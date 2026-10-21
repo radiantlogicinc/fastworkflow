@@ -123,7 +123,10 @@ How the runner (``WorkflowExecutionContext``) runs a phased skill call, phase by
    not an executor run. One model call with no tools (``write_answer``) writes its answer
    from the request and its steps, told "Do not run any command; write the answer from
    these facts only." (``ANSWER_ONLY_RULE``) and to name every item of every list. It
-   cannot call a workflow command. Its answer is checked in code (``answer_only_answer``):
+   cannot call a workflow command. When every step is verbatim (``say that ...``, or
+   ``say what ...: <facts>``) or a guard (``apply no change``), code writes the answer
+   from the steps with no model call (``answer_by_code``, ``answer_step_kind``).
+   Its answer is checked in code (``answer_only_answer``):
    field markers and echoed framing are stripped (``clean_answer``), an empty reply (or
    only a code fence) is retried once and then written in code from the steps, and the
    rows of the lists the steps give in full that it does not name are appended. A long
@@ -154,6 +157,16 @@ How the runner (``WorkflowExecutionContext``) runs a phased skill call, phase by
    fan-out items) does not stop the call: it counts as not run (no output, so a later
    parameter named after it keeps its default; its runs' answers are dropped), its span
    records the error with ``optional: true``, and the next phase runs.
+11. STEPS RUN BY CODE (``CodeSteps``; ``FW_SKILL_CODE_STEPS``, on by default): code runs a
+   phase's leading mechanical steps (``code_step``) through the agent's own command tool
+   before the executor's model takes a step, each a normal trajectory step marked "run
+   by code". An open step that opens the one row of the previous step's Output that
+   names its lookup value exactly (or its only row) runs too (``pick_step``).
+   It stops at the first open step, a failed step, or a page-1 run that shows
+   more pages of a step whose note asks for the full list (``FULL_LIST_PHRASES``), and
+   the agent does the rest. A phase run wholly by code makes no model
+   call, except the one answer call of a phase whose answer is shown (the last phase,
+   the extra-steps phase). Never for planner-written steps or on a resume.
 
 Each phase run is a ``fw.skill.phase`` span (see ``tracing.SPAN_CONTRACTS``).
 """
@@ -1197,7 +1210,11 @@ _EARLIER_PARTS = "Earlier parts already ran; their findings are in the steps."
 _COPY_RULE = ("Copy every name, id and number exactly as the steps give it, and name every "
               "item of every list the steps give, in full: never shorten a list, count it "
               "instead of naming it, or write a placeholder for it.")
-_FRAMING_SENTENCES = (ANSWER_ONLY_RULE, _DO_ONLY_THESE, _LATER_PARTS, _EARLIER_PARTS, _COPY_RULE)
+#: Said when code ran the phase's leading steps (``CodeSteps``) before the executor.
+_CODE_STEPS_DONE = ("Steps marked 'run by code' in the trajectory are done; do the "
+                    "remaining steps.")
+_FRAMING_SENTENCES = (ANSWER_ONLY_RULE, _DO_ONLY_THESE, _LATER_PARTS, _EARLIER_PARTS, _COPY_RULE,
+                      _CODE_STEPS_DONE)
 #: "This is part 2 of 3 (items) for item 1 of 2 (u1), the last part of this job." and the
 #: like: the opening of a phase's framing.
 _PART_RE = re.compile(
@@ -1208,7 +1225,8 @@ _ANSWER_REQUEST_RE = re.compile(r"(?:Do these steps, then )?[Aa]nswer the reques
 
 
 def phase_query(request: str, plan_text: str, *, index: int, count: int, name: str,
-                answer_only: bool = False, item: Optional[tuple[int, int, Any]] = None) -> str:
+                answer_only: bool = False, item: Optional[tuple[int, int, Any]] = None,
+                code_steps: bool = False) -> str:
     """The executor's input for phase *index* (0-based) of *count*: its steps, framed.
 
     A phase other than the last gets only its own steps: the request is left out, so
@@ -1216,23 +1234,387 @@ def phase_query(request: str, plan_text: str, *, index: int, count: int, name: s
     gets the request too, since it writes the answer to it. An *answer_only* phase is
     told to run no command and to write from the facts its steps carry
     (``ANSWER_ONLY_RULE``). *item* ``(k, n, value)`` (0-based *k*) frames one item's
-    sub-plan of a fan-out phase.
+    sub-plan of a fan-out phase. *code_steps*: code runs the phase's leading steps first
+    (``CodeSteps``), and the run is told those are done (``_CODE_STEPS_DONE``).
     """
     part = f"part {index + 1} of {count} ({name})"
+    by_code = f" {_CODE_STEPS_DONE}" if code_steps else ""
     if item is not None:
         part += f" for item {item[0] + 1} of {item[1]} ({item[2]})"
     if index < count - 1:
         if answer_only:
             return f"This is {part} of a larger job. {ANSWER_ONLY_RULE}\n{plan_text}"
         return (f"This is {part} of a larger job. {_DO_ONLY_THESE} "
-                f"{_LATER_PARTS}\n{plan_text}")
+                f"{_LATER_PARTS}{by_code}\n{plan_text}")
     earlier = f" {_EARLIER_PARTS}" if count > 1 else ""
     scope = " for this item only" if item is not None else ""
     if answer_only:
         return (f"{request}\n\nThis is {part}, the last part of this job.{earlier} "
                 f"{ANSWER_ONLY_RULE} {_COPY_RULE} Answer the request{scope}:\n{plan_text}")
-    return (f"{request}\n\nThis is {part}, the last part of this job.{earlier} "
+    return (f"{request}\n\nThis is {part}, the last part of this job.{earlier}{by_code} "
             f"Do these steps, then answer the request{scope}:\n{plan_text}")
+
+
+# ----------------------------------------------------------------------
+# Steps run by code (fix-6llp)
+# ----------------------------------------------------------------------
+
+#: The env setting that turns code-run phase steps off (``0``); on by default. Temporary:
+#: kept for one A/B benchmark run, then removed (fix-6llp.10).
+CODE_STEPS_ENV = "FW_SKILL_CODE_STEPS"
+#: Words in a step's note (after the chain) that ask for every page of a paged command.
+#: Only then does code hand over after page 1 when the output shows more pages; any
+#: other note (or none) means page 1 is what the step wants.
+FULL_LIST_PHRASES = ("full list", "every page", "all pages", "until complete", "page through")
+#: Core commands code runs as a step of their own, written with nothing after them.
+_CODE_NAVIGATION = ("go_up", "reset_context")
+_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def code_steps_on() -> bool:
+    """Whether code runs a phase's leading mechanical steps: ``FW_SKILL_CODE_STEPS``,
+    on unless ``0`` (``false``, ``off``, ``no``). Read like the other settings."""
+    from fastworkflow import context_budget
+
+    return context_budget.env_value(CODE_STEPS_ENV).lower() not in ("0", "false", "off", "no")
+
+
+def _code_step(step: Any, parameters_class: Any) -> tuple[Optional[str], str]:
+    """``(command, reason)``: see ``code_step``; *reason* says why, in a few words."""
+    from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
+        ParameterExtraction)
+    from fastworkflow.observation_offloading import finish_check
+
+    if step.kind != finish_check.KIND_COMMAND or not step.command:
+        return None, f"{step.kind} step"
+    clean = step.text.replace("`", " ").replace("*", " ")
+    first = _WORD_RE.search(clean)
+    if first is None or first.group(0) != step.command:
+        return None, "command not first"
+    # The chain: the text after the command up to the first "(" or ";". The rest is a note.
+    chain = re.split(r"[(;]", clean[first.end():], maxsplit=1)[0].strip()
+    fields = getattr(parameters_class, "model_fields", None) or {}
+    if not chain:
+        if any(info.is_required() for info in fields.values()):
+            return None, "missing required field"
+        return step.command, "bare" if fields else "no parameters"
+    if not fields:
+        return None, "prose after command"
+    command = f"{step.command} {chain}"
+    bound = ParameterExtraction._extract_parameters_from_key_values(
+        command, parameters_class, step.command)
+    if bound is None:
+        return None, "not key=value"
+    given = {match.group(1) for match in finish_check._ARGUMENT_KEY_RE.finditer(chain)}
+    if given != set(step.arguments):
+        return None, "placeholder"
+    if any(finish_check.plain_value(getattr(bound, key, None)) != value
+           for key, value in step.arguments.items()):
+        return None, "prose in value"
+    if any(info.is_required() and name not in given for name, info in fields.items()):
+        return None, "missing required field"
+    return command, "key=value"
+
+
+def code_step(step: Any, parameters_class: Any) -> Optional[str]:
+    """The command code runs for plan step *step*, or None when the step is open.
+
+    *step* is a ``finish_check.PlanStep``; *parameters_class* is its command's parameters
+    class (None for a command with none). Mechanical, read only with the existing parsers:
+    a command step (``KIND_COMMAND``) whose first word is its command, and whose CHAIN (the
+    text after the command, cut at the first ``(`` or ``;``) is empty with every field
+    defaulted, or binds with the key=value parser (which declines placeholders, examples
+    and values that do not validate), every bound value the step's own value
+    (``finish_check.step_arguments``, so prose swallowed into a value is caught) and every
+    required field given. Code runs ``command chain``: the note after it is never sent.
+    A paging value the step writes (``start=20``) is a value like any other.
+    """
+    return _code_step(step, parameters_class)[0]
+
+
+def pick_step(step: Any, lookup: Any, output: Any,
+              parameters_classes: Sequence[Any]) -> tuple[Optional[str], str]:
+    """``(command, reason)`` for an open *step* that opens one row of the step before it.
+
+    *lookup* is the step code ran just before (a ``finish_check.PlanStep``) and *output*
+    the Output of its one run. Code runs *step* as ``command P=<uid>`` only when:
+
+    - *step* is a command step whose first word is its command, with no value of its own,
+      and its command has exactly one required field P, a uid (``_is_uid_field``), under
+      every parameters class;
+    - *step* names a concrete value of *lookup* (``open_book_by_uid with the uid of the
+      Dune match`` after ``find_book query=Dune``), paging values aside;
+    - *output* has exactly one uid list (rows read as ``narrowed_output`` reads them), and
+      exactly one row holds the named values whole (``Dune``, not ``Dune 1``; spacing,
+      quotes and case ignored), or the output has exactly one row at all.
+
+    Anything else (no such row, two exact matches, no rows) leaves the step to the agent:
+    *command* is None and *reason* says why.
+    """
+    from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
+        ParameterExtraction)
+    from fastworkflow.observation_offloading import finish_check
+    from fastworkflow.observation_offloading.facts import PAGING_PARAMETERS
+
+    first = _WORD_RE.search(step.text.replace("`", " ").replace("*", " "))
+    if step.kind != finish_check.KIND_COMMAND or step.arguments or not parameters_classes \
+            or first is None or first.group(0) != step.command:
+        return None, "not a pick"
+    required = {tuple(name for name, info in (getattr(cls, "model_fields", None) or {}).items()
+                      if info.is_required()) for cls in parameters_classes}
+    if len(required) != 1 or len(fields := required.pop()) != 1 or not _is_uid_field(fields[0]):
+        return None, "not one required uid"
+    text = _folded(step.text)
+    values = [value for key, value in lookup.arguments.items() if key not in PAGING_PARAMETERS
+              and re.search(rf"(?<![a-z0-9_]){re.escape(_folded(value))}(?![a-z0-9_])", text)]
+    if not values:
+        return None, "names no lookup value"
+    uids = [key for key, value in (output.items() if isinstance(output, Mapping) else ())
+            if _is_uid_field(str(key)) and isinstance(value, (list, tuple)) and value]
+    if len(uids) != 1:
+        return None, "no uid column"
+    rows = (narrowed_output(output, values) or output)[uids[0]]
+    if len(rows) != 1 or rows[0] is None or isinstance(rows[0], (Mapping, list, tuple, bool)):
+        return None, "no single match"
+    command = f"{step.command} {fields[0]}={rows[0]}"
+    for cls in parameters_classes:
+        bound = ParameterExtraction._extract_parameters_from_key_values(command, cls, step.command)
+        if bound is None or finish_check.plain_value(getattr(bound, fields[0], None)) != \
+                finish_check.plain_value(rows[0]):
+            return None, "uid does not bind"
+    return command, "only row" if len(output[uids[0]]) == 1 else "exact match"
+
+
+def parameter_classes(routing: Any) -> Callable[[str], list]:
+    """``command name -> its parameters classes`` (one per context that defines it, None
+    for one with no parameters) in the routing definition *routing*."""
+    from fastworkflow import ModuleType
+    from fastworkflow.observation_offloading.finish_check import plain_command_name
+
+    def classes(command: str) -> list:
+        return [routing.get_command_class(name, ModuleType.COMMAND_PARAMETERS_CLASS)
+                for name in routing.routing_definition_map
+                if name != "wildcard" and plain_command_name(name).lower() == command.lower()]
+
+    return classes
+
+
+def plan_code_steps(plan_text: str, commands: Iterable[str], core_commands: Iterable[str],
+                    parameters: Callable[[str], list]) -> list[tuple[Any, Optional[str], str]]:
+    """``(step, command, reason)`` for each step of *plan_text*, as code reads it.
+
+    *command* is what code runs (``code_step``); ``""`` for a step code passes over, since
+    it names nothing to run (an answer step, a negated step); None for an open step. A
+    core ``go_up`` / ``reset_context`` written alone runs. *parameters* gives a command's
+    parameters classes (``parameter_classes``); a step is mechanical only under all of them.
+    """
+    from fastworkflow.observation_offloading import finish_check
+
+    core = {finish_check.plain_command_name(c).lower() for c in core_commands if c}
+    read = []
+    for step in finish_check.parse_plan(plan_text, list(commands), list(core)):
+        if step.kind == finish_check.KIND_SKIPPED and step.command.lower() in core:
+            # A step about a core command: navigation, unless it is negated or an answer.
+            nav = finish_check._classify(step.number, step.text, core, set())
+            if nav.kind == finish_check.KIND_SKIPPED:
+                read.append((step, "", "passed over"))
+            elif nav.kind == finish_check.KIND_COMMAND and nav.command.lower() in _CODE_NAVIGATION:
+                read.append((step, *_code_step(nav, None)))
+            else:
+                read.append((step, None, f"{nav.kind} navigation step"))
+        elif step.kind == finish_check.KIND_SKIPPED:
+            read.append((step, "", "passed over"))
+        elif step.kind != finish_check.KIND_COMMAND:
+            read.append((step, None, f"{step.kind} step"))
+        else:
+            results = [_code_step(step, cls) for cls in parameters(step.command)] or [
+                (None, "unknown command")]
+            texts = {text for text, _ in results}
+            read.append((step, texts.pop(), results[0][1]) if len(texts) == 1
+                        else (step, None, "differs by context"))
+    return read
+
+
+def _more_pages(observation: Any, paging: Iterable[str]) -> bool:
+    """Whether a page-1 observation names a later page: one of the command's paging
+    parameters with a positive value (``start=20``), as a paged command tells its reader."""
+    names = "|".join(re.escape(name) for name in paging)
+    return bool(names) and re.search(rf"(?<![A-Za-z0-9_])(?:{names})\s*=\s*0*[1-9]",
+                                     str(observation or "")) is not None
+
+
+class CodeSteps:
+    """The leading steps of one phase run that code runs, before (or instead of) the agent.
+
+    ``fastWorkflowReAct._run_loop`` (``code=``) asks ``next()`` for each ``(thought, command)``
+    and runs it through the agent's own command tool as a normal trajectory step, then
+    reports it with ``ran(step_index, observation)``. Code passes over answer and negated
+    steps, and stops at the first open step (``plan_code_steps``; an open step that opens
+    the one matching row of the step code ran before it, ``pick_step``, runs), after a step that
+    failed, and after a page-1 run of a paged command that shows more pages when the
+    step's note asks for the full list (``FULL_LIST_PHRASES``; the agent reads the rest). A step whose command is not available where the workflow is goes
+    there first when ``context_navigation.code_path`` finds a no-value path; each move is
+    a step of its own. Code never fails the phase: it hands over to the agent.
+
+    ``stop`` says why code stopped (``done`` when it ran every step; ``open step N``,
+    ``step N failed``, ``no path for step N``, ``more pages at step N``; ``stopped`` when
+    the executor's ``on_step_complete`` hook ended the run) and ``count``
+    how many steps it ran, moves included. *own_steps* steps of the plan are the phase's
+    own; planner-written steps after them are never run by code: one that runs anything
+    (not an answer or negated step) is an open step, so the agent runs it. *answers*: the run's
+    answer is shown, so a phase run wholly by code still writes it.
+    """
+
+    def __init__(self, plan_text: str, *, workflow: Callable[[], Any],
+                 runs: Callable[[int], list], commands: Iterable[str],
+                 core_commands: Iterable[str], own_steps: int, answers: bool):
+        import fastworkflow
+
+        self.workflow, self.runs, self.answers = workflow, runs, answers
+        routing = fastworkflow.RoutingRegistry.get_definition(workflow().folderpath)
+        self._parameters = parameter_classes(routing)
+        read = plan_code_steps(plan_text, commands, core_commands, self._parameters)
+        self.items = read[:own_steps]
+        # The first planner-written step after the phase's own that runs anything.
+        self._after = next((step for step, command, _ in read[own_steps:] if command != ""),
+                           None)
+        self.count = 0
+        self.stop: Optional[str] = None
+        self._position = 0
+        self._moves: list[str] = []
+        self._reached: set[int] = set()
+        self._current: Optional[tuple[Any, list, bool]] = None
+        # The last step code ran (step, step index, observation), for a pick (pick_step).
+        self._lookup: Optional[tuple[Any, int, Any]] = None
+        self._picks: dict[int, str] = {}
+
+    @property
+    def runs_any(self) -> bool:
+        """Whether code runs the plan's first step that runs anything."""
+        return next((bool(command) for _, command, _ in self.items if command != ""), False)
+
+    @property
+    def finished(self) -> bool:
+        """Whether code ran every step: no agent loop is needed."""
+        return self.stop == "done"
+
+    def next(self) -> Optional[tuple[str, str]]:
+        """The next ``(thought, command)`` code runs, or None: code is done or stops."""
+        if self.stop is not None:
+            return None
+        if self._moves:
+            step = self.items[self._position][0]
+            self._current = (step, [], True)
+            return (f"Run by code to reach the context of step {step.number}.",
+                    self._moves.pop(0))
+        while self._position < len(self.items) and self.items[self._position][1] == "":
+            self._position += 1
+        if self._position == len(self.items):
+            self.stop = f"open step {self._after.number}" if self._after else "done"
+            return None
+        step, command, _ = self.items[self._position]
+        if command is None:
+            command = self._pick(step)
+            if command is None:
+                self.stop = f"open step {step.number}"
+                return None
+            self.items[self._position] = (step, command, "pick")
+        if step.number not in self._reached:
+            self._reached.add(step.number)
+            self._moves = self._path_to(command) or []
+            if self._moves:
+                return self.next()
+        self._position += 1
+        paging = self._paging(step, command)
+        self._current = (step, paging, False)
+        return (f"Step {step.number} of the plan, run by code"
+                + (" (its first page)" if paging else "")
+                + self._picks.get(step.number, "") + ".", command)
+
+    def ran(self, step_index: int, observation: Any) -> None:
+        """How the command ``next()`` gave went: a failure, or a page-1 run with more
+        pages, stops code."""
+        step, paging, move = self._current
+        self.count += 1
+        if not self._succeeded(step_index, observation):
+            refused = "is not available in the current context" in str(observation or "")
+            self.stop = (f"no path for step {step.number}" if refused and not move
+                         else f"step {step.number} failed")
+        elif paging and _more_pages(observation, paging):
+            self.stop = f"more pages at step {step.number}"
+        self._lookup = None if move else (step, step_index, observation)
+
+    def _pick(self, step: Any) -> Optional[str]:
+        """The command for open *step* when it opens one row of the step code ran just
+        before (``pick_step``), or None. Never after a page that shows more pages."""
+        from fastworkflow.observation_offloading.facts import PAGING_PARAMETERS
+
+        if self._lookup is None:
+            return None
+        lookup, index, observation = self._lookup
+        if _more_pages(observation, PAGING_PARAMETERS):
+            return None
+        try:
+            runs = [run for run in self.runs(index) if run.get("success")]
+        except Exception:  # noqa: BLE001 - runs that cannot be read give no row to pick
+            return None
+        if len(runs) != 1:
+            return None
+        command, reason = pick_step(step, lookup, runs[0].get("output"),
+                                    self._parameters(step.command))
+        if command is not None:
+            self._picks[step.number] = (f" (the only exact match of step {lookup.number})"
+                                        if reason == "exact match"
+                                        else f" (the only row of step {lookup.number})")
+        return command
+
+    def _succeeded(self, step_index: int, observation: Any) -> bool:
+        """No failure marker and every command run of the step succeeded; the reply for
+        entering the context the workflow is already in ran nothing and counts as done."""
+        from fastworkflow.context_navigation import ALREADY_IN_CONTEXT
+        from fastworkflow.observation_offloading.finish_check import run_failed
+
+        text = str(observation or "")
+        if run_failed(text):
+            return False
+        try:
+            runs = self.runs(step_index)
+        except Exception:  # noqa: BLE001 - runs that cannot be read are not known to succeed
+            return False
+        return all(run.get("success") for run in runs) if runs else ALREADY_IN_CONTEXT in text
+
+    def _path_to(self, command: str) -> Optional[list[str]]:
+        """The no-value moves to a context where *command* runs; [] when it runs here."""
+        from fastworkflow.command_executor import AlreadyInContextError, CommandNotFoundError
+        from fastworkflow.context_navigation import code_path
+        from fastworkflow.workflow_agent import _explicit_agent_command
+
+        workflow = self.workflow()
+        try:
+            _explicit_agent_command(command, workflow)
+        except AlreadyInContextError:
+            return []
+        except CommandNotFoundError:
+            return code_path(workflow, command.split()[0])
+        except Exception:  # noqa: BLE001 - the step runs, and the tool says what is wrong
+            return []
+        return []
+
+    def _paging(self, step: Any, command: str) -> list[str]:
+        """The paging parameters (``facts.PAGING_PARAMETERS``) of the step's command when
+        the step writes none of them and its note asks for the full list
+        (``FULL_LIST_PHRASES``): code reads page 1 and hands over if more remain."""
+        from fastworkflow.observation_offloading.facts import PAGING_PARAMETERS
+
+        fields = {name for cls in self._parameters(step.command) if cls is not None
+                  for name in cls.model_fields}
+        paging = [name for name in PAGING_PARAMETERS if name in fields]
+        if not paging or any(name in step.arguments for name in paging):
+            return []
+        text = step.text.replace("`", " ").replace("*", " ")
+        cut = re.search(r"[(;]", text[text.find(step.command) + len(step.command):])
+        note = text[text.find(step.command) + len(step.command) + cut.start():] if cut else ""
+        return paging if any(phrase in note.lower() for phrase in FULL_LIST_PHRASES) else []
 
 
 _ANSWER_SIGNATURE = None
@@ -1301,23 +1683,89 @@ def is_empty_answer(text: Any) -> bool:
 _STEP_NUMBER_RE = re.compile(r"^\s*\d+[.)]\s*")
 _SAY_RE = re.compile(r"^say(?:\s+that)?\s+", re.IGNORECASE)
 
+#: How an answer-only step reads (``answer_step_kind``). ``instruction``: the words a
+#: step that hands over facts starts with (``say ...: <facts>``); ``guard``: the words of
+#: a step with no facts that only says what not to do (``apply no change``).
+ANSWER_STEP_WORDS = {
+    "instruction": ("say", "compare", "present"),
+    "guard": ("apply", "do not", "don't", "never", "make no", "change nothing",
+              "present them as options only", "present it as options only"),
+}
+#: The env setting for writing an answer-only phase's answer in code when its every step
+#: is verbatim or a guard (``answer_by_code``): on unless ``0`` (``false``, ``off``, ``no``).
+ANSWER_BY_CODE_ENV = "FW_SKILL_ANSWER_BY_CODE"
+
+
+def _starts_with(text: str, words: Sequence[str]) -> bool:
+    return any(re.match(re.escape(word) + r"\b", text, re.IGNORECASE) for word in words)
+
+
+def answer_step_kind(step: str) -> str:
+    """How code reads one answer-only step (its number dropped):
+
+    - ``"verbatim"``: it starts with ``say that``, or it is an instruction head
+      (``ANSWER_STEP_WORDS["instruction"]``) followed by ``": "`` and the facts
+      (``say what b1 holds: l1, l2``): code can write it as it stands;
+    - ``"guard"``: no facts, only what not to do (``apply no change``,
+      ``ANSWER_STEP_WORDS["guard"]``): it adds nothing to the answer;
+    - ``"judgement"``: anything else (``say which is riskier``): the model must write it.
+    """
+    step = _STEP_NUMBER_RE.sub("", str(step or "")).strip()
+    if re.match(r"say\s+that\s", step, re.IGNORECASE):
+        return "verbatim"
+    head, sep, body = step.partition(": ")
+    if sep and body.strip() and _starts_with(head, ANSWER_STEP_WORDS["instruction"]):
+        return "verbatim"
+    if not (sep and body.strip()) and _starts_with(step, ANSWER_STEP_WORDS["guard"]):
+        return "guard"
+    return "judgement"
+
+
+def _answer_line(step: str) -> str:
+    """One step written as an answer line: ``say that P`` is P; ``say what X: facts`` keeps
+    its question as a label (``What X: facts``); ``present ..., and say that P: facts``
+    is ``P. facts``; another instruction head (``compare ...: facts``) gives its facts."""
+    if re.match(r"say\s+that\s", step, re.IGNORECASE):
+        line = _SAY_RE.sub("", step)
+    else:
+        head, sep, body = step.partition(": ")
+        said = re.search(r"\bsay\s+that\s+(.+)$", head, re.IGNORECASE)
+        if not (sep and body.strip()) or not _starts_with(head, ANSWER_STEP_WORDS["instruction"]):
+            line = _SAY_RE.sub("", step)
+        elif re.match(r"say\s", head, re.IGNORECASE):
+            line = f"{_SAY_RE.sub('', head)}: {body}"
+        elif said:
+            body = body.strip()
+            line = f"{said.group(1).rstrip('.')}. {body[:1].upper()}{body[1:]}"
+        else:
+            line = body
+    line = line.strip()
+    line = line[:1].upper() + line[1:]
+    return line if line.endswith((".", "!", "?")) else line + "."
+
 
 def answer_from_steps(plan_text: str) -> str:
-    """An answer written in code from an answer-only phase's steps, when the model wrote none.
+    """An answer written in code from an answer-only phase's steps.
 
     The steps carry the facts as finished text (``say that b1 has loans l1, l2``). Each
-    step that starts with ``say`` (all steps when none does) becomes one line, its
-    number and its leading ``say`` / ``say that`` dropped.
+    step but a guard (``answer_step_kind``) becomes one line (``_answer_line``), its number
+    and its leading ``say`` / ``say that`` dropped, in step order, with no numbering.
     """
     lines = [_STEP_NUMBER_RE.sub("", line).strip() for line in str(plan_text or "").splitlines()]
-    lines = [line for line in lines if line]
-    said = [line for line in lines if _SAY_RE.match(line)]
-    out = []
-    for line in said or lines:
-        line = _SAY_RE.sub("", line)
-        line = line[:1].upper() + line[1:]
-        out.append(line if line.endswith((".", "!", "?")) else line + ".")
-    return "\n".join(out)
+    return "\n".join(_answer_line(line) for line in lines
+                     if line and answer_step_kind(line) != "guard")
+
+
+def answer_by_code(plan_text: str) -> bool:
+    """Whether code writes the answer of an answer-only phase with these steps, with no
+    model call: every step is verbatim or a guard (``answer_step_kind``), at least one is
+    verbatim, and ``FW_SKILL_ANSWER_BY_CODE`` is on (unless ``0``, ``false``, ``off``, ``no``)."""
+    from fastworkflow import context_budget
+
+    if context_budget.env_value(ANSWER_BY_CODE_ENV).lower() in ("0", "false", "off", "no"):
+        return False
+    kinds = [answer_step_kind(line) for line in str(plan_text or "").splitlines() if line.strip()]
+    return "verbatim" in kinds and "judgement" not in kinds
 
 
 #: A step that tells the answer to name or list what it gives says one of these words.
@@ -1466,13 +1914,15 @@ def write_answer(query: str) -> str:
 def answer_only_answer(query: str, plan_text: str, outputs: Mapping[str, Any]) -> str:
     """The answer of an answer-only phase, checked in code.
 
-    ``write_answer`` writes it (retrying an empty reply once). Still empty: the answer is
-    written in code from the steps (``answer_from_steps``). Then every row of the lists
-    the steps give in full that the answer does not name (``missing_list_items``, against
-    *outputs*, the earlier phases' outputs) is appended after ``MISSING_ITEMS_LEAD``, so a
-    list is never dropped, cut short or garbled out of the answer.
+    When every step is verbatim or a guard (``answer_by_code``), code writes it from the
+    steps (``answer_from_steps``), with no model call. Otherwise ``write_answer`` writes it
+    (retrying an empty reply once); still empty, code writes it from the steps. Then every
+    row of the lists the steps give in full that the answer does not name
+    (``missing_list_items``, against *outputs*, the earlier phases' outputs) is appended
+    after ``MISSING_ITEMS_LEAD``, so a list is never dropped, cut short or garbled out of
+    the answer.
     """
-    answer = write_answer(query)
+    answer = answer_from_steps(plan_text) if answer_by_code(plan_text) else write_answer(query)
     if is_empty_answer(answer):
         answer = answer_from_steps(plan_text)
     missing = missing_list_items(answer, plan_text, outputs)
@@ -1790,8 +2240,12 @@ __all__ = [
     "MISSING_ITEMS_LEAD",
     "MIN_ANSWER_CHARS",
     "active_phases",
+    "ANSWER_BY_CODE_ENV",
+    "ANSWER_STEP_WORDS",
+    "answer_by_code",
     "answer_from_steps",
     "answer_only_answer",
+    "answer_step_kind",
     "bound_arguments",
     "cap_note",
     "capped_steps",

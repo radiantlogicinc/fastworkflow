@@ -53,6 +53,9 @@ class fastWorkflowReAct(Module):
     # -> a note that replaces the finish observation and sends the agent back to
     # the loop, or None to finish. Set by the caller per run (the finish check).
     finish_reviewer: Callable[[dict[str, Any], int], str | None] | None = None
+    # The steps code runs before the loop (``skill_phases.CodeSteps``), for the next
+    # forward() only: set by the caller per run, taken (and cleared) by forward().
+    code_steps: Any = None
 
     def __init__(self, signature: type["Signature"], tools: list[Callable], max_iters: int = 10,
                  on_step_complete: Callable[[int, dict], bool] | None = None):
@@ -252,12 +255,28 @@ class fastWorkflowReAct(Module):
         max_iters = input_args.pop("max_iters", self.max_iters)
         idx = input_args.pop("first_step", 0)
         exception_count = 0
+        source, self.code_steps = self.code_steps, None
 
-        suspended = self._run_loop(
-            self.trajectory, idx, input_args, max_iters, exception_count
-        )
-        if suspended is not None:
-            return suspended
+        if source is not None:
+            # Code runs the leading steps it can (see _run_loop); the loop goes on after them.
+            self._run_loop(self.trajectory, idx, input_args, max_iters, exception_count,
+                           code=source)
+            idx = max(_step_indexes(self.trajectory), default=idx - 1) + 1
+        go_on = source is None or source.stop != "stopped"
+        if go_on and source is not None and source.finished:
+            # Every step ran by code: no loop. A run whose answer is not shown ends here
+            # with an empty one and no model call; one that is shown gets the answer call.
+            self._exhausted_last_run = False
+            if not source.answers:
+                return dspy.Prediction(
+                    trajectory=self.trajectory, exhausted=False,
+                    **{name: "" for name in self.signature.output_fields})
+        elif go_on:
+            suspended = self._run_loop(
+                self.trajectory, idx, input_args, max_iters, exception_count
+            )
+            if suspended is not None:
+                return suspended
 
         extract = self._extract_prediction(self.trajectory, **input_args)
         return dspy.Prediction(
@@ -303,6 +322,7 @@ class fastWorkflowReAct(Module):
         input_args: dict[str, Any],
         max_iters: int,
         exception_count: int,
+        code: Any = None,
     ):
         """
         Run the ReAct tool loop until finish, max_iters, or AskUserSuspend.
@@ -310,12 +330,21 @@ class fastWorkflowReAct(Module):
         Returns a suspended Prediction, or None when the loop completed normally.
         Sets ``self._exhausted_last_run`` when the loop ends because max_iters
         was reached without the agent selecting the `finish` tool.
+
+        With *code* (``skill_phases.CodeSteps``) the steps are code's, not the model's:
+        each ``(thought, command)`` it gives runs as an ``execute_workflow_query`` step,
+        written, traced (``by_code``) and hooked like any other, and is reported back to
+        it (``code.ran``). They do not count toward ``iteration_counter``. The loop ends
+        when *code* gives no more (``code.stop`` "stopped" when ``on_step_complete`` did).
         """
         self._exhausted_last_run = False
         # Host for the fw.agent.step spans, bound by the caller around the whole
         # agent run. None outside an observed turn, where every helper no-ops.
         host = tracing.current_host()
         while True:
+            planned = code.next() if code is not None else None
+            if code is not None and planned is None:
+                break
             # Opened before the reasoning call so a step that fails to pick a
             # tool is still a recorded step rather than a gap in the trace.
             step_span = tracing.start_span(
@@ -326,9 +355,11 @@ class fastWorkflowReAct(Module):
             repaired_tool_name = None
             reopened = False
             try:
-                pred = self._call_with_potential_trajectory_truncation(
-                    self.react, trajectory, **input_args
-                )
+                pred = (dspy.Prediction(next_thought=planned[0], next_tool_name=_COMMAND_TOOL,
+                                        next_tool_args={"command": planned[1]})
+                        if planned is not None else
+                        self._call_with_potential_trajectory_truncation(
+                            self.react, trajectory, **input_args))
                 if pred is None:
                     raise ValueError("Tool returned is None")
             # A reply no adapter could parse, or a call that timed out, is a bad
@@ -395,6 +426,8 @@ class fastWorkflowReAct(Module):
             }
             if repaired_tool_name is not None:
                 step_attributes["repaired_tool_name"] = repaired_tool_name
+            if planned is not None:
+                step_attributes["by_code"] = True
 
             try:
                 if pred.next_tool_name in self.disabled_tools:
@@ -463,6 +496,7 @@ class fastWorkflowReAct(Module):
             tracing.end_span(
                 host, step_span, status=step_status, attributes=step_attributes
             )
+            observed = trajectory.get(f"observation_{idx}")
             if self.on_step_end is not None:
                 self.on_step_end()
 
@@ -474,7 +508,13 @@ class fastWorkflowReAct(Module):
             # (test helpers) that never set this attribute.
             on_step_complete = getattr(self, "_on_step_complete", None)
             if on_step_complete and not on_step_complete(idx, trajectory):
+                if code is not None:
+                    code.stop = "stopped"
                 break
+            if code is not None:
+                code.ran(idx, observed)
+                idx += 1
+                continue
 
             if pred.next_tool_name == "finish" and not reopened:
                 break

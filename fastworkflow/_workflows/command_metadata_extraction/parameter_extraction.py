@@ -297,6 +297,11 @@ class ParameterExtraction:
                         self.command, command_parameters_class, self.command_name)
                     if new_params is not None:
                         diagnostics["deterministic_form"] = "positional"
+                if new_params is None:
+                    new_params = self._extract_parameters_from_bare(
+                        self.command, command_parameters_class, self.command_name)
+                    if new_params is not None:
+                        diagnostics["deterministic_form"] = "bare"
 
                 # If regex extraction fails, fall back to LLM-based extraction
                 if new_params is None:
@@ -856,6 +861,25 @@ class ParameterExtraction:
             except (ValidationError, TypeError, ValueError):
                 return None
         return ParameterExtraction._bound_model(command_parameters_class, converted)
+
+    @staticmethod
+    def _extract_parameters_from_bare(
+            command: str, command_parameters_class: type[BaseModel],
+            command_name: str = "") -> Optional[BaseModel]:
+        """The parameters' defaults for a command sent with nothing after its name, or None.
+
+        Only when the text is empty or just *command_name* (short or qualified) and
+        every field has a default; a command with a required field goes on as before.
+        """
+        text = (command or "").strip()
+        if text and not ParameterExtraction._is_own_command_token(text, command_name):
+            return None
+        if any(info.is_required() for info in command_parameters_class.model_fields.values()):
+            return None
+        try:
+            return command_parameters_class()
+        except Exception:  # noqa: BLE001 - a default that does not validate is no binding
+            return None
 
     @staticmethod
     def _is_positional_field(field_info) -> bool:

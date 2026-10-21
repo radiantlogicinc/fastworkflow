@@ -167,8 +167,10 @@ A skill file::
   validation context ``{"request": <the request>, "workflow": <the workflow or None>}``
   (``info.context`` of a validator that takes ``info``). A refusal, and a hook's ``(False,
   message)``, is a ``SkillInputError``: the planner is given the message and fills the call
-  once more (``plan_skill_call``); a second refusal falls back. They also run on the
-  placeholder combinations (request ``""``): one they refuse is left out of the template.
+  once more (``plan_skill_call``); a second refusal falls back. So is a required argument
+  the guards of ``check_arguments`` refuse (missing, invalid, not written in the request).
+  They also run on the placeholder combinations (request ``""``): one they refuse is left out
+  of the template.
 
 The file is imported as a command file is (``python_utils.get_module`` under the workflow's
 package, so package-relative imports work); one that fails to import is logged and skipped;
@@ -232,9 +234,11 @@ class SkillCallError(ValueError):
 
 
 class SkillInputError(SkillCallError):
-    """The skill's own rules refuse the arguments: a pydantic validator of its ``Input`` raised,
-    or ``validate_extracted_parameters`` returned ``(False, message)``. The message says what to
-    fix; ``plan_skill_call`` gives it to the planner for one more typed call."""
+    """The arguments are refused: a pydantic validator of the skill's ``Input`` raised,
+    ``validate_extracted_parameters`` returned ``(False, message)``, or a guard of
+    ``check_arguments`` refused one of the planner's arguments (missing, not a valid value, not
+    written in the request). The message says what to fix; ``plan_skill_call`` gives it to the
+    planner for one more typed call."""
 
 
 # ---------------------------------------------------------------- the parsed skill
@@ -1082,6 +1086,19 @@ def _strip_words(text: str, words: tuple[str, ...]) -> str:
     return " ".join(tokens).strip()
 
 
+def _single(value):
+    """``value``, or the element of a one-element list given for it (a list, or the list
+    written as JSON text: ``'["Payroll"]'``)."""
+    if isinstance(value, str) and value.strip().startswith("[") and value.strip().endswith("]"):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return value
+    if isinstance(value, (list, tuple)) and len(value) == 1 and not isinstance(value[0], (list, tuple, dict)):
+        return value[0]
+    return value
+
+
 def _empty(value) -> bool:
     return value is None or str(value).strip().strip("\"'`").lower() in ("", "none", "null")
 
@@ -1226,6 +1243,8 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
                     verdicts: dict | None = None) -> tuple[dict, list[str]]:
     """The guarded, complete arguments of a skill call; ``(args, notes)``.
 
+    - a one-element list given for an argument (``["Payroll"]``, or that list written as JSON
+      text) stands for its element;
     - a ``str`` or ``int`` argument first goes through the command parameter screen
       (``utils.signatures.screen_parameter_values``, as a command's parameters do): quotes
       or angle brackets around the whole value are removed, a placeholder (``<name>``,
@@ -1238,7 +1257,7 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
     - a str argument loses surrounding quotes and its strip words, and must then be a
       verbatim (case-insensitive; any Unicode dash matches "-") substring of ``request``;
       it takes the request's own spelling. One that is not: an optional argument takes its default, a required one
-      fails the call (the planner falls back to the template path);
+      fails the call (the planner fills it once more, then falls back to the template path);
     - a str argument inside an identifier match of the request (``command.identifiers``)
       becomes the whole match; a ``subject`` one must name a record of the request
       (``_as_subject``); one that does not is reset or fails the call as above;
@@ -1252,7 +1271,9 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
     An argument that only applies when others take some value is reset afterwards, by the
     skill's ``validate_extracted_parameters`` (``validate_call``).
 
-    ``notes`` says what a guard changed. Raises SkillCallError.
+    ``notes`` says what a guard changed. A required argument the guards refuse raises
+    SkillInputError (the planner fills the call once more, ``plan_skill_call``); a sure check
+    that the request names no such argument raises SkillCallError.
     """
     from fastworkflow.utils.signatures import is_sentinel_number
 
@@ -1260,17 +1281,18 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
     args: dict = {}
     folded = _fold(request).lower()
     subjects = _request_subjects(command, request) if any(p.subject for p in command.params) else []
-    screened, refused = _screen(command, raw, request)
+    single = {**raw, **{p.name: _single(raw.get(p.name)) for p in command.params}}
+    screened, refused = _screen(command, single, request)
 
     def refuse(p: Param, value, why: str) -> None:
         if p.required:
-            raise SkillCallError(f"{p.name}={value!r} {why}")
+            raise SkillInputError(f"{p.name}={value!r} {why}")
         notes.append(f"{p.name}={value!r} {why}: default")
         args[p.name] = p.default
 
     for p in command.params:
         shown = raw.get(p.name)   # the model's argument, as the notes show it
-        value = screened.get(p.name, shown)
+        value = screened.get(p.name, single[p.name])
         compared = shown          # what a changed spelling is noted against
         sure = _confident(verdicts, p.name) if p.verify else None
         if sure is not None and p.type == "enum" and (_empty(value) or _clean_str(value).lower() not in p.values):
@@ -1293,36 +1315,36 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
             continue
         if _empty(value):
             if p.required:
-                raise SkillCallError(f"missing required argument {p.name}")
+                raise SkillInputError(f"missing required argument {p.name}")
             args[p.name] = p.default
             continue
         if p.type == "bool":
             if isinstance(value, str):
                 if value.strip().lower() not in ("true", "false"):
-                    raise SkillCallError(f"{p.name}={shown!r} is not true or false")
+                    raise SkillInputError(f"{p.name}={shown!r} is not true or false")
                 value = value.strip().lower() == "true"
             args[p.name] = bool(value)
         elif p.type == "int":
             try:
                 number = int(str(value).strip())
             except ValueError:
-                raise SkillCallError(f"{p.name}={shown!r} is not an integer") from None
+                raise SkillInputError(f"{p.name}={shown!r} is not an integer") from None
             if is_sentinel_number(number):   # the extractor's "not given" marker or a made-up extreme
                 if p.required:
-                    raise SkillCallError(f"missing required argument {p.name}")
+                    raise SkillInputError(f"missing required argument {p.name}")
                 number = p.default
             args[p.name] = number
         elif p.type == "enum":
             text = _clean_str(value).lower()
             if text not in p.values:
-                raise SkillCallError(f"{p.name}={shown!r} is not one of {', '.join(p.values)}")
+                raise SkillInputError(f"{p.name}={shown!r} is not one of {', '.join(p.values)}")
             args[p.name] = text
         else:
             text = _strip_words(_clean_str(value), p.strip)
             at = folded.find(_fold(text).lower()) if text else -1
             if at < 0:
                 if p.required:
-                    raise SkillCallError(f"{p.name}={shown!r} is not written in the request")
+                    raise SkillInputError(f"{p.name}={shown!r} is not written in the request")
                 notes.append(f"{p.name}={shown!r} is not in the request: default")
                 args[p.name] = p.default
                 continue
@@ -1352,7 +1374,7 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
         elif p.default in written:
             only = p.default
         else:
-            raise SkillCallError(f"{p.name}={args[p.name]} is not a number the request writes "
+            raise SkillInputError(f"{p.name}={args[p.name]} is not a number the request writes "
                                  f"({', '.join(map(str, sorted(written)))})")
         notes.append(f"{p.name}={args[p.name]} -> {only} (the number the request writes)")
         args[p.name] = only
@@ -1674,7 +1696,8 @@ def plan_skill_call(command: SkillCommand, request: str, available_commands: str
     alongside the typed call (``check_verdicts``). A skill file's
     ``validate_extracted_parameters`` then sees the checked arguments (``validate_call``;
     ``workflow`` is passed to it), and the ``Input``'s rules (``check_input``). When the skill's
-    rules refuse the arguments (SkillInputError), the planner fills the call once more, with the
+    rules or the argument guards refuse the arguments (SkillInputError: a made-up name, a
+    missing or invalid value), the planner fills the call once more, with the
     refusal after the request (``REFUSED_CALL_NOTE``); the guards still read the request alone.
     Raises on any other failure, or a second refusal (the caller falls back to the template
     path).

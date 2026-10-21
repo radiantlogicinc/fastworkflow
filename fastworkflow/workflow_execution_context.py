@@ -2395,6 +2395,9 @@ class WorkflowExecutionContext:
                 tracing.end_span(self, span, status=tracing.STATUS_ERROR,
                                  attributes={"steps": "", "facts_error": str(error)})
                 return "failed", str(error)
+            # Code may run the phase's own steps only: never the planner's steps_before
+            # (then none) or steps_after (after them).
+            own_steps = 0 if state["steps_before"] and index == 0 and first_item else len(steps)
             steps = ((state["steps_before"] if index == 0 and first_item else []) + steps
                      + (state["steps_after"] if last and last_item else []))
             state["first_step"] = first_step
@@ -2406,7 +2409,8 @@ class WorkflowExecutionContext:
         try:
             if answer_only:
                 # Steps that name no command: one model call, with no tools, writes the
-                # answer from the facts the steps carry. Nothing can run a command.
+                # answer from the facts the steps carry (none when every step is verbatim
+                # or a guard: code writes it, skill_phases.answer_by_code). Nothing can run a command.
                 # A long list the steps do not tell the answer to name is cut short in the
                 # prompt (skill_phases.capped_steps); a list to name is given whole.
                 earlier_outputs = self._phase_outputs(phases, index)
@@ -2431,27 +2435,40 @@ class WorkflowExecutionContext:
                 if resumed:
                     result = self._call_agent_resume(resume_observation)
                 else:
+                    # Code runs the leading mechanical steps first (skill_phases.CodeSteps).
+                    code = self._phase_code_steps(
+                        plan_text, own_steps, names,
+                        answers=last or phase.name == state.get("extra_phase"))
                     # A phase other than the last sees only its own steps, never the request.
                     user_query = skill_phases.phase_query(
                         state["query"], plan_text, index=index, count=len(phases),
-                        name=phase.name, item=item_frame)
+                        name=phase.name, item=item_frame,
+                        code_steps=code is not None and code.runs_any)
                     available_commands = _what_can_i_do(self)
-                    result = self._call_agent_with_retry(
-                        lambda: self._workflow_tool_agent(
+
+                    def run_phase():
+                        self._workflow_tool_agent.code_steps = code
+                        return self._workflow_tool_agent(
                             user_query=user_query,
                             available_commands=available_commands,
                             first_step=first_step,
                             max_iters=budget,
-                        ),
-                        trace_input=user_query,
-                    )
+                        )
+
+                    result = self._call_agent_with_retry(run_phase, trace_input=user_query)
         except BaseException as exc:
             tracing.end_span(self, span, status=tracing.status_for_dispatch_exception(exc),
                              attributes={"steps": plan_text, "answer_only": answer_only,
                                          "error_type": type(exc).__name__})
             raise
+        by_code = {}
+        if not answer_only and not resumed:
+            by_code = {"steps_by_code": code.count if code is not None else 0,
+                       "code_stop": (code.stop if code is not None else None) or "off"}
         if answer_only:
             steps_used = 0
+            # Whether code wrote the answer from the steps, with no model call (fix-hia1.30).
+            by_code = {"answer_by_code": skill_phases.answer_by_code(prompt_steps)}
         else:
             trajectory = getattr(self._workflow_tool_agent, "trajectory", None) or {}
             indices = [int(key.rsplit("_", 1)[1]) for key in trajectory
@@ -2461,7 +2478,8 @@ class WorkflowExecutionContext:
             if getattr(result, "suspended", None) is True:
                 tracing.end_span(self, span, status=tracing.STATUS_CANCELLED,
                                  attributes={"steps": plan_text, "steps_used": steps_used,
-                                             "answer_only": False, "suspended": True})
+                                             "answer_only": False, "suspended": True,
+                                             **by_code})
                 return "suspended", result
             if indices:
                 self._next_step = max(indices) + 1
@@ -2472,7 +2490,7 @@ class WorkflowExecutionContext:
         state.setdefault("phase_answers", []).append(answer)
         exhausted = getattr(result, "exhausted", None) is True
         closing = {"steps": plan_text, "steps_used": steps_used, "exhausted": exhausted,
-                   "suspended": False, "answer_only": answer_only}
+                   "suspended": False, "answer_only": answer_only, **by_code}
         record = None
         facts = None
         issues = None
@@ -2538,6 +2556,25 @@ class WorkflowExecutionContext:
         tracing.end_span(self, span, attributes={
             **closing, "record": record, "record_issues": issues, "facts": facts})
         return "done", None
+
+    def _phase_code_steps(self, plan_text: str, own_steps: int, names: dict, *,
+                          answers: bool):
+        """The steps code runs at the start of this phase run (``skill_phases.CodeSteps``),
+        or None: ``FW_SKILL_CODE_STEPS`` is off, or nothing could be read (never a reason to
+        fail the phase; the agent then runs every step)."""
+        from fastworkflow import skill_phases
+
+        if not own_steps or not skill_phases.code_steps_on() or self._app_workflow is None:
+            return None
+        try:
+            return skill_phases.CodeSteps(
+                plan_text, workflow=lambda: self.get_active_workflow() or self._app_workflow,
+                runs=lambda index: [run for run in self._archived_command_runs()
+                                    if int(run.get("step_index") or 0) == index],
+                own_steps=own_steps, answers=answers, **names)
+        except Exception as error:  # noqa: BLE001 - the agent runs the steps instead
+            logger.warning("code-run steps skipped: %s: %s", type(error).__name__, error)
+            return None
 
     def _run_subtasks_from(self, start: int):
         """Run sub-tasks start.. one after another; the combined answer, or a suspension.

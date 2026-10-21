@@ -173,7 +173,8 @@ sub-task runs its phases in order instead of one executor run on the whole list.
    even as background, so the run cannot take on the rest of the job; the steps carry
    every value it needs. Replans after an error or an ask_user answer plan from that
    same input. The last phase's input is the request followed by its steps: it does
-   them and answers the request.
+   them and answers the request. Code runs the phase's leading mechanical steps before
+   the executor's model takes a step (see "Steps run by code" below).
 3. **Finish check per phase.** The finish check reads the phase's own steps against the
    outputs archived from the phase's first step on. In a phase it also compares a step's
    concrete argument values (`values=True`, the rule facts use below): a run of
@@ -320,6 +321,24 @@ sub-task runs its phases in order instead of one executor run on the whole list.
      `uid: b1; loan_uids: l1, l2; total: 3` (lists joined with `, `, `none` for an empty
      list or `None`, nested models in parentheses; `fields=` picks fields, `sep=` the
      separator). If no workflow command names can be read, no phase is answer-only.
+   - **Code writes the answer when the steps already are the answer**
+     (`skill_phases.answer_by_code`). Each step is read in code (`answer_step_kind`):
+     - *verbatim*: it starts with `say that`, or it is an instruction head (`say`,
+       `compare`, `present`) followed by `": "` and the facts (`say what b1 holds: l1, l2`);
+     - *guard*: no facts, only what not to do (`apply no change`, `present them as options
+       only; apply none of them`);
+     - *judgement*: anything else (`say which is riskier`, `list the loans: l1, l2`).
+
+     The words are one constant, `ANSWER_STEP_WORDS`. When every step is verbatim or a
+     guard (and one at least is verbatim), there is no model call: `answer_from_steps`
+     writes one line per step, in step order, unnumbered, guards dropped. `say that P` is
+     `P.`; `say what X: facts` keeps its question as a label (`What X: facts.`; also `say
+     which`, `say who`, `say whether`, `say for ...`); `present ..., and say that P: facts`
+     is `P. Facts.`; `compare ...: facts` is `Facts.`. One judgement step and the model
+     writes the whole answer, as below. `FW_SKILL_ANSWER_BY_CODE=0` (read like the other
+     settings) turns code writing off. The phase's span says which (`answer_by_code`).
+     So write a step's facts as the answer should read them: an instruction left in the
+     facts (`..., and name every one of them:`) is copied into the answer.
    - **The answer-only answer is checked in code** (`skill_phases.answer_only_answer`).
      The call is also told to name every item of every list the steps give, never to
      shorten one, count it instead or write a placeholder. Then:
@@ -331,8 +350,8 @@ sub-task runs its phases in order instead of one executor run on the whole list.
        sentences of `phase_query`);
      - an empty reply (nothing, only a code fence or markers: fewer than
        `MIN_ANSWER_CHARS` letters and digits, `is_empty_answer`) is retried once; still
-       empty, the answer is written in code from the steps (`answer_from_steps`: each step
-       that starts with `say`, its number and `say` / `say that` dropped);
+       empty, the answer is written in code from the steps (`answer_from_steps`, as
+       above: every step but a guard);
      - every row of the lists the steps give in full that the answer does not name is
        appended after "Also in the facts, not named above:" (`missing_list_items`). A
        list is a list field of text (two items or more) of an earlier phase's output whose
@@ -473,23 +492,149 @@ item's output is then filled where its run ended, as for any phase.
 - An item with an output that was never opened fails the phase ("item u2 was never
   opened: ..."), and with it the skill call, as any failed fill does.
 
+## Steps run by code
+
+Most steps a `steps_fn` builds are exact commands with every value filled in
+(`open_library`, `open_book_by_uid book_uid=b1`). Code runs those itself, before the
+executor's model takes a step (`skill_phases.CodeSteps`), and the agent gets only what
+is left.
+
+**Which step code runs** (`skill_phases.code_step`, `plan_code_steps`). A step is
+mechanical when `finish_check.parse_plan` reads it as a command step (so never a
+conditional, negated or answer step), its first word is its command, and its **chain**
+(the text after the command, cut at the first `(` or `;`):
+
+- is empty and every field of the command's parameters class has a default (or the
+  command has no parameters class); or
+- binds with the key=value parser (`_extract_parameters_from_key_values`, which declines
+  placeholders `<...>`, `{...}`, `...`, unknown names and values that do not validate),
+  every bound value equals the step's own value (`finish_check.step_arguments`, so prose
+  swallowed into a value, `shelf_uid=s1, no filter`, is caught), and every required
+  field is given.
+
+A core `go_up` or `reset_context` written alone also runs. Code sends `command chain`:
+the rest of the step is a note and is never sent. A command several contexts define is
+mechanical only when it reads the same under each one's parameters class. Any other
+step is open.
+
+**Picks** (`skill_phases.pick_step`). An open step right after a step code ran also runs
+when it opens one row of that step's Output: `open_book_by_uid with the uid of the Dune
+match` after `find_book query=Dune`. Code reads the step's run from the archive and sends
+`open_book_by_uid book_uid=<uid>` only when:
+
+- the step is a command step with no value of its own (prose or a placeholder), and its
+  command has exactly one required field, a uid (named `uid` or `id`, or ending `_uid`
+  or `_id`, plural too: the test readable facts use for uids);
+- the step names a concrete value of the step before it (`Dune`), paging values aside;
+- that run is the step's one successful run, its observation names no later page, and
+  its Output has exactly one uid list; rows are read as `narrowed_output` reads them
+  (list fields of one length are the columns of one table); and
+- exactly one row holds the named value whole (`Dune`, never `Dune 1`; spacing, quotes
+  and case ignored), or the Output has exactly one row at all.
+
+Otherwise (two exact matches, several rows and none exact, no rows) the step is open as
+before and the agent picks. The thought says which: "Step 3 of the plan, run by code
+(the only exact match of step 2)." or "(the only row of step 2)."
+
+**What runs.** Code walks the phase's own steps from the first. Each runs through the
+agent's own `execute_workflow_query` tool inside the executor run
+(`fastWorkflowReAct._run_loop` with `code=`; the runner sets the agent's `code_steps`
+attribute, which `forward()` takes and clears), so it is an ordinary trajectory step,
+thought "Step 2 of the plan, run by code.": outputs, the archive, facts, spans, the
+repeat guard and the finish check see a normal run. Answer steps and negated steps are
+passed over.
+
+- Code steps do not count toward `FW_SKILL_PHASE_MAX_STEPS`; the budget is the agent's.
+- A retry never re-runs a code step, and a phase resumed after ask_user runs no code.
+- Planner steps (`steps_before` / `steps_after`) are never run by code; a phase that
+  starts with `steps_before` runs no code at all, and a `steps_after` step that runs
+  anything (not an answer or negated step) is an open step: the agent runs it.
+- A command with side effects runs like any other: its values come from the checked
+  skill input or from facts filled in code.
+- The command text is `name k=v` or a bare name, so parameter extraction binds it in
+  code (`deterministic_form` `key_value`, or `bare`: nothing after the name and every
+  field defaulted).
+
+**Navigation.** When a step's command is not available where the workflow is, code goes
+there first only along one shortest path whose moves need no value (`go_up`,
+`reset_context`, an opener with no parameters): `context_navigation.code_path`, the
+planner behind the agent's refusal text. Each move is a step of its own ("Run by code to
+reach the context of step 3."). Otherwise the step runs anyway, the tool's refusal names
+the way, and code stops there. A step that opens the record the workflow is already on
+gets the "You are already in context ..." reply, which counts as done.
+
+**Hand-off.** Code stops at the first open step, after a step that failed (a
+failure marker in its observation, a command run of it that did not succeed, or no run
+at all other than the "already in context" reply), or by
+the paging rule below. The agent's loop then goes on with the code steps in its
+trajectory, and the phase's framing has one more sentence: "Steps marked 'run by code'
+in the trajectory are done; do the remaining steps." (stripped from answers by
+`clean_answer`). A failed step is the agent's last observation; code never fails a phase
+by itself. Code does not resume after an open step.
+
+When every step ran by code there is no agent loop. A phase whose answer is not shown
+ends with an empty answer and no model call; the last phase and the extra-steps phase
+get the one answer call every executor run ends with. Fan-out items run the same way,
+so an item of mechanical steps makes no model call; the item record check still runs.
+
+**Paging is literal.** Code sends only a paging value (`facts.PAGING_PARAMETERS`) the
+step writes: `list_loans start=20` runs that page, a step with none runs page 1. Code
+never computes a next page. A step that writes the paging value as a placeholder
+(`start=<n>`), in its chain or as a step of its own with no command (`next page with
+start=<n> until the list is read`), is open: the agent pages. One exception: when a step
+on a paged command writes no paging value, its note holds one of
+`skill_phases.FULL_LIST_PHRASES` ("full list", "every page", "all pages", "until
+complete", "page through"; any case), and page 1's observation names a later page (a
+paging parameter with a positive value, `start=10`), code stops after that step and the
+agent reads the rest. Its thought then says "(its first page)". Any other note, or none:
+page 1 is what the step wants, and code goes on.
+
+**The switch.** `FW_SKILL_CODE_STEPS`: on by default; `0` (`false`, `off`, `no`) turns
+it off; read like the other settings. It is temporary: kept for one A/B benchmark run,
+then removed, and code-run steps are always on for phased skills. Skills without
+`plan()` are unchanged.
+
+**Writing steps for code.**
+
+- A note goes in parentheses after the chain (`list_loans (for the due dates)`) and is
+  never sent. Prose after the command that is not in parentheses (`go_up back to the
+  library`) leaves the step to the agent.
+- A note never changes what runs: write a filter as an argument
+  (`list_loans status=overdue`), not as a note (`list_loans (only overdue ones)`).
+- For every page, say so in the note with one of the `FULL_LIST_PHRASES`
+  (`list_loans (full list)`), or write the paging as a step of its own with `start=`
+  (`next page with start=<n> until the list is read`), which the agent pages. A note
+  that asks for more pages in other words gets page 1.
+- A step the agent must decide is written as conditional ("only when ...", "skip when
+  ...", "if needed"). A concrete mutating step (`renew_loan loan_uid=l1`) is run by code.
+
 ## Tracing
 
 Each phase run (each item of a fan-out phase) is one `fw.skill.phase` span (span
-contract v18, `fw.skill.phase` v3), the parent of that run's `fw.agent.execute`:
+contract v22, `fw.skill.phase` v5), the parent of that run's `fw.agent.execute`:
 
 | attribute | meaning |
 |---|---|
 | `skill`, `phase`, `phase_index`, `phase_count` | which phase of which skill (index 0-based) |
 | `step_budget`, `first_step` | the run's budget and its first step number |
 | `answer_only` | the phase named no command: one model call with no tools wrote its answer (its `fw.agent.execute` is the child, with no tool calls) |
+| `answer_by_code` | an answer-only phase only: `true` when code wrote its answer from its steps, with no model call (every step verbatim or a guard, `answer_by_code`) |
 | `item`, `item_index`, `item_count`, `items_total` | one item of a fan-out phase: the item, its 0-based index of `item_count` items run, of `items_total` before the cap |
 | `record_issues` | a bound item's record-check flags (a list, `[]` when none); `record` is then the item's bound record |
 | `skipped` | the phase's callable `when` was false: nothing ran, no child span (`false` with `facts_error` when deciding it failed) |
 | `stop_condition_met` | an item of a fan-out phase with `until`: the condition held after it, so the fan-out stops |
 | `resumed` | a run resumed after ask_user (it opens a new span) |
 | `steps` | the phase's numbered plan |
-| `steps_used`, `exhausted`, `suspended` | executor steps the run took; whether it reached its budget or suspended |
+| `steps_used`, `exhausted`, `suspended` | executor steps the run took (code steps included); whether it reached its budget or suspended |
+| `steps_by_code` | steps code ran before the agent, moves included; model steps = `steps_used - steps_by_code` |
+| `code_stop` | why code stopped: `done` (every step), `open step N`, `step N failed`, `no path for step N` (refused, no no-value path), `more pages at step N`, `stopped` (the executor's step hook ended the run), `off` (no code: the switch is off, the phase starts with planner steps, or its steps could not be read) |
 | `record`, `facts` | the record its output was filled on, and the filled output (`null` for no output) |
 | `facts_error` | why the phase failed (status `error`) |
 | `error_type` | the exception that ended the run, when one did |
+
+`steps_by_code` and `code_stop` are absent on an answer-only phase and on a resumed run.
+A step code ran is an ordinary `fw.agent.step` (v7) with `by_code: true` and a thought
+that says "run by code"; its `fw.agent.tool_call` child is unchanged. A phase run wholly
+by code still has its `fw.agent.execute`, with no model child spans unless it writes the
+answer. A command code sent bare is bound with `fw.nlu.param_extraction`
+`deterministic_form` `bare`.

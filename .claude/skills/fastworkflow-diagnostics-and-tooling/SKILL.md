@@ -64,7 +64,7 @@ Do NOT use this skill for — go to the sibling instead:
 - Use the repo venv interpreter: `.venv/bin/python`. `import fastworkflow`
   takes ~5–10 s (pulls dspy/torch); scripts note where that cost applies.
 
-## The four scripts
+## The scripts
 
 All live in `.claude/skills/fastworkflow-diagnostics-and-tooling/scripts/`.
 Each supports `--json` for machine-readable output (except trace_turn, whose
@@ -77,6 +77,7 @@ walkthroughs: [references/observed-outputs.md](references/observed-outputs.md).
 | `check_cache_freshness.py <wf>` | will the JSON snapshots be trusted or rebuilt, and why — recomputes the v2.22.1 fingerprint, prints verdict + the 5 most recently modified command sources (the usual culprit) | ~7 s (imports fastworkflow) |
 | `trace_turn.py {turns,turn,response,explain}` | list recorded turns / print one turn's span tree + artifacts from `observability.sqlite3`; read a saved server turn-response body; `explain` prints the capture recipes per topology | instant (stdlib only) |
 | `collect_model_metrics.py <wf> [--context C]` | per-command top-1 accuracy, confusion pairs, ambiguity rate, DistilBERT-fallback rate of a TRAINED context, scored on stored seed utterances with the exact runtime decision rule | ~10–60 s/context (loads 2 transformer models, CPU ok) |
+| `replay_code_steps.py <wf> --db PATH [--experiment ID]` | which stored `fw.skill.phase` plan steps code would run (fix-6llp): counts per reason, phases mechanical end to end, leading-run length, page-1 runs, every dropped note; DB opened read-only, nothing runs | ~10 s (imports fastworkflow and the workflow's commands) |
 
 Copy-paste smoke test (works offline, no API keys, uses the bundled internal
 workflow which is trained on any machine that has ever run `fastworkflow

@@ -317,6 +317,43 @@ def unavailable_command_message(
     return render_unavailable_command(token, current, homes, paths, edges)
 
 
+def home_contexts(workflow, token: str) -> list[str]:
+    """The most specific contexts that define the command ``token`` (short or qualified).
+
+    A context another home context inherits from is a base, not somewhere to
+    navigate to, so only the most specific ones are named.
+    """
+    app = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
+    wanted = token.lower()
+    homes = {context for context, names in app.contexts.items()
+             if any(wanted == (name if "/" in token else name.split("/")[-1]).lower()
+                    for name in names)}
+    inherited = set().union(*(app.context_model.inherited_base_contexts(c) for c in homes))
+    return sorted(homes - inherited)
+
+
+def code_path(workflow, command: str) -> list[str] | None:
+    """The moves code makes to reach a home of ``command``, or None when it must not.
+
+    The same planner as the refusal text (``unavailable_command_message``). Only
+    one shortest path, to one home, whose moves need no value (``go_up``,
+    ``reset_context``, an opener with no parameters): anything else is the agent's.
+    """
+    try:
+        current = workflow.current_command_context_name
+        homes = home_contexts(workflow, command)
+        paths = plan_navigation(current, homes, live_context_chain(workflow),
+                                collect_descend_edges(workflow.folderpath))
+    except Exception:
+        logger.debug("code path not computed", exc_info=True)
+        return None
+    found = [path for path in paths.values() if path]
+    shortest = [path for path in found if len(path) == min(map(len, found))] if found else []
+    if len(shortest) != 1 or any(step.needs or step.required_to_enter for step in shortest[0]):
+        return None
+    return [step.command.split("/")[-1] for step in shortest[0]]
+
+
 def enters_current_context(workflow, token: str, current: str) -> bool:
     """Whether ``token`` is a command that enters ``current``, the context the agent is in."""
     try:
@@ -327,6 +364,10 @@ def enters_current_context(workflow, token: str, current: str) -> bool:
     return any(edge.target == current
                and edge.command.split("/")[-1].lower() == token.lower()
                for edge in edges)
+
+
+#: How the refusal for entering the context the agent is in begins: nothing ran.
+ALREADY_IN_CONTEXT = "You are already in context"
 
 
 def render_already_in_context(token: str, current: str, workflow) -> str:
@@ -346,7 +387,7 @@ def render_already_in_context(token: str, current: str, workflow) -> str:
     except Exception:
         logger.debug("commands of %r unread", current, exc_info=True)
         commands = []
-    text = f"You are already in context {label!r}" + (f" ({instance})" if instance else "")
+    text = f"{ALREADY_IN_CONTEXT} {label!r}" + (f" ({instance})" if instance else "")
     text += f": {token!r} is how you enter it."
     if commands:
         text += f" To work on it, run one of its commands: {', '.join(commands)}."

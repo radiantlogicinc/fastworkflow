@@ -29,6 +29,7 @@ from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_executor import AlreadyInContextError, CommandNotFoundError
 from fastworkflow.context_navigation import (
     enters_current_context, render_already_in_context, unavailable_command_message)
+from fastworkflow.context_navigation import home_contexts as context_homes
 from fastworkflow.utils.react import AskUserSuspend
 from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
 from fastworkflow.observation_offloading.agent import build_tool_agent
@@ -305,16 +306,9 @@ def _explicit_agent_command(command: str, workflow) -> str:
     available = set(app.get_command_names(current_context)) | core_command_names()
     matches = [name for name in available if _command_name_matches(token, name)]
     if not matches:
-        home_contexts = {
-            context for context, names in app.contexts.items()
-            if any(_command_name_matches(token, name) for name in names)}
+        home_contexts = context_homes(workflow, token)
         if not home_contexts:
             return command
-        # A context another home context inherits from is a base, not
-        # somewhere to navigate to; name only the most specific ones.
-        inherited = set().union(*(app.context_model.inherited_base_contexts(c)
-                                  for c in home_contexts))
-        home_contexts = sorted(home_contexts - inherited)
         if enters_current_context(workflow, token, current_context):
             raise AlreadyInContextError(
                 render_already_in_context(token, current_context, workflow))

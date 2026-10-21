@@ -341,3 +341,32 @@ def test_assistant_mode_retry_round_binds_the_answer(no_prediction, harness):
     params = output.command_response.artifacts["cmd_parameters"]
     assert (params.scope, params.scope_uid) == ("shelf", "3c85")
     assert output.command_response.artifacts["command"] == f"{LIST}: {LIST}"
+
+
+# ---------------------------------------------------------------------------
+# fix-6llp.1: the bare form -- nothing after the command name, every field defaulted
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [f"{FIND}: find_book", f"{FIND}: {FIND}", f"{FIND}:"])
+def test_a_bare_command_binds_its_defaults_without_the_llm(harness, text):
+    output, diagnostics, _ = harness(_FindParams, text)
+    assert output.parameters_are_valid
+    assert (output.cmd_parameters.query, output.cmd_parameters.start) == (None, None)
+    assert diagnostics["extraction_method"] == "xml_regex"
+    assert diagnostics["deterministic_form"] == "bare"
+
+
+def test_a_bare_command_with_a_required_field_takes_the_existing_path(harness):
+    output, diagnostics, _ = harness(
+        _OpenParams, f"{OPEN}: open_book", command_name=OPEN,
+        llm_result=lambda cls: cls.model_construct(book_uid="from llm"))
+    assert diagnostics["extraction_method"] == "llm"
+    assert "deterministic_form" not in diagnostics
+    assert output.cmd_parameters.book_uid == "from llm"
+
+
+def test_text_after_the_name_is_not_bare():
+    assert ParameterExtraction._extract_parameters_from_bare(
+        "find_book everything", _FindParams, FIND) is None
+    assert ParameterExtraction._extract_parameters_from_bare(
+        "other_command", _FindParams, FIND) is None

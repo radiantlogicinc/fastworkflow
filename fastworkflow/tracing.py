@@ -273,7 +273,15 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 #
 # v20: fw.agent.step v6 (fix-5jss) -- `folded_command`: the command text the
 # command tool built from arguments the model passed beside `command`.
-SPAN_CONTRACT_VERSION = 20
+#
+# v21: fw.agent.step v7 and fw.skill.phase v4 (fix-6llp) -- code runs a phase's
+# leading mechanical steps: `by_code` on a step code ran, and on the phase
+# `steps_by_code` and `code_stop`. fw.nlu.param_extraction's `deterministic_form`
+# may be "bare" (no new attribute).
+#
+# v22: fw.skill.phase v5 (fix-hia1.30) -- `answer_by_code` on an answer-only phase:
+# code wrote its answer from its steps (every step verbatim or a guard), no model call.
+SPAN_CONTRACT_VERSION = 22
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -503,13 +511,24 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # span has no child and carries only the opening attributes; `skipped` false
     # with `facts_error` when deciding it failed) and, for an item of a fan-out
     # phase with `until`, `stop_condition_met` (the fan-out stops after this item).
+    # v4 (fix-6llp): `steps_by_code` (the steps of the run code ran, before the agent:
+    # navigation included; model steps = `steps_used - steps_by_code`) and `code_stop`
+    # (why code stopped: "done", "open step N", "step N failed", "no path for step
+    # N", "more pages at step N", "stopped" when the executor's step hook ended the
+    # run, or "off" when code ran nothing for the phase).
+    # Absent on an answer-only phase and on a resumed run.
+    # v5 (fix-hia1.30): `answer_by_code` on an answer-only phase only: true when code
+    # wrote its answer from its steps with no model call (`skill_phases.answer_by_code`).
     SPAN_SKILL_PHASE: SpanContract(
-        version=3,
+        version=5,
         attributes=frozenset(
             {
                 "answer_only",
+                "answer_by_code",
                 "skipped",
                 "stop_condition_met",
+                "steps_by_code",
+                "code_stop",
                 "item",
                 "item_index",
                 "item_count",
@@ -547,8 +566,10 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # v6: `folded_command` (fix-5jss) is the command text the command tool built
     # from parameters the model passed as tool arguments beside `command`;
     # `tool_args` is still what the model sent.
+    # v7 (fix-6llp): `by_code` (true) on a step code ran (skill_phases.CodeSteps),
+    # not the model; `thought` then says "run by code".
     SPAN_AGENT_STEP: SpanContract(
-        version=6,
+        version=7,
         attributes=frozenset(
             {
                 "step_index",
@@ -562,6 +583,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "error_type",
                 "repaired_tool_name",
                 "folded_command",
+                "by_code",
             }
         ),
     ),
@@ -665,7 +687,8 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         # writes (`desired-tag`). Absent on earlier versions.
         # v5 (fix-hia1.15, fix-hia1.14): `deterministic_form` says which code
         # parser bound the parameters when `extraction_method` is "xml_regex"
-        # ("key_value" or "positional"; absent for XML tags), and
+        # ("key_value", "positional" or, since span contract v21, "bare": nothing
+        # after the command name and every field defaulted; absent for XML tags), and
         # `unbound_value` is a lone value that bound to no field and was
         # refused. Absent on earlier versions.
         version=5,

@@ -264,9 +264,18 @@ def test_strip_words_remove_a_kind_word_and_its_possessive(tmp_path):
     assert sc._strip_words("group", ("group",)) == "group"
 
 
+def test_a_one_element_list_is_its_element_and_a_longer_list_is_not(tmp_path):
+    command = _command(tmp_path)
+    args, notes = sc.check_arguments(command, {"name": ["Payroll"], "kind": '["group"]'}, "Who is in Payroll?")
+    assert args["name"] == "Payroll" and args["kind"] == "group"
+    assert notes == ["name=['Payroll'] -> 'Payroll'"]
+    with pytest.raises(sc.SkillInputError, match="not written in the request"):
+        sc.check_arguments(command, {"name": '["Payroll", "Billing"]', "kind": "group"}, "Who is in Payroll?")
+
+
 def test_an_argument_not_in_the_request_fails_a_required_one_and_resets_an_optional_one(tmp_path):
     command = _command(tmp_path)
-    with pytest.raises(SkillCallError, match="not written in the request"):
+    with pytest.raises(sc.SkillInputError, match="not written in the request"):
         sc.check_arguments(command, {"name": "Billing", "kind": "group"}, "Who is in Payroll?")
     args, notes = sc.check_arguments(command, {"name": "Payroll", "kind": "group", "person": "Bo Diaz"},
                                      "Who is in Payroll?")
@@ -377,13 +386,13 @@ def test_a_failed_skill_call_falls_back_to_the_template_path(tmp_path, workflow_
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
     ctx._begin_turn("show my todo items")
-    # "Billing" is not in the request: the guard refuses the call, the text planner plans
-    lm = DummyLM([_typed_answer(name="Billing"), _text_answer()])
+    # "Billing" is not in the request: the guard refuses the call twice, the text planner plans
+    lm = DummyLM([_typed_answer(name="Billing"), _typed_answer(name="Billing"), _text_answer()])
 
     _plan(ctx, wf, lm, plan_template="TEMPLATE TEXT", skill_command=_command(tmp_path))
 
-    assert len(lm.history) == 2
-    assert "TEMPLATE TEXT" in _prompt(lm, 1)
+    assert len(lm.history) == 3
+    assert "TEMPLATE TEXT" in _prompt(lm, 2)
     span = _plan_span(sink)
     assert span.attributes["plan_source"] == "text"
     assert span.attributes["plan"] == "1. Show all todo items"
@@ -958,14 +967,47 @@ def test_a_second_refusal_falls_back_to_the_template_path(tmp_path, workflow_env
     assert "break a rule of pair" in span.attributes["skill_fallback"]
 
 
-def test_a_guard_refusal_is_not_planned_again(tmp_path, workflow_env):
+def test_a_guard_refusal_is_planned_again_with_the_refusal(tmp_path, workflow_env):
     workflow_env()
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
     ctx._begin_turn(PAIR_REQUEST)
-    lm = DummyLM([_pair_answer(second="Finance"), _text_answer()])
+    # a name the request does not write: planned again as a skill call, not the text plan
+    lm = DummyLM([_pair_answer(second="Finance"), _pair_answer()])
 
     _plan_pair(ctx, wf, lm, _command(tmp_path, PAIR, "pair"))
 
-    assert len(lm.history) == 2   # the typed call, then the text planner
+    assert len(lm.history) == 2   # the typed call, then the typed call again
+    assert "A first call of this skill was refused" in _prompt(lm, 1) and "'Finance' is not written" in _prompt(lm, 1)
+    span = _plan_span(sink)
+    assert span.attributes["plan_source"] == "skill_call"
+    assert span.attributes["skill_fallback"] is None
+    assert span.attributes["skill_args"] == {"first": "Payroll", "second": "Billing", "kind": "group"}
+
+
+def test_a_second_guard_refusal_falls_back_to_the_template_path(tmp_path, workflow_env):
+    workflow_env()
+    sink = RecordingTraceSink()
+    ctx, wf = _session(sink)
+    ctx._begin_turn(PAIR_REQUEST)
+    lm = DummyLM([_pair_answer(second="Finance"), _pair_answer(second="Finance"), _text_answer()])
+
+    _plan_pair(ctx, wf, lm, _command(tmp_path, PAIR, "pair"))
+
+    assert len(lm.history) == 3   # two typed calls, then the text planner
     assert "not written in the request" in _plan_span(sink).attributes["skill_fallback"]
+
+
+def test_a_one_element_list_argument_stands_for_its_element(tmp_path, workflow_env):
+    workflow_env()
+    sink = RecordingTraceSink()
+    ctx, wf = _session(sink)
+    ctx._begin_turn(PAIR_REQUEST)
+    lm = DummyLM([_pair_answer(second='["Billing"]')])
+
+    _plan_pair(ctx, wf, lm, _command(tmp_path, PAIR, "pair"))
+
+    assert len(lm.history) == 1
+    span = _plan_span(sink)
+    assert span.attributes["plan_source"] == "skill_call"
+    assert span.attributes["skill_args"] == {"first": "Payroll", "second": "Billing", "kind": "group"}

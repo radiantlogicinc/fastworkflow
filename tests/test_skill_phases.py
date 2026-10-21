@@ -708,6 +708,9 @@ def phased(initialized_fastworkflow, todo_workflow_path, monkeypatch):
         return state.script[name]["answer"]
 
     monkeypatch.setattr("fastworkflow.skill_phases.write_answer", fake_answer)
+    # These tests script the model's answer; the answer written by code is tested on its own
+    # (test_code_writes_an_answer_only_phase_whose_every_step_is_verbatim and below).
+    monkeypatch.setenv("FW_SKILL_ANSWER_BY_CODE", "0")
     state.ctx, state.sink, state.reviews, state.start = ctx, sink, reviews, start
     state.answered = answered
     return state
@@ -1874,9 +1877,89 @@ def test_missing_list_items_reads_lists_the_steps_give_in_full_as_rows():
 def test_answer_only_answer_appends_rows_left_out(monkeypatch):
     monkeypatch.setattr("fastworkflow.skill_phases.write_answer", lambda query: "Loans: l1.")
     book = BookFacts(uid="b1", loan_uids=["l1", "l2"])
-    assert answer_only_answer("q", "1. say that b1 has loans and list them: l1, l2",
+    # "list ...: facts" is no verbatim step (only say / compare / present are), so the model writes it.
+    assert answer_only_answer("q", "1. list the loans of b1: l1, l2",
                               {"book": book}) == \
         f"Loans: l1.\n\n{MISSING_ITEMS_LEAD} l2."
+
+
+# ----------------------------------------------------------------------
+# Code writes an answer-only phase whose every step is verbatim or a guard (fix-hia1.30)
+# ----------------------------------------------------------------------
+
+from fastworkflow.skill_phases import answer_by_code, answer_step_kind  # noqa: E402
+
+
+def test_answer_steps_are_verbatim_guard_or_judgement():
+    assert answer_step_kind("1. say that b1 has loans l1, l2") == "verbatim"
+    assert answer_step_kind("say what Dune holds: l1, l2") == "verbatim"
+    assert answer_step_kind("compare the two books: Dune has 2 loans") == "verbatim"
+    assert answer_step_kind("present the renewals as options only, and say that none "
+                            "was applied: renew l1") == "verbatim"
+    assert answer_step_kind("2. apply no change") == "guard"
+    assert answer_step_kind("present them as options only; apply none of them") == "guard"
+    assert answer_step_kind("say which book is riskier") == "judgement"
+    assert answer_step_kind("say what Dune holds:") == "judgement"      # no facts given
+    assert answer_step_kind("list the loans of b1: l1, l2") == "judgement"
+    assert answer_step_kind("b1 has loans l1") == "judgement"
+
+
+def test_answer_from_steps_writes_each_verbatim_step_as_a_line():
+    steps = ("1. say that b1 has loans l1, l2\n"
+             "2. say what Dune holds: l1, l2\n"
+             "3. present the renewals on offer as options only, and say that none was "
+             "applied: renew l1, renew l2\n"
+             "4. compare the two books: Dune has 2 loans; Emma has 1\n"
+             "5. apply no change\n"
+             "6. present them as options only; apply none of them")
+    assert answer_by_code(steps)
+    assert answer_from_steps(steps) == (
+        "B1 has loans l1, l2.\n"
+        "What Dune holds: l1, l2.\n"
+        "None was applied. Renew l1, renew l2.\n"
+        "Dune has 2 loans; Emma has 1.")
+    # A guard alone gives nothing to write; one judgement step leaves it to the model.
+    assert not answer_by_code("1. apply no change")
+    assert not answer_by_code("1. say that b1 has loans l1\n2. say which loan is due first")
+
+
+def test_answer_only_answer_makes_no_model_call_when_every_step_is_verbatim(monkeypatch):
+    monkeypatch.delenv("FW_SKILL_ANSWER_BY_CODE", raising=False)
+    calls = []
+    monkeypatch.setattr("fastworkflow.skill_phases.write_answer",
+                        lambda query: calls.append(query) or "Model text.")
+    book = BookFacts(uid="b1", loan_uids=["l1", "l2"])
+    steps = "1. say what b1 has on loan: l1, l2\n2. apply no change"
+    assert answer_only_answer("q", steps, {"book": book}) == "What b1 has on loan: l1, l2."
+    assert calls == []
+    # The appended rows are still checked: a guard that names a list the answer leaves out.
+    steps = "1. say that b1 has loans l1\n2. never drop a loan (l1, l2), name each"
+    assert answer_only_answer("q", steps, {"book": book}) == \
+        f"B1 has loans l1.\n\n{MISSING_ITEMS_LEAD} l2."
+    assert calls == []
+    # A judgement step keeps the model call (and the append).
+    steps = "1. say that b1 has loans and name each: l1, l2\n2. say which loan is due first"
+    assert answer_only_answer("q", steps, {"book": book}) == \
+        f"Model text.\n\n{MISSING_ITEMS_LEAD} l1, l2."
+    assert len(calls) == 1
+    # Switched off, the model writes every answer-only phase.
+    monkeypatch.setenv("FW_SKILL_ANSWER_BY_CODE", "0")
+    assert answer_only_answer("q", "1. say that b1 has loans l1, l2", {"book": book}) == \
+        "Model text."
+    assert len(calls) == 2
+
+
+def test_code_writes_an_answer_only_phase_and_its_span_says_so(phased, monkeypatch):
+    monkeypatch.delenv("FW_SKILL_ANSWER_BY_CODE", raising=False)
+    phased.start()
+    result = phased.ctx.process_turn("show the book Dune")
+    assert result.answer == "B1 has loans l1, l2."
+    assert phased.answered == []                       # no model call wrote it
+    spans = phased.sink.named(tracing.SPAN_SKILL_PHASE)
+    report = spans[-1]
+    assert report.attributes["answer_only"] is True
+    assert report.attributes["answer_by_code"] is True
+    assert all("answer_by_code" not in span.attributes for span in spans[:-1])
 
 
 # ----------------------------------------------------------------------
