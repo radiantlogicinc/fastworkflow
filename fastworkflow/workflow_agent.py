@@ -1761,6 +1761,7 @@ def build_query_with_next_steps(user_query: str,
     plan_text = ""
     plan_source = None
     skill_args = None
+    skill_notes = None
     skill_fallback = None
     if initial_plan:
         # A phased skill call (skill_phases): the runner reads it after this plan.
@@ -1772,6 +1773,7 @@ def build_query_with_next_steps(user_query: str,
                     call = plan_skill_call(skill_command, request_text, available_commands, check_lm=_jev_lm(),
                                            workflow=current_workflow)
                     prediction, plan_text, skill_args = call.prediction, call.plan, call.args
+                    skill_notes = list(call.notes) or None
                     plan_source = "skill_call"
                     if call.phases is not None:
                         chat_session_obj._phased_skill_call = (skill_command, call)
@@ -1795,6 +1797,7 @@ def build_query_with_next_steps(user_query: str,
             "plan_source": plan_source,
             "skill": skill_command.name if skill_command is not None and initial_plan else None,
             "skill_args": skill_args,
+            "skill_notes": skill_notes,
             "skill_fallback": skill_fallback,
         },
     )

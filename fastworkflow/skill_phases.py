@@ -1239,8 +1239,12 @@ _COPY_RULE = ("Copy every name, id and number exactly as the steps give it, and 
 #: Said when code ran the phase's leading steps (``CodeSteps``) before the executor.
 _CODE_STEPS_DONE = ("Steps marked 'run by code' in the trajectory are done; do the "
                     "remaining steps.")
+#: Said to the last phase when code ran every one of its steps (``CodeSteps.done_inputs``).
+_CODE_STEPS_ALL_DONE = ("Every step below has run (by code); their outputs are in the "
+                        "trajectory. Answer from those outputs, and run a command only when "
+                        "the request needs one that no step ran.")
 _FRAMING_SENTENCES = (ANSWER_ONLY_RULE, _DO_ONLY_THESE, _LATER_PARTS, _EARLIER_PARTS, _COPY_RULE,
-                      _CODE_STEPS_DONE)
+                      _CODE_STEPS_DONE, _CODE_STEPS_ALL_DONE)
 #: "This is part 2 of 3 (items) for item 1 of 2 (u1), the last part of this job." and the
 #: like: the opening of a phase's framing.
 _PART_RE = re.compile(
@@ -1252,7 +1256,7 @@ _ANSWER_REQUEST_RE = re.compile(r"(?:Do these steps, then )?[Aa]nswer the reques
 
 def phase_query(request: str, plan_text: str, *, index: int, count: int, name: str,
                 answer_only: bool = False, item: Optional[tuple[int, int, Any]] = None,
-                code_steps: bool = False) -> str:
+                code_steps: bool = False, code_ran_all: bool = False) -> str:
     """The executor's input for phase *index* (0-based) of *count*: its steps, framed.
 
     A phase other than the last gets only its own steps: the request is left out, so
@@ -1262,6 +1266,8 @@ def phase_query(request: str, plan_text: str, *, index: int, count: int, name: s
     (``ANSWER_ONLY_RULE``). *item* ``(k, n, value)`` (0-based *k*) frames one item's
     sub-plan of a fan-out phase. *code_steps*: code runs the phase's leading steps first
     (``CodeSteps``), and the run is told those are done (``_CODE_STEPS_DONE``).
+    *code_ran_all*: code ran every step of the last phase; the run is told to answer from
+    their outputs (``_CODE_STEPS_ALL_DONE``), with the copy rule answer-only phases get.
     """
     part = f"part {index + 1} of {count} ({name})"
     by_code = f" {_CODE_STEPS_DONE}" if code_steps else ""
@@ -1277,6 +1283,9 @@ def phase_query(request: str, plan_text: str, *, index: int, count: int, name: s
     if answer_only:
         return (f"{request}\n\nThis is {part}, the last part of this job.{earlier} "
                 f"{ANSWER_ONLY_RULE} {_COPY_RULE} Answer the request{scope}:\n{plan_text}")
+    if code_ran_all:
+        return (f"{request}\n\nThis is {part}, the last part of this job.{earlier} "
+                f"{_CODE_STEPS_ALL_DONE} {_COPY_RULE} Answer the request{scope}:\n{plan_text}")
     return (f"{request}\n\nThis is {part}, the last part of this job.{earlier}{by_code} "
             f"Do these steps, then answer the request{scope}:\n{plan_text}")
 
@@ -1501,7 +1510,8 @@ class CodeSteps:
     how many steps it ran, moves included. *own_steps* steps of the plan are the phase's
     own; planner-written steps after them are never run by code: one that runs anything
     (not an answer or negated step) is an open step, so the agent runs it. *answers*: the run's
-    answer is shown, so a phase run wholly by code still writes it.
+    answer is shown, so a phase run wholly by code still writes it: the agent then takes a
+    step from code's last one, with ``done_inputs`` (set by the caller) over its inputs.
     """
 
     def __init__(self, plan_text: str, *, workflow: Callable[[], Any],
@@ -1519,6 +1529,8 @@ class CodeSteps:
                            None)
         self.count = 0
         self.stop: Optional[str] = None
+        #: Inputs the agent's loop gets when code ran every step (``finished``).
+        self.done_inputs: dict[str, Any] = {}
         self._position = 0
         self._moves: list[str] = []
         self._reached: set[int] = set()

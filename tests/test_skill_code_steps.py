@@ -172,6 +172,7 @@ from fastworkflow.command_executor import CommandExecutor  # noqa: E402
 from fastworkflow.skill_commands import SkillCallPlan, call_phases, command_from_module  # noqa: E402
 from fastworkflow.skill_phases import Phase  # noqa: E402
 from fastworkflow.turn import TurnStatus  # noqa: E402
+from fastworkflow.utils.react import _step_indexes  # noqa: E402
 from fastworkflow.workflow_agent import initialize_workflow_tool_agent  # noqa: E402
 from tests.test_skill_phases import RecordingSink  # noqa: E402
 from tests.test_turn_result_capture import (  # noqa: E402,F401 - shared fixtures
@@ -299,16 +300,25 @@ class Workflow:
 
 class Model:
     """The executor's model: scripted agent steps, and the answer call. Asked for a step
-    nobody scripted, it fails the test."""
+    nobody scripted, it fails the test, except right after a step code ran with every
+    step done (fix-hia1.34): it then finishes, recorded in *closings*, not *asked*."""
 
     def __init__(self, agent):
         self.agent = agent
         self.steps: list = []
         self.asked: list[dict] = []
+        self.closings: list[dict] = []
         self.answers: list[str] = []
 
     def __call__(self, module, trajectory, **inputs):
         if module is self.agent.react:
+            last = max(_step_indexes(trajectory), default=None)
+            if (not self.steps and last is not None
+                    and "run by code" in str(trajectory.get(f"thought_{last}"))):
+                self.closings.append({"query": inputs.get("user_query"),
+                                      "trajectory": dict(trajectory)})
+                return dspy.Prediction(next_thought="weighed", next_tool_name="finish",
+                                       next_tool_args={})
             self.asked.append({"query": inputs.get("user_query"), "trajectory": dict(trajectory)})
             if not self.steps:
                 raise AssertionError(f"the model was asked for a step after {trajectory}")
@@ -408,9 +418,10 @@ def test_a_phase_of_mechanical_steps_runs_with_no_model_call(todo):
     result = todo.turn()
 
     assert result.status == TurnStatus.COMPLETED
-    # Every step ran in code, through the agent's own tool; the model was never asked
-    # for a step, and only the last phase (it answers) made the one answer call.
+    # Every step ran in code, through the agent's own tool. Only the last phase (it
+    # answers) went on to the model: one step, its finish, then the one answer call.
     assert todo.model.asked == []
+    assert len(todo.model.closings) == 1
     assert len(todo.model.answers) == 1
     assert todo.workflow.sent == ["list_todo_lists", "get_todo_list id=8", "get_all_children",
                                   "get_properties"]
@@ -420,7 +431,8 @@ def test_a_phase_of_mechanical_steps_runs_with_no_model_call(todo):
     assert spans[1].attributes["facts"] == {"description": "errands"}
     assert [s.attributes["steps_by_code"] for s in spans] == [1, 2, 1]
     assert [s.attributes["code_stop"] for s in spans] == ["done", "done", "done"]
-    assert [s.attributes["steps_used"] for s in spans] == [1, 2, 1]
+    # The last phase's finish is its one model step (steps_used - steps_by_code).
+    assert [s.attributes["steps_used"] for s in spans] == [1, 2, 2]
     assert all(s.status == tracing.STATUS_OK for s in spans)
     assert result.answer == "the answer"
 
@@ -432,11 +444,13 @@ def test_code_steps_are_ordinary_trajectory_steps_spans_and_archive_rows(todo):
     assert trajectory[f"thought_{first}"] == "Step 1 of the plan, run by code."
     assert trajectory[f"tool_name_{first}"] == "execute_workflow_query"
     assert trajectory[f"tool_args_{first}"] == {"command": "get_properties"}
+    # Code steps never count toward the budget (a finish ends the loop uncounted, as ever).
     assert todo.agent.iteration_counter == 0
     steps = todo.sink.named(tracing.SPAN_AGENT_STEP)
-    assert len(steps) == 4 and all(s.attributes["by_code"] is True for s in steps)
+    assert len(steps) == 5 and all(s.attributes["by_code"] is True for s in steps[:4])
+    assert steps[4].attributes["tool_name"] == "finish" and "by_code" not in steps[4].attributes
     calls = todo.sink.named(tracing.SPAN_AGENT_TOOL_CALL)
-    assert [c.parent_span_id for c in calls] == [s.span_id for s in steps]
+    assert [c.parent_span_id for c in calls] == [s.span_id for s in steps[:4]]
     runs = todo.ctx._archived_command_runs()
     assert [(r["step_index"], r["command"].split("/")[-1]) for r in runs] == [
         (0, "list_todo_lists"), (1, "get_todo_list"), (2, "get_all_children"),
@@ -944,6 +958,90 @@ def test_a_skill_without_phases_runs_as_one_phase_with_code_steps(todo, monkeypa
     assert todo.model.asked == [] and len(todo.model.answers) == 1
     assert todo.workflow.sent == ["list_todo_lists", "get_todo_list id=8", "get_all_children"]
     assert result.answer == "the answer"
+
+
+def _record_finish_checks(monkeypatch):
+    from fastworkflow.observation_offloading import finish_check
+
+    seen: list[dict] = []
+    real = finish_check.review_finish
+
+    def recorded(**kwargs):
+        seen.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(finish_check, "review_finish", recorded)
+    return seen
+
+
+def test_a_flat_call_code_ran_wholly_still_takes_a_model_step_that_finishes(todo, monkeypatch):
+    # fix-hia1.34: code ran every step and the run answers, so the model weighs the
+    # outputs in a step of its own; the finish check reads its finish.
+    checks = _record_finish_checks(monkeypatch)
+    extracted: list[dict] = []
+    real = todo.model.__call__
+
+    def model(module, trajectory, **inputs):
+        if module is todo.agent.extract:
+            extracted.append(dict(trajectory))
+        return real(module, trajectory, **inputs)
+
+    monkeypatch.setattr(todo.agent, "_call_with_potential_trajectory_truncation", model)
+    todo.skill = _flat_skill(lambda input: list(FLAT_STEPS))
+    result = todo.turn()
+
+    assert result.status == TurnStatus.COMPLETED
+    (closing,) = todo.model.closings
+    assert todo.model.asked == []
+    # Framed as done, with the copy rule; never "do these steps".
+    assert skill_phases._CODE_STEPS_ALL_DONE in closing["query"]
+    assert skill_phases._COPY_RULE in closing["query"]
+    assert "Do these steps" not in closing["query"]
+    assert skill_phases._CODE_STEPS_DONE not in closing["query"]
+    # The model saw every code-run step and its output.
+    assert [closing["trajectory"][f"tool_args_{i}"]["command"] for i in range(3)] == [
+        "list_todo_lists", "get_todo_list id=8", "get_all_children"]
+    assert all(f"observation_{i}" in closing["trajectory"] for i in range(3))
+    assert len(checks) == 1
+    # The answer call reads the trajectory that ends on the model's finish.
+    (last,) = extracted
+    assert last["thought_3"] == "weighed" and last["tool_name_3"] == "finish"
+    (span,) = _phases(todo.sink)
+    assert span.attributes["steps_by_code"] == 3 and span.attributes["code_stop"] == "done"
+    assert span.attributes["steps_used"] - span.attributes["steps_by_code"] == 1
+    assert todo.workflow.sent == ["list_todo_lists", "get_todo_list id=8", "get_all_children"]
+
+
+def test_the_model_step_after_code_runs_a_command_the_plan_lacked(todo):
+    todo.skill = _flat_skill(lambda input: ["get_todo_list id=8", "get_all_children"])
+    todo.model.run("get_properties")
+    todo.model.finish()
+    result = todo.turn()
+
+    assert result.status == TurnStatus.COMPLETED
+    assert len(todo.model.asked) == 2 and todo.model.closings == []
+    assert skill_phases._CODE_STEPS_ALL_DONE in todo.model.asked[0]["query"]
+    # No code step ran again; the added command ran once, after them.
+    assert todo.workflow.sent == ["get_todo_list id=8", "get_all_children", "get_properties"]
+    (span,) = _phases(todo.sink)
+    assert span.attributes["steps_by_code"] == 2 and span.attributes["code_stop"] == "done"
+    assert span.attributes["steps_used"] == 4
+    # One model step counted toward the budget (the finish ends the loop uncounted).
+    assert todo.agent.iteration_counter == 1
+
+
+def test_an_answer_only_last_phase_is_still_written_with_no_model_step(todo):
+    todo.plan = _plan(
+        Phase("open", lambda: ["get_todo_list id=8"], output=Opened),
+        Phase("report", lambda open=None: [
+            f"say that the list is {open.description if open else 'named'}"]))
+    result = todo.turn()
+
+    assert result.status == TurnStatus.COMPLETED
+    assert todo.model.asked == [] and todo.model.closings == []
+    spans = _phases(todo.sink)
+    assert [s.attributes["answer_only"] for s in spans] == [False, True]
+    assert spans[0].attributes["steps_used"] == spans[0].attributes["steps_by_code"] == 1
 
 
 def test_a_flat_call_leaves_planner_steps_after_to_the_agent(todo):

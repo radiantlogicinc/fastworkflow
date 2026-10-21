@@ -541,6 +541,26 @@ def test_the_last_phase_sees_the_request():
     assert query.endswith("1. say that b1 has loans l1")
 
 
+def test_the_last_phase_code_ran_wholly_is_told_to_answer_from_the_outputs():
+    # fix-hia1.34: nothing remains, so never "do these steps"; the copy rule applies.
+    from fastworkflow import skill_phases
+    from fastworkflow.skill_phases import clean_answer
+
+    query = phase_query("show the book Dune", "1. find_book query=Dune\n2. list_loans",
+                        index=0, count=1, name="show", code_steps=True, code_ran_all=True)
+    assert query.startswith("show the book Dune\n\nThis is part 1 of 1 (show), the last part")
+    assert skill_phases._CODE_STEPS_ALL_DONE in query and skill_phases._COPY_RULE in query
+    assert "Do these steps" not in query and skill_phases._CODE_STEPS_DONE not in query
+    assert query.endswith("Answer the request:\n1. find_book query=Dune\n2. list_loans")
+    assert clean_answer("Dune is on loan. " + query.split("\n\n", 1)[1].split("\n1.")[0]) == (
+        "Dune is on loan.")
+    # A phase other than the last keeps its own framing.
+    middle = phase_query("q", "1. find_book query=Dune", index=0, count=2, name="find",
+                         code_steps=True, code_ran_all=True)
+    assert middle == phase_query("q", "1. find_book query=Dune", index=0, count=2,
+                                 name="find", code_steps=True)
+
+
 # ----------------------------------------------------------------------
 # The runner
 # ----------------------------------------------------------------------

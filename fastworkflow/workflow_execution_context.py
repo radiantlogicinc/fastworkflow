@@ -2462,6 +2462,11 @@ class WorkflowExecutionContext:
                         state["query"], plan_text, index=index, count=len(phases),
                         name=phase.name, item=item_frame,
                         code_steps=code is not None and code.runs_any)
+                    if code is not None and last:
+                        # Code may run every step: the agent then answers from their outputs.
+                        code.done_inputs = {"user_query": skill_phases.phase_query(
+                            state["query"], plan_text, index=index, count=len(phases),
+                            name=phase.name, item=item_frame, code_ran_all=True)}
                     available_commands = _what_can_i_do(self)
 
                     def run_phase():

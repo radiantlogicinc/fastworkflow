@@ -281,7 +281,10 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 #
 # v22: fw.skill.phase v5 (fix-hia1.30) -- `answer_by_code` on an answer-only phase:
 # code wrote its answer from its steps (every step verbatim or a guard), no model call.
-SPAN_CONTRACT_VERSION = 22
+#
+# v23: fw.planner.plan / fw.planner.replan v5 (fix-hia1.34) -- `skill_notes`: what
+# the argument guards and verify verdicts changed in a skill call's arguments.
+SPAN_CONTRACT_VERSION = 23
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -607,15 +610,17 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # `skill` names the matched skill with params (None otherwise, and on a replan),
     # `skill_args` holds the arguments of a skill call, `skill_fallback` why a
     # skill call fell back to the text planner.
+    # v5: `skill_notes`, the notes of a skill call (``SkillCallPlan.notes``: an argument
+    # a guard or a sure verify verdict replaced, dropped extra steps); None otherwise.
     SPAN_PLANNER_PLAN: SpanContract(
-        version=4,
+        version=5,
         attributes=frozenset({"model", "replan_trigger", "plan", "plan_source",
-                              "skill", "skill_args", "skill_fallback"}),
+                              "skill", "skill_args", "skill_notes", "skill_fallback"}),
     ),
     SPAN_PLANNER_REPLAN: SpanContract(
-        version=4,
+        version=5,
         attributes=frozenset({"model", "replan_trigger", "plan", "plan_source",
-                              "skill", "skill_args", "skill_fallback"}),
+                              "skill", "skill_args", "skill_notes", "skill_fallback"}),
     ),
     # One distillation pass. `fw.pass` is the membership stamp every descendant
     # inherits through ancestry; the rest is the pass's OWN content, recorded

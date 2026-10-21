@@ -587,10 +587,17 @@ in the trajectory are done; do the remaining steps." (stripped from answers by
 `clean_answer`). A failed step is the agent's last observation; code never fails a phase
 by itself. Code does not resume after an open step.
 
-When every step ran by code there is no agent loop. A phase whose answer is not shown
-ends with an empty answer and no model call; the last phase and the extra-steps phase
-get the one answer call every executor run ends with. Fan-out items run the same way,
-so an item of mechanical steps makes no model call; the item record check still runs.
+When every step ran by code, a phase whose answer is not shown ends with an empty
+answer and no model call. The last phase and the extra-steps phase still go on into the
+agent's loop from code's last step (fix-hia1.34): the model takes at least one step,
+weighing the outputs code got, and finishes (the finish check reads that finish) or runs
+a command the request needs that the plan lacked; then the answer call every executor
+run ends with. The budget is the agent's, as above; no code step runs again. The last
+phase's framing then says "Every step below has run (by code); ..." in place of "Do these
+steps", with the copy rule answer-only phases get (`phase_query(code_ran_all=True)`, given
+to the loop as `CodeSteps.done_inputs`). Fan-out items whose answer is not shown run the
+same way as a phase, so such an item of mechanical steps makes no model call; the item
+record check still runs.
 
 **Paging is literal.** Code sends only a paging value (`facts.PAGING_PARAMETERS`) the
 step writes: `list_loans start=20` runs that page, a step with none runs page 1. Code

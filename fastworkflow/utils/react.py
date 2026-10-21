@@ -263,15 +263,20 @@ class fastWorkflowReAct(Module):
                            code=source)
             idx = max(_step_indexes(self.trajectory), default=idx - 1) + 1
         go_on = source is None or source.stop != "stopped"
-        if go_on and source is not None and source.finished:
-            # Every step ran by code: no loop. A run whose answer is not shown ends here
-            # with an empty one and no model call; one that is shown gets the answer call.
+        if go_on and source is not None and source.finished and not source.answers:
+            # Every step ran by code and the run's answer is not shown: it ends here with
+            # an empty answer and no model call.
             self._exhausted_last_run = False
-            if not source.answers:
-                return dspy.Prediction(
-                    trajectory=self.trajectory, exhausted=False,
-                    **{name: "" for name in self.signature.output_fields})
-        elif go_on:
+            return dspy.Prediction(
+                trajectory=self.trajectory, exhausted=False,
+                **{name: "" for name in self.signature.output_fields})
+        if go_on:
+            # The loop goes on from code's last step. A run code finished whose answer is
+            # shown still takes a model step: it weighs the outputs and finishes (the
+            # finish check reads that), or runs a command the plan lacked. Its inputs may
+            # say every step has run (``source.done_inputs``).
+            if source is not None and source.finished:
+                input_args.update(getattr(source, "done_inputs", None) or {})
             suspended = self._run_loop(
                 self.trajectory, idx, input_args, max_iters, exception_count
             )
