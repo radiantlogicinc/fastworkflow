@@ -2097,6 +2097,9 @@ class WorkflowExecutionContext:
             "args": json.loads(json.dumps(call.args, default=str)),
             "query": query,
             "phases": [phase.name for phase in phases],
+            # A flat skill call (call_phases: one phase named after the skill, no output): its
+            # run gets the executor's own step cap, not FW_SKILL_PHASE_MAX_STEPS.
+            "flat": [(p.name, p.output) for p in call.phases] == [(command.name, None)],
             "steps_before": list(call.steps_before),
             "steps_after": steps_after,
             # The phase the extra command steps run in (None when there is none), its steps
@@ -2129,17 +2132,16 @@ class WorkflowExecutionContext:
         """``(command, phases)`` of the call in progress; rebuilt from the skill after a restore."""
         if self._phase_live is not None:
             return self._phase_live
-        from fastworkflow.skill_commands import phases_for
+        from fastworkflow.skill_commands import call_phases
         from fastworkflow.skill_phases import PhaseError
         from fastworkflow.workflow_agent import load_skill_commands
 
         state = self._phase_run
         command = load_skill_commands(self._app_workflow.folderpath).get(state["skill"])
-        if command is None or command.plan_fn is None:
-            raise PhaseError(f"skill {state['skill']!r} has no plan() any more")
-        phases = phases_for(command, state["args"])
-        if phases is None:
-            raise PhaseError(f"skill {state['skill']!r} now plans no phases for these arguments")
+        if command is None:
+            raise PhaseError(f"skill {state['skill']!r} is no longer defined")
+        # A flat call (no plan(), or no phases for these arguments) is one phase.
+        phases = call_phases(command, state["args"])
         if state.get("extra_phase"):
             from fastworkflow.skill_phases import Phase, with_phase_before
 
@@ -2367,7 +2369,8 @@ class WorkflowExecutionContext:
         index = state["index"]
         phase = phases[index]
         last = index == len(phases) - 1
-        budget = skill_phases.phase_step_budget()
+        budget = (getattr(self._workflow_tool_agent, "max_iters", None)
+                  if state.get("flat") else None) or skill_phases.phase_step_budget()
         resumed = resume_observation is not None
         attributes = {
             "skill": state["skill"],

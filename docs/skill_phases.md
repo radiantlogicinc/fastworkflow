@@ -62,10 +62,11 @@ def steps(input: Signature.Input) -> list[str]:
     return concatenated_steps(plan(input))
 ```
 
-- `plan(input) -> list[Phase]` is optional. A skill without it behaves exactly as before.
-  `plan()` needs a skill with parameters. It may return `None` (or `[]`) for some inputs:
-  that call is then not phased and runs flat, from `steps(input)`, through the normal
-  planner and skill-call path (see "Phased for some inputs only" below).
+- `plan(input) -> list[Phase]` is optional. A skill without it runs as ONE phase, named
+  after the skill, whose steps are `steps(input)` (`skill_commands.call_phases`; see
+  "Steps run by code" below). `plan()` needs a skill with parameters. It may return
+  `None` (or `[]`) for some inputs: that call then runs the same way, as one phase of
+  `steps(input)` (see "Phased for some inputs only" below).
 - `Phase(name, steps_fn, output=None, when=True, over=None, item="item", max_items=None,
   bind=True, until=None, noun=None, optional=False)`:
   - `name`: a Python identifier, unique in the plan.
@@ -111,9 +112,9 @@ def steps(input):
 ```
 
 `plan()` returning `None` or `[]` (`skill_phases.is_flat_plan`) means "run this call
-flat": `phases_for` returns `None`, the skill call (`plan_skill_call`) has no `phases`,
-and the call runs exactly as a skill without `plan()` would, from `steps(input)`. Such a
-file must define its own `steps()`: `concatenated_steps(None)` raises, and a file with
+flat": `phases_for` returns `None`, and the skill call (`plan_skill_call`) gets one phase
+named after the skill whose steps are `steps(input)` (`call_phases`), exactly as a skill
+without `plan()` does. Such a file must define its own `steps()`: `concatenated_steps(None)` raises, and a file with
 no `steps()` whose `plan()` runs flat for some placeholder input fails the load. A plan
 whose phases are all left out by `when=False` is still an error, not a flat run.
 
@@ -188,8 +189,9 @@ sub-task runs its phases in order instead of one executor run on the whole list.
    check of a run that is not a phase does not compare values.
 4. **No hand-off.** A phase that reaches its budget just ends; its output is still filled
    from what it ran. A phased skill never uses the step-cap hand-off (progress summary
-   plus a fresh plan). Sub-tasks that are not phased skill calls keep the hand-off and
-   the 25-step cap unchanged.
+   plus a fresh plan), nor does a skill without phases (one phase with the executor's
+   25-step cap, see "Steps run by code"). Sub-tasks that are not skill calls keep the
+   hand-off and the 25-step cap unchanged.
 5. **Facts.** After the run, the phase's `output` is filled in code
    (`facts_from_runs`), with no model call, from the command runs archived during **this
    phase** (`runs_for_facts`). Runs of earlier phases never count.
@@ -529,9 +531,14 @@ when it opens one row of that step's Output: `open_book_by_uid with the uid of t
 match` after `find_book query=Dune`. Code reads the step's run from the archive and sends
 `open_book_by_uid book_uid=<uid>` only when:
 
-- the step is a command step with no value of its own (prose or a placeholder), and its
-  command has exactly one required field, a uid (named `uid` or `id`, or ending `_uid`
-  or `_id`, plural too: the test readable facts use for uids);
+- the step is a command step, its command has the same required fields under every
+  context, and the step leaves exactly one of them unwritten: a uid (named `uid` or `id`,
+  or ending `_uid` or `_id`, plural too: the test readable facts use for uids). The step
+  writes no value of its own (prose or a placeholder), or its ONLY placeholder is that
+  uid's and its other values are concrete
+  (`list_access resource_type=app resource_uid=<the Dune uid> filter=Ann`): code then
+  sends those values as written, with the uid filled in
+  (`list_access resource_uid=<uid> resource_type=app filter=Ann`);
 - the step names a concrete value of the step before it (`Dune`), paging values aside;
 - that run is the step's one successful run, its observation names no later page, and
   its Output has exactly one uid list; rows are read as `narrowed_output` reads them
@@ -597,9 +604,19 @@ paging parameter with a positive value, `start=10`), code stops after that step 
 agent reads the rest. Its thought then says "(its first page)". Any other note, or none:
 page 1 is what the step wants, and code goes on.
 
-**Always on.** Code-run steps are always on for phased skills (the temporary switch,
-`FW_SKILL_CODE_STEPS`, was removed after stages 12 and 13 confirmed the gain). Skills
-without `plan()` are unchanged.
+**Always on.** Code-run steps are always on (the temporary switch,
+`FW_SKILL_CODE_STEPS`, was removed after stages 12 and 13 confirmed the gain).
+
+**A skill without phases runs as one phase** (fix-6llp.11). A skill call with no
+`plan()`, or whose `plan()` returns no phases for its input, runs through the same
+runner as one phase named after the skill, whose steps are `steps(input)`
+(`skill_commands.call_phases`). Code runs its leading mechanical steps and picks as
+above; the agent runs the rest and answers the request. Its step budget is the
+executor's own cap (`max_iters`, 25), not `FW_SKILL_PHASE_MAX_STEPS`, and, as for any
+phase, there is no step-cap hand-off: a run that reaches the cap just ends. Planner
+steps before and after the skill's own are handled as in a phased call (a phase of their
+own before; after, left to the agent). Suspended on ask_user and restored, the phase is
+rebuilt from the skill and resumes. Nothing changes for the app developer.
 
 **Writing steps for code.**
 

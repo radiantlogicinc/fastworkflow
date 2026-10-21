@@ -22,6 +22,7 @@ from fastworkflow.skill_commands import (
     SkillFormatError,
     check_phase_sources,
     command_from_module,
+    call_phases,
     phases_for,
 )
 from fastworkflow.skill_phases import (
@@ -596,6 +597,7 @@ class FakeExecutor:
         self.notes: list = []
         self.disabled_tools = frozenset()
         self.iteration_counter = 0
+        self.max_iters = 25
         self._pending = None
 
     def _phase(self, query):
@@ -666,13 +668,13 @@ def phased(initialized_fastworkflow, todo_workflow_path, monkeypatch):
     def fake_plan(user_query, session, with_agent_inputs_and_trajectory=False,
                   planner_lm=None, skill_command=None, **kwargs):
         state.planned.append(skill_command)
-        if skill_command is not None and skill_command.plan_fn is not None:
+        if skill_command is not None:
+            # As workflow_agent: every skill call runs phased; a flat one as one phase.
             call = SkillCallPlan(plan="", args=dict(state.args), notes=[], prediction=None,
-                                 phases=phases_for(skill_command, state.args),
+                                 phases=call_phases(skill_command, state.args),
                                  steps_after=list(state.steps_after),
                                  steps_before=list(state.steps_before))
-            if call.phases is not None:   # as workflow_agent: None runs the call flat
-                session._phased_skill_call = (skill_command, call)
+            session._phased_skill_call = (skill_command, call)
         session._initial_plan_text = "1. find_book query=Dune"
         return user_query
 
@@ -793,14 +795,27 @@ def test_the_facts_come_only_from_the_phase_own_runs(phased):
     assert "NoteFacts.total" in result.answer
 
 
-def test_a_skill_without_plan_runs_as_before(phased):
+def _knows_the_toy_commands(phased, monkeypatch):
+    """The toy commands are known by name (as a workflow's routing names its commands), so a
+    flat skill's steps are command steps, not answer-only ones."""
+    monkeypatch.setattr(phased.ctx, "_phase_command_names", lambda: {
+        "commands": ["open_library", "find_book", "open_book_by_uid", "list_loans",
+                     "count_notes"], "core_commands": []})
+
+
+def test_a_skill_without_plan_runs_as_one_phase_with_the_executor_step_cap(phased, monkeypatch):
+    monkeypatch.setenv(PHASE_MAX_STEPS_ENV, "3")
+    _knows_the_toy_commands(phased, monkeypatch)
     phased.command = _flat_command()
     executor = phased.start()
     result = phased.ctx.process_turn("show the book Dune")
 
     assert len(executor.calls) == 1
-    assert "max_iters" not in executor.calls[0]
-    assert phased.sink.named(tracing.SPAN_SKILL_PHASE) == []
+    # Its budget is the executor's own max_iters, not FW_SKILL_PHASE_MAX_STEPS.
+    assert executor.calls[0]["max_iters"] == 25
+    (span,) = phased.sink.named(tracing.SPAN_SKILL_PHASE)
+    assert span.attributes["phase"] == "show_book" and span.attributes["phase_count"] == 1
+    assert span.attributes["step_budget"] == 25
     assert result.answer == "found b1"
 
 
@@ -1367,14 +1382,16 @@ def test_a_plan_that_may_run_flat_needs_its_own_steps():
                         steps=flat_steps)
 
 
-def test_a_flat_plan_result_runs_the_call_as_a_flat_skill_call(phased):
+def test_a_flat_plan_result_runs_the_call_as_a_flat_skill_call(phased, monkeypatch):
+    _knows_the_toy_commands(phased, monkeypatch)
     phased.command = _phased_command(plan=notes_only_plan, steps=flat_steps)
     executor = phased.start()
     result = phased.ctx.process_turn("show the book Dune")
 
     assert len(executor.calls) == 1
-    assert "max_iters" not in executor.calls[0]       # the normal executor run, not a phase
-    assert phased.sink.named(tracing.SPAN_SKILL_PHASE) == []
+    assert executor.calls[0]["max_iters"] == 25       # one phase, with the executor's step cap
+    assert [s.attributes["phase"] for s in phased.sink.named(tracing.SPAN_SKILL_PHASE)] == [
+        "show_book"]
     assert phased.ctx._phase_run is None
     assert result.answer == "found b1"
 

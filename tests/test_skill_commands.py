@@ -844,14 +844,33 @@ def test_a_phased_skill_call_hands_its_phases_to_the_runner(tmp_path, workflow_e
     assert call.steps_before == [] and call.steps_after == []
 
 
-def test_an_unphased_skill_call_hands_nothing_to_the_runner(tmp_path, workflow_env):
+def test_an_unphased_skill_call_runs_as_one_phase_named_after_the_skill(tmp_path, workflow_env):
     workflow_env()
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
     ctx._begin_turn(REQUEST)
     lm = DummyLM([_typed_answer(include_risk=True)])
-    _plan_request(ctx, wf, lm, plan_template="TEMPLATE", skill_command=_command(tmp_path))
-    assert ctx._phased_skill_call is None
+    command = _command(tmp_path)
+    _plan_request(ctx, wf, lm, plan_template="TEMPLATE", skill_command=command)
+    called, call = ctx._phased_skill_call
+    assert called is command
+    assert [phase.name for phase in call.phases] == ["lookup"]
+    assert call.phases[0].steps_fn() == sc.expand(command, call.args)
+
+
+def test_call_phases_gives_plan_phases_or_one_phase_of_the_flat_steps(tmp_path):
+    phased = _command(tmp_path / "phased", PHASED_LOOKUP)
+    args = _args(include_risk=True, count=1)
+    assert [p.name for p in sc.call_phases(phased, args)] == \
+        [p.name for p in sc.phases_for(phased, args)] == ["find", "rest"]
+    flat = _command(tmp_path / "flat", LOOKUP)
+    (one,) = sc.call_phases(flat, args)
+    assert one.name == "lookup" and one.output is None and one.steps_fn() == sc.expand(flat, args)
+    # plan() returning None: phases_for still says "flat", call_phases gives the one phase.
+    none_plan = _command(tmp_path / "none", LOOKUP + "\n\ndef plan(input):\n    return None\n")
+    assert sc.phases_for(none_plan, args) is None
+    assert [p.name for p in sc.call_phases(none_plan, args)] == ["lookup"]
+    assert sc.call_phases(none_plan, args)[0].steps_fn() == sc.expand(none_plan, args)
 
 
 PAIR = '''

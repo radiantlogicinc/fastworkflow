@@ -169,7 +169,7 @@ from fastworkflow import tracing  # noqa: E402
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (  # noqa: E402
     ParameterExtraction)
 from fastworkflow.command_executor import CommandExecutor  # noqa: E402
-from fastworkflow.skill_commands import SkillCallPlan, command_from_module, phases_for  # noqa: E402
+from fastworkflow.skill_commands import SkillCallPlan, call_phases, command_from_module  # noqa: E402
 from fastworkflow.skill_phases import Phase  # noqa: E402
 from fastworkflow.turn import TurnStatus  # noqa: E402
 from fastworkflow.workflow_agent import initialize_workflow_tool_agent  # noqa: E402
@@ -228,6 +228,17 @@ def _skill(plan):
     module = types.ModuleType("show_list_skill")
     module.Signature = ShowSignature
     module.plan = plan
+    return command_from_module("show_list", module, "_skills/show_list.py").command
+
+
+def _flat_skill(steps, plan=None):
+    """The skill ``show_list`` without phases: its ``steps(input)``, and a ``plan()`` (that
+    gives no phases) when *plan* is given."""
+    module = types.ModuleType("show_list_skill")
+    module.Signature = ShowSignature
+    module.steps = steps
+    if plan is not None:
+        module.plan = plan
     return command_from_module("show_list", module, "_skills/show_list.py").command
 
 
@@ -346,7 +357,8 @@ def todo(initialized_fastworkflow, todo_workflow_path, monkeypatch):
     monkeypatch.setattr(CommandExecutor, "invoke_command",
                         classmethod(lambda cls, session, command: workflow(session, command)))
     state = SimpleNamespace(ctx=ctx, wf=wf, sink=sink, agent=agent, model=model,
-                            workflow=workflow, plan=PLANS["three"], answered=[], toys={})
+                            workflow=workflow, plan=PLANS["three"], answered=[], toys={},
+                            skill=None)
     # Toy commands (scripted in `workflow.scripted`) for what the todo workflow lacks:
     # their parameters classes, and their names among the commands a plan is read with.
     real_classes = skill_phases.parameter_classes
@@ -365,7 +377,7 @@ def todo(initialized_fastworkflow, todo_workflow_path, monkeypatch):
         if skill_command is None:   # the reply to ask_user is planned too
             return user_query
         call = SkillCallPlan(plan="", args={"name": "groceries"}, notes=[], prediction=None,
-                             phases=phases_for(skill_command, {"name": "groceries"}),
+                             phases=call_phases(skill_command, {"name": "groceries"}),
                              steps_after=list(getattr(state, "steps_after", [])),
                              steps_before=list(getattr(state, "steps_before", [])))
         session._phased_skill_call = (skill_command, call)
@@ -374,7 +386,7 @@ def todo(initialized_fastworkflow, todo_workflow_path, monkeypatch):
 
     monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", fake_plan)
     monkeypatch.setattr("fastworkflow.workflow_agent.planner_skill_for",
-                        lambda text, folder: ("", _skill(state.plan)))
+                        lambda text, folder: ("", state.skill or _skill(state.plan)))
     monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
                         lambda *args, **kwargs: ["show the list groceries"])
     monkeypatch.setattr("fastworkflow.skill_phases.write_answer",
@@ -907,3 +919,113 @@ def test_the_agent_picks_when_no_one_row_matches(picks, labels, ids, text):
     assert len(picks.model.asked) == 2
     assert _phases(picks.sink)[0].attributes["code_stop"] == "open step 2"
     assert picks.workflow.sent == ["find_list query=errands", "get_todo_list id=8"]
+
+
+# ----------------------------------------------------------------------
+# A skill without phases runs as one phase (fix-6llp.11)
+# ----------------------------------------------------------------------
+
+FLAT_STEPS = ["list_todo_lists (every list)", "get_todo_list id=8", "get_all_children",
+              "say what the list holds"]
+
+
+@pytest.mark.parametrize("plan", [None, lambda input: None])
+def test_a_skill_without_phases_runs_as_one_phase_with_code_steps(todo, monkeypatch, plan):
+    monkeypatch.setenv(skill_phases.PHASE_MAX_STEPS_ENV, "3")
+    todo.skill = _flat_skill(lambda input: list(FLAT_STEPS), plan)
+    result = todo.turn()
+
+    assert result.status == TurnStatus.COMPLETED
+    (span,) = _phases(todo.sink)
+    assert span.attributes["phase"] == "show_list" and span.attributes["phase_count"] == 1
+    assert span.attributes["steps_by_code"] == 3 and span.attributes["code_stop"] == "done"
+    # The executor's own step cap, not FW_SKILL_PHASE_MAX_STEPS.
+    assert span.attributes["step_budget"] == todo.agent.max_iters == 25
+    assert todo.model.asked == [] and len(todo.model.answers) == 1
+    assert todo.workflow.sent == ["list_todo_lists", "get_todo_list id=8", "get_all_children"]
+    assert result.answer == "the answer"
+
+
+def test_a_flat_call_leaves_planner_steps_after_to_the_agent(todo):
+    todo.skill = _flat_skill(lambda input: ["get_todo_list id=8", "get_properties"])
+    todo.steps_after = ["get_all_children (what the list holds)"]
+    todo.model.run("get_all_children")
+    todo.model.finish()
+    result = todo.turn()
+
+    assert result.status == TurnStatus.COMPLETED
+    (span,) = _phases(todo.sink)
+    assert span.attributes["code_stop"] == "open step 3"
+    assert span.attributes["steps_by_code"] == 2
+    assert todo.workflow.sent == ["get_todo_list id=8", "get_properties", "get_all_children"]
+
+
+def test_a_flat_call_suspended_and_restored_resumes_without_running_code_again(todo, monkeypatch):
+    skill = todo.skill = _flat_skill(lambda input: [
+        "list_todo_lists (every list)", "ask which list the user means when it is unclear"])
+    todo.model.steps.append(("ask", "ask_user", {"clarification_request": "Which list?"}))
+    todo.model.finish()
+    first = todo.turn()
+    assert first.status == TurnStatus.AWAITING_USER
+    assert todo.workflow.sent == ["list_todo_lists"]
+
+    # As after a restore: the one phase is rebuilt from the skill and the saved state.
+    monkeypatch.setattr("fastworkflow.workflow_agent.load_skill_commands",
+                        lambda folder: {"show_list": skill})
+    todo.ctx._phase_live = None
+    second = todo.ctx.process_turn("the errands list")
+
+    assert second.status == TurnStatus.COMPLETED
+    assert todo.workflow.sent.count("list_todo_lists") == 1
+    spans = _phases(todo.sink)
+    assert [(s.attributes["phase"], s.attributes["resumed"]) for s in spans] == [
+        ("show_list", False), ("show_list", True)]
+    assert spans[0].status == tracing.STATUS_CANCELLED and spans[1].status == tracing.STATUS_OK
+    assert "code_stop" not in spans[1].attributes
+    assert "stopped at its part" not in second.answer
+
+
+# ----------------------------------------------------------------------
+# Picks: a step whose only placeholder is the one required uid (fix-6llp.11)
+# ----------------------------------------------------------------------
+
+class OpenAsParams(BaseModel):
+    book_uid: str = Field(description="uid")
+    format: Optional[str] = Field(default=None)
+    pages: Optional[int] = Field(default=None)
+
+
+def test_a_uid_placeholder_step_with_concrete_values_is_a_pick_of_one_row():
+    one = {"labels": ["Dune"], "book_uids": ["b1"]}
+    step = "open_book_by_uid book_uid=<the Dune uid> format=pdf"
+    assert _pick(step, one, (OpenAsParams,)) == (
+        "open_book_by_uid book_uid=b1 format=pdf", "only row")
+    # The other values are sent as written, in their places.
+    assert _pick("open_book_by_uid format=pdf book_uid=<the Dune uid> pages=3", one,
+                 (OpenAsParams,))[0] == "open_book_by_uid book_uid=b1 format=pdf pages=3"
+    several = {"labels": ["Dune", "Dune Messiah"], "book_uids": ["b1", "b2"]}
+    assert _pick(step, several, (OpenAsParams,))[0] == "open_book_by_uid book_uid=b1 format=pdf"
+    # Another required field written concretely: the uid is still the one left to fill.
+    loans = {"labels": ["Dune"], "loan_uids": ["l1"]}
+    assert _pick("set_due loan_uid=<the uid of the Dune match>, no note days=7", loans,
+                 (DueParams,))[0] == "set_due loan_uid=l1 days=7"
+    assert _pick("set_due loan_uid=<the Dune uid> days=<how many>", loans,
+                 (DueParams,))[1] == "not one required uid"
+
+
+@pytest.mark.parametrize("step, output", [
+    # several rows, none the named one: the agent picks
+    ("open_book_by_uid book_uid=<the Dune uid> format=pdf",
+     {"labels": ["Dune 1", "Dune 2"], "book_uids": ["b1", "b2"]}),
+    # another placeholder besides the uid's
+    ("open_book_by_uid book_uid=<the Dune uid> format=<the format>",
+     {"labels": ["Dune"], "book_uids": ["b1"]}),
+    # a placeholder for another field, the uid written: not a pick
+    ("open_book_by_uid book_uid=b9 format=<the Dune format>",
+     {"labels": ["Dune"], "book_uids": ["b1"]}),
+    # a value that does not validate
+    ("open_book_by_uid book_uid=<the Dune uid> pages=many",
+     {"labels": ["Dune"], "book_uids": ["b1"]}),
+])
+def test_a_uid_placeholder_step_is_left_to_the_agent_otherwise(step, output):
+    assert _pick(step, output, (OpenAsParams,))[0] is None

@@ -272,8 +272,8 @@ Always on for phased skills. There was one temporary switch, `FW_SKILL_CODE_STEP
 stages 12 and 13 confirmed the gain (fix-6llp.10), together with
 `FW_SKILL_ANSWER_BY_CODE` (code-written answers, fix-hia1.30, are always on too).
 
-Skills without `plan()` (flat skill calls) and sub-tasks that are not skill calls are
-unchanged (see "Later").
+Skills without `plan()` (flat skill calls) run as one phase and get the same treatment
+(As built 11). Sub-tasks that are not skill calls are unchanged.
 
 ## 6. Observability
 
@@ -443,7 +443,8 @@ The owner's answers to the design's open questions (fix-6llp.9):
 3. **Find-one.** Deferred (see "Later").
 4. **A failed code step** hands over to the agent with the failure visible in its
    trajectory. It never fails the phase by itself.
-5. **Flat skill calls.** Later, after stage 12 (see "Later").
+5. **Flat skill calls.** Built after stage 13 (fix-6llp.11): a skill without phases
+   runs as one phase (As built 11).
 6. **Paging** stays literal (section 4): code runs only the paging value the step itself
    writes. A step on a paged command that writes none runs page 1. Code hands the rest
    of the phase to the agent after page 1 only when the step's note holds one of
@@ -466,7 +467,7 @@ The owner's answers to the design's open questions (fix-6llp.9):
   code runs 30 of the 30 pick hand-overs; 29 open the uid the agent opened, and the
   30th opens the exact-name record where the agent opened the `... 1` one.
 - **Flat skill calls** (skills without `plan()`): the same code-run treatment for their
-  steps. Considered after stage 12 (fix-6llp.11).
+  steps. Done (fix-6llp.11): see As built 11.
 - **The switch.** `FW_SKILL_CODE_STEPS` was removed after stages 12 and 13 confirmed
   the gain (fix-6llp.10).
 - **The fill's repair rules** for agent deviations (section 7): removed in a later bead
@@ -528,3 +529,23 @@ The build follows the design except for these points (the code is the reference)
     (outside the wheel). On stage 11: 1119 of 1190 steps mechanical, 340 of 407 phases
     (83%) mechanical end to end, 1062 steps in a leading run, 1026 of 1190 agreeing with
     the hand classes.
+11. **Flat skill calls run as one phase** (fix-6llp.11). A skill call with no `plan()`,
+    or whose `plan()` returns no phases for its input, runs through the phased runner as
+    one phase named after the skill, whose steps are `steps(input)`
+    (`skill_commands.call_phases`; `phases_for` still returns `None` for such a call).
+    So `CodeSteps` runs its leading mechanical steps and picks, as in any phase. Its
+    budget is the executor's own `max_iters` (25; `step_budget` on its `fw.skill.phase`
+    span says so), not `FW_SKILL_PHASE_MAX_STEPS`, and there is no step-cap hand-off.
+    Planner `steps_before` run in their own phase first; `steps_after` are left to the
+    agent. A flat call suspended on ask_user and restored is rebuilt with `call_phases`
+    and resumes. No new concept for app developers: a skill without phases runs as one
+    phase. Offline replay of the stored flat skill calls (1236 calls, 9510 steps):
+    2552 steps (26%) in a leading mechanical run, and at the first open step after a
+    code-run step 1035 pick-shaped steps (790 prose or uid-placeholder only, 245 with
+    other concrete values) that code runs when the lookup has one matching row.
+12. **Picks with other values** (fix-6llp.11). A pick step may write other values
+    besides the uid when the uid's placeholder is its ONLY placeholder and the step
+    leaves no other required field unwritten
+    (`list_access resource_type=app resource_uid=<the Dune uid> filter=Ann`): code sends
+    the uid and the step's other values as written. Any other placeholder, or a value
+    that does not bind as written, leaves the step to the agent.

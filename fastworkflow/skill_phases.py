@@ -62,8 +62,9 @@ bind=True, until=None, noun=None, optional=False)``:
   job (see 10 below).
 
 ``plan(input)`` may return ``None`` (or ``[]``): this call is not phased. It runs flat,
-from ``steps(input)``, through the normal planner and skill call (``is_flat_plan``). A
-skill can so be phased for some inputs only; its file then defines its own ``steps()``.
+from ``steps(input)`` (``is_flat_plan``), as one phase named after the skill, as a skill
+without ``plan()`` does (``skill_commands.call_phases``). A skill can so be phased for
+some inputs only; its file then defines its own ``steps()``.
 
 ``steps(input)`` stays: for a phased skill it is the plain concatenation of the phases'
 steps with no earlier outputs (``concatenated_steps``), which is what skill matching, the
@@ -1353,9 +1354,11 @@ def pick_step(step: Any, lookup: Any, output: Any,
     *lookup* is the step code ran just before (a ``finish_check.PlanStep``) and *output*
     the Output of its one run. Code runs *step* as ``command P=<uid>`` only when:
 
-    - *step* is a command step whose first word is its command, with no value of its own,
-      and its command has exactly one required field P, a uid (``_is_uid_field``), under
-      every parameters class;
+    - *step* is a command step whose first word is its command, and its command has the
+      same required fields under every parameters class, of which the step leaves exactly
+      one, P, unwritten: a uid (``_is_uid_field``). The step writes no value of its own,
+      or its only placeholder is P's (``open_book book_uid=<the Dune uid> format=pdf``):
+      its other values, all concrete, are sent as written;
     - *step* names a concrete value of *lookup* (``open_book_by_uid with the uid of the
       Dune match`` after ``find_book query=Dune``), paging values aside;
     - *output* has exactly one uid list (rows read as ``narrowed_output`` reads them), and
@@ -1370,14 +1373,33 @@ def pick_step(step: Any, lookup: Any, output: Any,
     from fastworkflow.observation_offloading import finish_check
     from fastworkflow.observation_offloading.facts import PAGING_PARAMETERS
 
-    first = _WORD_RE.search(step.text.replace("`", " ").replace("*", " "))
-    if step.kind != finish_check.KIND_COMMAND or step.arguments or not parameters_classes \
+    clean = step.text.replace("`", " ").replace("*", " ")
+    first = _WORD_RE.search(clean)
+    if step.kind != finish_check.KIND_COMMAND or not parameters_classes \
             or first is None or first.group(0) != step.command:
         return None, "not a pick"
     required = {tuple(name for name, info in (getattr(cls, "model_fields", None) or {}).items()
                       if info.is_required()) for cls in parameters_classes}
-    if len(required) != 1 or len(fields := required.pop()) != 1 or not _is_uid_field(fields[0]):
+    # The one required field the step leaves to fill: a uid (its other required fields,
+    # if any, it writes concretely).
+    fields = [name for name in required.pop() if name not in step.arguments] \
+        if len(required) == 1 else []
+    if len(fields) != 1 or not _is_uid_field(fields[0]):
         return None, "not one required uid"
+    # Any placeholder but the uid's leaves the step to the agent. The step's other values
+    # stay as written; only the uid's placeholder is filled.
+    chain = re.split(r"[(;]", clean[first.end():], maxsplit=1)[0].strip()
+    keys = list(finish_check._ARGUMENT_KEY_RE.finditer(chain))
+    named = [match.group(1) for match in keys]
+    if set(named) - {fields[0]} != set(step.arguments) or \
+            (step.arguments and named.count(fields[0]) != 1):
+        return None, "not a pick"
+    rest = ""
+    if step.arguments:
+        at = named.index(fields[0])
+        rest = " ".join(part.strip() for part in (
+            chain[:keys[at].start()],
+            chain[keys[at + 1].start():] if at + 1 < len(keys) else "") if part.strip())
     text = _folded(step.text)
     values = [value for key, value in lookup.arguments.items() if key not in PAGING_PARAMETERS
               and re.search(rf"(?<![a-z0-9_]){re.escape(_folded(value))}(?![a-z0-9_])", text)]
@@ -1390,12 +1412,15 @@ def pick_step(step: Any, lookup: Any, output: Any,
     rows = (narrowed_output(output, values) or output)[uids[0]]
     if len(rows) != 1 or rows[0] is None or isinstance(rows[0], (Mapping, list, tuple, bool)):
         return None, "no single match"
-    command = f"{step.command} {fields[0]}={rows[0]}"
+    command = f"{step.command} {fields[0]}={rows[0]}" + (f" {rest}" if rest else "")
     for cls in parameters_classes:
         bound = ParameterExtraction._extract_parameters_from_key_values(command, cls, step.command)
         if bound is None or finish_check.plain_value(getattr(bound, fields[0], None)) != \
                 finish_check.plain_value(rows[0]):
             return None, "uid does not bind"
+        if any(finish_check.plain_value(getattr(bound, key, None)) != value
+               for key, value in step.arguments.items()):
+            return None, "prose in value"
     return command, "only row" if len(output[uids[0]]) == 1 else "exact match"
 
 

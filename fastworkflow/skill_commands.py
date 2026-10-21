@@ -146,7 +146,8 @@ A skill file::
   ``fastworkflow.skill_phases``). ``steps(input)`` stays the flat concatenation of the phases'
   steps, which skill matching and the template read; a file with ``plan()`` and no
   ``steps()`` gets it. ``plan()`` may return ``None`` (or ``[]``) for some inputs: that
-  call then runs flat, from ``steps()``, as for a skill without ``plan()``; such a file
+  call then runs flat, from ``steps()``, as one phase, as for a skill without ``plan()``
+  (``call_phases``); such a file
   must define ``steps()``. At load ``plan()`` runs on the placeholder inputs: what it
   returns must be phases whose parameters bind and whose ``"from"`` are well formed
   (``SkillFormatError`` otherwise); a ``"from"`` naming a command or field the workflow
@@ -967,6 +968,20 @@ def phases_for(command: SkillCommand, args: dict) -> list | None:
     return phases
 
 
+def call_phases(command: SkillCommand, args: dict) -> list:
+    """The phases a call of ``command`` with ``args`` runs: ``phases_for``'s, or, for a flat
+    call (no ``plan()``, or ``plan()`` gives no phases), one phase named after the skill whose
+    steps are ``expand(command, args)``. A skill without phases runs as one phase.
+    Raises SkillCallError as ``phases_for`` and ``expand`` do."""
+    from fastworkflow.skill_phases import Phase
+
+    phases = phases_for(command, args) if command.plan_fn is not None else None
+    if phases is not None:
+        return phases
+    steps = expand(command, args)
+    return [Phase(command.name, lambda: list(steps))]
+
+
 def expand_includes(command: SkillCommand, lines: list[str]) -> list[str]:
     """``lines`` with each ``@<skill>`` line replaced by that skill's steps (a skill without
     params). Raises SkillCallError for any other skill."""
@@ -1678,9 +1693,9 @@ class SkillCallPlan:
     args: dict
     notes: list[str]
     prediction: object
-    #: For a phased skill (``plan()``): the phases that run, in order (``skill_phases.Phase``),
-    #: and the extra steps the request asks for before and after the skill's own. None
-    #: otherwise, and when ``plan()`` returns no phases for these arguments (run flat).
+    #: The phases that run, in order (``skill_phases.Phase``, see ``call_phases``): a phased
+    #: skill's (``plan()``), or, for a flat call, one phase named after the skill with its
+    #: steps. And the extra steps the request asks for before and after the skill's own.
     phases: list | None = None
     steps_before: list[str] = field(default_factory=list)
     steps_after: list[str] = field(default_factory=list)
@@ -1731,6 +1746,6 @@ def plan_skill_call(command: SkillCommand, request: str, available_commands: str
     after, dropped_after = filter_extra_steps(getattr(prediction, "steps_after", None), steps, names,
                                               command.name, request, notes, texts)
     notes += [f"dropped extra step {s!r}" for s in dropped_before + dropped_after]
-    phases = phases_for(command, args) if command.plan_fn is not None else None
+    phases = call_phases(command, args)
     return SkillCallPlan(plan=number(before + steps + after), args=args, notes=notes, prediction=prediction,
                          phases=phases, steps_before=list(before), steps_after=list(after))
