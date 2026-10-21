@@ -260,18 +260,17 @@ The runner builds the `source` for the phase and passes it to the executor's
   already joins pages the agent reads (`_scalar_of_pages`). Reason: reading pages until
   a stop condition would be behaviour no step wrote.
 - **Planner steps.** `steps_before` / `steps_after` are written by the planner LLM, not
-  by `steps_fn`, and their values were not checked. Code never runs them: a phase that
-  starts with `steps_before` has no leading code run.
+  by `steps_fn`, and their values were not checked. Code never runs them: the
+  `steps_before` run first in a phase of their own (`extra_steps_before`, run by the
+  agent), so the skill's first phase keeps its code run (fix-6llp.12; until then they
+  were put before the first phase's steps, and that phase ran no code at all).
 
 ## 5. Configuration
 
-On by default for phased skills. One switch: `FW_SKILL_CODE_STEPS` (default on; `0`
-turns it off), read like the other `FW_SKILL_*` settings (the workflow's env file, then
-the process environment).
-
-The switch is temporary. It exists for the stage-12 A/B run (a way to compare and to go
-back without a code change). It is removed after stage 12 if the run confirms the gain;
-code-run steps are then always on for phased skills.
+Always on for phased skills. There was one temporary switch, `FW_SKILL_CODE_STEPS`
+(default on; `0` turned it off), kept for the stage-12 A/B run. It was removed after
+stages 12 and 13 confirmed the gain (fix-6llp.10), together with
+`FW_SKILL_ANSWER_BY_CODE` (code-written answers, fix-hia1.30, are always on too).
 
 Skills without `plan()` (flat skill calls) and sub-tasks that are not skill calls are
 unchanged (see "Later").
@@ -373,7 +372,7 @@ Tests:
   - a paging request in a note runs page 1 only; code computes no next page; when more
     pages remain, code hands over after that step;
   - last phase: one answer call, no loop;
-  - `FW_SKILL_CODE_STEPS=0` gives today's behaviour;
+  - `FW_SKILL_CODE_STEPS=0` gives today's behaviour (switch since removed, fix-6llp.10);
   - suspend/resume after a code prefix does not re-run code steps.
 - **Stage-12 benchmark.** Same models, tasks and settings as stage 11, three runs,
   graded the same way. Compare stopped jobs, checklist lines, executor steps, LLM calls
@@ -407,7 +406,7 @@ About 255 lines of framework code. Removing the switch after stage 12 takes out 
 | fix-6llp.7 | offline replay of stored plans | P1 | .1 |
 | fix-6llp.8 | docs | P2 | .3, .4, .6, .7, .9 |
 | fix-6llp.9 | owner decisions (closed; see Decisions) | P1 | |
-| fix-6llp.10 | remove `FW_SKILL_CODE_STEPS` after stage 12 confirms the gain | P2 | .2; the stage-12 benchmark |
+| fix-6llp.10 | remove `FW_SKILL_CODE_STEPS` after stage 12 confirms the gain (done: removed after stages 12 and 13) | P2 | .2; the stage-12 benchmark |
 | fix-6llp.5 | find-one (deferred until after stage 12) | P3 | .4 |
 | fix-6llp.11 | consider code-run steps for flat skill plans | P3 | the stage-12 benchmark |
 
@@ -439,8 +438,8 @@ The owner's answers to the design's open questions (fix-6llp.9):
 1. **Mutating commands.** Code may run a mutating command when its step is concrete.
    There is no per-command flag: a flag would be a registry, and the values already pass
    the skill-argument checks.
-2. **The switch.** `FW_SKILL_CODE_STEPS` is temporary: kept for the stage-12 A/B run,
-   removed after stage 12 if the gain is confirmed (section 5).
+2. **The switch.** `FW_SKILL_CODE_STEPS` was temporary: kept for the stage-12 A/B run,
+   and removed after stages 12 and 13 confirmed the gain (section 5).
 3. **Find-one.** Deferred (see "Later").
 4. **A failed code step** hands over to the agent with the failure visible in its
    trajectory. It never fails the phase by itself.
@@ -468,8 +467,8 @@ The owner's answers to the design's open questions (fix-6llp.9):
   30th opens the exact-name record where the agent opened the `... 1` one.
 - **Flat skill calls** (skills without `plan()`): the same code-run treatment for their
   steps. Considered after stage 12 (fix-6llp.11).
-- **The switch.** `FW_SKILL_CODE_STEPS` is removed after stage 12 if the gain is
-  confirmed (fix-6llp.10).
+- **The switch.** `FW_SKILL_CODE_STEPS` was removed after stages 12 and 13 confirmed
+  the gain (fix-6llp.10).
 - **The fill's repair rules** for agent deviations (section 7): removed in a later bead
   only where stage 12 shows they never fire.
 
@@ -491,7 +490,8 @@ The build follows the design except for these points (the code is the reference)
 3. **Own steps only.** `CodeSteps` reads the plan with `plan_code_steps` and keeps the
    first `own_steps` entries (the phase's own steps); `steps_after` are never run by
    code (the first one that runs anything is an open step, so the agent runs it; answer
-   and negated ones are passed over) and `steps_before` means no code. The rule is `code_step` (`_code_step` also
+   and negated ones are passed over); `steps_before` run in a phase of their own, which
+   has no own steps (fix-6llp.12). The rule is `code_step` (`_code_step` also
    gives the reason, for the replay); a command several contexts define must read the
    same under each one's parameters class ("differs by context" otherwise).
 4. **Paging rule.** The design's "hand over whenever more pages remain" (section 4) was
@@ -506,8 +506,9 @@ The build follows the design except for these points (the code is the reference)
    step N` and `off`: `more pages at step N` (the paging rule) and `stopped` (the
    executor's `on_step_complete` hook ended the run; no agent loop follows). `no path
    for step N` is a step refused as not available here; a failed navigation move is
-   `step N failed`. `off` means no source (switch off, planner steps first, or a
-   source that could not be built). Both attributes are absent on an answer-only phase
+   `step N failed`. `off` means no source (the `steps_before` phase, which has no
+   own steps, or a source that could not be built; the switch, `FW_SKILL_CODE_STEPS`,
+   is gone). Both attributes are absent on an answer-only phase
    and on a resumed run.
 6. **Navigation.** `context_navigation.code_path(workflow, command)` uses
    `home_contexts` (the most specific contexts defining the command), now shared with

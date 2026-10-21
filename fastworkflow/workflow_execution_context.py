@@ -2077,6 +2077,8 @@ class WorkflowExecutionContext:
         run. See ``fastworkflow.skill_phases`` for what the runner does and decides.
         Extra command steps after the skill's own that would land in an answer-only last
         phase run in a phase of their own just before it (``skill_phases.extra_steps_phase``).
+        The extra steps before the skill's own run first, in a phase of their own
+        (``skill_phases.steps_before_phase``).
         """
         from fastworkflow import skill_phases
         from fastworkflow.observation_offloading.facts import fact_sources
@@ -2087,6 +2089,8 @@ class WorkflowExecutionContext:
             for source in fact_sources(phase.output)]
         extra, steps_after = skill_phases.extra_steps_phase(call.phases, call.steps_after, **names)
         phases = skill_phases.with_phase_before(call.phases, extra)
+        before = skill_phases.steps_before_phase(phases, call.steps_before)
+        phases = skill_phases.with_phase_before(phases, before, 0)
         self._phase_live = (command, phases)
         self._phase_run = {
             "skill": command.name,
@@ -2100,6 +2104,10 @@ class WorkflowExecutionContext:
             "extra_phase": extra.name if extra is not None else None,
             "extra_steps": extra.steps_fn() if extra is not None else [],
             "extra_answer": "",
+            # The phase the extra steps before the skill's own run in (None when there
+            # are none; its steps are steps_before) and its answer (added to the job's).
+            "before_phase": before.name if before is not None else None,
+            "before_answer": "",
             "index": 0,
             "outputs": {},
             "answers": [],
@@ -2137,6 +2145,11 @@ class WorkflowExecutionContext:
 
             moved = list(state.get("extra_steps") or [])
             phases = with_phase_before(phases, Phase(state["extra_phase"], lambda: list(moved)))
+        if state.get("before_phase"):
+            from fastworkflow.skill_phases import Phase, with_phase_before
+
+            first = list(state.get("steps_before") or [])
+            phases = with_phase_before(phases, Phase(state["before_phase"], lambda: list(first)), 0)
         if [phase.name for phase in phases] != state["phases"]:
             raise PhaseError(f"skill {state['skill']!r} now plans other phases")
         self._phase_live = (command, phases)
@@ -2255,6 +2268,9 @@ class WorkflowExecutionContext:
         if state.get("extra_answer") and last:
             # The extra command steps' own report (their phase is not the last).
             answer = f"{answer}\n\n{state['extra_answer']}"
+        if state.get("before_answer") and last:
+            # The report of the extra steps before the skill's own (their phase is first).
+            answer = f"{state['before_answer']}\n\n{answer}"
         notes = list(state.get("notes") or [])
         if notes:
             answer = "\n\n".join(part for part in (answer, " ".join(notes)) if part)
@@ -2370,9 +2386,9 @@ class WorkflowExecutionContext:
             item, others = items[k], items[:k] + items[k + 1:]
             attributes.update({"item": item, "item_index": k, "item_count": len(items),
                                "items_total": state["items_total"]})
-            first_item, last_item = k == 0, k == len(items) - 1
+            last_item = k == len(items) - 1
         else:
-            first_item = last_item = True
+            last_item = True
         span = tracing.start_span(self, tracing.SPAN_SKILL_PHASE, attributes=attributes)
         if skip:
             if skip_error is not None:
@@ -2396,10 +2412,9 @@ class WorkflowExecutionContext:
                                  attributes={"steps": "", "facts_error": str(error)})
                 return "failed", str(error)
             # Code may run the phase's own steps only: never the planner's steps_before
-            # (then none) or steps_after (after them).
-            own_steps = 0 if state["steps_before"] and index == 0 and first_item else len(steps)
-            steps = ((state["steps_before"] if index == 0 and first_item else []) + steps
-                     + (state["steps_after"] if last and last_item else []))
+            # (their phase has none of its own) or steps_after (after them).
+            own_steps = 0 if phase.name == state.get("before_phase") else len(steps)
+            steps = steps + (state["steps_after"] if last and last_item else [])
             state["first_step"] = first_step
             state["plan"] = number(steps)
         plan_text = state["plan"]
@@ -2486,6 +2501,8 @@ class WorkflowExecutionContext:
         answer = skill_phases.clean_answer(getattr(result, "final_answer", "") or "")
         if phase.name == state.get("extra_phase"):
             state["extra_answer"] = answer
+        if phase.name == state.get("before_phase"):
+            state["before_answer"] = answer
         state["answers"].append(answer)
         state.setdefault("phase_answers", []).append(answer)
         exhausted = getattr(result, "exhausted", None) is True
@@ -2560,11 +2577,11 @@ class WorkflowExecutionContext:
     def _phase_code_steps(self, plan_text: str, own_steps: int, names: dict, *,
                           answers: bool):
         """The steps code runs at the start of this phase run (``skill_phases.CodeSteps``),
-        or None: ``FW_SKILL_CODE_STEPS`` is off, or nothing could be read (never a reason to
-        fail the phase; the agent then runs every step)."""
+        or None: the run has no steps of its own (planner-written steps only), or nothing
+        could be read (never a reason to fail the phase; the agent then runs every step)."""
         from fastworkflow import skill_phases
 
-        if not own_steps or not skill_phases.code_steps_on() or self._app_workflow is None:
+        if not own_steps or self._app_workflow is None:
             return None
         try:
             return skill_phases.CodeSteps(

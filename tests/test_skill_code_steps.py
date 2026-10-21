@@ -146,13 +146,6 @@ def test_the_code_steps_framing_is_said_and_stripped_from_answers():
         == "Dune is on loan."
 
 
-def test_the_switch_is_on_by_default_and_0_turns_it_off(monkeypatch):
-    monkeypatch.delenv(skill_phases.CODE_STEPS_ENV, raising=False)
-    assert skill_phases.code_steps_on()
-    monkeypatch.setenv(skill_phases.CODE_STEPS_ENV, "0")
-    assert not skill_phases.code_steps_on()
-
-
 @pytest.mark.parametrize("observation, more", [
     ("12 loans; showing 1-10. Next page: start=10, same arguments.", True),
     ("3 loans.", False),
@@ -323,7 +316,6 @@ class Model:
 @pytest.fixture
 def todo(initialized_fastworkflow, todo_workflow_path, monkeypatch):
     """A phased skill call on the todo workflow, run by the real executor and tools."""
-    monkeypatch.delenv(skill_phases.CODE_STEPS_ENV, raising=False)
     monkeypatch.delenv(skill_phases.PHASE_MAX_STEPS_ENV, raising=False)
     ctx, wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
     sink = RecordingSink()
@@ -444,27 +436,6 @@ def test_code_steps_are_ordinary_trajectory_steps_spans_and_archive_rows(todo):
                for s in _phases(todo.sink))
 
 
-def test_with_the_switch_off_the_agent_runs_every_step(todo, monkeypatch):
-    monkeypatch.setenv(skill_phases.CODE_STEPS_ENV, "0")
-    for command in ["list_todo_lists"]:
-        todo.model.run(command)
-    todo.model.finish()
-    for command in ["get_todo_list id=8", "get_all_children"]:
-        todo.model.run(command)
-    todo.model.finish()
-    todo.model.run("get_properties")
-    todo.model.finish()
-    result = todo.turn()
-
-    assert result.status == TurnStatus.COMPLETED
-    assert len(todo.model.asked) == 7 and todo.model.steps == []
-    assert all(skill_phases._CODE_STEPS_DONE not in a["query"] for a in todo.model.asked)
-    spans = _phases(todo.sink)
-    assert [s.attributes["code_stop"] for s in spans] == ["off"] * 3
-    assert [s.attributes["steps_by_code"] for s in spans] == [0, 0, 0]
-    assert not any(s.attributes.get("by_code") for s in todo.sink.named(tracing.SPAN_AGENT_STEP))
-
-
 def _plan(*phases):
     return lambda input: list(phases)
 
@@ -575,15 +546,27 @@ def test_the_framing_sentence_never_reaches_the_answer(todo, monkeypatch):
     assert result.answer == "The list holds nothing."
 
 
-def test_a_phase_with_planner_steps_before_runs_no_code(todo):
+def test_planner_steps_before_run_first_and_the_first_phase_runs_its_code_steps(todo):
     todo.steps_before = ["list_todo_lists"]
     todo.model.run("list_todo_lists")
-    todo.model.run("list_todo_lists")
     todo.model.finish()
-    todo.turn()
+    result = todo.turn()
+
+    assert result.status == TurnStatus.COMPLETED
     spans = _phases(todo.sink)
+    assert [s.attributes["phase"] for s in spans] == [
+        skill_phases.STEPS_BEFORE_PHASE, "lists", "open", "report"]
+    # The agent runs the planner's steps (code never does); the first phase then runs
+    # wholly by code, as with no steps_before.
     assert spans[0].attributes["code_stop"] == "off"
-    assert spans[1].attributes["code_stop"] == "done"
+    assert spans[0].attributes["steps_by_code"] == 0
+    assert [s.attributes["code_stop"] for s in spans[1:]] == ["done", "done", "done"]
+    assert len(todo.model.asked) == 2 and todo.model.steps == []
+    assert todo.workflow.sent == ["list_todo_lists", "list_todo_lists", "get_todo_list id=8",
+                                  "get_all_children", "get_properties"]
+    # Facts fill from the first phase's own run and the next phase binds them.
+    assert spans[1].attributes["facts"] == {"list_ids": [1, 7, 8]}
+    assert spans[2].attributes["facts"] == {"description": "errands"}
 
 
 def test_a_suspended_phase_resumes_without_running_code_steps_again(todo):

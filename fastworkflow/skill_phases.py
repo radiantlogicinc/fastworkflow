@@ -74,10 +74,11 @@ How the runner (``WorkflowExecutionContext``) runs a phased skill call, phase by
 
 1. ``steps_fn`` is called with the earlier outputs bound; its steps (``@<skill>`` lines
    expanded) are the phase's plan. The planner does not rewrite them. The skill call's
-   extra steps the request asked for go before the first phase's steps
-   (``steps_before``) and after the last phase's (``steps_after``); extra COMMAND steps
-   after an answer-only last phase run in a phase of their own just before it
-   (``extra_steps_phase``), so the last phase stays answer-only.
+   extra steps the request asked for before the skill's own (``steps_before``) run in a
+   phase of their own before the first phase (``steps_before_phase``); those after go
+   after the last phase's steps (``steps_after``); extra COMMAND steps after an answer-only
+   last phase run in a phase of their own just before it (``extra_steps_phase``), so the
+   last phase stays answer-only.
 2. The phase runs as its own sub-plan: a fresh executor run with a step budget of
    ``phase_step_budget()`` (``FW_SKILL_PHASE_MAX_STEPS``, default 15), its own finish
    check against its own steps, its step numbers continuing the turn's. There is no
@@ -157,7 +158,7 @@ How the runner (``WorkflowExecutionContext``) runs a phased skill call, phase by
    fan-out items) does not stop the call: it counts as not run (no output, so a later
    parameter named after it keeps its default; its runs' answers are dropped), its span
    records the error with ``optional: true``, and the next phase runs.
-11. STEPS RUN BY CODE (``CodeSteps``; ``FW_SKILL_CODE_STEPS``, on by default): code runs a
+11. STEPS RUN BY CODE (``CodeSteps``): code runs a
    phase's leading mechanical steps (``code_step``) through the agent's own command tool
    before the executor's model takes a step, each a normal trajectory step marked "run
    by code". An open step that opens the one row of the previous step's Output that
@@ -601,12 +602,36 @@ def extra_steps_phase(phases: Sequence[Phase], steps_after: Sequence[str], *,
              if not is_answer_only(number([step]), commands, core_commands)]
     if not moved:
         return None, steps_after
-    names = {phase.name for phase in phases}
-    name, k = EXTRA_STEPS_PHASE, 2
-    while name in names:
-        name, k = f"{EXTRA_STEPS_PHASE}_{k}", k + 1
-    return (Phase(name, lambda: list(moved)),
+    return (Phase(_free_phase_name(EXTRA_STEPS_PHASE, phases), lambda: list(moved)),
             [step for step in steps_after if step not in moved])
+
+
+#: The name of the phase that runs a skill call's extra steps before its own
+#: (``steps_before``): ``steps_before_phase``.
+STEPS_BEFORE_PHASE = "extra_steps_before"
+
+
+def steps_before_phase(phases: Sequence[Phase], steps_before: Sequence[str]) -> Optional[Phase]:
+    """The phase that runs the extra steps the planner kept before the skill's own
+    (``steps_before``), or None when there are none.
+
+    It runs first (``with_phase_before(phases, phase, 0)``), as a phase of its own: the
+    agent runs its steps (code never runs planner-written steps), and the skill's first
+    phase then runs as it does with no extra steps before it, its code-run steps included.
+    The workflow's current context and the facts carry over as between any two phases.
+    """
+    steps_before = [str(step) for step in steps_before if str(step).strip()]
+    if not steps_before:
+        return None
+    return Phase(_free_phase_name(STEPS_BEFORE_PHASE, phases), lambda: list(steps_before))
+
+
+def _free_phase_name(name: str, phases: Sequence[Phase]) -> str:
+    """*name*, or *name* with a number (``name_2``, ...) when a phase is already so named."""
+    names, base, k = {phase.name for phase in phases}, name, 2
+    while name in names:
+        name, k = f"{base}_{k}", k + 1
+    return name
 
 
 def with_phase_before(phases: Sequence[Phase], phase: Optional[Phase],
@@ -1259,9 +1284,6 @@ def phase_query(request: str, plan_text: str, *, index: int, count: int, name: s
 # Steps run by code (fix-6llp)
 # ----------------------------------------------------------------------
 
-#: The env setting that turns code-run phase steps off (``0``); on by default. Temporary:
-#: kept for one A/B benchmark run, then removed (fix-6llp.10).
-CODE_STEPS_ENV = "FW_SKILL_CODE_STEPS"
 #: Words in a step's note (after the chain) that ask for every page of a paged command.
 #: Only then does code hand over after page 1 when the output shows more pages; any
 #: other note (or none) means page 1 is what the step wants.
@@ -1269,14 +1291,6 @@ FULL_LIST_PHRASES = ("full list", "every page", "all pages", "until complete", "
 #: Core commands code runs as a step of their own, written with nothing after them.
 _CODE_NAVIGATION = ("go_up", "reset_context")
 _WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
-
-def code_steps_on() -> bool:
-    """Whether code runs a phase's leading mechanical steps: ``FW_SKILL_CODE_STEPS``,
-    on unless ``0`` (``false``, ``off``, ``no``). Read like the other settings."""
-    from fastworkflow import context_budget
-
-    return context_budget.env_value(CODE_STEPS_ENV).lower() not in ("0", "false", "off", "no")
 
 
 def _code_step(step: Any, parameters_class: Any) -> tuple[Optional[str], str]:
@@ -1691,9 +1705,6 @@ ANSWER_STEP_WORDS = {
     "guard": ("apply", "do not", "don't", "never", "make no", "change nothing",
               "present them as options only", "present it as options only"),
 }
-#: The env setting for writing an answer-only phase's answer in code when its every step
-#: is verbatim or a guard (``answer_by_code``): on unless ``0`` (``false``, ``off``, ``no``).
-ANSWER_BY_CODE_ENV = "FW_SKILL_ANSWER_BY_CODE"
 
 
 def _starts_with(text: str, words: Sequence[str]) -> bool:
@@ -1758,12 +1769,8 @@ def answer_from_steps(plan_text: str) -> str:
 
 def answer_by_code(plan_text: str) -> bool:
     """Whether code writes the answer of an answer-only phase with these steps, with no
-    model call: every step is verbatim or a guard (``answer_step_kind``), at least one is
-    verbatim, and ``FW_SKILL_ANSWER_BY_CODE`` is on (unless ``0``, ``false``, ``off``, ``no``)."""
-    from fastworkflow import context_budget
-
-    if context_budget.env_value(ANSWER_BY_CODE_ENV).lower() in ("0", "false", "off", "no"):
-        return False
+    model call: every step is verbatim or a guard (``answer_step_kind``) and at
+    least one is verbatim."""
     kinds = [answer_step_kind(line) for line in str(plan_text or "").splitlines() if line.strip()]
     return "verbatim" in kinds and "judgement" not in kinds
 
@@ -2230,6 +2237,7 @@ __all__ = [
     "DEFAULT_FANOUT_MAX_ITEMS",
     "DEFAULT_PHASE_MAX_STEPS",
     "EXTRA_STEPS_PHASE",
+    "STEPS_BEFORE_PHASE",
     "FACTS_MAX_LIST_ITEMS_ENV",
     "FANOUT_MAX_ITEMS_ENV",
     "FOUND_FACTS_LEAD",
@@ -2240,7 +2248,6 @@ __all__ = [
     "MISSING_ITEMS_LEAD",
     "MIN_ANSWER_CHARS",
     "active_phases",
-    "ANSWER_BY_CODE_ENV",
     "ANSWER_STEP_WORDS",
     "answer_by_code",
     "answer_from_steps",
@@ -2253,6 +2260,7 @@ __all__ = [
     "clean_answer",
     "concatenated_steps",
     "extra_steps_phase",
+    "steps_before_phase",
     "facts_list_cap",
     "facts_text",
     "failure_text",

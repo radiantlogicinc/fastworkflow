@@ -155,8 +155,14 @@ sub-task runs its phases in order instead of one executor run on the whole list.
 
 1. **Steps.** The phase's `steps_fn` is called with the earlier outputs bound. Its steps
    are the phase's plan; the planner does not rewrite them. Extra steps the skill call
-   kept from the request (`steps_before` / `steps_after`) go before the first phase's
-   steps and after the last phase's. One exception (`skill_phases.extra_steps_phase`):
+   kept from the request before the skill's own (`steps_before`) run first, in a phase
+   of their own, `extra_steps_before` (`skill_phases.steps_before_phase`): the agent runs
+   them (code never runs planner steps), and the first phase then runs exactly as it
+   does with no extra steps before it, its code-run steps included. The workflow's
+   current context and the facts carry over from it as between any two phases; it fills
+   no output. Its answer is put before the job's answer, and it is rebuilt with the plan
+   after a restore. Extra steps after the skill's own (`steps_after`) go after the last
+   phase's steps. One exception (`skill_phases.extra_steps_phase`):
    when the last phase is meant to be answer-only (its steps, built with no earlier
    outputs, name no command), an extra COMMAND step after the skill's own would turn it
    into an executor run and take away the answer-only handling (step 7). Such steps run
@@ -335,8 +341,9 @@ sub-task runs its phases in order instead of one executor run on the whole list.
      `P.`; `say what X: facts` keeps its question as a label (`What X: facts.`; also `say
      which`, `say who`, `say whether`, `say for ...`); `present ..., and say that P: facts`
      is `P. Facts.`; `compare ...: facts` is `Facts.`. One judgement step and the model
-     writes the whole answer, as below. `FW_SKILL_ANSWER_BY_CODE=0` (read like the other
-     settings) turns code writing off. The phase's span says which (`answer_by_code`).
+     writes the whole answer, as below. This is always on (its temporary switch was
+     removed after stages 12 and 13 confirmed the gain). The phase's span says which
+     (`answer_by_code`).
      So write a step's facts as the answer should read them: an instruction left in the
      facts (`..., and name every one of them:`) is copied into the answer.
    - **The answer-only answer is checked in code** (`skill_phases.answer_only_answer`).
@@ -546,8 +553,9 @@ passed over.
 
 - Code steps do not count toward `FW_SKILL_PHASE_MAX_STEPS`; the budget is the agent's.
 - A retry never re-runs a code step, and a phase resumed after ask_user runs no code.
-- Planner steps (`steps_before` / `steps_after`) are never run by code; a phase that
-  starts with `steps_before` runs no code at all, and a `steps_after` step that runs
+- Planner steps (`steps_before` / `steps_after`) are never run by code; the
+  `steps_before` run in a phase of their own that runs no code (`code_stop` "off"), and
+  a `steps_after` step that runs
   anything (not an answer or negated step) is an open step: the agent runs it.
 - A command with side effects runs like any other: its values come from the checked
   skill input or from facts filled in code.
@@ -589,10 +597,9 @@ paging parameter with a positive value, `start=10`), code stops after that step 
 agent reads the rest. Its thought then says "(its first page)". Any other note, or none:
 page 1 is what the step wants, and code goes on.
 
-**The switch.** `FW_SKILL_CODE_STEPS`: on by default; `0` (`false`, `off`, `no`) turns
-it off; read like the other settings. It is temporary: kept for one A/B benchmark run,
-then removed, and code-run steps are always on for phased skills. Skills without
-`plan()` are unchanged.
+**Always on.** Code-run steps are always on for phased skills (the temporary switch,
+`FW_SKILL_CODE_STEPS`, was removed after stages 12 and 13 confirmed the gain). Skills
+without `plan()` are unchanged.
 
 **Writing steps for code.**
 
@@ -627,7 +634,7 @@ contract v22, `fw.skill.phase` v5), the parent of that run's `fw.agent.execute`:
 | `steps` | the phase's numbered plan |
 | `steps_used`, `exhausted`, `suspended` | executor steps the run took (code steps included); whether it reached its budget or suspended |
 | `steps_by_code` | steps code ran before the agent, moves included; model steps = `steps_used - steps_by_code` |
-| `code_stop` | why code stopped: `done` (every step), `open step N`, `step N failed`, `no path for step N` (refused, no no-value path), `more pages at step N`, `stopped` (the executor's step hook ended the run), `off` (no code: the switch is off, the phase starts with planner steps, or its steps could not be read) |
+| `code_stop` | why code stopped: `done` (every step), `open step N`, `step N failed`, `no path for step N` (refused, no no-value path), `more pages at step N`, `stopped` (the executor's step hook ended the run), `off` (no code: the phase of the planner's `steps_before`, or its steps could not be read) |
 | `record`, `facts` | the record its output was filled on, and the filled output (`null` for no output) |
 | `facts_error` | why the phase failed (status `error`) |
 | `error_type` | the exception that ended the run, when one did |

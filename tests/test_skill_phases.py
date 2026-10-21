@@ -660,7 +660,8 @@ def phased(initialized_fastworkflow, todo_workflow_path, monkeypatch):
     ctx.set_trace_sink(sink)
     command = _phased_command()
     state = SimpleNamespace(args={"name": "Dune", "notes": False}, command=command,
-                            planned=[], script=dict(SCRIPT), suspend_in=None, steps_after=[])
+                            planned=[], script=dict(SCRIPT), suspend_in=None, steps_after=[],
+                            steps_before=[])
 
     def fake_plan(user_query, session, with_agent_inputs_and_trajectory=False,
                   planner_lm=None, skill_command=None, **kwargs):
@@ -668,7 +669,8 @@ def phased(initialized_fastworkflow, todo_workflow_path, monkeypatch):
         if skill_command is not None and skill_command.plan_fn is not None:
             call = SkillCallPlan(plan="", args=dict(state.args), notes=[], prediction=None,
                                  phases=phases_for(skill_command, state.args),
-                                 steps_after=list(state.steps_after))
+                                 steps_after=list(state.steps_after),
+                                 steps_before=list(state.steps_before))
             if call.phases is not None:   # as workflow_agent: None runs the call flat
                 session._phased_skill_call = (skill_command, call)
         session._initial_plan_text = "1. find_book query=Dune"
@@ -709,8 +711,8 @@ def phased(initialized_fastworkflow, todo_workflow_path, monkeypatch):
 
     monkeypatch.setattr("fastworkflow.skill_phases.write_answer", fake_answer)
     # These tests script the model's answer; the answer written by code is tested on its own
-    # (test_code_writes_an_answer_only_phase_whose_every_step_is_verbatim and below).
-    monkeypatch.setenv("FW_SKILL_ANSWER_BY_CODE", "0")
+    # (test_code_writes_an_answer_only_phase_and_its_span_says_so and around it).
+    monkeypatch.setattr("fastworkflow.skill_phases.answer_by_code", lambda plan_text: False)
     state.ctx, state.sink, state.reviews, state.start = ctx, sink, reviews, start
     state.answered = answered
     return state
@@ -1924,7 +1926,6 @@ def test_answer_from_steps_writes_each_verbatim_step_as_a_line():
 
 
 def test_answer_only_answer_makes_no_model_call_when_every_step_is_verbatim(monkeypatch):
-    monkeypatch.delenv("FW_SKILL_ANSWER_BY_CODE", raising=False)
     calls = []
     monkeypatch.setattr("fastworkflow.skill_phases.write_answer",
                         lambda query: calls.append(query) or "Model text.")
@@ -1942,15 +1943,11 @@ def test_answer_only_answer_makes_no_model_call_when_every_step_is_verbatim(monk
     assert answer_only_answer("q", steps, {"book": book}) == \
         f"Model text.\n\n{MISSING_ITEMS_LEAD} l1, l2."
     assert len(calls) == 1
-    # Switched off, the model writes every answer-only phase.
-    monkeypatch.setenv("FW_SKILL_ANSWER_BY_CODE", "0")
-    assert answer_only_answer("q", "1. say that b1 has loans l1, l2", {"book": book}) == \
-        "Model text."
-    assert len(calls) == 2
 
 
 def test_code_writes_an_answer_only_phase_and_its_span_says_so(phased, monkeypatch):
-    monkeypatch.delenv("FW_SKILL_ANSWER_BY_CODE", raising=False)
+    # The fixture scripts the model's answers; here code writes this one.
+    monkeypatch.setattr("fastworkflow.skill_phases.answer_by_code", answer_by_code)
     phased.start()
     result = phased.ctx.process_turn("show the book Dune")
     assert result.answer == "B1 has loans l1, l2."
@@ -1968,10 +1965,12 @@ def test_code_writes_an_answer_only_phase_and_its_span_says_so(phased, monkeypat
 
 from fastworkflow.skill_phases import (  # noqa: E402
     EXTRA_STEPS_PHASE,
+    STEPS_BEFORE_PHASE,
     capped_steps,
     extra_steps_phase,
     facts_text,
     phase_query,
+    steps_before_phase,
 )
 
 
@@ -2090,3 +2089,71 @@ def test_the_extra_steps_phase_is_rebuilt_after_a_restore(phased, monkeypatch):
     second = phased.ctx.process_turn("go on")
     assert second.status == TurnStatus.COMPLETED
     assert second.answer == "Dune (b1) is on loan: l1, l2.\n\nb1 has 3 notes."
+
+
+# ----------------------------------------------------------------------
+# The planner's steps_before run in a phase of their own, before the first phase
+# ----------------------------------------------------------------------
+
+def test_steps_before_get_a_phase_of_their_own():
+    phases = [Phase("find", lambda: find_steps("Dune"), output=Found)]
+    assert steps_before_phase(phases, []) is None
+    assert steps_before_phase(phases, ["  "]) is None
+    before = steps_before_phase(phases, ["count_notes on b1"])
+    assert before.name == STEPS_BEFORE_PHASE and before.steps_fn() == ["count_notes on b1"]
+    assert before.output is None and not before.fans_out
+    # A name already taken gets a suffix.
+    taken = [Phase(STEPS_BEFORE_PHASE, lambda: ["find_book query=x"])] + phases
+    assert steps_before_phase(taken, ["count_notes"]).name == f"{STEPS_BEFORE_PHASE}_2"
+
+
+def _with_steps_before(phased, monkeypatch):
+    phased.steps_before = ["count_notes on b1"]
+    phased.script[STEPS_BEFORE_PHASE] = dict(
+        runs=[_run("count_notes", {"total": 3}, context=BOOK)], record=BOOK,
+        answer="b1 has 3 notes.")
+    monkeypatch.setattr(phased.ctx, "_phase_command_names",
+                        lambda: {"commands": list(COMMANDS), "core_commands": list(CORE)})
+
+
+def test_steps_before_run_first_then_the_first_phase_runs_as_without_them(phased, monkeypatch):
+    _with_steps_before(phased, monkeypatch)
+    executor = phased.start()
+    result = phased.ctx.process_turn("show the book Dune")
+
+    assert result.status == TurnStatus.COMPLETED
+    queries = [call["user_query"] for call in executor.calls]
+    assert len(queries) == 3
+    assert f"part 1 of 4 ({STEPS_BEFORE_PHASE})" in queries[0]
+    assert "count_notes on b1" in queries[0] and "find_book" not in queries[0]
+    # The first phase gets only its own steps, numbered from 1, as with no steps_before.
+    assert "part 2 of 4 (find)" in queries[1] and "count_notes" not in queries[1]
+    assert executor.plans[1].startswith("1. ")
+    spans = phased.sink.named(tracing.SPAN_SKILL_PHASE)
+    assert [s.attributes["phase"] for s in spans] == [STEPS_BEFORE_PHASE, "find", "book",
+                                                      "report"]
+    # The steps_before phase fills nothing; the first phase still fills its facts, from
+    # its own runs, and later phases bind them.
+    assert spans[0].attributes["facts"] is None
+    assert spans[1].attributes["facts"] == {"book_uids": ["b1"]}
+    assert "open_book_by_uid book_uid=b1" in queries[2]
+    # Its run's steps continue the turn's numbering: the first phase starts after it.
+    assert spans[1].attributes["first_step"] > spans[0].attributes["first_step"]
+    # Their report comes first in the answer, as the request asked for them first.
+    assert result.answer == "b1 has 3 notes.\n\nDune (b1) is on loan: l1, l2."
+
+
+def test_the_steps_before_phase_is_rebuilt_after_a_restore(phased, monkeypatch):
+    _with_steps_before(phased, monkeypatch)
+    monkeypatch.setattr("fastworkflow.workflow_agent.load_skill_commands",
+                        lambda folder: {"show_book": phased.command})
+    phased.start(suspend_in=STEPS_BEFORE_PHASE)
+    first = phased.ctx.process_turn("show the book Dune")
+    assert first.status == TurnStatus.AWAITING_USER
+    state = phased.ctx._phase_run
+    assert state["phases"] == [STEPS_BEFORE_PHASE, "find", "book", "report"]
+    assert state["before_phase"] == STEPS_BEFORE_PHASE
+    phased.ctx._phase_live = None  # as after a restore: rebuilt from the skill and the state
+    second = phased.ctx.process_turn("go on")
+    assert second.status == TurnStatus.COMPLETED
+    assert second.answer == "b1 has 3 notes.\n\nDune (b1) is on loan: l1, l2."
