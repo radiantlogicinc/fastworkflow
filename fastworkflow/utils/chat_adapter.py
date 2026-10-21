@@ -32,6 +32,8 @@ keeping them out of the trajectory to prevent token bloat across iterations.
 This scoped approach ensures the adapter only affects workflow agent calls, not other
 DSPy operations in the system.
 """
+import re
+
 import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 from dspy.adapters.json_adapter import JSONAdapter
@@ -103,6 +105,20 @@ def _without_leaked_thinking(completion: str) -> str:
     return answer if marker else completion
 
 
+def _with_field_headers_repaired(signature, completion: str) -> str:
+    """The reply with near-miss headers of the signature's output fields written in full.
+
+    Models sometimes close a field header with one bracket (``[[ ## subtasks ## ]``);
+    DSPy's parser then misses the field and retries with a fresh JSON-format sample,
+    which can give a different answer. Only a line that is nothing but such a header,
+    for a field the signature declares, is rewritten.
+    """
+    names = "|".join(re.escape(name) for name in signature.output_fields)
+    if not names:
+        return completion
+    return re.sub(rf"^[ \t]*\[\[ ## ({names}) ## \]?[ \t]*$", r"[[ ## \1 ## ]]", completion, flags=re.M)
+
+
 class CommandsSystemPreludeJSONAdapter(JSONAdapter):
     """The JSONAdapter DSPy retries with when a chat-format reply does not parse,
     carrying the same available-commands prelude as the chat attempt."""
@@ -172,7 +188,7 @@ class CommandsSystemPreludeAdapter(dspy.ChatAdapter):
         return _inject_commands_prelude(formatted, self.title, cmds)
 
     def parse(self, signature, completion):
-        return super().parse(signature, _without_leaked_thinking(completion))
+        return super().parse(signature, _with_field_headers_repaired(signature, _without_leaked_thinking(completion)))
 
     def _make_json_adapter_fallback(self):
         # DSPy's private hook (ChatAdapter.__call__/acall build the retry

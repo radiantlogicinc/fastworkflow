@@ -918,10 +918,19 @@ _ITS = re.compile(r"\bits\b")
 
 def unnamed_subjects(user_query: str, text: str, identifiers: tuple[re.Pattern, ...] = ()) -> list[str]:
     """The request's subjects that ``text`` does not name: what a sub-task's "it", "its" or
-    "that team" may stand for. Choosing among them is the caller's (a model); this is code only."""
+    "that team" may stand for. Choosing among them is the caller's (a model); this is code only.
+
+    Left out too: the records listed in one request sentence with a record ``text`` names ("Ann Lee
+    and Bob Kerr leave, so each of them ..."). A sibling in that list is never the referent of the
+    sub-task cut for the other one."""
     known = request_subjects(user_query, identifiers)
     named = subjects_in(text, known, identifiers)
-    return [k for k in known if _norm(k) not in named]
+    siblings = set()
+    for sentence in _sentences(user_query):
+        found = _listed(sentence, known)
+        if found and any(_norm(name) in named for name in found[2]):
+            siblings |= {_norm(name) for name in found[2]}
+    return [k for k in known if _norm(k) not in named and _norm(k) not in siblings]
 
 
 #: "the <word>": a definite description that may stand for a record named earlier ("the customer").

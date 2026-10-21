@@ -291,6 +291,18 @@ def test_the_unnamed_subjects_are_the_request_subjects_a_sub_task_leaves_out():
     assert unnamed_subjects(q, "Tag the customer `on-leave`.") == ["Ann Lee"]
 
 
+def test_a_record_listed_with_the_one_a_sub_task_names_is_not_its_unnamed_subject():
+    from fastworkflow.split_merge import unnamed_subjects
+    q = ("Northwind Ltd is closing. Walk its whole roster: every person on it. Ann Lee and Bob Kerr leave at the end "
+         "of the month, so each of them down to their first login listed. And Cid Moss has asked for the right "
+         "Payroll_Admin: what it exposes and who holds it.")
+    ann = "Ann Lee leaves at the end of the month, so each of them down to their first login listed."
+    assert unnamed_subjects(q, ann) == ["Northwind Ltd", "Payroll_Admin", "Cid Moss"]
+    assert "Ann Lee" not in unnamed_subjects(q, ann.replace("Ann Lee", "Bob Kerr"))
+    # a sub-task naming neither keeps both as candidates
+    assert {"Ann Lee", "Bob Kerr"} <= set(unnamed_subjects(q, "Walk the whole roster of Northwind Ltd."))
+
+
 def test_a_referent_replaces_the_one_pointing_phrase_or_is_appended():
     from fastworkflow.split_merge import with_referent
     assert with_referent("Raj Patel from that team is leaving.", "Hart Mills Ltd") == \

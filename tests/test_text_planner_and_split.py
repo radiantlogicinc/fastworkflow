@@ -340,6 +340,28 @@ def test_a_split_sub_task_gets_the_referent_jev_chooses_written_in(tmp_path, mon
                      ("Tag the customer `on-leave` and show its tags.", ["Ann Lee"], "Tag names are not records.")]
 
 
+def test_a_merged_sub_task_is_never_given_the_record_listed_beside_its_own(monkeypatch):
+    import fastworkflow.workflow_agent as agent
+    from fastworkflow.split_merge import merge_subtasks
+
+    # a chooser that takes a listed sibling whenever it is offered one (the mistake seen live)
+    monkeypatch.setattr(agent, "_jev_lm", lambda: object())
+    monkeypatch.setattr(agent, "_choose_referent", lambda q, text, candidates, *a: next(
+        (c for c in ("Bob Kerr", "Ann Lee") if c in candidates), None))
+    monkeypatch.setattr(agent, "_choose_description", lambda *args: None)
+    q = ("Northwind Ltd is closing. Walk its whole roster: every person on it. Ann Lee and Bob Kerr leave at the end "
+         "of the month, so each of them down to their first login listed. And Cid Moss has asked for the right "
+         "Payroll_Admin: what it exposes and who holds it.")
+    merged = merge_subtasks(q, [
+        "Walk the whole roster of Northwind Ltd: every person on it.",
+        "Ann Lee leaves at the end of the month, so each of them down to their first login listed.",
+        "Bob Kerr leaves at the end of the month, so each of them down to their first login listed.",
+        "Cid Moss has asked for the right Payroll_Admin: what it exposes and who holds it."])
+    resolved = agent.resolve_referents(q, merged, None)
+    assert [t for t in resolved if "Ann Lee" in t] == [t for t in merged if "Ann Lee" in t]
+    assert not any("Ann Lee" in t and "Bob Kerr" in t for t in resolved)
+
+
 def test_the_record_is_written_after_the_definite_description_jev_chooses(tmp_path, monkeypatch):
     import fastworkflow.workflow_agent as agent
 

@@ -298,3 +298,35 @@ def test_a_reply_with_leaked_thinking_is_parsed_after_the_thinking():
     json_reply = 'thinking {"next_steps": "1. ..."} </think>{"next_steps": "1. open_item_explorer"}'
     parsed = CommandsSystemPreludeJSONAdapter("Commands").parse(Plan, json_reply)
     assert parsed["next_steps"] == "1. open_item_explorer"
+
+
+class SplitSignature(dspy.Signature):
+    user_query: str = dspy.InputField()
+    reasoning: str = dspy.OutputField()
+    subtasks: str = dspy.OutputField()
+
+
+def test_a_field_header_closed_with_one_bracket_parses_without_the_json_retry():
+    reply = ("[[ ## reasoning ## ]]\nTwo jobs.\n\n[[ ## subtasks ## ]\n1. Open Ann Lee.\n2. Open Bob Kerr.\n\n"
+             "[[ ## completed ## ]]")
+    parsed = CommandsSystemPreludeAdapter().parse(SplitSignature, reply)
+    assert parsed == {"reasoning": "Two jobs.", "subtasks": "1. Open Ann Lee.\n2. Open Bob Kerr."}
+
+    near_miss = GOOD_CHAT.replace("[[ ## next_tool_name ## ]]", "[[ ## next_tool_name ## ]")
+    calls, _, ok = _predict(CommandsSystemPreludeAdapter(), [near_miss], schema=False)
+    assert ok and calls == 1
+
+
+def test_a_well_formed_reply_parses_as_before():
+    reply = "[[ ## reasoning ## ]]\nOne job.\n\n[[ ## subtasks ## ]]\n1. Open Ann Lee.\n\n[[ ## completed ## ]]"
+    assert CommandsSystemPreludeAdapter().parse(SplitSignature, reply) == dspy.ChatAdapter().parse(SplitSignature, reply)
+
+
+def test_text_that_only_mentions_brackets_is_left_alone():
+    adapter = CommandsSystemPreludeAdapter()
+    body = "1. Open [[ ## subtasks ## ] in the note.\n2. [[ ## other ## ]"
+    reply = f"[[ ## reasoning ## ]]\nr\n\n[[ ## subtasks ## ]]\n{body}\n\n[[ ## completed ## ]]"
+    assert adapter.parse(SplitSignature, reply)["subtasks"] == body
+
+    with pytest.raises(AdapterParseError):        # an undeclared name is not made a header
+        adapter.parse(SplitSignature, "[[ ## reasoning ## ]]\nr\n\n[[ ## steps ## ]\n1. x")
