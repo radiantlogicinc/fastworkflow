@@ -335,6 +335,7 @@ def reset_observation_state() -> None:
     with _lock:
         _events.clear()
         _pending_command_runs.clear()
+        _pending_folded_commands.clear()
         _event_write_failures.clear()
         _default_archive = None
         _archives_by_path.clear()
