@@ -1283,14 +1283,19 @@ def _name_like_word(word: str) -> bool:
                         or (w[:1].isupper() and w != "I" and w.lower() not in _COMMON))
 
 
-def _plain_name(request: str, a: int, b: int) -> bool:
+def _plain_name(request: str, a: int, b: int, kinds: frozenset[str] = frozenset()) -> bool:
     """``request[a:b]`` is a name written in lower case ("ann lee" of "is ann lee in Payroll"):
     two or more words, none a common one, with no such word right before or after it in its
     clause, so that it cuts no longer name ("ann lee" of "ann lee smith"), and not one name of
     a chain joined by "and" that ends on a company word ("henderson ramirez" of "henderson
     ramirez and lewis and sons", as ``split_merge`` reads a capitalised chain). A single
-    lower-case word ("roster", "user") reads as a common noun, not a name."""
-    from fastworkflow.split_merge import _COMPANY_SUFFIX, _NOT_NAMES, _STOP
+    lower-case word ("roster", "user") reads as a common noun, not a name.
+
+    A neighbour that is a clause word, a verb of ``split_merge._FINITE`` or a preposition of
+    ``split_merge._PLACING`` ("does barbara sanchez hold ...", "is alan cooper among ..."), is no
+    part of the name; nor is one of the command's ``kinds`` (its enum values, or their plural)
+    right before it when a clause word follows it ("every right brent randolph holds")."""
+    from fastworkflow.split_merge import _COMPANY_SUFFIX, _FINITE, _NOT_NAMES, _PLACING, _STOP
 
     def bare(word: str) -> str:
         return word.strip(".,;:!?()'\"`").lower()
@@ -1301,13 +1306,22 @@ def _plain_name(request: str, a: int, b: int) -> bool:
     def company(ws: list[str]) -> bool:
         return any(bare(w) in _COMPANY_SUFFIX for w in ws)
 
+    def clause_word(word: str) -> bool:
+        return _FINITE.fullmatch(bare(word)) is not None or re.fullmatch(_PLACING, bare(word)) is not None
+
+    def kind(word: str) -> bool:
+        return bare(word) in kinds or (bare(word).endswith("s") and bare(word)[:-1] in kinds)
+
     words = request[a:b].split()
     clause = r"[.,;:!?()\"]"
     before = re.split(clause, request[:a])[-1].split()
     # a possessive ends the name ("ann lee's login")
     after = [] if re.match(r"['’]s\b", request[b:]) else re.split(clause, request[b:])[0].split()
+    verb_after = bool(after) and clause_word(after[0])
     return (len(words) > 1 and all(plain(w) for w in words)
-            and not (before and plain(before[-1])) and not (after and plain(after[0]))
+            and not (before and plain(before[-1]) and not clause_word(before[-1])
+                     and not (verb_after and kind(before[-1])))
+            and not (after and plain(after[0]) and not verb_after)
             and not (bare(after[0] if after else "") in ("and", "&") and company(after))
             and not (bare(before[-1] if before else "") in ("and", "&") and company(words)))
 
@@ -1335,7 +1349,8 @@ def _check_subjects(command: SkillCommand, request: str) -> list[str]:
     return out
 
 
-def _as_subject(request: str, text: str, subjects: list[str]) -> tuple[str | None, str]:
+def _as_subject(request: str, text: str, subjects: list[str],
+                kinds: frozenset[str] = frozenset()) -> tuple[str | None, str]:
     """``(argument, why)`` of a ``subject`` argument: ``text`` when it names a record of the
     request, the whole subject when it is one cut short, else None with ``why``.
 
@@ -1360,7 +1375,7 @@ def _as_subject(request: str, text: str, subjects: list[str]) -> tuple[str | Non
             return text, ""
         cut = [(s, e) for s, e in spans if s < b and a < e and not (a <= s and e <= b)]
         if not cut and (any(a <= s and e <= b for s, e in spans) or any(_name_like_word(w) for w in text.split())
-                        or _plain_name(request, a, b)):
+                        or _plain_name(request, a, b, kinds)):
             return text, ""
     snaps = set()
     for a, b in occurrences:
@@ -1448,6 +1463,7 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
     args: dict = {}
     folded = _fold(request).lower()
     subjects = _request_subjects(command, request) if any(p.subject for p in command.params) else []
+    kinds = frozenset(v.lower() for p in command.params if p.type == "enum" for v in p.values)
     single = {**raw, **{p.name: _single(raw.get(p.name)) for p in command.params}}
     screened, refused = _screen(command, single, request)
 
@@ -1522,7 +1538,7 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
                 continue
             exact = whole or exact
             if p.subject:
-                named, why = _as_subject(request, exact, subjects)
+                named, why = _as_subject(request, exact, subjects, kinds)
                 if named is None:
                     refuse(p, shown, why)
                     continue

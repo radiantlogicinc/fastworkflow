@@ -689,6 +689,32 @@ def test_a_subject_written_in_lower_case_stands_when_it_is_a_whole_name(tmp_path
         assert args["person"] == "" and "names no record" in notes[0]
     assert sc.check_arguments(command, {"right": "Billing", "person": "ann lee"},
                               "what does ann lee's login hold on Billing?")[0]["person"] == "ann lee"
+    # a finite verb or a placing preposition next to it is no part of the name; a part of a longer one still is
+    for request in ("does ann lee hold Payroll?", "is ann lee among the holders of Payroll?",
+                    "ann lee leaves on friday: who else has Payroll?"):
+        assert sc.check_arguments(command, {"right": "Payroll", "person": "ann lee"}, request)[0]["person"] == "ann lee"
+    for request, part in (("does ann lee smith hold Payroll?", "ann lee"), ("does ann lee smith hold Payroll?", "lee smith"),
+                          ("is ann lee smith among the holders of Payroll?", "ann lee"),
+                          ("is ann lee smith among the holders of Payroll?", "lee smith"),
+                          ("which rights does mary ann lee hold on Payroll?", "ann lee")):
+        args, notes = sc.check_arguments(command, {"right": "Payroll", "person": part}, request)
+        assert args["person"] == "" and "names no record" in notes[0], (request, part)
+    # a word other than a verb or preposition after it may still continue it ("ann lee violates" is refused)
+    args, notes = sc.check_arguments(command, {"right": "Payroll", "person": "ann lee"}, "does ann lee violate Payroll?")
+    assert args["person"] == "" and "names no record" in notes[0]
+    # one of the command's own enum values right before it, with a clause word after it, is no part of it either
+    from dataclasses import replace
+    kinded = replace(command, params=command.params + (sc.Param("kind", "enum", ("right", "group"), "right"),))
+    assert sc.check_arguments(kinded, {"right": "Payroll", "person": "ann lee"},
+                              "list every right ann lee holds besides Payroll")[0]["person"] == "ann lee"
+    assert sc.check_arguments(command, {"right": "Payroll", "person": "ann lee"},
+                              "list every right ann lee holds besides Payroll")[0]["person"] == ""
+    for request, part in (("list every right ann lee smith holds besides Payroll", "lee smith"),
+                          ("list every right ann lee smith holds besides Payroll", "ann lee"),
+                          ("show the right ann lee smith next to Payroll", "ann lee"),
+                          ("show the right ann lee next to Payroll", "ann lee")):
+        args, notes = sc.check_arguments(kinded, {"right": "Payroll", "person": part}, request)
+        assert args["person"] == "" and "names no record" in notes[0], (request, part)
     # one name of a chain joined by "and" that ends on a company word is a part of that name
     request = "which controls does henderson ramirez and lewis and sons trip on Billing?"
     for part in ("henderson ramirez", "lewis and sons"):

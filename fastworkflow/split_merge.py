@@ -537,9 +537,11 @@ def _comparison_text(user_query: str, run: list[tuple[str, frozenset[str]]]) -> 
 #: "Finance" -> "Finance/Payroll", "core" -> "core.db". (``_norm`` keeps ``_`` and ``-`` and turns
 #: ``/ . :`` into spaces, so on normalised names the separators are ``_``, ``-`` and a space.)
 _NAME_SEPARATORS = "_-/.: "
+#: Prepositions that place one thing among or within others ("among them", "is ann lee among ...").
+_PLACING = r"among|amongst|of|in|on|from|within|under|inside|across|between"
 #: A back-reference to something named earlier: "among them", "of it", "its", "their".
 _BACK_REFERENCE = re.compile(
-    r"\b(?:(?:among|amongst|of|in|on|from|within|under|inside|across|between)\s+(?:them|those|these|it)\b"
+    r"\b(?:(?:" + _PLACING + r")\s+(?:them|those|these|it)\b"
     r"|its|their)\b", re.IGNORECASE)
 
 
