@@ -126,10 +126,9 @@ def test_usage_is_captured_with_or_without_history(tmp_path, disable_history):
 def test_usage_is_captured_on_every_call_under_a_bounded_history(tmp_path):
     """A capped history never grows, so "did a new entry land" cannot be a length test.
 
-    The chatbot's server keeps history at one entry per LM
-    (server_memory.INSPECT_POLICY_SETTINGS) — enough to read usage back,
-    small enough not to retain request-sized payloads. A list that trims as it
-    appends has a constant length, so detecting the new entry by growth
+    The history fallback (an LM call whose result skipped the capture hook,
+    in a process that keeps DSPy history) may run under a capped history,
+    e.g. ``max_history_size=1``. A list that trims as it appends has a constant length, so detecting the new entry by growth
     reported "history is disabled" for every call after the first.
     """
     db_path = str(tmp_path / "observability.sqlite3")

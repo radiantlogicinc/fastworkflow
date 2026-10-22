@@ -402,6 +402,14 @@
 
 ### Removed
 
+- **`run_fastapi_mcp --keep_dspy_history`** (fix-50pd): the bounded-history
+  "inspect mode" of the server's DSPy memory policy is gone, with
+  `install_policy(keep_history=..., history_entries=...)`,
+  `INSPECT_POLICY_SETTINGS`, `BoundedHistory` and `SERVER_DSPY_HISTORY_ENTRIES`.
+  `fw.llm.call` usage, cost and cache status come from each call's own result
+  (fix-sgsp), so DSPy history is now off in every server, the chatbot's
+  included; the chatbot no longer passes the flag, and passing it is an error.
+
 - **`FW_SPLIT_REQUESTS`**: request splitting is always on. The switch already
   defaulted to `1` and was on in every evaluation run; `"0"` no longer turns
   it off (the variable is not read), and the commented line is gone from

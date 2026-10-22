@@ -326,13 +326,8 @@ def _log_memory_bounds() -> None:
     else:
         asserted = "asserted" if dspy_policy.asserted else "NOT ASSERTED"
         owner = "claimed" if dspy_policy.async_owner_claimed else "unclaimed"
-        history = (
-            f"bounded to {dspy_policy.history_entries} entries "
-            f"(1 per LM, for usage/cost capture)"
-            if dspy_policy.keep_history else "off"
-        )
         dspy_bounds = (
-            f"dspy_history={history} ({asserted}), dspy_trace=off ({asserted}), "
+            f"dspy_history=off ({asserted}), dspy_trace=off ({asserted}), "
             f"dspy_memory_cache={dspy_policy.memory_cache_entries} entries ({asserted}), "
             f"dspy_disk_cache={'off' if dspy_policy.disk_cache_off else 'ON'}, "
             f"dspy_policy_owner={owner}"
@@ -637,12 +632,6 @@ def load_args():
     parser.add_argument("--cors_origin", default=None,
                        help="Pin CORS to exactly this origin (e.g. http://127.0.0.1:9000). "
                             "Default: allow all origins (development posture).")
-    parser.add_argument("--keep_dspy_history", action="store_true", default=False,
-                        help="Retain a bounded DSPy call history so the observability "
-                             "trace can record token usage, cost and cache-hit status. "
-                             "For single-developer servers (the chatbot spawns one with "
-                             "this set); off by default because history holds "
-                             "request-sized payloads.")
     parser.add_argument("--cors_loopback_only", action="store_true", default=False,
                        help="Pin CORS to loopback origins only (127.0.0.1/localhost/[::1], any "
                             "port) — tighter than the wide-open default, and resilient to port "
@@ -2735,9 +2724,7 @@ def main():
     host = ARGS.host if hasattr(ARGS, 'host') else "0.0.0.0"
     port = ARGS.port if hasattr(ARGS, 'port') else 8000
 
-    server_memory.install_policy(
-        keep_history=getattr(ARGS, "keep_dspy_history", False)
-    )
+    server_memory.install_policy()
 
     # Chatbot-spawned children pass --parent_pid so an unclean chatbot exit
     # (SIGHUP / SIGKILL / crash) cannot leave this process orphaned.

@@ -515,9 +515,9 @@ the `--prune`/`--forget-channel` CLI flags became chatbot-UI/store-API
 operations (§3.2 amendment); R17/R18/R19/R22/D3 carry inline amendments; the
 implemented schema additionally holds `conversation_counters`, `diagnostics`,
 and `conversations.updated_at` (Phase-7 rulings C2/R13/C7). `fw.llm.call`
-usage/cost capture reads DSPy history: `run_fastapi_mcp --keep_dspy_history`
-enables a bounded (20-entry) history for it — off by default; the chatbot's
-spawned server always passes it.
+usage/cost capture reads each LM call's own result, not DSPy history
+(fix-sgsp); DSPy history is off in every `run_fastapi_mcp` server, and the
+former `--keep_dspy_history` flag was removed (fix-50pd).
 
 | Finding | Ruling |
 |---|---|

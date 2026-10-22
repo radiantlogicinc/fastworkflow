@@ -475,9 +475,9 @@ class DSPyObservabilityCallback(BaseCallback):
             innermost.spans.append((host, span))
         # Remember the entry that was newest BEFORE this call, by identity.
         # Length growth cannot answer "did a new entry land": a bounded history
-        # (the chatbot's server caps it at one entry per LM) trims as it
-        # appends, so the length is constant and every call after the first
-        # would look like it produced nothing.
+        # (``max_history_size=1``, one entry per LM) trims as it appends, so
+        # the length is constant and every call after the first would look
+        # like it produced nothing.
         history = getattr(instance, "history", None) or []
         previous_entry = history[-1] if history else None
         with self._calls_lock:
