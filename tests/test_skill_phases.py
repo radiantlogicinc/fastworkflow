@@ -1877,6 +1877,21 @@ def test_an_answer_only_reply_that_is_empty_is_written_from_the_steps(phased, mo
     assert result.answer == "B1 has loans l1, l2."
 
 
+def test_an_answer_only_reply_that_cannot_be_parsed_is_written_from_the_steps(monkeypatch):
+    from dspy.utils.exceptions import AdapterParseError
+
+    def unparsable(query):
+        raise AdapterParseError(adapter_name="ChatAdapter", lm_response="?",
+                                signature=dspy.Signature("user_query -> final_answer"))
+
+    monkeypatch.setattr("fastworkflow.skill_phases.write_answer", unparsable)
+    book = BookFacts(uid="b1", loan_uids=["l1", "l2", "l3", "l4"])
+    # written from the steps, so laid out as a code-written answer, and still checked
+    steps = "1. say which loan is due first\n2. say what b1 has on loan, naming each: l1, l2, l3, l4"
+    assert answer_only_answer("q", steps, {"book": book}) == (
+        "- Which loan is due first.\n- What b1 has on loan, naming each:\n  - l1\n  - l2\n  - l3\n  - l4")
+
+
 def test_write_answer_retries_an_empty_reply_once_and_strips_field_markers():
     from dspy.utils.dummies import DummyLM
 

@@ -129,7 +129,8 @@ How the runner (``WorkflowExecutionContext``) runs a phased skill call, phase by
    from the steps with no model call (``answer_by_code``, ``answer_step_kind``).
    Its answer is checked in code (``answer_only_answer``):
    field markers and echoed framing are stripped (``clean_answer``), an empty reply (or
-   only a code fence) is retried once and then written in code from the steps, and the
+   only a code fence) or one that cannot be parsed is retried once and then written in
+   code from the steps, and the
    rows of the lists the steps give in full that it does not name are appended. A long
    list the steps give only as background is cut short in its prompt (``capped_steps``).
 7. FAN-OUT phases (``Phase(..., over=...)``): the phase runs once per item, each item its
@@ -2047,14 +2048,23 @@ def answer_only_answer(query: str, plan_text: str, outputs: Mapping[str, Any]) -
 
     When every step is verbatim or a guard (``answer_by_code``), code writes it from the
     steps (``answer_from_steps``), with no model call. Otherwise ``write_answer`` writes it
-    (retrying an empty reply once); still empty, code writes it from the steps. Then every
+    (retrying an empty or unparsable reply once); still empty or unparsable, code writes it
+    from the steps. Then every
     row of the lists the steps give in full that the answer does not name
     (``missing_list_items``, against *outputs*, the earlier phases' outputs) is appended
     after ``MISSING_ITEMS_LEAD``, so a list is never dropped, cut short or garbled out of
     the answer. Last, an answer code wrote is laid out for reading (``bulleted_answer``).
     """
+    from dspy.utils.exceptions import AdapterParseError
+
     by_code = answer_by_code(plan_text)
-    answer = answer_from_steps(plan_text) if by_code else write_answer(query)
+    try:
+        answer = answer_from_steps(plan_text) if by_code else write_answer(query)
+    except AdapterParseError as error:
+        from fastworkflow.utils.logging import logger
+
+        logger.warning(f"answer-only reply could not be parsed twice; written from the steps: {error}")
+        answer = ""
     if is_empty_answer(answer):
         answer, by_code = answer_from_steps(plan_text), True
     missing = missing_list_items(answer, plan_text, outputs)

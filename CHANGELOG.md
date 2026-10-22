@@ -538,6 +538,11 @@
 
 ### Fixed
 
+- **An answer-only reply that cannot be parsed twice no longer fails the turn**
+  (fix-ajir.8): `answer_only_answer` writes the answer from the steps
+  (`answer_from_steps`), as it does for an empty reply; the list check and the
+  code-written layout (`bulleted_answer`) apply to it.
+
 - **One malformed skill file no longer fails every turn** (fix-ajir.3). A skill
   file whose declaration is malformed (or whose name is not an identifier) is
   logged as an error and skipped, as one that does not import already was; the
