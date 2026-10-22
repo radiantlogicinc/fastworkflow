@@ -124,6 +124,10 @@ _PRUNE_TXN_ROWS = 200
 _PRUNE_TXN_TURNS = 2
 _PRUNE_PAUSE_S = 0.02
 _PRUNE_VACUUM_PAGES = 256
+# Prune's checkpoints wait this long, not the connection's busy timeout: a
+# TRUNCATE checkpoint holds the write lock while it waits for a reader on an
+# old snapshot, so every writer waits with it (fix-ajir.39).
+_PRUNE_CHECKPOINT_TIMEOUT_MS = 100
 # The writer re-runs the startup prune this often, so a long-lived server stays
 # inside the horizon and the cap, and a backlog larger than one bounded pass
 # drains over successive passes (fix-nczr.1). Not a knob: the horizon and the
@@ -5780,7 +5784,7 @@ class ObservabilityStore:
                         only_bound_left = True
                         break
                 self._vacuum_in_steps(conn)
-                if conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()[0][0]:
+                if self._checkpoint_briefly(conn):
                     # A reader pins the WAL, so the size cannot drop in this
                     # pass, and each further batch would evict for nothing and
                     # block writers for another busy timeout here. The next
@@ -5829,7 +5833,7 @@ class ObservabilityStore:
             conn.commit()
             # Fold the deletes back into the main file now, so the evidence
             # they removed does not wait there for the next checkpoint.
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self._checkpoint_briefly(conn)
 
         return deleted
 
@@ -5866,6 +5870,20 @@ class ObservabilityStore:
                 keys,
             ).fetchall()
         ]
+
+    @staticmethod
+    def _checkpoint_briefly(conn: sqlite3.Connection) -> bool:
+        """Truncate the WAL, waiting at most `_PRUNE_CHECKPOINT_TIMEOUT_MS` for
+        readers and writers (fix-ajir.39). True when it was busy, so the WAL
+        could not be truncated in full."""
+        timeout_ms = conn.execute("PRAGMA busy_timeout").fetchall()[0][0]
+        conn.execute(f"PRAGMA busy_timeout={_PRUNE_CHECKPOINT_TIMEOUT_MS}")
+        try:
+            return bool(
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()[0][0]
+            )
+        finally:
+            conn.execute(f"PRAGMA busy_timeout={int(timeout_ms)}")
 
     @staticmethod
     def _vacuum_in_steps(conn: sqlite3.Connection) -> None:

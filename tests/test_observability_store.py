@@ -1079,24 +1079,57 @@ class TestMaintenance:
     def test_reader_pinned_wal_stops_the_size_cap_pass(self, db_path, monkeypatch):
         """fix-ajir.27: while a reader pins the WAL the file cannot shrink, so
         the cap pass stops after its first batch instead of evicting every
-        unbound record for nothing."""
+        unbound record for nothing. fix-ajir.39: its checkpoints wait for the
+        reader only briefly, since a writer waits with them; without a pinned
+        reader the pass still truncates the WAL."""
+        import threading
+
         self._tiny_prune(monkeypatch, _PRUNE_BATCH_ROWS=100)
         store = self._mixed_store(db_path)
         connect = obs.ObservabilityStore._connect
         monkeypatch.setattr(
             obs.ObservabilityStore, "_connect",
-            lambda self, timeout=30.0: connect(self, timeout=0.2),
+            lambda self, timeout=30.0: connect(self, timeout=5.0),
         )
+        waits: list[float] = []
+        done = threading.Event()
+
+        def write_meanwhile() -> None:
+            writer = sqlite3.connect(db_path, isolation_level=None, timeout=30)
+            try:
+                while not done.is_set():
+                    started = time.monotonic()
+                    writer.execute("BEGIN IMMEDIATE")
+                    writer.execute("COMMIT")
+                    waits.append(time.monotonic() - started)
+                    time.sleep(0.01)
+            finally:
+                writer.close()
+
         reader = sqlite3.connect(db_path, isolation_level=None)
+        thread = threading.Thread(target=write_meanwhile)
         try:
             reader.execute("BEGIN")
             reader.execute("SELECT COUNT(*) FROM turns").fetchall()
+            thread.start()
             deleted = store.prune(retention_days=30, max_bytes=1)
         finally:
+            done.set()
+            thread.join()
             reader.close()
 
         assert deleted["spans"] == 15 and "turns" not in deleted
         assert len(_rows(db_path, "SELECT turn_key FROM turns")) == 7
+        assert waits and max(waits) < 1.0
+
+        # An idle connection keeps the WAL file, which the last close deletes.
+        idle = sqlite3.connect(db_path, isolation_level=None)
+        try:
+            idle.execute("SELECT COUNT(*) FROM turns").fetchall()
+            store.prune(retention_days=30, max_bytes=1)
+            assert os.path.getsize(db_path + "-wal") == 0
+        finally:
+            idle.close()
 
     def test_writer_prunes_periodically(self, db_path, monkeypatch):
         """fix-nczr.1: a long-lived sink re-runs the prune, not only at startup."""
