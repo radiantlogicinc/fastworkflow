@@ -27,7 +27,14 @@ A preview, in the order of the skill-file layout (``docs/skill_file_layout.md``)
    when not all;
 5. its steps for the sample inputs: for a phased skill phase by phase, for a flat skill
    the ``steps()`` list. Each different render the inputs give is shown once (see
-   ``variants``).
+   ``variants``). An answer-only phase (``skill_phases.is_answer_only``, read with the
+   workflow's command names as a run reads them: ``phase_command_names``) ends with who
+   writes its answer (``answer_mode``), decided by the runtime's own wording rules
+   (``skill_phases.answer_by_code``, ``answer_step_kind``): "Answer: written by code, word
+   for word (steps 1-2 verbatim; step 3 dropped as a guard)." or "Answer: written by the
+   model (step 2 needs judgement)." A phase that runs commands gets no such line: its
+   answer is the agent's. A run's own additions (the planner's ``steps_after``, extra
+   command steps) are not part of the preview, so they may change the mode at run time.
 
 Sample inputs come from the ``Input`` model (``sample_value``): a str takes its default,
 else its first ``examples`` value, else a placeholder ``<name>``; a bool is false; an int
@@ -1073,6 +1080,91 @@ def _numbered(steps: list[str]) -> list[str]:
     return [f"{i}. {_code(s)}" for i, s in enumerate(steps, 1)]
 
 
+def _step_numbers(numbers: list[int]) -> str:
+    """``step 2``, ``steps 1-3``, ``steps 1, 3 and 5``: runs of consecutive numbers joined."""
+    runs: list[list[int]] = []
+    for n in numbers:
+        if runs and n == runs[-1][-1] + 1:
+            runs[-1].append(n)
+        else:
+            runs.append([n])
+    parts = [part for r in runs
+             for part in ([f"{r[0]}-{r[-1]}"] if len(r) > 2 else map(str, r))]
+    text = parts[0] if len(parts) == 1 else f"{', '.join(parts[:-1])} and {parts[-1]}"
+    return f"{'step' if len(numbers) == 1 else 'steps'} {text}"
+
+
+def answer_mode(steps: list[str]) -> str:
+    """Who writes the answer of an answer-only phase with *steps*, as one preview line.
+
+    Read with the runtime's own rules (``skill_phases.answer_by_code`` and
+    ``skill_phases.answer_step_kind`` on the numbered steps): code writes the answer word
+    for word, dropping guard steps, or the model writes it, because a step needs
+    judgement or no step is verbatim.
+    """
+    from fastworkflow.skill_commands import number
+    from fastworkflow.skill_phases import answer_by_code, answer_step_kind
+
+    kinds: dict[str, list[int]] = {}
+    for i, step in enumerate(steps, 1):
+        kinds.setdefault(answer_step_kind(step), []).append(i)
+    if answer_by_code(number(steps)):
+        why = f"{_step_numbers(kinds['verbatim'])} verbatim"
+        if kinds.get("guard"):
+            dropped = kinds["guard"]
+            why += f"; {_step_numbers(dropped)} dropped as {'a guard' if len(dropped) == 1 else 'guards'}"
+        return f"Answer: written by code, word for word ({why})."
+    if kinds.get("judgement"):
+        judged = kinds["judgement"]
+        return (f"Answer: written by the model ({_step_numbers(judged)} "
+                f"{'needs' if len(judged) == 1 else 'need'} judgement).")
+    return "Answer: written by the model (no step is verbatim)."
+
+
+def phase_command_names(workflow_folder: str) -> dict[str, list[str]]:
+    """``commands`` / ``core_commands`` a phase's steps are read with, as a run reads them
+    (``WorkflowExecutionContext._phase_command_names``): the workflow's routed commands and
+    the framework's core commands (``workflow_agent.core_command_names``, read from the
+    routing registry class, as ``fastworkflow.init`` has not run). An empty list when its
+    routing cannot be read."""
+    import fastworkflow
+    from fastworkflow.command_routing import RoutingRegistry
+
+    def read(folder: str, contexts: Optional[tuple] = None) -> list[str]:
+        try:
+            routing = RoutingRegistry.get_definition(folder)
+            if contexts is None:
+                return list(routing.routing_definition_map)
+            return sorted({name for context in contexts for name in routing.get_command_names(context)})
+        except Exception:  # noqa: BLE001 - read the steps with what is known, as a run does
+            return []
+
+    return {"commands": read(os.path.abspath(workflow_folder)),
+            "core_commands": read(fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
+                                  ("IntentDetection", "ErrorCorrection"))}
+
+
+def _answer_line(steps: list[str], names: Optional[dict], outputs: list) -> list[str]:
+    """``[answer_mode(steps), ""]`` when *steps* make an answer-only phase
+    (``skill_phases.is_answer_only``, with *names* and the commands the facts of the plan's
+    phase *outputs* come from, as a run reads them); else nothing."""
+    from fastworkflow.observation_offloading.facts import fact_sources
+    from fastworkflow.skill_commands import number
+    from fastworkflow.skill_phases import is_answer_only
+
+    if not names or not steps:
+        return []
+    commands = list(names.get("commands", ()))
+    for model in outputs:
+        try:
+            commands += [source.command for source in fact_sources(model)]
+        except Exception:  # noqa: BLE001 - a bad "from" is reported by --check
+            pass
+    if not is_answer_only(number(steps), commands, names.get("core_commands", ())):
+        return []
+    return [answer_mode(steps), ""]
+
+
 def _phase_order(found: list[_Variant]) -> list[str]:
     order: list[str] = []
     for variant in found:
@@ -1226,14 +1318,17 @@ NO_ITEMS_NOTE = "No items: `over` is empty for these inputs, so the phase runs n
 
 
 def _render_lines(render: _Render, level: str, first: Optional[_Render] = None,
-                  first_title: str = "") -> list[str]:
-    """*render* as markdown. A phase the same as in *first* (the first plan shown) is one line."""
+                  first_title: str = "", names: Optional[dict] = None) -> list[str]:
+    """*render* as markdown. A phase the same as in *first* (the first plan shown) is one line.
+    With *names* (``phase_command_names``), an answer-only phase's steps are followed by who
+    writes its answer (``answer_mode``)."""
     flat = [FLAT_NOTE, ""] if render.flat else []
     if render.error:
         return flat + [f"The steps cannot be rendered: {_text(render.error)}", ""]
     if not render.phases:
         return flat + _numbered(render.steps) + [""]
     same = {p.key() for p in first.phases} if first is not None else set()
+    outputs = [p.output for p in render.phases if p.output is not None]
     lines = []
     for index, phase in enumerate(render.phases, 1):
         lines += [f"{level} Phase {index}: `{phase.name}`", ""]
@@ -1251,18 +1346,21 @@ def _render_lines(render: _Render, level: str, first: Optional[_Render] = None,
             lines += [f"_{PLACEHOLDER_NOTE}_", ""]
         if phase.items is None:
             lines += _numbered(phase.steps) + [""]
+            lines += _answer_line(phase.steps, names, outputs)
         elif not phase.items:
             lines += [NO_ITEMS_NOTE, ""]
         else:
             for head, steps in phase.items:
                 lines += [head, ""]
                 lines += _numbered(steps) + [""]
+                lines += _answer_line(steps, names, outputs)
     if render.left_out:
         lines += [f"Left out (`when` is false): {', '.join(f'`{n}`' for n in render.left_out)}.", ""]
     return lines
 
 
-def _steps_section(found: list[_Variant], changing: list[str], phased: bool) -> list[str]:
+def _steps_section(found: list[_Variant], changing: list[str], phased: bool,
+                   command_names: Optional[dict] = None) -> list[str]:
     title = "Plan" if phased else "Steps"
     lines = [f"## {title}", ""]
     rendered = [v for v in found if v.render is not None]
@@ -1271,7 +1369,7 @@ def _steps_section(found: list[_Variant], changing: list[str], phased: bool) -> 
     if not changing:
         lines += ["For the sample inputs; no input changes them.", ""]
         if rendered:
-            lines += _render_lines(rendered[0].render, "###")
+            lines += _render_lines(rendered[0].render, "###", names=command_names)
     else:
         names = ", ".join(f"`{n}`" for n in changing)
         one, noun = ("plan", "plans") if phased else ("list of steps", "lists of steps")
@@ -1291,7 +1389,7 @@ def _steps_section(found: list[_Variant], changing: list[str], phased: bool) -> 
             lines += [f"### {title} {_text(variant.title())}", ""]
             lines += _render_lines(variant.render, "####",
                                    first.render if phased and variant is not first else None,
-                                   _text(first.title()) if first else "")
+                                   _text(first.title()) if first else "", command_names)
     if refused:
         lines += ["Not rendered, as no skill call reaches `steps()` with them "
                   "(`validate_extracted_parameters` changes or refuses them):", ""]
@@ -1301,9 +1399,11 @@ def _steps_section(found: list[_Variant], changing: list[str], phased: bool) -> 
 
 
 def render_preview(name: str, description: str, steps: tuple, command,
-                   utterances: tuple, source: str) -> str:
+                   utterances: tuple, source: str, names: Optional[dict] = None) -> str:
     """The markdown preview of one skill (see the module doc). *source* is the skill file's
-    path relative to the workflow folder (``_skills/<name>.py``)."""
+    path relative to the workflow folder (``_skills/<name>.py``); *names* the command names
+    a phase's steps are read with (``phase_command_names``), to show who writes an
+    answer-only phase's answer (none given: not shown)."""
     phased = command is not None and command.plan_fn is not None
     kind = ("phased: `plan()` runs it as bounded sub-plans, each passing facts on" if phased
             else "flat: one list of steps" if command is not None
@@ -1318,7 +1418,7 @@ def render_preview(name: str, description: str, steps: tuple, command,
         found, changing = variants(command)
         if phased:
             lines += _phases_section(found)
-        lines += _steps_section(found, changing, phased)
+        lines += _steps_section(found, changing, phased, names)
     while lines and lines[-1] == "":
         lines.pop()
     return "\n".join(lines) + "\n"
@@ -1352,8 +1452,11 @@ def render_previews(workflow_folder: str) -> dict[str, str]:
     errors = [_load_error(name, path, folder) for name, path in files if name not in names]
     if errors:
         raise PreviewError("skill file(s) not loaded:\n" + "\n".join(f"  {e}" for e in errors))
+    command_names = phase_command_names(folder) if any(
+        c.plan_fn is not None for c in commands.values()) else None
     return {f"{name}.md": render_preview(name, description, steps, commands.get(name),
-                                         utterances.get(name, ()), f"_skills/{name}.py")
+                                         utterances.get(name, ()), f"_skills/{name}.py",
+                                         command_names)
             for name, description, steps in sorted(loaded)}
 
 
@@ -1459,10 +1562,12 @@ __all__ = [
     "MAX_VARIANTS",
     "PLACEHOLDER_NUMBER",
     "PreviewError",
+    "answer_mode",
     "check_previews",
     "condition_text",
     "default_out_dir",
     "describe_inputs",
+    "phase_command_names",
     "placeholder_output",
     "preview_main",
     "render_preview",

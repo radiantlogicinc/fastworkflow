@@ -246,7 +246,13 @@ A preview follows the order above:
    `bind=False`. A cell that differs by input (the output model, the `when`, the fan-out)
    lists each value with the inputs that give it ("when kind = crate: `CrateMatch`");
 5. the steps for the sample inputs: phase by phase for a phased skill, the `steps()` list
-   for a flat one.
+   for a flat one. An answer-only phase (its steps name no command, read with the
+   workflow's command names as a run reads them) ends with who writes its answer, decided
+   by the same wording rules a run uses (`skill_phases.answer_by_code`,
+   `answer_step_kind`): "Answer: written by code, word for word (steps 1-2 verbatim; step
+   3 dropped as a guard)." or "Answer: written by the model (step 2 needs judgement)." A
+   phase that runs commands has no such line: the agent writes its answer. Steps a run
+   adds (the planner's `steps_after`) are not in the preview.
 
 **Sample inputs** come from the `Input` model: a str takes its default, else its first
 `examples` value (`Field(examples=[...])`), else the placeholder `<name>`; a bool is false;

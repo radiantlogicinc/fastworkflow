@@ -698,3 +698,69 @@ def test_a_skill_past_max_grid_lists_every_phase(tmp_path):
                   "iota", "kappa", "lambda_", "mu", "nu", "pair", "report"]:
         assert f"| `{phase}` |" in text
     assert "| `pair` | none | only when alpha = true, beta = true |" in text
+
+
+# ---------------------------------------------------------------- answer modes (fix-ajir.10)
+
+@pytest.mark.parametrize("steps, line", [
+    (["say that b1 has loans l1, l2"],
+     "Answer: written by code, word for word (step 1 verbatim)."),
+    (["say that b1 has loans l1, l2", "say what b2 holds: l3", "compare them: l1 > l3",
+      "apply no change"],
+     "Answer: written by code, word for word (steps 1-3 verbatim; step 4 dropped as a guard)."),
+    (["say that b1 has loans l1", "do not open them", "say that b2 has none", "never guess"],
+     "Answer: written by code, word for word (steps 1 and 3 verbatim; steps 2 and 4 dropped "
+     "as guards)."),
+    (["say which is riskier"],
+     "Answer: written by the model (step 1 needs judgement)."),
+    (["say that b1 has loans l1", "say which loan is the oldest", "apply no change",
+      "summarise the rest"],
+     "Answer: written by the model (steps 2 and 4 need judgement)."),
+    (["apply no change", "do not open anything"],
+     "Answer: written by the model (no step is verbatim)."),
+])
+def test_answer_mode_reads_the_steps_with_the_runtime_rules(steps, line):
+    from fastworkflow.skill_commands import number
+    from fastworkflow.skill_phases import answer_by_code
+
+    assert skill_preview.answer_mode(steps) == line
+    assert line.startswith("Answer: written by code") == answer_by_code(number(steps))
+
+
+def test_answer_mode_shows_what_the_wording_rules_decide_even_when_it_misfires():
+    # "say <question>: <text>" is written word for word by code: no judgement is made.
+    assert skill_preview.answer_mode(["say which is riskier: A has score 3, B has score 5"]) == (
+        "Answer: written by code, word for word (step 1 verbatim).")
+    # A step starting "apply" with no facts is a guard: it is dropped from the answer.
+    assert skill_preview.answer_mode(["say that the total is 100",
+                                      "apply a 10% discount to the total"]) == (
+        "Answer: written by code, word for word (step 1 verbatim; step 2 dropped as a guard).")
+
+
+def test_an_answer_only_phase_shows_its_answer_mode_and_a_command_phase_none(workflow):
+    text = skill_preview.render_previews(workflow)["show_item.md"]
+    plan = text[text.index("## Plan"):]
+    # Each report phase (one per plan) is answer-only; find, item and checks run commands.
+    assert plan.count("Answer: written by code, word for word (step 1 verbatim).") == 2
+    blocks = plan.split("#### Phase ")[1:]
+    assert [block.split("`")[1] for block in blocks if "Answer: " in block] == ["report", "report"]
+    # A flat skill and a fixed one have no phases, so no answer mode.
+    previews = skill_preview.render_previews(workflow)
+    assert "Answer: " not in previews["list_parts_of.md"]
+    assert "Answer: " not in previews["close_out.md"]
+
+
+def test_without_command_names_no_answer_mode_is_shown(workflow):
+    from fastworkflow import workflow_agent
+
+    commands = workflow_agent.load_skill_commands(workflow)
+    (name, description, steps), = [s for s in workflow_agent.load_skills(workflow)
+                                   if s[0] == "show_item"]
+    bare = skill_preview.render_preview(name, description, steps, commands[name], (),
+                                        "_skills/show_item.py")
+    named = skill_preview.render_preview(name, description, steps, commands[name], (),
+                                         "_skills/show_item.py",
+                                         skill_preview.phase_command_names(workflow))
+    assert "Answer: " not in bare
+    assert [line for line in named.splitlines() if line not in bare.splitlines()] == [
+        "Answer: written by code, word for word (step 1 verbatim)."] * 2
