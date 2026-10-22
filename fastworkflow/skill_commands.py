@@ -1282,6 +1282,29 @@ def _name_like_word(word: str) -> bool:
                         or (w[:1].isupper() and w != "I" and w.lower() not in _COMMON))
 
 
+def _opening_tails(request: str, spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The tails of the subject ``spans`` of ``request`` that open a sentence: such a subject
+    may hold the word that opens the sentence ("Treat Ledger" of "Treat Ledger as ..."), and its
+    tail ("Ledger") stands for it."""
+    tails = []
+    for s, e in spans:
+        first = re.match(r"\S+\s+", request[s:e])
+        if first and (s == 0 or re.search(r"[.?!:;]\s*$", request[:s])):
+            tails.append((s + first.end(), e))
+    return tails
+
+
+def _check_subjects(command: SkillCommand, request: str) -> list[str]:
+    """The request's subjects as a check offers them: a sentence-opening one with its tail
+    after it (``_opening_tails``), so that a check never has to choose between "Treat Ledger"
+    and no record at all."""
+    out: list[str] = []
+    for subject in _request_subjects(command, request):
+        tails = [request[s:e] for s, e in _opening_tails(request, _spans(request, subject))]
+        out += [n for n in [subject, *tails] if n.lower() not in {o.lower() for o in out}]
+    return out
+
+
 def _as_subject(request: str, text: str, subjects: list[str]) -> tuple[str | None, str]:
     """``(argument, why)`` of a ``subject`` argument: ``text`` when it names a record of the
     request, the whole subject when it is one cut short, else None with ``why``.
@@ -1295,12 +1318,7 @@ def _as_subject(request: str, text: str, subjects: list[str]) -> tuple[str | Non
     may be a record of its own and is refused.
     """
     spans = [(s, e) for subject in subjects for s, e in _spans(request, subject)]
-    # a sentence-opening subject may hold the word that opens the sentence ("Treat Ledger"): its tail stands for it
-    parts = set()
-    for s, e in spans:
-        first = re.match(r"\S+\s+", request[s:e])
-        if first and (s == 0 or re.search(r"[.?!:;]\s*$", request[:s])):
-            parts.add((s + first.end(), e))
+    parts = set(_opening_tails(request, spans))
 
     def joined(i: int) -> bool:   # request[i - 1] and request[i] are letters or digits of one word
         return 0 < i < len(request) and request[i - 1].isalnum() and request[i].isalnum()
@@ -1749,7 +1767,7 @@ def _check_one(lm, command: SkillCommand, p: Param, request: str) -> tuple[objec
         question = f"Which record named in the request is the {p.name}? {p.desc}".strip()
     else:
         question = f"Which {p.name} does the request mean? {p.desc}".strip()
-    options = _check_options(p, _request_subjects(command, request) if p.type == "str" else ())
+    options = _check_options(p, _check_subjects(command, request) if p.type == "str" else ())
     signature = dspy.make_signature({
         "request": (str, dspy.InputField(desc="the user's request")),
         "job": (str, dspy.InputField(desc="the job the request is planned as")),

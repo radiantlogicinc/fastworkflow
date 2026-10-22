@@ -734,6 +734,42 @@ def test_a_sure_check_of_a_subject_chooses_among_the_request_subjects_or_none(tm
     assert [v for v, _ in options] == ["Ann Lee", "Bo Diaz", sc.NO_SUBJECT]
 
 
+def test_a_subject_check_offers_the_tail_of_a_name_opening_a_sentence(tmp_path, monkeypatch):
+    import dspy
+    command = _named(tmp_path)
+    request = "Treat Ledger as a right: who holds it?"
+    # the name opening the sentence holds its first word; offered alone, the check could only
+    # choose "Treat Ledger" or no record, and a sure "none" refused the planner's "Ledger"
+    assert sc._request_subjects(command, request) == ["Treat Ledger"]
+    assert sc._check_subjects(command, request) == ["Treat Ledger", "Ledger"]
+    assert sc._check_subjects(command, "Before Ann Lee asks. Treat Ledger as a right") == [
+        "Treat Ledger", "Ledger", "Ann Lee"]
+    # a name inside a sentence is offered as it is
+    assert sc._check_subjects(command, "May Bo Diaz hold Ledger?") == ["Bo Diaz", "Ledger"]
+
+    from types import SimpleNamespace
+    offered = []
+    options = sc._check_options
+
+    def recorded(p, subjects=()):
+        offered.extend(v for v, _ in options(p, subjects))
+        return options(p, subjects)
+
+    class Predict:
+        def __init__(self, signature):
+            pass
+
+        def __call__(self, **inputs):
+            choice = SimpleNamespace(value="Ledger", probabilities={"Ledger": 0.9}, confidence=0.9)
+            return SimpleNamespace(value=choice)
+    monkeypatch.setattr(sc, "_check_options", recorded)
+    monkeypatch.setattr(dspy, "Predict", Predict)
+    assert sc._check_one(object(), command, command.param("right"), request) == ("Ledger", 0.9)
+    assert offered == ["Treat Ledger", "Ledger", sc.NO_SUBJECT]
+    args, notes = sc.check_arguments(command, {"right": "Ledger"}, request, {"right": ("Ledger", 0.9)})
+    assert args["right"] == "Ledger" and notes == []
+
+
 def test_check_verdicts_skips_a_subject_check_when_the_request_names_nothing(tmp_path, monkeypatch):
     command = _named(tmp_path)
     monkeypatch.setattr(sc, "_check_one", lambda lm, cmd, p, request: ("Ann Lee", 0.9))
