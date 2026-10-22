@@ -3,6 +3,7 @@ Agent integration module for fastWorkflow.
 Provides workflow tool agent functionality for intelligent tool selection.
 """
 
+import contextvars
 import dataclasses
 import functools
 import json
@@ -11,6 +12,8 @@ import re
 import threading
 import time
 import traceback
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
@@ -22,7 +25,8 @@ import fastworkflow
 from fastworkflow import tracing
 from fastworkflow import skill_commands
 from fastworkflow.skill_commands import SkillCommand, SkillFormatError, plan_skill_call
-from fastworkflow.split_merge import definite_descriptions, merge_subtasks, unnamed_subjects, with_referent
+from fastworkflow.split_merge import (definite_descriptions, merge_subtasks, request_subjects, subjects_in,
+                                      unnamed_subjects, with_referent)
 from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
@@ -1505,56 +1509,109 @@ def _visibly_broken(subtasks: list[str]) -> bool:
     return len(set(subtasks)) < len(subtasks) or any(_UNRESOLVED_REFERENCE.search(t) for t in subtasks)
 
 
+#: The splitter is called this many times at once and the split most answers agree on is kept: the model
+#: splits the same request differently from one call to the next, even at temperature 0. The first call is
+#: at temperature 0, the others at 0.7. Measured offline (fix-hia1.39, 49 multi-job requests x 3 repeats):
+#: 3 calls keep the pass/fail of 47 requests the same across repeats (45 with one call) and fail none that
+#: one call passes; 5 calls do no better. 1 is the single call, retried once when visibly broken.
+SPLIT_SAMPLES = 3
+
+
+def _split_shape(user_query: str, jobs: list[str], identifiers: tuple[re.Pattern, ...]) -> tuple:
+    """What the split vote compares: which of the request's subjects each job names, wording and order aside."""
+    if len(jobs) < 2:
+        return ()
+    known = request_subjects(user_query, identifiers)
+    return tuple(sorted(tuple(sorted(subjects_in(job, known, identifiers))) for job in jobs))
+
+
 def split_into_subtasks(user_query: str, planner_lm=None,
                         workflow_folderpath: str | None = None) -> list[str]:
     """The request as independent sub-tasks, in order; ``[user_query]`` when it is not split.
 
-    One call on the planner LM, with no command catalog: the split is about the
-    request, not about how to carry it out. It is shown the workflow's skills
-    (``_skills``), as the kinds of job it may contain.
-    Any failure, an empty answer, or more than MAX_SUBTASKS sub-tasks leaves the
-    request whole. The model's split then goes through ``split_merge.merge_subtasks``
-    (code only), which joins parts that are not independent jobs and returns the
-    request whole when one job is left.
+    SPLIT_SAMPLES calls at once on the planner LM, with no command catalog: the split is about
+    the request, not about how to carry it out. It is shown the workflow's skills (``_skills``),
+    as the kinds of job it may contain. Each answer goes through ``split_merge.merge_subtasks``
+    (code only), which joins parts that are not independent jobs and returns the request whole
+    when one job is left; an empty answer, or more than MAX_SUBTASKS sub-tasks, is the request
+    whole. The answers vote (``dspy.majority``) on which subjects each job names: the first split
+    with most votes is kept, the temperature-0 one on a tie, and the vote ends as soon as the
+    temperature-0 call is in and one split has a majority. A visibly broken answer does not vote; when no answer votes, one more
+    call at 0.7 is made, and a broken split with a leftover reference is still better than none.
+    A call that fails does not vote; when none votes the request is left whole.
     """
     if planner_lm is None:
         planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
     job_types = _job_types_for(workflow_folderpath)
-    # Temperature 0, so the same request splits the same way; a split that is
-    # visibly broken is retried once at 0.7, which also misses the LM cache.
-    # A split whose only flaw is a leftover reference ("each of them") is still
-    # better than none, so it is kept when the retry does not fix it.
-    usable = None
-    for temperature in (0.0, 0.7):
+    signature = _split_signature(workflow_folderpath) if workflow_folderpath else SplitIntoSubtasks
+    identifiers = identifier_patterns(workflow_folderpath) if workflow_folderpath else ()
+
+    def answer(sample: int) -> list[str] | None:
+        """The numbered lines of one splitter answer; None when the call fails. A rollout id keeps
+        the LM cache from handing every call at 0.7 the same answer."""
+        lm = planner_lm.copy(temperature=0.0) if sample == 0 else planner_lm.copy(temperature=0.7, rollout_id=sample)
         try:
-            with dspy.context(lm=planner_lm.copy(temperature=temperature),
-                              adapter=CommandsSystemPreludeAdapter()):
-                signature = _split_signature(workflow_folderpath) if workflow_folderpath else SplitIntoSubtasks
-                text = dspy.ChainOfThought(signature)(
-                    job_types=job_types, user_query=user_query).subtasks or ""
+            with dspy.context(lm=lm, adapter=CommandsSystemPreludeAdapter()):
+                text = dspy.ChainOfThought(signature)(job_types=job_types, user_query=user_query).subtasks or ""
         except Exception:  # noqa: BLE001 - splitting is an optimisation; never fail the turn
-            logger.warning("could not split the request; running it whole", exc_info=True)
+            logger.warning("could not split the request", exc_info=True)
+            return None
+        return [match.group(1).translate(_HYPHENS) for line in text.splitlines()
+                if (match := _NUMBERED_LINE.match(line))]
+
+    votes: dict[int, list[str]] = {}
+    broken: dict[int, list[str]] = {}
+    first_in = False
+
+    def count(sample: int, subtasks: list[str] | None) -> None:
+        if subtasks is None:
+            return
+        if subtasks and len(subtasks) <= MAX_SUBTASKS and _visibly_broken(subtasks):
+            broken[sample] = subtasks
+        else:
+            votes[sample] = _merged(user_query, subtasks, identifiers) \
+                if subtasks and len(subtasks) <= MAX_SUBTASKS else [user_query]
+
+    def decided() -> bool:
+        shapes = Counter(_split_shape(user_query, jobs, identifiers) for jobs in votes.values())
+        return bool(shapes) and max(shapes.values()) > SPLIT_SAMPLES // 2
+
+    # Each call runs in a copy of this context, so the turn's DSPy settings and tracing reach it.
+    # Once the temperature-0 call is in and a split has a majority, the calls still out are not waited for:
+    # the majority cannot change, and its wording is the temperature-0 call's whenever that call agrees.
+    pool = ThreadPoolExecutor(SPLIT_SAMPLES)
+    try:
+        calls = {pool.submit(contextvars.copy_context().run, answer, sample): sample
+                 for sample in range(SPLIT_SAMPLES)}
+        for call in as_completed(calls):
+            count(calls[call], call.result())
+            if calls[call] == 0:
+                first_in = True
+            if first_in and decided():
+                break
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    if not votes and broken:
+        count(SPLIT_SAMPLES, answer(SPLIT_SAMPLES))
+    if votes:
+        ranked = [{"jobs": votes[sample]} for sample in sorted(votes)]
+        jobs = dspy.majority(ranked, normalize=lambda jobs: _split_shape(user_query, jobs, identifiers),
+                             field="jobs").jobs
+    else:
+        usable = [subtasks for _, subtasks in sorted(broken.items()) if len(set(subtasks)) == len(subtasks)]
+        if not usable:
             return [user_query]
-        subtasks = [match.group(1).translate(_HYPHENS) for line in text.splitlines()
-                    if (match := _NUMBERED_LINE.match(line))]
-        if not subtasks or len(subtasks) > MAX_SUBTASKS:
-            return [user_query]
-        if not _visibly_broken(subtasks):
-            return _merged(user_query, subtasks, workflow_folderpath)
-        if usable is None and len(set(subtasks)) == len(subtasks):
-            usable = subtasks
-    return _merged(user_query, usable, workflow_folderpath) if usable else [user_query]
+        jobs = _merged(user_query, usable[0], identifiers)
+    return resolve_referents(user_query, jobs, workflow_folderpath) if len(jobs) > 1 else jobs
 
 
-def _merged(user_query: str, subtasks: list[str], workflow_folderpath: str | None = None) -> list[str]:
+def _merged(user_query: str, subtasks: list[str], identifiers: tuple[re.Pattern, ...] = ()) -> list[str]:
     """``split_merge.merge_subtasks`` on the model's split; the split unchanged if the merge fails."""
     try:
-        identifiers = identifier_patterns(workflow_folderpath) if workflow_folderpath else ()
-        merged = merge_subtasks(user_query, subtasks, identifiers)
+        return merge_subtasks(user_query, subtasks, identifiers)
     except Exception:  # noqa: BLE001 - the merge is a clean-up; never fail the turn
         logger.warning("could not merge the split; keeping it as the model gave it", exc_info=True)
         return subtasks
-    return resolve_referents(user_query, merged, workflow_folderpath) if len(merged) > 1 else merged
 
 
 #: A sub-task's referent is written in only at or above this Jev probability.
