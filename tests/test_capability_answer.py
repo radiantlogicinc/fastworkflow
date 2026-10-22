@@ -82,26 +82,60 @@ def test_the_answer_names_each_skill_with_two_examples_then_each_command_then_ot
     ]
 
 
-def test_commands_several_contexts_add_are_named_once_and_each_line_is_capped():
-    shared = ["add_tag", "assess_risk", "propose_fix", "remove_tag", "show_metadata",
-              "show_properties", "show_risk_score"]
+def test_commands_more_than_half_of_the_other_contexts_add_are_named_once():
     answer = render_capability_answer(
         {}, ["who_am_i"],
-        {"Account": shared + ["list_permissions"],
-         "Group": ["list_members"] + shared + ["show_nesting"],
-         "Repository": shared,
-         "Finding": ["explain_risk", "show_metadata"],
-         "Directory": ["find_a", "find_b", "find_c", "find_d", "find_e", "find_f", "find_g"]},
+        {"Account": ["add_tag", "show_metadata", "list_permissions"],
+         "Group": ["add_tag", "show_metadata", "list_members"],
+         "Repository": ["add_tag", "list_members"],
+         "Finding": ["explain_risk", "show_metadata"]},
     )
-    assert answer.splitlines()[-6:] == [
-        "- Who am I",
-        "- In several places: add tag, assess risk, propose fix, remove tag, show metadata, "
-        "show properties and 1 more",
+    # add tag (3 of 4) and show metadata (3 of 4) are shared; list members (2 of 4) is not
+    assert answer.splitlines()[-5:] == [
+        "- In several places: add tag, show metadata",
         "- In Account: list permissions",
-        "- In Group: list members, show nesting",
+        "- In Group: list members",
+        "- In Repository: list members",
         "- In Finding: explain risk",
-        "- In Directory: find a, find b, find c, find d, find e, find f and 1 more",
     ]
+
+
+def test_a_context_left_with_no_commands_of_its_own_gets_no_line():
+    answer = render_capability_answer(
+        {}, ["who_am_i"],
+        {"Account": ["add_tag"], "Group": ["add_tag"], "Repository": ["add_tag", "list_accounts"]},
+    )
+    assert answer.splitlines()[-3:] == [
+        "- Who am I",
+        "- In several places: add tag",
+        "- In Repository: list accounts",
+    ]
+
+
+def test_a_context_line_names_commands_while_it_fits_the_line_width(monkeypatch):
+    monkeypatch.setattr("fastworkflow.capability_answer.LINE_WIDTH", 42)
+    answer = render_capability_answer(
+        {}, [],
+        {"Directory": ["find_a", "find_b", "find_c", "find_d", "find_e", "find_f"],
+         "Short": ["list_x", "list_y"],
+         "Long": ["a_command_name_far_wider_than_the_line_itself", "show_z"]},
+    )
+    lines = answer.splitlines()[-3:]
+    assert lines == [
+        "- In Directory: find a, find b and 4 more",
+        "- In Short: list x, list y",
+        "- In Long: a command name far wider than the line itself and 1 more",
+    ]
+    assert len(lines[0]) <= 42 and len(lines[1]) <= 42
+
+
+def test_the_shared_line_may_fill_two_line_widths(monkeypatch):
+    monkeypatch.setattr("fastworkflow.capability_answer.LINE_WIDTH", 30)
+    shared = ["cmd_a", "cmd_b", "cmd_c", "cmd_d", "cmd_e", "cmd_f", "cmd_g", "cmd_h"]
+    answer = render_capability_answer({}, [], {"One": shared, "Two": shared, "Three": shared})
+    line = answer.splitlines()[-1]
+    assert line == "- In several places: cmd a, cmd b, cmd c, cmd d and 4 more"
+    assert 30 < len(line) <= 60
 
 
 @pytest.fixture
