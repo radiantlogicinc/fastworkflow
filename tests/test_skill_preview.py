@@ -281,6 +281,11 @@ def test_check_fails_on_a_skill_file_the_loader_skips(workflow, monkeypatch, cap
         handle.write("def steps():\n    return ['a']\n")
     assert _run_cli(monkeypatch, "skill", "preview", workflow, "--check") == 1
     assert "broken: SkillFormatError:" in capsys.readouterr().out
+    # preview_main itself reports it as a problem line, not an exception
+    import argparse
+    assert skill_preview.preview_main(argparse.Namespace(workflow_folder=workflow, out=None, check=True)) == 1
+    out = capsys.readouterr().out
+    assert "cannot be checked: skill file(s) not loaded:" in out and "  broken: SkillFormatError:" in out
 
 
 def test_check_fails_on_a_fact_source_the_workflow_does_not_have(workflow, monkeypatch, capsys):

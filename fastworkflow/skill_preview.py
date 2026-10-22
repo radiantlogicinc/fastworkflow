@@ -1609,7 +1609,11 @@ def preview_main(args) -> int:
     """``fastworkflow skill preview``: write the previews, or with ``--check`` compare them."""
     out_dir = args.out or default_out_dir(args.workflow_folder)
     if args.check:
-        problems = check_previews(args.workflow_folder, out_dir)
+        try:
+            problems = check_previews(args.workflow_folder, out_dir)
+        except PreviewError as error:   # no _skills folder, or a skill file that does not load
+            print(f"skill previews in {out_dir} cannot be checked: {error}")
+            return 1
         if problems:
             print(f"skill previews in {out_dir} are not current "
                   f"(run: fastworkflow skill preview {args.workflow_folder}"
