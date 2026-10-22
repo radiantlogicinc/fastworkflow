@@ -1766,6 +1766,73 @@ class TestBoundEvidenceRetention:
         assert _over_cap_diagnostic(db_path) is None
         self._assert_survivors(db_path, _EXP_TURN)
 
+    def test_the_cap_pass_counts_the_spans_it_deletes(self, store, db_path):
+        """Recent spans are evicted by the cap alone, and the count says so."""
+        now_ns = time.time_ns()
+        spans = [
+            tracing.Span(
+                span_id=f"recent-{index}", trace_id="turn-recent", name="fw.turn",
+                start_ns=now_ns, status="ok", attributes={"pad": "x" * 2_000},
+                channel_id="chat",
+            )
+            for index in range(3)
+        ]
+        with store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            store.upsert_span_rows(conn, spans, store._store_redactor())
+            conn.commit()
+
+        deleted = store.prune(retention_days=3650, max_bytes=1)
+
+        assert deleted["spans"] == 3
+        assert _evidence_ids(db_path, "spans", "span_id") == set()
+
+
+def _offload_rows(db_path: str, turn_key: str, channel: str) -> None:
+    """One row in each offload table for *turn_key*."""
+    stamp = "2026-08-29T00:00:00Z"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO offload_evidence (turn_key, channel_id, alias, "
+            "command_name, step_index, text_utf8, text_sha256, redaction, "
+            "redacted, raw_utf8_bytes, persisted_at) "
+            "VALUES (?, ?, 'O1', 'cmd', 1, x'00', 'sha', 'none', 0, 1, ?)",
+            (turn_key, channel, stamp),
+        )
+        conn.execute(
+            "INSERT INTO offload_events (turn_key, channel_id, kind, event_json, "
+            "redaction, redacted, recorded_at) "
+            "VALUES (?, ?, 'k', '{}', 'none', 0, ?)",
+            (turn_key, channel, stamp),
+        )
+        conn.execute(
+            "INSERT INTO offload_command_runs (turn_key, channel_id, alias, "
+            "ordinal, step_index, command_name, success, redaction, redacted, "
+            "persisted_at) VALUES (?, ?, 'O1', 0, 1, 'cmd', 1, 'none', 0, ?)",
+            (turn_key, channel, stamp),
+        )
+        conn.commit()
+
+
+def test_restart_attempt_deletes_the_attempts_offload_rows(store, db_path):
+    """A restarted attempt's offload rows go with its turns; others stay."""
+    store.create_experiment(
+        "exp-1", "L", declared_tasks=1, declared_attempts=1, **STORE_PIN
+    )
+    channel = channel_for("exp-1", "t0", 1)
+    store.start_attempt("exp-1", "t0", 1, channel)
+    _write_turn(store, _turn_row(
+        "tk-restarted", channel, experiment_id="exp-1", task_id="t0", attempt=1,
+    ))
+    _write_turn(store, _turn_row("tk-chat", "chat"))
+    _offload_rows(db_path, "tk-restarted", channel)
+    _offload_rows(db_path, "tk-chat", "chat")
+
+    assert store.restart_attempt("exp-1", "t0", 1) == 1
+
+    for table in ("offload_evidence", "offload_events", "offload_command_runs"):
+        assert _evidence_ids(db_path, table, "turn_key") == {"tk-chat"}, table
+
 
 # ----------------------------------------------------------------------
 # `[XR9]`: the read API, over real HTTP

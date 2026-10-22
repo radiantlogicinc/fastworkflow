@@ -4303,7 +4303,8 @@ class ObservabilityStore:
     def restart_attempt(self, experiment_id: str, task_id: str, attempt: int) -> int:
         """Clear a crashed attempt so it can be re-run under the same labels.
 
-        Deletes that attempt's conversations and turns in ONE transaction and
+        Deletes that attempt's conversations and turns (with their spans,
+        artifacts, prompt slots and offload rows) in ONE transaction and
         bumps `restarts`. The deletion is deliberate (`[XR18]`): the abandoned
         partial trajectory is evidence of nothing, `idx_conv_experiment_attempt`
         is UNIQUE so a second conversation under the same three labels is
@@ -4354,6 +4355,9 @@ class ObservabilityStore:
                     conn.execute(
                         f"DELETE FROM spans WHERE trace_id IN ({marks})", chunk
                     )
+                # The turns' offload rows go with them, by the same turn key
+                # retention and erasure delete them by.
+                self._delete_offload_turns_in_txn(conn, turn_keys, {})
             deleted = conn.execute(
                 """DELETE FROM turns
                     WHERE experiment_id=? AND task_id=? AND attempt=?""",
@@ -5497,6 +5501,7 @@ class ObservabilityStore:
                     "ORDER BY start_ns LIMIT ?)",
                     (_PRUNE_BATCH_ROWS,),
                 )
+                deleted["spans"] += cur.rowcount
                 oldest_turns = self._offload_turns_in_txn(
                     conn, before=None, limit=_OFFLOAD_PRUNE_BATCH_TURNS,
                     exempt=bound_turns, only=finished_turns,
