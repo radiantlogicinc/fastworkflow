@@ -675,6 +675,44 @@ def test_a_subject_cut_short_becomes_the_whole_name_and_a_part_of_a_compound_is_
                               "Treat Ledger as a right: who holds it?")[0]["right"] == "Ledger"
 
 
+def test_a_subject_written_in_lower_case_stands_when_it_is_a_whole_name(tmp_path):
+    command = _named(tmp_path)
+    # a full name in lower case, between common words, stands
+    args, notes = sc.check_arguments(command, {"right": "Payroll", "person": "ann lee"}, "is ann lee in Payroll?")
+    assert args["person"] == "ann lee" and notes == []
+    assert sc.check_arguments(command, {"right": "Billing", "person": "bo diaz"},
+                              "may bo diaz have Billing, and who else has it?")[0]["person"] == "bo diaz"
+    # a part of a longer lower-case name is refused ("ann lee" of "ann lee smith", "lee smith")
+    request = "is ann lee smith in Payroll?"
+    for part in ("ann lee", "lee smith"):
+        args, notes = sc.check_arguments(command, {"right": "Payroll", "person": part}, request)
+        assert args["person"] == "" and "names no record" in notes[0]
+    assert sc.check_arguments(command, {"right": "Billing", "person": "ann lee"},
+                              "what does ann lee's login hold on Billing?")[0]["person"] == "ann lee"
+    # one name of a chain joined by "and" that ends on a company word is a part of that name
+    request = "which controls does henderson ramirez and lewis and sons trip on Billing?"
+    for part in ("henderson ramirez", "lewis and sons"):
+        args, notes = sc.check_arguments(command, {"right": "Billing", "person": part}, request)
+        assert args["person"] == "" and "names no record" in notes[0], part
+    assert sc.check_arguments(command, {"right": "Billing", "person": "bo diaz"},
+                              "may ann lee and bo diaz have Billing?")[0]["person"] == "bo diaz"
+    # a single lower-case word reads as a common noun: refused, as are common words
+    for person, request in (("roster", "who is on the roster for Payroll?"),
+                            ("user", "which user am I acting as on Billing?"),
+                            ("ann", "is ann lee in Payroll?"),
+                            ("full list", "give me the full list for Billing")):
+        args, notes = sc.check_arguments(command, {"right": request.split()[-1].strip("?"), "person": person}, request)
+        assert args["person"] == "" and "names no record" in notes[0], person
+    with pytest.raises(SkillCallError, match="names no record"):
+        sc.check_arguments(command, {"right": "approve"},
+                           "Before I approve anything on the right Payroll_Approver 2: how risky is it?")
+    # a capitalised name cut short still becomes the whole subject; its sentence-opening tail stands
+    assert sc.check_arguments(command, {"right": "Billing", "person": "Ann"},
+                              "May Ann Lee have Billing?")[0]["person"] == "Ann Lee"
+    assert sc.check_arguments(command, {"right": "Ledger"},
+                              "Treat Ledger as a right: who holds it?")[0]["right"] == "Ledger"
+
+
 def test_an_argument_inside_an_identifier_the_request_writes_becomes_the_whole_identifier(tmp_path):
     import re
     command = _named(tmp_path, (re.compile(r"\bacct_[0-9]+"),))
