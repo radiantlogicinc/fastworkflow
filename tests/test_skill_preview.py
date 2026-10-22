@@ -705,7 +705,7 @@ def test_a_skill_past_max_grid_lists_every_phase(tmp_path):
 @pytest.mark.parametrize("steps, line", [
     (["say that b1 has loans l1, l2"],
      "Answer: written by code, word for word (step 1 verbatim)."),
-    (["say that b1 has loans l1, l2", "say what b2 holds: l3", "compare them: l1 > l3",
+    (["say that b1 has loans l1, l2", "say that what b2 holds: l3", "say that l1 > l3",
       "apply no change"],
      "Answer: written by code, word for word (steps 1-3 verbatim; step 4 dropped as a guard)."),
     (["say that b1 has loans l1", "do not open them", "say that b2 has none", "never guess"],
@@ -727,13 +727,15 @@ def test_answer_mode_reads_the_steps_with_the_runtime_rules(steps, line):
     assert line.startswith("Answer: written by code") == answer_by_code(number(steps))
 
 
-def test_answer_mode_shows_what_the_wording_rules_decide_even_when_it_misfires():
-    # "say <question>: <text>" is written word for word by code: no judgement is made.
+def test_answer_mode_is_by_code_only_for_say_that_and_guards_need_a_negation():
+    # "say <question>: <text>" needs a judgement: only "say that" is copied (fix-ajir.10).
     assert skill_preview.answer_mode(["say which is riskier: A has score 3, B has score 5"]) == (
-        "Answer: written by code, word for word (step 1 verbatim).")
-    # A step starting "apply" with no facts is a guard: it is dropped from the answer.
+        "Answer: written by the model (step 1 needs judgement).")
+    # A step starting "apply" with no negation word is no guard: the model applies it.
     assert skill_preview.answer_mode(["say that the total is 100",
                                       "apply a 10% discount to the total"]) == (
+        "Answer: written by the model (step 2 needs judgement).")
+    assert skill_preview.answer_mode(["say that the total is 100", "apply no discount"]) == (
         "Answer: written by code, word for word (step 1 verbatim; step 2 dropped as a guard).")
 
 

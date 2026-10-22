@@ -1969,14 +1969,15 @@ def test_missing_list_items_reads_lists_the_steps_give_in_full_as_rows():
 def test_answer_only_answer_appends_rows_left_out(monkeypatch):
     monkeypatch.setattr("fastworkflow.skill_phases.write_answer", lambda query: "Loans: l1.")
     book = BookFacts(uid="b1", loan_uids=["l1", "l2"])
-    # "list ...: facts" is no verbatim step (only say / compare / present are), so the model writes it.
+    # "list ...: facts" is no verbatim step (only "say that" is), so the model writes it.
     assert answer_only_answer("q", "1. list the loans of b1: l1, l2",
                               {"book": book}) == \
         f"Loans: l1.\n\n{MISSING_ITEMS_LEAD} l2."
 
 
 # ----------------------------------------------------------------------
-# Code writes an answer-only phase whose every step is verbatim or a guard (fix-hia1.30)
+# Code writes an answer-only phase whose every step is verbatim or a guard (fix-hia1.30;
+# verbatim only for "say that", fix-ajir.10)
 # ----------------------------------------------------------------------
 
 from fastworkflow.skill_phases import answer_by_code, answer_step_kind  # noqa: E402
@@ -1984,13 +1985,23 @@ from fastworkflow.skill_phases import answer_by_code, answer_step_kind  # noqa: 
 
 def test_answer_steps_are_verbatim_guard_or_judgement():
     assert answer_step_kind("1. say that b1 has loans l1, l2") == "verbatim"
-    assert answer_step_kind("say what Dune holds: l1, l2") == "verbatim"
-    assert answer_step_kind("compare the two books: Dune has 2 loans") == "verbatim"
-    assert answer_step_kind("present the renewals as options only, and say that none "
-                            "was applied: renew l1") == "verbatim"
+    assert answer_step_kind("Say that what Dune holds: l1, l2") == "verbatim"
     assert answer_step_kind("2. apply no change") == "guard"
     assert answer_step_kind("present them as options only; apply none of them") == "guard"
+    assert answer_step_kind("do not renew any loan") == "guard"
     assert answer_step_kind("say which book is riskier") == "judgement"
+    # Only "say that" is copied: a head and its facts may still need a judgement.
+    assert answer_step_kind("say which is riskier: A has score 3, B has score 5") == "judgement"
+    assert answer_step_kind("compare findings and say which carries more risk: A 3, B 5") == \
+        "judgement"
+    assert answer_step_kind("say what Dune holds: l1, l2") == "judgement"
+    assert answer_step_kind("present the renewals as options only, and say that none "
+                            "was applied: renew l1") == "judgement"
+    # A guard word with no negation word is an instruction, not a guard.
+    assert answer_step_kind("apply a 10% discount to the total") == "judgement"
+    # "say that" followed by an instruction is still copied: the author's choice.
+    assert answer_step_kind("say that the riskier one is whichever has more findings") == \
+        "verbatim"
     assert answer_step_kind("say what Dune holds:") == "judgement"      # no facts given
     assert answer_step_kind("list the loans of b1: l1, l2") == "judgement"
     assert answer_step_kind("b1 has loans l1") == "judgement"
@@ -1998,10 +2009,9 @@ def test_answer_steps_are_verbatim_guard_or_judgement():
 
 def test_answer_from_steps_writes_each_verbatim_step_as_a_line():
     steps = ("1. say that b1 has loans l1, l2\n"
-             "2. say what Dune holds: l1, l2\n"
-             "3. present the renewals on offer as options only, and say that none was "
-             "applied: renew l1, renew l2\n"
-             "4. compare the two books: Dune has 2 loans; Emma has 1\n"
+             "2. say that what Dune holds: l1, l2\n"
+             "3. say that none was applied. Renew l1, renew l2\n"
+             "4. say that Dune has 2 loans; Emma has 1\n"
              "5. apply no change\n"
              "6. present them as options only; apply none of them")
     assert answer_by_code(steps)
@@ -2020,7 +2030,7 @@ def test_answer_only_answer_makes_no_model_call_when_every_step_is_verbatim(monk
     monkeypatch.setattr("fastworkflow.skill_phases.write_answer",
                         lambda query: calls.append(query) or "Model text.")
     book = BookFacts(uid="b1", loan_uids=["l1", "l2"])
-    steps = "1. say what b1 has on loan: l1, l2\n2. apply no change"
+    steps = "1. say that what b1 has on loan: l1, l2\n2. apply no change"
     assert answer_only_answer("q", steps, {"book": book}) == "What b1 has on loan: l1, l2."
     assert calls == []
     # The appended rows are still checked: a guard that names a list the answer leaves out.
@@ -2063,7 +2073,7 @@ def test_bulleted_answer_splits_only_runs_of_output_values():
 def test_answer_only_answer_bullets_a_code_written_answer_after_its_checks(monkeypatch):
     monkeypatch.setattr("fastworkflow.skill_phases.write_answer", lambda query: "a, b, c, d")
     book = BookFacts(uid="b1", loan_uids=["l1", "l2", "l3", "l4"])
-    steps = ("1. say what b1 has on loan, naming each: l1, l2, l3, l4\n"
+    steps = ("1. say that what b1 has on loan, naming each: l1, l2, l3, l4\n"
              "2. say that it is due back\n3. apply no change")
     assert answer_only_answer("q", steps, {"book": book}) == (
         "- What b1 has on loan, naming each:\n  - l1\n  - l2\n  - l3\n  - l4\n"

@@ -125,8 +125,8 @@ How the runner (``WorkflowExecutionContext``) runs a phased skill call, phase by
    not an executor run. One model call with no tools (``write_answer``) writes its answer
    from the request and its steps, told "Do not run any command; write the answer from
    these facts only." (``ANSWER_ONLY_RULE``) and to name every item of every list. It
-   cannot call a workflow command. When every step is verbatim (``say that ...``, or
-   ``say what ...: <facts>``) or a guard (``apply no change``), code writes the answer
+   cannot call a workflow command. When every step is verbatim (``say that ...``) or a
+   guard (``apply no change``), code writes the answer
    from the steps with no model call (``answer_by_code``, ``answer_step_kind``).
    Its answer is checked in code (``answer_only_answer``):
    field markers and echoed framing are stripped (``clean_answer``), an empty reply (or
@@ -1761,12 +1761,11 @@ def is_empty_answer(text: Any) -> bool:
 _STEP_NUMBER_RE = re.compile(r"^\s*\d+[.)]\s*")
 _SAY_RE = re.compile(r"^say(?:\s+that)?\s+", re.IGNORECASE)
 
-#: How an answer-only step reads (``answer_step_kind``). ``instruction``: the words a
-#: step that hands over facts starts with (``say ...: <facts>``); ``guard``: the words of
-#: a step with no facts that only says what not to do (``apply no change``).
+#: The words a guard step starts with (``answer_step_kind``): with a negation word
+#: (``finish_check._NEGATION_RE``) and no facts, it only says what not to do
+#: (``apply no change``) and adds nothing to the answer.
 ANSWER_STEP_WORDS = {
-    "instruction": ("say", "compare", "present"),
-    "guard": ("apply", "do not", "don't", "never", "make no", "change nothing",
+    "guard": ("apply", "do not", "don't", "never", "make no",
               "present them as options only", "present it as options only"),
 }
 
@@ -1778,43 +1777,30 @@ def _starts_with(text: str, words: Sequence[str]) -> bool:
 def answer_step_kind(step: str) -> str:
     """How code reads one answer-only step (its number dropped):
 
-    - ``"verbatim"``: it starts with ``say that``, or it is an instruction head
-      (``ANSWER_STEP_WORDS["instruction"]``) followed by ``": "`` and the facts
-      (``say what b1 holds: l1, l2``): code can write it as it stands;
-    - ``"guard"``: no facts, only what not to do (``apply no change``,
-      ``ANSWER_STEP_WORDS["guard"]``): it adds nothing to the answer;
-    - ``"judgement"``: anything else (``say which is riskier``): the model must write it.
+    - ``"verbatim"``: it starts with ``say that`` (``say that b1 has loans l1, l2``): code
+      writes it as it stands. This is the only form code copies;
+    - ``"guard"``: no facts, only what not to do: it starts with a guard word
+      (``ANSWER_STEP_WORDS["guard"]``) AND has a negation word (``finish_check._NEGATION_RE``:
+      ``apply no change``): it adds nothing to the answer;
+    - ``"judgement"``: anything else (``say which is riskier: A 3, B 5``,
+      ``apply a 10% discount``): the model must write it.
     """
+    from fastworkflow.observation_offloading.finish_check import _NEGATION_RE
+
     step = _STEP_NUMBER_RE.sub("", str(step or "")).strip()
     if re.match(r"say\s+that\s", step, re.IGNORECASE):
         return "verbatim"
     head, sep, body = step.partition(": ")
-    if sep and body.strip() and _starts_with(head, ANSWER_STEP_WORDS["instruction"]):
-        return "verbatim"
-    if not (sep and body.strip()) and _starts_with(step, ANSWER_STEP_WORDS["guard"]):
+    if (not (sep and body.strip()) and _starts_with(step, ANSWER_STEP_WORDS["guard"])
+            and _NEGATION_RE.search(step)):
         return "guard"
     return "judgement"
 
 
 def _answer_line(step: str) -> str:
-    """One step written as an answer line: ``say that P`` is P; ``say what X: facts`` keeps
-    its question as a label (``What X: facts``); ``present ..., and say that P: facts``
-    is ``P. facts``; another instruction head (``compare ...: facts``) gives its facts."""
-    if re.match(r"say\s+that\s", step, re.IGNORECASE):
-        line = _SAY_RE.sub("", step)
-    else:
-        head, sep, body = step.partition(": ")
-        said = re.search(r"\bsay\s+that\s+(.+)$", head, re.IGNORECASE)
-        if not (sep and body.strip()) or not _starts_with(head, ANSWER_STEP_WORDS["instruction"]):
-            line = _SAY_RE.sub("", step)
-        elif re.match(r"say\s", head, re.IGNORECASE):
-            line = f"{_SAY_RE.sub('', head)}: {body}"
-        elif said:
-            body = body.strip()
-            line = f"{said.group(1).rstrip('.')}. {body[:1].upper()}{body[1:]}"
-        else:
-            line = body
-    line = line.strip()
+    """One step written as an answer line: its leading ``say`` / ``say that`` dropped, its
+    first letter in capitals, ending with a full stop (``say that P`` is ``P.``)."""
+    line = _SAY_RE.sub("", step).strip()
     line = line[:1].upper() + line[1:]
     return line if line.endswith((".", "!", "?")) else line + "."
 

@@ -342,18 +342,24 @@ sub-task runs its phases in order instead of one executor run on the whole list.
      separator). If no workflow command names can be read, no phase is answer-only.
    - **Code writes the answer when the steps already are the answer**
      (`skill_phases.answer_by_code`). Each step is read in code (`answer_step_kind`):
-     - *verbatim*: it starts with `say that`, or it is an instruction head (`say`,
-       `compare`, `present`) followed by `": "` and the facts (`say what b1 holds: l1, l2`);
-     - *guard*: no facts, only what not to do (`apply no change`, `present them as options
-       only; apply none of them`);
-     - *judgement*: anything else (`say which is riskier`, `list the loans: l1, l2`).
+     - *verbatim*: it starts with `say that` (`say that b1 has loans l1, l2`, `say that
+       what b1 holds: l1, l2`). This is the only form code copies;
+     - *guard*: no facts, only what not to do: it starts with a guard word
+       (`ANSWER_STEP_WORDS["guard"]`: `apply`, `do not`, `don't`, `never`, `make no`,
+       `present them/it as options only`) AND has a negation word
+       (`finish_check._NEGATION_RE`): `apply no change`, `present them as options only;
+       apply none of them`;
+     - *judgement*: anything else: `say which is riskier`, `list the loans: l1, l2`, and
+       also a head with facts (`say which is riskier: A 3, B 5`, `compare ...: facts`),
+       since only the author knows whether the facts already answer the head, and a guard
+       word with no negation (`apply a 10% discount to the total`).
 
-     The words are one constant, `ANSWER_STEP_WORDS`. When every step is verbatim or a
-     guard (and one at least is verbatim), there is no model call: `answer_from_steps`
-     writes one line per step, in step order, unnumbered, guards dropped. `say that P` is
-     `P.`; `say what X: facts` keeps its question as a label (`What X: facts.`; also `say
-     which`, `say who`, `say whether`, `say for ...`); `present ..., and say that P: facts`
-     is `P. Facts.`; `compare ...: facts` is `Facts.`. One judgement step and the model
+     When every step is verbatim or a guard (and one at least is verbatim), there is no
+     model call: `answer_from_steps` writes one line per step, in step order, unnumbered,
+     guards dropped: `say that P` is `P.` (first letter in capitals, a full stop added
+     when it has none), so `say that what X holds: facts` is `What X holds: facts.`. A
+     `say that` followed by an instruction (`say that the riskier one is whichever has
+     more findings`) is copied too: write the finished sentence. One judgement step and the model
      writes the whole answer, as below. This is always on (its temporary switch was
      removed after stages 12 and 13 confirmed the gain). The phase's span says which
      (`answer_by_code`).
