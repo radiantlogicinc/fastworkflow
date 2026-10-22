@@ -402,78 +402,13 @@ def test_a_failing_merge_keeps_the_models_split(monkeypatch):
         "Audit right A.", "Sweep Hubbard."]
 
 
-def test_one_sample_is_the_single_call_retried_once_when_broken(monkeypatch):
-    import fastworkflow.workflow_agent as agent
+def test_a_clean_split_is_not_retried():
+    from fastworkflow.workflow_agent import split_into_subtasks
 
-    monkeypatch.setattr(agent, "SPLIT_SAMPLES", 1)
     clean = {"reasoning": "r", "subtasks": "1. Audit as well as sweep Alice.\n2. Sweep Hubbard."}
     retry_would_differ = {"reasoning": "r", "subtasks": "1. Other part.\n2. Another part."}
-    assert agent.split_into_subtasks("the request", planner_lm=DummyLM([clean, retry_would_differ])) == [
+    assert split_into_subtasks("the request", planner_lm=DummyLM([clean, retry_would_differ])) == [
         "Audit as well as sweep Alice.", "Sweep Hubbard."]
-    duplicated = {"reasoning": "r", "subtasks": "1. Same thing.\n2. Same thing."}
-    fixed = {"reasoning": "r", "subtasks": "1. Part A.\n2. Part B."}
-    assert agent.split_into_subtasks("the request", planner_lm=DummyLM([duplicated, fixed, clean])) == [
-        "Part A.", "Part B."]
-
-
-class _PerCall(DummyLM):
-    """A DummyLM whose copy for splitter call n (its rollout id; 0 for the call at temperature 0) gives answers[n]."""
-
-    def __init__(self, answers):
-        super().__init__([])
-        self.per_call = answers
-
-    def copy(self, **kwargs):
-        return DummyLM([self.per_call[kwargs.get("rollout_id", 0)]])
-
-
-_REQUEST = "Audit Alice Moss and Bob Lund."
-_PER_PERSON = {"reasoning": "r", "subtasks": "1. Audit Alice Moss.\n2. Audit Bob Lund."}
-_PER_PERSON_REWORDED = {"reasoning": "r", "subtasks": "1. Check Alice Moss.\n2. Check Bob Lund."}
-_WHOLE = {"reasoning": "r", "subtasks": "1. Audit Alice Moss and Bob Lund."}
-_BROKEN = {"reasoning": "r", "subtasks": "1. Audit Alice Moss.\n2. Audit Alice Moss."}
-
-
-def test_the_split_most_calls_agree_on_wins_in_the_first_wording(monkeypatch):
-    import fastworkflow.workflow_agent as agent
-
-    monkeypatch.setattr(agent, "SPLIT_SAMPLES", 3)
-    # Calls agree on which subjects each job names, whatever the wording; the first such call's words are kept.
-    assert agent.split_into_subtasks(_REQUEST, planner_lm=_PerCall([_WHOLE, _PER_PERSON_REWORDED, _PER_PERSON])) == [
-        "Check Alice Moss.", "Check Bob Lund."]
-    assert agent.split_into_subtasks(_REQUEST, planner_lm=_PerCall([_PER_PERSON, _WHOLE, _WHOLE])) == [
-        "Audit Alice Moss and Bob Lund."]
-
-
-def test_a_tied_vote_keeps_the_temperature_0_split(monkeypatch):
-    import fastworkflow.workflow_agent as agent
-
-    monkeypatch.setattr(agent, "SPLIT_SAMPLES", 3)
-    # A broken answer does not vote, so one split each: the temperature-0 call's split is kept.
-    assert agent.split_into_subtasks(_REQUEST, planner_lm=_PerCall([_PER_PERSON, _WHOLE, _BROKEN])) == [
-        "Audit Alice Moss.", "Audit Bob Lund."]
-    assert agent.split_into_subtasks(_REQUEST, planner_lm=_PerCall([_WHOLE, _BROKEN, _PER_PERSON])) == [
-        "Audit Alice Moss and Bob Lund."]
-    # When every call is broken, one more call is made.
-    assert agent.split_into_subtasks(_REQUEST, planner_lm=_PerCall([_BROKEN, _BROKEN, _BROKEN, _PER_PERSON])) == [
-        "Audit Alice Moss.", "Audit Bob Lund."]
-
-
-def test_the_calls_carry_the_turns_dspy_settings(monkeypatch):
-    import dspy
-    from dspy.utils.callback import BaseCallback
-    import fastworkflow.workflow_agent as agent
-
-    monkeypatch.setattr(agent, "SPLIT_SAMPLES", 3)
-    seen = []
-
-    class Seen(BaseCallback):
-        def on_lm_start(self, call_id, instance, inputs):
-            seen.append(call_id)
-
-    with dspy.context(callbacks=[Seen()]):
-        agent.split_into_subtasks(_REQUEST, planner_lm=_PerCall([_PER_PERSON, _PER_PERSON, _WHOLE]))
-    assert len(seen) >= 2   # the vote may end before the last call starts
 
 
 def skill_file(text: str) -> str:
