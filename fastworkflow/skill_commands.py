@@ -84,7 +84,12 @@ A skill file::
   without parameters leaves it out or empty. A field's type is ``str``, ``bool``, ``int``
   or ``Literal[...]`` of text values (an enum). ``Field(default=...)`` makes it optional (no
   default: required; a ``bool`` always defaults to false, a ``default=True`` fails the
-  load: the model sets it true only when the request asks for that part); ``description``
+  load: the model sets it true only when the request asks for that part). A ``str``
+  default is the value ``steps()`` gets when the request gives none, so ``"NOT_FOUND"``
+  would be written into the steps: an argument the request may leave out defaults to
+  ``""``, or is ``Optional[str] = None`` (``steps()``, ``plan()``, the hook and the
+  validators then get None for it; to the planner it is a str that defaults to empty).
+  ``description``
   is what the planner and a ``verify`` check read; ``ge``/``le`` bounds are enforced by the
   argument screen (see ``check_arguments``). The skill options go in ``json_schema_extra``
   (each optional; unknown keys fail the load):
@@ -199,7 +204,8 @@ import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from typing import Callable, Literal, get_args, get_origin
+from types import UnionType
+from typing import Callable, Literal, Optional, Union, get_args, get_origin
 
 #: A ``verify`` check replaces the planner's argument only at or above this probability.
 VERIFY_THRESHOLD = 0.65
@@ -408,6 +414,12 @@ def _spec_from_field(name: str, info, where: str) -> dict:
     from pydantic_core import PydanticUndefined
 
     annotation = info.annotation
+    optional = get_origin(annotation) in (Union, UnionType) and type(None) in get_args(annotation)
+    if optional:
+        if annotation != Optional[str] or info.default is not None:
+            raise SkillFormatError(f"{where}: field {name!r}: Optional is for an argument the request may "
+                                   "leave out, Optional[str] = None; give another type a default")
+        annotation = str
     if annotation is str or annotation is bool or annotation is int:
         type_text = annotation.__name__
     elif get_origin(annotation) is Literal:
@@ -423,7 +435,9 @@ def _spec_from_field(name: str, info, where: str) -> dict:
         spec["desc"] = info.description
     if info.default_factory is not None:
         raise SkillFormatError(f"{where}: field {name!r}: give a plain default, not a default_factory")
-    if info.default is not PydanticUndefined:
+    if optional:
+        spec["default"] = ""
+    elif info.default is not PydanticUndefined:
         default = info.default
         if default is None or isinstance(default, (dict, list, tuple)):
             raise SkillFormatError(f"{where}: field {name!r} default must be a value of its type "
@@ -464,6 +478,20 @@ class SkillFile:
     command: SkillCommand | None
     #: ``Signature.plain_utterances``: example requests for the skill (with or without params).
     plain_utterances: tuple[str, ...] = ()
+
+
+def _absent_as_none(command: SkillCommand, args: dict) -> dict:
+    """*args* as the skill file's code reads them: an ``Optional[str] = None`` field's
+    absent argument (``""``) is None."""
+    fields = command.input_model.model_fields
+    return {n: None if v == "" and n in fields and fields[n].default is None else v
+            for n, v in args.items()}
+
+
+def input_instance(command: SkillCommand, args: dict):
+    """The skill's ``Input`` for *args*, unvalidated, as ``steps()``, ``plan()`` and the hook
+    get it (``_absent_as_none``)."""
+    return command.input_model.model_construct(**_absent_as_none(command, args))
 
 
 def _call_steps(fn: Callable, instance, where: str) -> list[str]:
@@ -831,7 +859,7 @@ def placeholder_template(command: SkillCommand) -> list[str]:
     grid, runs = [], []
     for env in _template_grid(command):
         try:
-            lines = _call_steps(command.steps_fn, command.input_model.model_construct(**env), command.path)
+            lines = _call_steps(command.steps_fn, input_instance(command, env), command.path)
         except Exception as exc:  # noqa: BLE001 - a set steps() refuses is left out of the template
             if not grid and not runs:
                 raise SkillFormatError(f"{command.path}: steps() fails on placeholder inputs "
@@ -960,7 +988,7 @@ def _checked_plan(command: SkillCommand, own_steps: bool = True) -> tuple[type, 
     ran = 0
     for env in _template_grid(command):
         try:
-            result = command.plan_fn(command.input_model.model_construct(**env))
+            result = command.plan_fn(input_instance(command, env))
         except Exception as exc:  # noqa: BLE001 - a set plan() refuses, as for steps()
             if not ran:
                 raise SkillFormatError(f"{command.path}: plan() fails on placeholder inputs "
@@ -1041,7 +1069,7 @@ def phases_for(command: SkillCommand, args: dict) -> list | None:
     """
     from fastworkflow.skill_phases import PhaseError, active_phases, is_flat_plan
 
-    instance = command.input_model.model_construct(**args)
+    instance = input_instance(command, args)
     try:
         raw = command.plan_fn(instance)
         if is_flat_plan(raw):
@@ -1080,7 +1108,7 @@ def expand(command: SkillCommand, args: dict) -> list[str]:
     """The skill's command steps for ``args`` (complete, checked arguments), unnumbered:
     ``steps(input)``. Raises SkillCallError when ``steps()`` fails or returns something else
     than a list of text."""
-    instance = command.input_model.model_construct(**args)
+    instance = input_instance(command, args)
     try:
         lines = _call_steps(command.steps_fn, instance, command.path)
     except SkillCallError:
@@ -1100,7 +1128,7 @@ def _run_validate(command: SkillCommand, args: dict, request: str, workflow) -> 
     SkillCallError when it refuses them or raises."""
     import inspect
 
-    instance = command.input_model.model_construct(**args)
+    instance = input_instance(command, args)
     hook = command.validate
     kwargs = {"command_text": request} if "command_text" in inspect.signature(hook).parameters else {}
     try:
@@ -1110,7 +1138,10 @@ def _run_validate(command: SkillCommand, args: dict, request: str, workflow) -> 
     ok, message = result if isinstance(result, tuple) else (bool(result), "")
     if not ok:
         raise SkillInputError(f"validate_extracted_parameters: {message}")
-    return {p.name: getattr(instance, p.name, args.get(p.name)) for p in command.params}
+    fields = command.input_model.model_fields
+    out = {p.name: getattr(instance, p.name, args.get(p.name)) for p in command.params}
+    # an Optional[str] field set to None is the absent argument, "" (``_absent_as_none``)
+    return {n: "" if v is None and fields[n].default is None else v for n, v in out.items()}
 
 
 def _validation_text(error) -> str:
@@ -1131,7 +1162,8 @@ def check_input(command: SkillCommand, args: dict, request: str, workflow=None) 
     from pydantic import ValidationError
 
     try:
-        command.input_model.model_validate(args, context={"request": request, "workflow": workflow})
+        command.input_model.model_validate(_absent_as_none(command, args),
+                                           context={"request": request, "workflow": workflow})
     except ValidationError as exc:
         raise SkillInputError(f"the arguments break a rule of {command.name}: {_validation_text(exc)}") from None
 

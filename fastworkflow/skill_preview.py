@@ -730,7 +730,7 @@ def _render_phases(command, args: dict) -> _Render:
     from fastworkflow.skill_phases import Phase, PhaseError, active_phases, is_flat_plan, phase_steps
 
     try:
-        raw = command.plan_fn(command.input_model.model_construct(**args))
+        raw = command.plan_fn(skill_commands.input_instance(command, args))
         if is_flat_plan(raw):
             # No phases for these inputs: the call runs flat, from steps().
             try:

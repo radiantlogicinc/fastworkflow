@@ -456,6 +456,15 @@
 
 ### Changed
 
+- **Skill API surface** (fix-ajir.19): `fastworkflow.skill_phases.__all__` is
+  the author-facing API (`Phase`, `concatenated_steps`, `fact_from`,
+  `facts_text`, `PhaseError`, and the helpers a workflow's tests use to check
+  its skills without a model); the other names stay importable but are the
+  framework's. A skill `Input` field may be `Optional[str] = None`: the planner
+  sees a str that defaults to empty, and `steps()`, `plan()`, the hook and the
+  validators get None when the request leaves it out. A `str` default such as
+  `"NOT_FOUND"` is still a value written into the steps (now documented).
+
 - **The finish check runs on every run that has a plan** (fix-3xts follow-up):
   it no longer waits for `FW_FINISH_CHECK`, and it reads plan steps against
   their commands' runs only. A run with no durable archive gets no note

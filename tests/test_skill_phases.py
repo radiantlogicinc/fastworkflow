@@ -1911,6 +1911,17 @@ def test_write_answer_retries_an_empty_reply_once_and_strips_field_markers():
     assert len(lm.history) == 2
 
 
+def test_the_star_import_is_the_author_api():
+    from fastworkflow import skill_phases
+
+    names: dict = {}
+    exec("from fastworkflow.skill_phases import *", names)
+    assert {"Phase", "concatenated_steps", "fact_from", "facts_text"} <= set(names)
+    assert "write_answer" not in names and "item_record" not in names
+    # the framework's own names stay importable
+    assert callable(skill_phases.write_answer) and callable(skill_phases.item_record)
+
+
 def test_fact_from_is_the_field_of_a_fact_copied_from_a_command_field():
     class Page(BaseModel):
         uids: list[str] = fact_from("list_items.item_uids", min_length=1,

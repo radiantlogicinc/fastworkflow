@@ -259,7 +259,8 @@ def steps(input):
 
 @pytest.mark.parametrize("field, message", [
     ("ratio: float = 0.5", "has type"),
-    ("name: Optional[str] = None", "has type"),
+    ("count: Optional[int] = None", "Optional is for an argument the request may leave out"),
+    ("name: Optional[str] = 'x'", "Optional is for"),
     ("name: str = None", "default must be a value of its type"),
     ("flag: bool = True", "must default to false"),
     ("kind: Literal['a', 'b'] = 'c'", "not one of its values"),
@@ -275,6 +276,54 @@ def steps(input):
 ])
 def test_a_malformed_input_field_fails_the_load(tmp_path, field, message):
     assert re.search(message, _load_error(_write(tmp_path, {"bad": FIELD.format(field=field)})))
+
+
+OPTIONAL = '''from typing import Optional
+from pydantic import BaseModel, Field, field_validator
+
+
+class Signature:
+    """Show one record, and its owner when the request names one."""
+
+    class Input(BaseModel):
+        name: str
+        owner: Optional[str] = Field(default=None, description="the owner the request names")
+
+        @field_validator("owner")
+        @classmethod
+        def not_the_record(cls, value, info):
+            assert value is None or value != info.data.get("name"), "owner is not the record"
+            return value
+
+    @staticmethod
+    def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
+        SEEN.append(cmd_parameters.owner)
+        return True, ""
+
+
+SEEN = []
+
+
+def steps(input):
+    return [f"open {input.name}", "say who owns it" if input.owner is None else f"check owner {input.owner}"]
+'''
+
+
+def test_an_optional_str_field_is_none_when_the_request_leaves_it_out(tmp_path):
+    command = workflow_agent.load_skill_commands(_write(tmp_path, {"show": OPTIONAL}))["show"]
+    owner = command.param("owner")
+    assert (owner.type, owner.required, owner.default) == ("str", False, "")
+    assert command.template == ("open <name>", "check owner <owner> (only when owner is given)",
+                                "say who owns it (only when owner is empty)")
+    args, _ = sc.check_arguments(command, {"name": "Payroll"}, "Show Payroll.")
+    assert args["owner"] == ""
+    seen = sys.modules[command.validate.__module__].SEEN
+    seen.clear()
+    assert sc.validate_call(command, args, "Show Payroll.") == args
+    assert seen == [None]   # the hook, the validator and steps() read None
+    assert sc.expand(command, args) == ["open Payroll", "say who owns it"]
+    args = sc.validate_call(command, {"name": "Payroll", "owner": "Ann Lee"}, "Show Payroll and Ann Lee.")
+    assert sc.expand(command, args) == ["open Payroll", "check owner Ann Lee"]
 
 
 def test_steps_that_fail_on_placeholder_inputs_need_a_declared_template(tmp_path):
