@@ -1,12 +1,15 @@
 """Skills as parameterized commands: skill files with params, expansion, guards, planner path."""
 from __future__ import annotations
 
+import re
+
 import pytest
 from dspy.utils import DummyLM
 
 from fastworkflow import skill_commands as sc
 from fastworkflow import workflow_agent
-from fastworkflow.skill_commands import SkillCallError, SkillFormatError
+from fastworkflow.skill_commands import SkillCallError
+from tests.test_skill_files import _load_error
 from tests.test_text_planner_and_split import (  # noqa: F401 - workflow_env is a fixture
     RecordingTraceSink, _fake_matcher, _plan, _prompt, _session, _text_answer, workflow_env)
 
@@ -501,9 +504,7 @@ def steps(input):
     ("kind: Literal['a', 'b'] = Field(json_schema_extra={'in_request': True})", "only an int parameter takes in_request"),
 ])
 def test_a_malformed_check_fails_the_load(tmp_path, field, message):
-    folder = _write(tmp_path, {"bad": CHECK_FIELD.replace("{field}", field)})
-    with pytest.raises(SkillFormatError, match=message):
-        workflow_agent.load_skills(folder)
+    assert re.search(message, _load_error(_write(tmp_path, {"bad": CHECK_FIELD.replace("{field}", field)})))
 
 
 def test_a_sure_check_replaces_the_argument_and_an_unsure_one_does_not(tmp_path):

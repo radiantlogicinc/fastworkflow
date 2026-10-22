@@ -171,8 +171,10 @@ A skill file::
   of the template.
 
 The file is imported as a command file is (``python_utils.get_module`` under the workflow's
-package, so package-relative imports work); one that fails to import is logged and skipped;
-a malformed declaration fails the load with a ``SkillFormatError`` naming the file.
+package, so package-relative imports work). A file that fails to import, or whose declaration
+is malformed (a ``SkillFormatError`` naming the file), fails its load: the skill is logged as
+an error and skipped, the workflow's other skills still load, and ``fastworkflow skill
+preview`` fails naming it.
 
 Any ``str`` argument that lies inside a match of one of the workflow's identifier patterns
 (``identifier_patterns`` in ``_skills/_split.py``, e.g. ``\bacct_[0-9]+``) without being all of it becomes the

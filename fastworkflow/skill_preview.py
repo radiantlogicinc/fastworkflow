@@ -1333,9 +1333,9 @@ def default_out_dir(workflow_folder: str) -> str:
 def render_previews(workflow_folder: str) -> dict[str, str]:
     """``{"<skill>.md": preview}`` for every skill of the workflow, by skill name.
 
-    Raises PreviewError when the workflow has no ``_skills`` folder or a skill file
-    could not be loaded (the loader logs and skips one that does not import), and the
-    loader's SkillFormatError for a malformed one.
+    Raises PreviewError when the workflow has no ``_skills`` folder or a skill file could
+    not be loaded (the loader logs and skips one that does not import or is malformed),
+    giving each such file's error.
     """
     from fastworkflow import workflow_agent
 
@@ -1343,16 +1343,28 @@ def render_previews(workflow_folder: str) -> dict[str, str]:
     root = os.path.join(folder, "_skills")
     if not os.path.isdir(root):
         raise PreviewError(f"{workflow_folder} has no _skills folder")
-    files = [name for name, _ in workflow_agent._skill_files(root)]
+    files = workflow_agent._skill_files(root)
     loaded = workflow_agent.load_skills(folder)
     commands = workflow_agent.load_skill_commands(folder)
     utterances = workflow_agent.skill_utterances(folder)
-    missing = sorted(set(files) - {name for name, _, _ in loaded})
-    if missing:
-        raise PreviewError(f"skill file(s) not loaded (see the log): {', '.join(missing)}")
+    names = {name for name, _, _ in loaded}
+    errors = [_load_error(name, path, folder) for name, path in files if name not in names]
+    if errors:
+        raise PreviewError("skill file(s) not loaded:\n" + "\n".join(f"  {e}" for e in errors))
     return {f"{name}.md": render_preview(name, description, steps, commands.get(name),
                                          utterances.get(name, ()), f"_skills/{name}.py")
             for name, description, steps in sorted(loaded)}
+
+
+def _load_error(name: str, path: str, folder: str) -> str:
+    """Why the skill file at *path* does not load: ``<name>: <error>``."""
+    from fastworkflow import workflow_agent
+
+    try:
+        workflow_agent._read_skill_file(name, path, folder)
+    except Exception as error:  # noqa: BLE001 - reported, not raised
+        return f"{name}: {type(error).__name__}: {error}"
+    return f"{name}: skipped by the loader (see the log)"
 
 
 def check_previews(workflow_folder: str, out_dir: Optional[str] = None) -> list[str]:

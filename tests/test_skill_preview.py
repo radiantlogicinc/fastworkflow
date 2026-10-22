@@ -275,6 +275,14 @@ def test_write_removes_stale_generated_previews_and_keeps_other_files(workflow, 
     assert not gone.exists()
 
 
+def test_check_fails_on_a_skill_file_the_loader_skips(workflow, monkeypatch, capsys):
+    skill_preview.write_previews(workflow)
+    with open(os.path.join(workflow, "_skills", "broken.py"), "w", encoding="utf-8") as handle:
+        handle.write("def steps():\n    return ['a']\n")
+    assert _run_cli(monkeypatch, "skill", "preview", workflow, "--check") == 1
+    assert "broken: SkillFormatError:" in capsys.readouterr().out
+
+
 def test_a_workflow_without_skills_is_an_error(tmp_path):
     with pytest.raises(skill_preview.PreviewError):
         skill_preview.render_previews(str(tmp_path))

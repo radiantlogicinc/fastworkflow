@@ -538,6 +538,13 @@
 
 ### Fixed
 
+- **One malformed skill file no longer fails every turn** (fix-ajir.3). A skill
+  file whose declaration is malformed (or whose name is not an identifier) is
+  logged as an error and skipped, as one that does not import already was; the
+  workflow's other skills load, and the result is kept for the process instead
+  of every skill being imported again on each turn. `fastworkflow skill preview`
+  (with or without `--check`) fails naming each skipped file and its error.
+
 - **Command modules that import other command modules load safely from
   several threads** (fix-nhhq, `python_utils.get_module`). Loading a command
   file by path always executed a fresh copy and swapped it into `sys.modules`

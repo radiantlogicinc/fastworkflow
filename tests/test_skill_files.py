@@ -3,6 +3,7 @@ template text, argument screen, validation hook and the planner path."""
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import textwrap
 
@@ -10,8 +11,8 @@ import pytest
 from dspy.utils import DummyLM
 
 from fastworkflow import skill_commands as sc
-from fastworkflow import workflow_agent
-from fastworkflow.skill_commands import SkillCallError, SkillFormatError
+from fastworkflow import skill_preview, workflow_agent
+from fastworkflow.skill_commands import SkillCallError
 from tests.test_text_planner_and_split import (  # noqa: F401 - workflow_env is a fixture
     RecordingTraceSink, _prompt, _session, _text_answer, workflow_env)
 
@@ -40,6 +41,16 @@ def _write(tmp_path, skills: dict[str, str]) -> str:
 def _example(tmp_path, text: str = EXAMPLE) -> sc.SkillCommand:
     folder = _write(tmp_path, {"show_record": text, "close_out": CLOSE_OUT})
     return workflow_agent.load_skill_commands(folder)["show_record"]
+
+
+def _load_error(folder: str, skill: str = "bad") -> str:
+    """Why *skill* does not load: the loader skips it (the workflow's other skills still load)
+    and ``fastworkflow skill preview`` fails, naming it and its error."""
+    assert skill not in {name for name, _, _ in workflow_agent.load_skills(folder)}
+    with pytest.raises(skill_preview.PreviewError) as info:
+        skill_preview.render_previews(folder)
+    assert f"  {skill}: " in str(info.value)
+    return str(info.value)
 
 
 def _args(**overrides):
@@ -173,8 +184,8 @@ def test_the_template_leaves_out_what_the_validation_hook_changes_or_refuses(tmp
     always = FIELD.format(field="name: str").replace(
         '    class Input', '    @staticmethod\n    def validate_extracted_parameters(workflow, command, p):\n'
         '        p.name = "x"\n        return True, ""\n\n    class Input')
-    with pytest.raises(SkillFormatError, match="changes or refuses every placeholder combination"):
-        workflow_agent.load_skills(_write(tmp_path / "always", {"bad": always}))
+    assert "changes or refuses every placeholder combination" in \
+        _load_error(_write(tmp_path / "always", {"bad": always}))
 
 
 def test_a_skill_file_without_input_may_take_the_empty_input(tmp_path):
@@ -207,6 +218,17 @@ def test_a_skill_file_that_cannot_be_imported_is_logged_and_skipped(tmp_path, ca
     assert "skipping skill 'broken'" in caplog.text
 
 
+def test_a_malformed_skill_file_is_logged_skipped_and_not_read_again(tmp_path, caplog, monkeypatch):
+    folder = _write(tmp_path, {"bad": "def steps():\n    return ['a']\n", "close_out": CLOSE_OUT})
+    with caplog.at_level(logging.ERROR):
+        assert [s[0] for s in workflow_agent.load_skills(folder)] == ["close_out"]
+    assert "skipping skill 'bad'" in caplog.text and "needs a class Signature" in caplog.text
+    # the result is kept: a later turn does not import the skill files again
+    monkeypatch.setattr(workflow_agent, "_load_skill_file", lambda *a: pytest.fail("skills read again"))
+    assert [s[0] for s in workflow_agent.load_skills(folder)] == ["close_out"]
+    assert workflow_agent.skill_utterances(folder) == {"close_out": ()}
+
+
 @pytest.mark.parametrize("text, message", [
     ("def steps():\n    return ['a']\n", "needs a class Signature"),
     ("class Signature:\n    pass\n\ndef steps():\n    return ['a']\n", "needs a docstring"),
@@ -216,9 +238,7 @@ def test_a_skill_file_that_cannot_be_imported_is_logged_and_skipped(tmp_path, ca
     ('class Signature:\n    """D."""\n\ndef steps():\n    return []\n', "returns no steps"),
 ])
 def test_a_malformed_skill_file_fails_the_load(tmp_path, text, message):
-    folder = _write(tmp_path, {"bad": text})
-    with pytest.raises(SkillFormatError, match=message):
-        workflow_agent.load_skills(folder)
+    assert re.search(message, _load_error(_write(tmp_path, {"bad": text})))
 
 
 FIELD = '''from typing import Literal, Optional
@@ -254,15 +274,12 @@ def steps(input):
     ("reasoning: int = 1", "bad parameter name 'reasoning'"),
 ])
 def test_a_malformed_input_field_fails_the_load(tmp_path, field, message):
-    folder = _write(tmp_path, {"bad": FIELD.format(field=field)})
-    with pytest.raises(SkillFormatError, match=message):
-        workflow_agent.load_skills(folder)
+    assert re.search(message, _load_error(_write(tmp_path, {"bad": FIELD.format(field=field)})))
 
 
 def test_steps_that_fail_on_placeholder_inputs_need_a_declared_template(tmp_path):
     text = FIELD.format(field="count: int = 2").replace('return ["step"]', 'return ["x"] * (10 // (input.count - 2))')
-    with pytest.raises(SkillFormatError, match="declare Signature.template"):
-        workflow_agent.load_skills(_write(tmp_path, {"bad": text}))
+    assert "declare Signature.template" in _load_error(_write(tmp_path, {"bad": text}))
 
 
 # ---------------------------------------------------------------- files that are not skills
@@ -284,8 +301,7 @@ def test_only_the_python_files_of_the_skills_folder_not_starting_with_an_undersc
 
 def test_a_skill_file_name_that_is_not_an_identifier_fails_the_load(tmp_path):
     folder = _write(tmp_path, {"close-out": CLOSE_OUT})
-    with pytest.raises(SkillFormatError, match="a Python identifier \\(snake_case\\): rename it to close_out.py"):
-        workflow_agent.load_skills(folder)
+    assert "a Python identifier (snake_case): rename it to close_out.py" in _load_error(folder, "close-out")
 
 
 # ---------------------------------------------------------------- argument screen (shared with commands)

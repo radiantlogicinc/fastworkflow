@@ -141,7 +141,8 @@ that of the last phase that ran, so keep the answer phase unconditional. At load
 `plan()` runs on the same placeholder inputs the template is rendered from. A result that
 is not a list of `Phase`, a repeated or invalid name, a parameter no earlier phase with an
 output provides (and no default), or a malformed `"from"` fails the load
-(`SkillFormatError`). Each output model is then checked against the workflow's command
+(`SkillFormatError`): the skill is logged as an error and skipped, and `fastworkflow skill
+preview` fails naming it. Each output model is then checked against the workflow's command
 signatures (`check_fact_sources`): a `"from"` naming a command or field the workflow does
 not have is logged as a warning and the skill still loads, so a workflow can add a
 command's `Output` after the skill that reads it. A plain command name that several
