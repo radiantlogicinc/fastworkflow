@@ -57,6 +57,7 @@ Principles applied to every decision below:
 | `session_state/` | `run_fastapi_mcp` | suspended `awaiting_user` trajectories, keyed by channel |
 | `checkpoints/` | `run_fastapi_mcp` | resume checkpoints, keyed by deployment / fingerprint / channel |
 | `function_cache/` | `@enablecache` | per-function app cache; only exists if a workflow uses it |
+| `archives/<experiment_id>-<utc stamp>.sqlite3` | `run_chatbot` Seal action | one sealed experiment each, 0444; recorded in `sealed_archives` (§2.6) |
 
 Rationale per row:
 
@@ -402,7 +403,7 @@ The release table is guarded by `control.present` and treated as empty when abse
 Rules:
 
 - **Exempt from both the horizon and the size cap.** Every prune delete gains `AND (experiment_id IS NULL OR experiment_id NOT IN <bound>)`. This covers spans, artifacts and the conversationless-turn sweep. `offload_*` deletes gain the same predicate through their turn's `experiment_id`. SQLite materialises the subquery once, and the bound set is small: no index and no measurable cost.
-- **Released by sealing, or explicitly.** Sealing releases by setting `evidence_sealed_at`; the archive now carries the evidence. Explicit release goes through `store.release_experiment_evidence(experiment_id, actor, reason)`, which inserts into `evidence_releases`. Invalid experiments are not auto-released, so their evidence stays inspectable.
+- **Released by sealing, or explicitly.** Sealing releases by setting `evidence_sealed_at`; the archive now carries the evidence. Explicit release goes through `store.release_experiment_evidence(experiment_id, actor, reason)`, which inserts into `evidence_releases`. Invalid experiments are not auto-released, so their evidence stays inspectable. A seal made from the chatbot also deletes the experiment's turn-level rows from the live DB at once (`drop_sealed_live_evidence`); the experiment-level rows stay, and every read of its turns goes to the archive (`store_for_turn`). Once sealed or released, its finished turns are evictable under the cap like any unbound turn (`fix-ajir.24`).
 - **The size cap may be exceeded.** If bound evidence alone is over `max_bytes`, prune evicts everything unbound and records `prune_over_cap_bound_bytes` in diagnostics. It never deletes bound rows.
 - **In-flight offload evidence is exempt from the cap, not the horizon** (`fix-q2fy`). A turn's record is written when it ends and `offload_*` rows carry no `experiment_id`, so the cap evicts offload evidence only of turns with a finished (terminal-status) turn record. Evidence of any other turn, running, suspended or orphaned by a crash, goes by the horizon. Its bytes are reported as `in_flight_bytes` in the same diagnostic.
 - **`pruning_suppressed()` is unchanged.**
@@ -543,3 +544,4 @@ Net line estimates are for production code; tests are given in parentheses.
 7. **Per-incarnation writer health is in scope for `.6`** (§5).
 8. **Pre-existing experiments are enrolled only by an explicit decide, keep or promote request** that names them, in the same transaction (§2.3). Nothing enrols them automatically.
 9. **`chatbot_train.log` stays a separate file** (§1.1).
+10. **Seal, browse and delete are a development surface in the chatbot (2026-10-22, `fix-ajir.24`).** Tools → Sealed experiments lists sealed archives, complete experiments ready to seal, and the ones that cannot be sealed. Every action is a click with an in-page confirmation; nothing seals, releases or prunes an experiment automatically. Delete removes the archive file and every row naming the experiment, and is refused while the experiment is a contest's winner or holds a task's best run. A running experiment can be closed as invalid and released (this supersedes "no UI button yet" in item 4). No production guard: an experiment can only be registered against a benchmark version stored in the live DB.

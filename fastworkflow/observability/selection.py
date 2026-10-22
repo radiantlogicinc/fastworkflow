@@ -35,11 +35,13 @@ experiment's ACTUAL status.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import sqlite3
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
 from fastworkflow.observability import control
@@ -255,6 +257,9 @@ class SelectionControlStore:
     def __init__(self, store: Optional[ObservabilityStore]) -> None:
         self.store = store
         self._redactor: Optional[Redactor] = None
+        # The archive that last held a turn `_store_holding` looked for: one
+        # run's turns all live in one archive, so it is tried first.
+        self._last_archive: Optional[str] = None
 
     def _rows(self, sql: str, params: Iterable[Any] = ()) -> list[dict[str, Any]]:
         return control.rows(self.store, sql, params)
@@ -896,6 +901,61 @@ class SelectionControlStore:
             return ReadOnlyObservabilityStore(sealed["path"])
         return self.store
 
+    def store_for_turn(self, turn_key: str) -> Optional[ObservabilityStore]:
+        """The store holding one turn's evidence, by the same rule as `store_for`.
+
+        A turn the live DB still holds is read from its experiment's sealed
+        archive when that experiment has one. A sealed experiment's turns leave
+        the live DB (at seal, or by prune), so a turn the live DB does not hold
+        is looked for in each readable archive, the one that last answered
+        first. Neither found: the live DB, which answers "not found".
+        """
+        return self._store_holding("turns", "turn_key", turn_key)
+
+    def store_for_artifact(self, artifact_id: str) -> Optional[ObservabilityStore]:
+        """`store_for_turn` for one offloaded artifact, by its id."""
+        return self._store_holding("artifacts", "artifact_id", artifact_id)
+
+    def turn_reads(self) -> "RoutedTurnReads":
+        """`get_turn`/`get_spans` that read each turn from the store holding it."""
+        return RoutedTurnReads(self)
+
+    def _store_holding(
+        self, table: str, column: str, value: str
+    ) -> Optional[ObservabilityStore]:
+        if self.store is None or not value:
+            return self.store
+        try:
+            with self.store._connect() as conn:
+                row = conn.execute(
+                    f"SELECT experiment_id FROM {table} WHERE {column}=?", (value,)
+                ).fetchone()
+        except sqlite3.OperationalError:
+            # A DB older than the experiment columns has no sealed experiments.
+            return self.store
+        if row is not None:
+            return self.store_for(row[0]) if row[0] else self.store
+        archives = self._rows(
+            "SELECT path, size_bytes FROM sealed_archives ORDER BY sealed_at DESC"
+        )
+        archives.sort(key=lambda archive: archive["path"] != self._last_archive)
+        for archive in archives:
+            path = archive["path"]
+            if not (os.path.isfile(path) and os.path.getsize(path) == int(archive["size_bytes"])):
+                continue
+            try:
+                uri = Path(path).resolve().as_uri() + "?mode=ro"
+                with contextlib.closing(sqlite3.connect(uri, uri=True)) as conn:
+                    hit = conn.execute(
+                        f"SELECT 1 FROM {table} WHERE {column}=? LIMIT 1", (value,)
+                    ).fetchone()
+            except sqlite3.Error:
+                continue
+            if hit is not None:
+                self._last_archive = path
+                return ReadOnlyObservabilityStore(path)
+        return self.store
+
     def _member_group_id(self, experiment_id: str) -> Optional[str]:
         row = self._row(
             "SELECT group_id FROM comparison_group_members WHERE experiment_id=?",
@@ -929,6 +989,23 @@ class SelectionControlStore:
         }
 
 
+class RoutedTurnReads:
+    """The two turn reads a `StoreExecutionReader` makes, each from the store
+    `SelectionControlStore.store_for_turn` names, so a comparison can set a
+    sealed run beside a live one."""
+
+    def __init__(self, control_store: SelectionControlStore) -> None:
+        self._control = control_store
+
+    def get_turn(self, turn_key: str) -> Optional[dict[str, Any]]:
+        store = self._control.store_for_turn(turn_key)
+        return None if store is None else store.get_turn(turn_key)
+
+    def get_spans(self, turn_key: str) -> list[dict[str, Any]]:
+        store = self._control.store_for_turn(turn_key)
+        return [] if store is None else store.get_spans(turn_key)
+
+
 __all__ = [
     "DECISION_CLEAR",
     "DECISION_SET",
@@ -936,6 +1013,7 @@ __all__ = [
     "ExperimentNotInGroup",
     "ExperimentReference",
     "GROUP_BENCHMARK",
+    "RoutedTurnReads",
     "SELECTION_ACTOR_KINDS",
     "SYSTEM_ACTOR_KIND",
     "SelectionControlError",
@@ -946,3 +1024,4 @@ __all__ = [
     "UnknownComparisonGroup",
     "comparison_group_identity",
 ]
+

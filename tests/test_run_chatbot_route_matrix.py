@@ -93,6 +93,7 @@ _LIVE_GETS = (
     "/api/artifact/missing",
     "/api/training-runs",
     "/api/training-run/missing",
+    "/api/sealed-experiments",
     # Removed with the agent-memory feedback table; still a 404 branch.
     "/api/feedback",
 )
@@ -110,6 +111,7 @@ _COLD_GETS = (
     "/api/task-feedback",
     "/api/artifact/missing",
     "/api/experiment/missing",
+    "/api/sealed-experiments",
 )
 
 # Every allowlisted write shape, plus unknown paths under /, /api/, and
@@ -131,6 +133,8 @@ _WRITES = (
     ("POST", "/api/configure_env"),
     ("POST", "/api/train"),
     ("POST", "/api/clear_conversations"),
+    ("POST", "/api/sealed-experiments"),
+    ("POST", "/api/evidence-releases"),
     ("POST", "/not-a-page"),
     ("POST", "/api/not-a-route"),
     ("POST", "/api/experiments/e1/not-a-route"),
@@ -140,6 +144,7 @@ _WRITES = (
     ("DELETE", "/api/experiments/e1/tasks/t1/best-run"),
     ("DELETE", "/api/experiments/e1/not-a-route"),
     ("DELETE", "/api/benchmark-experiments/missing"),
+    ("DELETE", "/api/sealed-experiments/missing"),
     ("DELETE", "/api/not-a-route"),
     ("DELETE", "/not-a-page"),
     ("PATCH", "/api/experiment/missing"),
@@ -720,6 +725,26 @@ PINNED_ROUTE_MATRIX: dict[tuple[str, str, str, str], int] = {
     ('live', 'PUT', '/not-a-page', 'bad_origin'): 403,
     ('live', 'PUT', '/not-a-page', 'no_token'): 401,
     ('live', 'PUT', '/not-a-page', 'valid'): 405,
+    ('live', 'GET', '/api/sealed-experiments', 'bad_host'): 403,
+    ('live', 'GET', '/api/sealed-experiments', 'bad_origin'): 403,
+    ('live', 'GET', '/api/sealed-experiments', 'no_token'): 401,
+    ('live', 'GET', '/api/sealed-experiments', 'valid'): 200,
+    ('cold', 'GET', '/api/sealed-experiments', 'bad_host'): 403,
+    ('cold', 'GET', '/api/sealed-experiments', 'bad_origin'): 403,
+    ('cold', 'GET', '/api/sealed-experiments', 'no_token'): 401,
+    ('cold', 'GET', '/api/sealed-experiments', 'valid'): 200,
+    ('live', 'POST', '/api/sealed-experiments', 'bad_host'): 403,
+    ('live', 'POST', '/api/sealed-experiments', 'bad_origin'): 403,
+    ('live', 'POST', '/api/sealed-experiments', 'no_token'): 401,
+    ('live', 'POST', '/api/sealed-experiments', 'valid'): 400,
+    ('live', 'POST', '/api/evidence-releases', 'bad_host'): 403,
+    ('live', 'POST', '/api/evidence-releases', 'bad_origin'): 403,
+    ('live', 'POST', '/api/evidence-releases', 'no_token'): 401,
+    ('live', 'POST', '/api/evidence-releases', 'valid'): 400,
+    ('live', 'DELETE', '/api/sealed-experiments/missing', 'bad_host'): 403,
+    ('live', 'DELETE', '/api/sealed-experiments/missing', 'bad_origin'): 403,
+    ('live', 'DELETE', '/api/sealed-experiments/missing', 'no_token'): 401,
+    ('live', 'DELETE', '/api/sealed-experiments/missing', 'valid'): 404,
 }
 
 

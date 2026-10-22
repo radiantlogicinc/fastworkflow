@@ -178,6 +178,7 @@ PRE_SPLIT_HANDLER_METHODS = (
 # Mixin classes, in MRO order, each ahead of BaseHTTPRequestHandler.
 HANDLER_MIXIN_NAMES = (
     "_ExperimentRoutes",
+    "_SealedRoutes",
     "_BenchmarkRoutes",
     "_FeedbackRoutes",
     "_NavigationRoutes",
@@ -190,6 +191,7 @@ MIXIN_MODULES = (
     "handler_experiment.py",
     "handler_feedback.py",
     "handler_navigation.py",
+    "handler_sealed.py",
 )
 
 

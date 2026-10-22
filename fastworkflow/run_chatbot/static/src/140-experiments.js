@@ -175,6 +175,19 @@ function showExperiment(experimentId) {
       });
       actions.appendChild(archive);
     }
+    /* Sealing (fix-ajir.24) moves a complete experiment's evidence into one
+       read-only archive; this page reads it from there afterwards. */
+    if (!exp.sealed_archive && exp.benchmark_id
+        && (exp.status === "complete" || exp.status === "capture_complete")) {
+      var seal = el("button", "ghost", "Seal experiment");
+      seal.title = "Move this experiment's evidence into a read-only archive";
+      seal.addEventListener("click", function () {
+        sealExperiment(experimentId, seal).then(function (done) {
+          if (done && !expNavStale(nav)) { showExperiment(experimentId); }
+        }).catch(function () {});
+      });
+      actions.appendChild(seal);
+    }
     /* "Where did this run go wrong" is a question about recorded turns, so
        it opens the finder already scoped rather than a second search UI. */
     turnFindEntryButton(actions, { experiment: experimentId },
@@ -203,6 +216,11 @@ function showExperiment(experimentId) {
     conformancePills(verdictLine, exp.benchmark_conformance);
     verdictLine.appendChild(evidenceBadge(exp.evidence));
     if (exp.archived) { verdictLine.appendChild(el("span", "pill", "Archived")); }
+    if (exp.sealed_archive) {
+      var sealedPill = el("span", "pill", "Sealed");
+      sealedPill.title = "Read from " + exp.sealed_archive.path;
+      verdictLine.appendChild(sealedPill);
+    }
     card.appendChild(verdictLine);
     conformanceDetail(card, exp.benchmark_conformance);
 

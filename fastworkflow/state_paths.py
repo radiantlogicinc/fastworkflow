@@ -27,6 +27,7 @@ Layout::
         checkpoints/channels/<deployment>/<fingerprint>/<channel_key>/...
         function_cache/<fingerprint>/<function_name>/cache.sqlite3
         observability.sqlite3
+        archives/<experiment_id>-<utc stamp>.sqlite3   (sealed experiments)
 
 The fingerprint subdivisions are deliberate: checkpoints and function caches
 depend on the workflow's command source, so a code change must not read a stale
@@ -49,6 +50,7 @@ _WORKFLOWS_DIRNAME = "workflows"
 _SESSION_STATE_DIRNAME = "session_state"
 _CHECKPOINTS_DIRNAME = "checkpoints"
 _FUNCTION_CACHE_DIRNAME = "function_cache"
+_ARCHIVES_DIRNAME = "archives"
 
 
 def _optional_env(name: str) -> str | None:
@@ -135,6 +137,17 @@ def observability_db(workflow_path: str) -> str:
     observability store's job ([R4]).
     """
     return os.path.join(workflow_state_dir(workflow_path), "observability.sqlite3")
+
+
+def archives_dir(workflow_path: str) -> str:
+    """Where this workflow's sealed experiment archives are written (created).
+
+    Each is one read-only SQLite file; the live DB's `sealed_archives` table
+    records its path, size and digest.
+    """
+    path = os.path.join(workflow_state_dir(workflow_path), _ARCHIVES_DIRNAME)
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 def checkpoints_dir(workflow_path: str) -> str:

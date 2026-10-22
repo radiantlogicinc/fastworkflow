@@ -328,11 +328,15 @@ def _require_member(
 
 
 def _reader(control: selection.SelectionControlStore) -> comparison_module.StoreExecutionReader:
-    """`ExecutionReader` over the live DB, under the identity its refs carry."""
+    """`ExecutionReader` under the identity the live DB's refs carry.
+
+    Each turn is read from the store holding it: a sealed experiment's turns
+    from its archive, which carries the same store identity.
+    """
     identity = None if control.store is None else control.store.store_identity()
     if identity is None:
         raise ApiError(409, "this workflow has no live evidence database to read runs from")
-    return comparison_module.StoreExecutionReader(identity, control.store)
+    return comparison_module.StoreExecutionReader(identity, control.turn_reads())
 
 
 # ----------------------------------------------------------------------

@@ -675,6 +675,14 @@ class WriterStillOpen(RuntimeError):
     """A seal was attempted while this process still owned a live writer."""
 
 
+class ExperimentNotSealed(LookupError):
+    """The experiment has no readable sealed archive, so its live rows are its only copy."""
+
+
+class SealedExperimentSelected(RuntimeError):
+    """A sealed experiment is still a contest's winner or a task's best run."""
+
+
 class PartialBenchmarkPin(ValueError):
     """A benchmark pin requires id, version, and digest together."""
 
@@ -3980,6 +3988,156 @@ class ObservabilityStore:
                 (experiment_id, _utcnow_iso(), actor, reason),
             )
 
+    def sealed_archive(self, experiment_id: str) -> Optional[dict[str, Any]]:
+        """The `sealed_archives` row of one experiment, with `readable` added.
+
+        `readable` is the test `selection.store_for` applies: the file is there
+        at its recorded size. None when the experiment was never sealed.
+        """
+        found = control.rows(
+            self, "SELECT * FROM sealed_archives WHERE experiment_id=?", (experiment_id,)
+        )
+        if not found:
+            return None
+        row = found[0]
+        row["readable"] = os.path.isfile(row["path"]) and (
+            os.path.getsize(row["path"]) == int(row["size_bytes"])
+        )
+        return row
+
+    def _delete_experiment_evidence_in_txn(
+        self, conn: sqlite3.Connection, experiment_id: str
+    ) -> dict[str, int]:
+        """Delete one experiment's turns and everything recorded under them.
+
+        Its spans and artifacts (by label or by turn), then its turns whole as
+        prune deletes them (prompt slots, offload evidence, and review notes by
+        trigger), then any prompt slot labelled with it outside its turns, then
+        its conversations. The experiment-level rows stay.
+        """
+        deleted: dict[str, int] = {"prompt_slots": 0}
+        has_prompt_slots = _has_prompt_slots(conn)
+        turns = "SELECT turn_key FROM turns WHERE experiment_id=?"
+        params = (experiment_id, experiment_id)
+        deleted["spans"] = conn.execute(
+            f"DELETE FROM spans WHERE experiment_id=? OR trace_id IN ({turns})", params
+        ).rowcount
+        deleted["artifacts"] = conn.execute(
+            f"DELETE FROM artifacts WHERE experiment_id=? OR turn_key IN ({turns})", params
+        ).rowcount
+        keys = [
+            str(row[0]) for row in conn.execute(turns, (experiment_id,)).fetchall()
+        ]
+        self._delete_turn_records_in_txn(conn, keys, deleted, has_prompt_slots)
+        deleted["turns"] = len(keys)
+        deleted["conversations"] = conn.execute(
+            "DELETE FROM conversations WHERE experiment_id=?", (experiment_id,)
+        ).rowcount
+        if has_prompt_slots:
+            deleted["prompt_slots"] += conn.execute(
+                "DELETE FROM prompt_slots WHERE experiment_id=?", (experiment_id,)
+            ).rowcount
+        return deleted
+
+    def _reclaim_free_pages(self, conn: sqlite3.Connection) -> None:
+        """Return deleted pages to the filesystem, as `prune` does."""
+        conn.execute("PRAGMA incremental_vacuum").fetchall()
+        conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    def drop_sealed_live_evidence(self, experiment_id: str) -> dict[str, int]:
+        """Free a sealed experiment's turn-level evidence from the live DB.
+
+        Once sealed, the archive is the record: `selection.store_for` and the
+        chatbot read a sealed experiment's turns and spans from it. So its
+        turns, spans, artifacts, prompt slots, offload evidence, review notes
+        and conversations leave the live DB here rather than waiting for prune
+        to reach them. Its experiment-level rows (the experiment, attempts,
+        declarations, claims and evidence runs) stay: benchmark listings,
+        registrations, contests and scores read them, and they are small.
+
+        Refused unless the archive is readable: until then the live rows are
+        the only copy.
+        """
+        archive = self.sealed_archive(experiment_id)
+        if archive is None or not archive["readable"]:
+            raise ExperimentNotSealed(
+                f"experiment {experiment_id!r} has no readable sealed archive; "
+                "its live evidence is the only copy"
+            )
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            deleted = self._delete_experiment_evidence_in_txn(conn, experiment_id)
+            conn.commit()
+            self._reclaim_free_pages(conn)
+        return deleted
+
+    def delete_sealed_experiment(self, experiment_id: str) -> dict[str, Any]:
+        """Delete a sealed experiment: its archive file and every row naming it.
+
+        Refused while a contest names it as winner or a task names one of its
+        runs as best run (`SealedExperimentSelected`): those are judgements a
+        person made, withdrawn first. Otherwise, in one transaction: its live
+        evidence and experiment-level rows, its contest membership, its
+        registration (tombstoned, as `delete_empty_experiment` does), its
+        release and its `sealed_archives` row. The decision history is
+        append-only and keeps naming it. The archive file is removed after the
+        commit; `file_removed` says whether it was there to remove.
+        """
+        archive = self.sealed_archive(experiment_id)
+        if archive is None:
+            raise ExperimentNotSealed(f"experiment {experiment_id!r} is not sealed")
+        experiment_tables = (
+            "experiment_evidence_runs", "experiment_attempt_claims",
+            "experiment_attempt_declarations", "experiment_attempts", "experiments",
+        )
+        with control.write(self) as conn:
+            selected = conn.execute(
+                "SELECT scope_kind FROM selection_pointers WHERE experiment_id=? LIMIT 1",
+                (experiment_id,),
+            ).fetchone()
+            if selected is not None:
+                raise SealedExperimentSelected(
+                    f"experiment {experiment_id!r} is the "
+                    + ("winner of its contest" if selected[0] == "experiment"
+                       else "best run of one of its tasks")
+                    + "; withdraw that choice before deleting it"
+                )
+            deleted = self._delete_experiment_evidence_in_txn(conn, experiment_id)
+            present = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            for table in experiment_tables:
+                if table in present:
+                    deleted[table] = conn.execute(
+                        f"DELETE FROM {table} WHERE experiment_id=?", (experiment_id,)
+                    ).rowcount
+            # Inline: `selection` imports this module.
+            from fastworkflow.observability import selection as selection_module
+
+            selection_module.SelectionControlStore(self).leave_in_txn(conn, experiment_id)
+            conn.execute(
+                "UPDATE experiment_registrations SET state='deleted', deleted_at=? "
+                "WHERE experiment_id=? AND state<>'deleted'",
+                (_utcnow_iso(), experiment_id),
+            )
+            conn.execute("DELETE FROM evidence_releases WHERE experiment_id=?", (experiment_id,))
+            conn.execute("DELETE FROM sealed_archives WHERE experiment_id=?", (experiment_id,))
+        with self._connect() as conn:
+            self._reclaim_free_pages(conn)
+        file_removed = False
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(archive["path"])
+            file_removed = True
+        return {
+            "experiment_id": experiment_id,
+            "path": archive["path"],
+            "file_removed": file_removed,
+            "deleted": deleted,
+        }
+
     def start_attempt(
         self,
         experiment_id: str,
@@ -5360,7 +5518,7 @@ class ObservabilityStore:
 
         Conversations and turn records are exempt from the horizon (config §5)
         but not from the cap: once nothing else unbound is left to evict, the
-        oldest finished turn records outside any experiment go, whole, so
+        oldest finished turn records outside any bound experiment go, whole, so
         ``FW_OBS_DB_MAX_BYTES`` bounds the file (fix-nczr.2).
 
         Evidence of a bound experiment (`_BOUND_EXPERIMENTS_SQL`) is exempt
@@ -5531,15 +5689,16 @@ class ObservabilityStore:
                 if cur.rowcount == 0 and not oldest_turns and not slot_turns:
                     # Nothing but turn records is left to evict, so they go
                     # too, oldest first and whole, or the cap is no bound
-                    # (fix-nczr.2). Only finished turns outside any
-                    # experiment: an experiment's turns are its denominator
-                    # and go by seal or release, never by eviction [DR44].
+                    # (fix-nczr.2). Only finished turns outside any bound
+                    # experiment: a bound experiment's turns are its
+                    # denominator and never go by eviction [DR44]; a sealed
+                    # or released one's go like any other (fix-ajir.24).
                     marks = ",".join("?" for _ in TERMINAL_TURN_STATUSES)
                     conn.execute("BEGIN IMMEDIATE")
                     keys = [
                         str(row[0])
                         for row in conn.execute(
-                            "SELECT turn_key FROM turns WHERE experiment_id IS NULL "
+                            f"SELECT turn_key FROM turns WHERE {unbound} "
                             f"AND status IN ({marks}) ORDER BY turn_key LIMIT ?",
                             (*sorted(TERMINAL_TURN_STATUSES),
                              _OFFLOAD_PRUNE_BATCH_TURNS),

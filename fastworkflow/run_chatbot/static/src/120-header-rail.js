@@ -658,7 +658,7 @@ function refreshConvs(reportFailure) {
        does, because `setNavigationTab` calls the placeholder directly, and
        clearing conversations nulls `state.turnKey` before refreshing so the
        "all cleared" state still appears. */
-    if (!hierarchyPath.length && !state.turnKey) { showNavigationTabEmpty(); }
+    if (!hierarchyPath.length && !state.turnKey && !sealedPageOwnsDetail()) { showNavigationTabEmpty(); }
   }).catch(function (error) {
     if (requestWasAborted(error) || refresh !== conversationRefresh) { return; }
     var list = document.getElementById("convList"); clear(list);

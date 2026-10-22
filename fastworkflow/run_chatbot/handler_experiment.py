@@ -7,7 +7,7 @@ from typing import Any, Optional
 from urllib.parse import unquote
 
 from fastworkflow.experiment.setup import ExperimentSetups, SetupConflict
-from fastworkflow.observability import training_history
+from fastworkflow.observability import selection, training_history
 from fastworkflow.observability.store import (
     FEATURE_EXPERIMENTS_V1,
     ExperimentNotFound,
@@ -233,7 +233,12 @@ class _ExperimentRoutes:
             detail["provenance"] = experiment_provenance(
                 detail, store.experiment_attempt_rows(experiment_id)
             )
-            detail["benchmark_conformance"] = self._benchmark_conformance(store, detail)
+            # Conformance reads the turns, which a sealed experiment keeps in
+            # its archive; the row, its digest and its notes stay live.
+            detail["benchmark_conformance"] = self._benchmark_conformance(
+                selection.SelectionControlStore(store).store_for(experiment_id), detail
+            )
+            detail["sealed_archive"] = self._sealed_archive_summary(store, experiment_id)
             self._send_json({"experiment": detail})
         elif sub == "tasks":
             if store.get_experiment(experiment_id) is None:
@@ -247,7 +252,9 @@ class _ExperimentRoutes:
                 return
             rows = store.experiment_attempt_rows(experiment_id, task_id=q("task"))
             annotate_attempt_rows(
-                store, rows, evidence_verdict(detail.get("evidence_runs"))
+                selection.SelectionControlStore(store).store_for(experiment_id),
+                rows,
+                evidence_verdict(detail.get("evidence_runs")),
             )
             self._send_json({"attempts": rows})
         elif sub == "score":

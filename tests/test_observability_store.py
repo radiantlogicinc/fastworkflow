@@ -889,6 +889,22 @@ class TestMaintenance:
         kept = {r["turn_key"] for r in _rows(db_path, "SELECT turn_key FROM turns")}
         assert kept == {"20000101T000001-running", "20000101T000002-exp"}
 
+    def test_size_cap_evicts_released_experiment_turns(self, db_path):
+        """fix-ajir.24: a released (or sealed) experiment is no longer bound, so
+        its finished turns go like any other; a bound one's stay."""
+        store = obs.ObservabilityStore(db_path)
+        for eid in ("exp-bound", "exp-released"):
+            store.create_experiment(eid, "L", declared_tasks=1, declared_attempts=1, **STORE_PIN)
+        store.release_experiment_evidence("exp-released", "tester")
+        self._turn(store, "20000101T000000-bound", experiment_id="exp-bound")
+        self._turn(store, "20000101T000001-released", experiment_id="exp-released")
+
+        deleted = store.prune(retention_days=30, max_bytes=1)
+
+        assert deleted["turns"] == 1
+        kept = {r["turn_key"] for r in _rows(db_path, "SELECT turn_key FROM turns")}
+        assert kept == {"20000101T000000-bound"}
+
     def test_under_cap_prune_keeps_turn_records(self, db_path):
         store = obs.ObservabilityStore(db_path)
         self._turn(store, "20000101T000000-old")
