@@ -1510,6 +1510,50 @@ def plan_code_steps(plan_text: str, commands: Iterable[str], core_commands: Iter
     return read
 
 
+def step_paging(step: Any, parameters: Callable[[str], list]) -> tuple[list[str], bool]:
+    """How code pages command *step* (a ``finish_check`` plan step) when it runs it:
+    ``(paging, every_page)``.
+
+    *paging* is the paging parameters (``facts.PAGING_PARAMETERS``) of the step's command
+    (*parameters*, as for ``plan_code_steps``), or [] when it has none or the step writes
+    one (then the step reads the page it names). With *paging*, code reads page 1;
+    *every_page* says the step's note (from the first "(" or ";" after its command) asks
+    for the full list (``FULL_LIST_PHRASES``), so a page 1 that shows more pages hands
+    over to the agent, which reads the rest. Otherwise page 1 is all the step reads.
+    ``CodeSteps`` and the skill preview (``code_step_pages``) both read paging here.
+    """
+    from fastworkflow.observation_offloading.facts import PAGING_PARAMETERS
+
+    fields = {name for cls in parameters(step.command) if cls is not None
+              for name in cls.model_fields}
+    paging = [name for name in PAGING_PARAMETERS if name in fields]
+    if not paging or any(name in step.arguments for name in paging):
+        return [], False
+    text = step.text.replace("`", " ").replace("*", " ")
+    cut = re.search(r"[(;]", text[text.find(step.command) + len(step.command):])
+    note = text[text.find(step.command) + len(step.command) + cut.start():] if cut else ""
+    return paging, any(phrase in note.lower() for phrase in FULL_LIST_PHRASES)
+
+
+def code_step_pages(plan_text: str, commands: Iterable[str], core_commands: Iterable[str],
+                    parameters: Callable[[str], list]) -> tuple[list[int], list[int]]:
+    """``(every_page, page_one)``: the numbers of the steps of *plan_text* that run a paged
+    command without writing a paging value, split by ``step_paging``: those whose note
+    asks for every page (code reads page 1, the agent the rest) and those that read page 1
+    only. A step counts whether ``plan_code_steps`` reads it as run by code or as open
+    (code may still run it: a pick, or a value that is a placeholder in a preview); one
+    code passes over (an answer or negated step) does not."""
+    every_page: list[int] = []
+    page_one: list[int] = []
+    for step, command, _ in plan_code_steps(plan_text, commands, core_commands, parameters):
+        if command == "" or not step.command:
+            continue
+        paging, every = step_paging(step, parameters)
+        if paging:
+            (every_page if every else page_one).append(step.number)
+    return every_page, page_one
+
+
 def _more_pages(observation: Any, paging: Iterable[str]) -> bool:
     """Whether a page-1 observation names a later page: one of the command's paging
     parameters with a positive value (``start=20``), as a paged command tells its reader."""
@@ -1681,18 +1725,10 @@ class CodeSteps:
     def _paging(self, step: Any, command: str) -> list[str]:
         """The paging parameters (``facts.PAGING_PARAMETERS``) of the step's command when
         the step writes none of them and its note asks for the full list
-        (``FULL_LIST_PHRASES``): code reads page 1 and hands over if more remain."""
-        from fastworkflow.observation_offloading.facts import PAGING_PARAMETERS
-
-        fields = {name for cls in self._parameters(step.command) if cls is not None
-                  for name in cls.model_fields}
-        paging = [name for name in PAGING_PARAMETERS if name in fields]
-        if not paging or any(name in step.arguments for name in paging):
-            return []
-        text = step.text.replace("`", " ").replace("*", " ")
-        cut = re.search(r"[(;]", text[text.find(step.command) + len(step.command):])
-        note = text[text.find(step.command) + len(step.command) + cut.start():] if cut else ""
-        return paging if any(phrase in note.lower() for phrase in FULL_LIST_PHRASES) else []
+        (``FULL_LIST_PHRASES``): code reads page 1 and hands over if more remain
+        (``step_paging``)."""
+        paging, every_page = step_paging(step, self._parameters)
+        return paging if every_page else []
 
 
 _ANSWER_SIGNATURE = None
@@ -2388,6 +2424,7 @@ __all__ = [
     "answer_step_kind",
     "cap_note",
     "check_bindings",
+    "code_step_pages",
     "concatenated_steps",
     "fact_from",
     "facts_text",
@@ -2399,5 +2436,6 @@ __all__ = [
     "phase_steps",
     "plan_code_steps",
     "runs_now",
+    "step_paging",
     "stops_after",
 ]

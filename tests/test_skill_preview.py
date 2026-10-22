@@ -10,8 +10,10 @@ import os
 import subprocess
 import sys
 import textwrap
+from typing import Optional
 
 import pytest
+from pydantic import BaseModel
 
 from fastworkflow import cli, skill_preview
 
@@ -771,6 +773,73 @@ def test_without_command_names_no_answer_mode_is_shown(workflow):
     assert "Answer: " not in bare
     assert [line for line in named.splitlines() if line not in bare.splitlines()] == [
         "Answer: written by code, word for word (step 1 verbatim)."] * 2
+
+
+# ------------------------------------------------- which steps read every page (fix-ajir.14)
+
+class _Paged(BaseModel):
+    query: Optional[str] = None
+    start: Optional[int] = None
+
+
+def _paging_names(**extra):
+    paged = {"find_item", "list_parts"}
+    return {"commands": ["Catalog/open_catalog", "Catalog/find_item", "Item/open_item_by_uid",
+                         "Item/list_parts", "Item/count_checks"],
+            "core_commands": ["IntentDetection/go_up"],
+            "parameters": lambda name: [_Paged] if name in paged else [None], **extra}
+
+
+@pytest.mark.parametrize("steps, line", [
+    (["find_item query=Alpha", "list_parts (full list)"],
+     "Pages: step 1 reads page 1 only; step 2 reads every page."),
+    (["open_catalog", "list_parts (full list: next page with start=<n> until complete)",
+      "find_item query=a", "find_item query=b (all of them)"],
+     "Pages: step 2 reads every page; steps 3 and 4 read page 1 only."),
+    (["find_item query=Alpha start=10", "list_parts"], "Pages: step 2 reads page 1 only."),
+])
+def test_pages_line_names_the_steps_that_read_every_page_and_page_1(steps, line):
+    assert skill_preview.pages_line(steps, _paging_names()) == [line, ""]
+
+
+def test_pages_line_is_empty_without_a_paged_step_or_parameters():
+    assert skill_preview.pages_line(["open_catalog", "find_item query=a start=0"],
+                                    _paging_names()) == []
+    assert skill_preview.pages_line(["say that the item has no parts"], _paging_names()) == []
+    names = _paging_names()
+    del names["parameters"]
+    assert skill_preview.pages_line(["list_parts (full list)"], names) == []
+    assert skill_preview.pages_line(["list_parts (full list)"], None) == []
+
+
+def test_a_phase_on_a_paged_command_shows_its_pages_line(workflow):
+    from fastworkflow import workflow_agent
+
+    commands = workflow_agent.load_skill_commands(workflow)
+    (name, description, steps), = [s for s in workflow_agent.load_skills(workflow)
+                                   if s[0] == "show_item"]
+    bare = skill_preview.render_preview(name, description, steps, commands[name], (),
+                                        "_skills/show_item.py", _paging_names(parameters=None))
+    named = skill_preview.render_preview(name, description, steps, commands[name], (),
+                                         "_skills/show_item.py", _paging_names())
+    # Only the Pages lines are new: find reads page 1 of its search, item every page of
+    # its parts (the second plan shows them "as in the plan"); the others page nothing.
+    added = [line for line in named.splitlines() if line not in bare.splitlines()]
+    assert added == ["Pages: step 2 reads page 1 only.", "Pages: step 2 reads every page."]
+    kept = [line for line in named.splitlines() if line and not line.startswith("Pages: ")]
+    assert kept == [line for line in bare.splitlines() if line]
+
+
+def test_a_flat_skill_shows_its_pages_line(workflow):
+    from fastworkflow import workflow_agent
+
+    commands = workflow_agent.load_skill_commands(workflow)
+    (name, description, steps), = [s for s in workflow_agent.load_skills(workflow)
+                                   if s[0] == "list_parts_of"]
+    text = skill_preview.render_preview(name, description, steps, commands.get(name), (),
+                                        "_skills/list_parts_of.py", _paging_names())
+    # it runs as one phase: list_parts (no paging value, no note) reads page 1
+    assert "Pages: step 2 reads page 1 only." in text.splitlines()
 
 
 # ------------------------------------------------- template wording vs did not run (fix-ajir.13)

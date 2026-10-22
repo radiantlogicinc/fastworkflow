@@ -700,6 +700,43 @@ def _paged_items(command):
     return text, {"labels": [f"i{start}"]}
 
 
+# ----------------------------------------------------------------------
+# Which steps read every page: one rule for the runtime and the preview (fix-ajir.14)
+# ----------------------------------------------------------------------
+
+def _parameters(name):
+    return [CLASSES[name]] if name in CLASSES else []
+
+
+@pytest.mark.parametrize("text, paging", [
+    ("list_loans (full list: next page with start=<n> until complete)", (["start"], True)),
+    ("find_book query=Dune (every page)", (["start"], True)),
+    ("list_loans (all of them)", (["start"], False)),      # no full-list phrase: page 1
+    ("list_loans", (["start"], False)),                      # no note: page 1
+    ("find_book query=Dune start=20", ([], False)),         # writes its page
+    ("open_book_by_uid book_uid=b1 (full list)", ([], False)),   # not a paged command
+])
+def test_step_paging_reads_the_command_and_the_note(text, paging):
+    step = _step(text)
+    assert skill_phases.step_paging(step, _parameters) == paging
+    # the runtime's rule is this one: code hands over after page 1 only for every_page
+    code = SimpleNamespace(_parameters=_parameters)
+    expected = paging[0] if paging[1] else []
+    assert skill_phases.CodeSteps._paging(code, step, step.command) == expected
+
+
+def test_code_step_pages_splits_the_paged_steps_by_their_note():
+    plan = "\n".join(f"{i}. {text}" for i, text in enumerate([
+        "find_book query=Dune",
+        "list_loans (full list)",
+        "open_book_by_uid book_uid=b1",
+        "list_loans scope_uid=s1 start=10",
+        "list_loans scope_uid=<the uid of the shelf>",   # open, still a paged step
+        "say that the loans were listed",
+    ], 1))
+    assert skill_phases.code_step_pages(plan, COMMANDS, CORE, _parameters) == ([2], [1, 5])
+
+
 @pytest.fixture
 def paged(todo):
     todo.toys["list_items"] = ItemsParams

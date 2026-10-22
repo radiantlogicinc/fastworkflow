@@ -33,7 +33,13 @@ A preview, in the order of the skill-file layout (``docs/skill_file_layout.md``)
    (``skill_phases.answer_by_code``, ``answer_step_kind``): "Answer: written by code, word
    for word (steps 1-2 verbatim; step 3 dropped as a guard)." or "Answer: written by the
    model (step 2 needs judgement)." A phase that runs commands gets no such line: its
-   answer is the agent's. A run's own additions (the planner's ``steps_after``, extra
+   answer is the agent's. Steps (a phase's, or a flat skill's, which runs as one phase)
+   on a paged command that write no paging value are followed by how many pages each
+   reads (``pages_line``), by the runtime's own rule (``skill_phases.step_paging``, which
+   ``CodeSteps`` pages by): "Pages: step 2 reads every page; steps 4 and 5 read page 1
+   only." A step whose note asks for the full list (``FULL_LIST_PHRASES``) reads every
+   page (code reads page 1, the agent the rest); any other note, or none, page 1 only.
+   A run's own additions (the planner's ``steps_after``, extra
    command steps) are not part of the preview, so they may change the mode at run time.
 
 Sample inputs come from the ``Input`` model (``sample_value``): a str takes its default,
@@ -96,7 +102,7 @@ import re
 import types
 import typing
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional, Union, get_args, get_origin
+from typing import Any, Callable, Literal, Optional, Union, get_args, get_origin
 
 from pydantic import BaseModel
 
@@ -1188,12 +1194,14 @@ def answer_mode(steps: list[str]) -> str:
     return "Answer: written by the model (no step is verbatim)."
 
 
-def phase_command_names(workflow_folder: str) -> dict[str, list[str]]:
+def phase_command_names(workflow_folder: str) -> dict[str, Any]:
     """``commands`` / ``core_commands`` a phase's steps are read with, as a run reads them
     (``WorkflowExecutionContext._phase_command_names``): the workflow's routed commands and
     the framework's core commands (``workflow_agent.core_command_names``, read from the
     routing registry class, as ``fastworkflow.init`` has not run). An empty list when its
-    routing cannot be read."""
+    routing cannot be read. ``parameters``: a command's parameters classes
+    (``skill_phases.parameter_classes``, as ``CodeSteps`` reads them; none when the routing
+    cannot be read), for the "Pages:" line (``pages_line``)."""
     import fastworkflow
     from fastworkflow.command_routing import RoutingRegistry
 
@@ -1206,9 +1214,40 @@ def phase_command_names(workflow_folder: str) -> dict[str, list[str]]:
         except Exception:  # noqa: BLE001 - read the steps with what is known, as a run does
             return []
 
-    return {"commands": read(os.path.abspath(workflow_folder)),
+    def parameters(folder: str) -> Callable[[str], list]:
+        from fastworkflow.skill_phases import parameter_classes
+
+        try:
+            return parameter_classes(RoutingRegistry.get_definition(folder))
+        except Exception:  # noqa: BLE001 - no routing: no step reads as paged
+            return lambda command: []
+
+    folder = os.path.abspath(workflow_folder)
+    return {"commands": read(folder),
             "core_commands": read(fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
-                                  ("IntentDetection", "ErrorCorrection"))}
+                                  ("IntentDetection", "ErrorCorrection")),
+            "parameters": parameters(folder)}
+
+
+def pages_line(steps: list[str], names: Optional[dict]) -> list[str]:
+    """``["Pages: ...", ""]`` for a phase whose *steps* code runs on a paged command, read
+    as a run reads them (``skill_phases.code_step_pages``, with *names* from
+    ``phase_command_names``): "Pages: step 2 reads every page; steps 4 and 5 read page 1
+    only." A step reads every page when its note asks for the full list (code reads page
+    1, the agent the rest); else page 1 is all it reads. A step that writes a paging value
+    reads that page and is not listed. Else nothing."""
+    from fastworkflow.skill_commands import number
+    from fastworkflow.skill_phases import code_step_pages
+
+    if not names or not steps or names.get("parameters") is None:
+        return []
+    every_page, page_one = code_step_pages(number(steps), names.get("commands", ()),
+                                           names.get("core_commands", ()), names["parameters"])
+    parts = [f"{_step_numbers(numbers)} {verb}" for numbers, verb in sorted((
+        (every_page, "reads every page" if len(every_page) == 1 else "read every page"),
+        (page_one, "reads page 1 only" if len(page_one) == 1 else "read page 1 only")))
+        if numbers]
+    return [f"Pages: {'; '.join(parts)}.", ""] if parts else []
 
 
 def _answer_line(steps: list[str], names: Optional[dict], outputs: list) -> list[str]:
@@ -1387,13 +1426,15 @@ NO_ITEMS_NOTE = "No items: `over` is empty for these inputs, so the phase runs n
 def _render_lines(render: _Render, level: str, first: Optional[_Render] = None,
                   first_title: str = "", names: Optional[dict] = None) -> list[str]:
     """*render* as markdown. A phase the same as in *first* (the first plan shown) is one line.
-    With *names* (``phase_command_names``), an answer-only phase's steps are followed by who
-    writes its answer (``answer_mode``)."""
+    With *names* (``phase_command_names``), steps on a paged command are followed by how
+    many pages they read (``pages_line``) and an answer-only phase's steps by who writes
+    its answer (``answer_mode``)."""
     flat = [FLAT_NOTE, ""] if render.flat else []
     if render.error:
         return flat + [f"The steps cannot be rendered: {_text(render.error)}", ""]
     if not render.phases:
-        return flat + _numbered(render.steps) + [""]
+        # A call without phases runs as one phase, so code pages its steps the same way.
+        return flat + _numbered(render.steps) + [""] + pages_line(render.steps, names)
     same = {p.key() for p in first.phases} if first is not None else set()
     outputs = [p.output for p in render.phases if p.output is not None]
     lines = []
@@ -1413,6 +1454,7 @@ def _render_lines(render: _Render, level: str, first: Optional[_Render] = None,
             lines += [f"_{PLACEHOLDER_NOTE}_", ""]
         if phase.items is None:
             lines += _numbered(phase.steps) + [""]
+            lines += pages_line(phase.steps, names)
             lines += _answer_line(phase.steps, names, outputs)
         elif not phase.items:
             lines += [NO_ITEMS_NOTE, ""]
@@ -1420,6 +1462,7 @@ def _render_lines(render: _Render, level: str, first: Optional[_Render] = None,
             for head, steps in phase.items:
                 lines += [head, ""]
                 lines += _numbered(steps) + [""]
+                lines += pages_line(steps, names)
                 lines += _answer_line(steps, names, outputs)
     if render.left_out:
         lines += [f"Left out (`when` is false): {', '.join(f'`{n}`' for n in render.left_out)}.", ""]
@@ -1641,6 +1684,7 @@ __all__ = [
     "condition_text",
     "default_out_dir",
     "describe_inputs",
+    "pages_line",
     "phase_command_names",
     "placeholder_output",
     "preview_main",

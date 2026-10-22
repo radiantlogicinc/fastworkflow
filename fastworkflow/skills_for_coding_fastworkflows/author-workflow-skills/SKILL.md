@@ -211,7 +211,12 @@ fastworkflow skill preview <workflow_folder> --check    # writes nothing; exit 1
 2. Run `skill preview`. A load error names the file and its reason; fix it first.
 3. Read the preview: the inputs, the phases table ("runs" says when each phase runs),
    the facts with their sources, and the steps of each different plan. A step rendered
-   with `<phase.fact>` placeholders shows where a value comes from at run time.
+   with `<phase.fact>` placeholders shows where a value comes from at run time. Under the
+   steps, "Pages: step 2 reads every page; step 3 reads page 1 only." says how code pages
+   each step on a paged command (`skill_phases.step_paging`): only a note with a
+   full-list phrase (`FULL_LIST_PHRASES`: "full list", "every page", ...) reads every
+   page; "(all of them)" or no note reads page 1. A step that writes `start=` reads that
+   page and is not listed.
 4. Check each step against the grammar table below: is it run by code, held by the finish
    check, written into the answer as intended?
 5. Commit the previews and run `--check` in CI (`skill_preview.py` `check_previews`):

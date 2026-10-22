@@ -251,8 +251,16 @@ A preview follows the order above:
    by the same wording rules a run uses (`skill_phases.answer_by_code`,
    `answer_step_kind`): "Answer: written by code, word for word (steps 1-2 verbatim; step
    3 dropped as a guard)." or "Answer: written by the model (step 2 needs judgement)." A
-   phase that runs commands has no such line: the agent writes its answer. Steps a run
-   adds (the planner's `steps_after`) are not in the preview.
+   phase that runs commands has no such line: the agent writes its answer. Steps on a
+   paged command (a paging parameter such as `start`) that write no paging value are
+   followed by how many pages each reads, by the rule code pages by
+   (`skill_phases.step_paging`): "Pages: step 2 reads every page; steps 4 and 5 read
+   page 1 only." Only a note that asks for the full list (`list_parts (full list)`, see
+   `FULL_LIST_PHRASES` in `docs/skill_phases.md`) reads every page; any other note
+   ("(all of them)") or none reads page 1 only. The paging parameters come from the
+   workflow's commands, so a folder without its `_commands` shows no "Pages:" line. Steps
+   a run adds (the planner's
+   `steps_after`) are not in the preview.
 
 **Sample inputs** come from the `Input` model: a str takes its default, else its first
 `examples` value (`Field(examples=[...])`), else the placeholder `<name>`; a bool is false;

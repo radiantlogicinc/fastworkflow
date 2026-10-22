@@ -627,7 +627,11 @@ on a paged command writes no paging value, its note holds one of
 complete", "page through"; any case), and page 1's observation names a later page (a
 paging parameter with a positive value, `start=10`), code stops after that step and the
 agent reads the rest. Its thought then says "(its first page)". Any other note, or none:
-page 1 is what the step wants, and code goes on.
+page 1 is what the step wants, and code goes on. The rule is `skill_phases.step_paging`;
+the skill preview reads each step with it and says, under the steps, which read every page
+and which page 1 only ("Pages: step 2 reads every page; step 3 reads page 1 only.",
+`skill_phases.code_step_pages`), so a note such as "(all of them)" that reads page 1
+shows there.
 
 **Always on.** Code-run steps are always on (the temporary switch,
 `FW_SKILL_CODE_STEPS`, was removed after stages 12 and 13 confirmed the gain).
