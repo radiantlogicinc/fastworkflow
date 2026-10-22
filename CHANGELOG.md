@@ -538,6 +538,13 @@
 
 ### Fixed
 
+- **A misspelled phase parameter with a default fails the load** (fix-ajir.11).
+  A `steps_fn`, `when` or `until` parameter defaulting to `None` must name an
+  earlier phase with an output in at least one plan the placeholder inputs
+  give; `lambda find, recrod=None: ...` no longer loads and silently takes the
+  "not found" branch. A parameter with another default (`kind=kind`) keeps its
+  value and is not checked. `check_bindings` returns what it saw of them.
+
 - **An answer-only reply that cannot be parsed twice no longer fails the turn**
   (fix-ajir.8): `answer_only_answer` writes the answer from the steps
   (`answer_from_steps`), as it does for an empty reply; the list check and the

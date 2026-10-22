@@ -71,12 +71,15 @@ def steps(input: Signature.Input) -> list[str]:
   bind=True, until=None, noun=None, optional=False)`:
   - `name`: a Python identifier, unique in the plan.
   - `steps_fn`: returns the phase's steps (a list of str). Its parameters are bound
-    **by name** to the outputs of earlier phases, as typed objects: `lambda find: ...` receives the `find` phase's filled
-    `Found`. A zero-argument `steps_fn` receives nothing. A parameter is bound only when
-    an earlier phase of that name ran and declares an `output`; otherwise it keeps its
-    default, and one without a default fails the phase. So when a phase may be left out,
-    build the later phases with or without that parameter rather than relying on a
-    default.
+    **by name** to the outputs of earlier phases, as typed objects: `lambda find: ...`
+    receives the `find` phase's filled `Found`. A zero-argument `steps_fn` receives
+    nothing. A parameter is bound only when an earlier phase of that name ran and declares
+    an `output`; otherwise it keeps its default, and one without a default fails the
+    phase. So when a phase may be left out, build the later phases with or without that
+    parameter rather than relying on a default. A parameter defaulting to `None`
+    (`lambda find=None: ...`) must still name an earlier phase with an output in at least
+    one plan the inputs give, so a misspelled name fails the load; a parameter with
+    another default (`lambda find, kind=kind: ...`) keeps that value and is not bound.
   - `output`: a facts model. Each field names the command field it is copied from,
     `json_schema_extra={"from": "<command>.<field>"}`: a field of that command's
     `Signature.Output` (returned as `CommandResponse.output`), else of its
@@ -140,7 +143,8 @@ that of the last phase that ran, so keep the answer phase unconditional. At load
 
 `plan()` runs on the same placeholder inputs the template is rendered from. A result that
 is not a list of `Phase`, a repeated or invalid name, a parameter no earlier phase with an
-output provides (and no default), or a malformed `"from"` fails the load
+output provides (and no default), a parameter defaulting to `None` that no earlier phase
+with an output provides in any of the results, or a malformed `"from"` fails the load
 (`SkillFormatError`): the skill is logged as an error and skipped, and `fastworkflow skill
 preview` fails naming it. Each output model is then checked against the workflow's command
 signatures (`check_fact_sources`): a `"from"` naming a command or field the workflow does

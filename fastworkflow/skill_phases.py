@@ -646,7 +646,7 @@ def with_phase_before(phases: Sequence[Phase], phase: Optional[Phase],
     return phases[:index] + [phase] + phases[index:]
 
 
-def check_bindings(phases: Sequence[Phase], where: str = "plan()") -> None:
+def check_bindings(phases: Sequence[Phase], where: str = "plan()") -> dict[tuple[str, str, str], bool]:
     """Check, without running anything, that every phase's parameters can be bound.
 
     A parameter without a default must name an earlier phase that declares an output
@@ -655,7 +655,14 @@ def check_bindings(phases: Sequence[Phase], where: str = "plan()") -> None:
     The same holds for a callable ``when``'s parameters, and for ``until``'s, which may
     also name the phase itself (its outputs so far) when it declares an output.
     Raises PhaseError.
+
+    Returns, for each parameter whose default is None (a fact parameter that may be left
+    unbound), ``(phase, "steps_fn" | "when" | "until", parameter)`` -> whether it binds in
+    this plan. The skill loader fails on one that binds in no plan the inputs give (a
+    misspelled phase name). A parameter with another default (``family=family``, a value
+    the function keeps) is not a fact parameter and is not returned.
     """
+    defaults: dict[tuple[str, str, str], bool] = {}
     with_output: dict[str, type[BaseModel]] = {}
     for phase in phases:
         reference = phase.over_reference
@@ -675,6 +682,8 @@ def check_bindings(phases: Sequence[Phase], where: str = "plan()") -> None:
                 continue
             if phase.fans_out and parameter.name == phase.item:
                 continue
+            if parameter.default is None:
+                defaults[(phase.name, "steps_fn", parameter.name)] = parameter.name in with_output
             if parameter.default is parameter.empty and parameter.name not in with_output:
                 raise PhaseError(
                     f"{where}: phase {phase.name!r} takes {parameter.name!r}, which is not an "
@@ -689,6 +698,9 @@ def check_bindings(phases: Sequence[Phase], where: str = "plan()") -> None:
             for parameter in _parameters(phase, fn, what):
                 if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
                     continue
+                if parameter.default is None:
+                    defaults[(phase.name, what, parameter.name)] = \
+                        parameter.name in with_output or parameter.name in also
                 if parameter.default is parameter.empty and \
                         parameter.name not in with_output and parameter.name not in also:
                     raise PhaseError(
@@ -698,6 +710,7 @@ def check_bindings(phases: Sequence[Phase], where: str = "plan()") -> None:
                         + "; give the parameter a default")
         if phase.output is not None:
             with_output[phase.name] = phase.output
+    return defaults
 
 
 def _entered(runs: Sequence[Mapping[str, Any]], index: int, record: Optional[str]) -> Any:

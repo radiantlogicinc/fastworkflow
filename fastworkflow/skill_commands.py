@@ -146,7 +146,8 @@ A skill file::
   call then runs flat, from ``steps()``, as one phase, as for a skill without ``plan()``
   (``call_phases``); such a file
   must define ``steps()``. At load ``plan()`` runs on the placeholder inputs: what it
-  returns must be phases whose parameters bind and whose ``"from"`` are well formed
+  returns must be phases whose parameters bind (one defaulting to None in at least one
+  result: ``_checked_plan``) and whose ``"from"`` are well formed
   (``SkillFormatError`` otherwise); a ``"from"`` naming a command or field the workflow
   lacks is a logged warning (``check_phase_sources``), not a failure.
 - ``validate_extracted_parameters`` (optional, the signature of a command's): called with
@@ -945,7 +946,8 @@ def _checked_plan(command: SkillCommand, own_steps: bool = True) -> tuple[type, 
     file defines its own ``steps()`` (*own_steps*), which that call then runs.
     Each other result must be a list of ``Phase`` whose parameters can be bound
     (``skill_phases.check_bindings``) and whose ``output`` models' ``"from"`` are
-    well formed (``facts.fact_sources``). Returns the output models seen. Whether the
+    well formed (``facts.fact_sources``); a parameter defaulting to None must bind (name an
+    earlier phase with an output) in at least one of the results. Returns the output models seen. Whether the
     sources name real command fields is checked against the workflow later
     (``check_phase_sources``), as a warning. Raises SkillFormatError.
     """
@@ -953,6 +955,7 @@ def _checked_plan(command: SkillCommand, own_steps: bool = True) -> tuple[type, 
     from fastworkflow.skill_phases import PhaseError, active_phases, check_bindings, is_flat_plan
 
     models: list[type] = []
+    binds: dict[tuple[str, str, str], bool] = {}
     ran = 0
     for env in _template_grid(command):
         try:
@@ -971,7 +974,8 @@ def _checked_plan(command: SkillCommand, own_steps: bool = True) -> tuple[type, 
             continue
         try:
             phases = active_phases(result, f"{command.path}: plan()")
-            check_bindings(phases, f"{command.path}: plan()")
+            for key, bound in check_bindings(phases, f"{command.path}: plan()").items():
+                binds[key] = binds.get(key, False) or bound
         except PhaseError as exc:
             raise SkillFormatError(str(exc)) from None
         if not phases:
@@ -983,6 +987,11 @@ def _checked_plan(command: SkillCommand, own_steps: bool = True) -> tuple[type, 
                 except FactSourceError as exc:
                     raise SkillFormatError(f"{command.path}: phase {phase.name!r}: {exc}") from None
                 models.append(phase.output)
+    for (phase, what, parameter), bound in binds.items():
+        if not bound:
+            raise SkillFormatError(
+                f"{command.path}: phase {phase!r}: {what} takes {parameter!r}, which names no "
+                "earlier phase with an output in any plan; check its spelling")
     return tuple(models)
 
 

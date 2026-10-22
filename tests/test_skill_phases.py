@@ -177,6 +177,18 @@ def test_a_malformed_from_fails_the_load():
 def test_a_parameter_no_earlier_phase_provides_fails_the_load():
     with pytest.raises(SkillFormatError, match="'book'"):
         _phased_command(plan=lambda input: [Phase("report", lambda book: ["say it"])])
+    # a fact parameter defaulting to None must name a phase with an output in some plan
+    with pytest.raises(SkillFormatError, match="phase 'book': steps_fn takes 'fnd', which names no "
+                                               "earlier phase with an output in any plan"):
+        _phased_command(plan=lambda input: [Phase("find", lambda: ["find it"], output=Found),
+                                            Phase("book", lambda fnd=None: book_steps(fnd))])
+    with pytest.raises(SkillFormatError, match="phase 'report': when takes 'bok'"):
+        _phased_command(plan=lambda input: [Phase("find", lambda: ["find it"], output=Found),
+                                            Phase("report", lambda: ["say it"], when=lambda bok=None: True)])
+    # one plan of the input grid binding it is enough (notes runs only when input.notes);
+    # a parameter with another default keeps a value, it is not a fact
+    assert _phased_command(plan=lambda input: plan(input) + [
+        Phase("tail", lambda notes=None, kind="book": [f"say the {kind} notes"])]).plan_fn
 
 
 def test_a_plan_that_does_not_return_phases_fails_the_load():
@@ -1011,7 +1023,7 @@ def test_a_search_of_an_earlier_phase_never_counts(phased):
         return [
             Phase("find", lambda: find_steps(input.name), output=Found),
             Phase("again", lambda find: ["say the uid again"], output=Found),
-            Phase("report", report_steps),
+            Phase("report", lambda: report_steps()),
         ]
 
     phased.command = _phased_command(plan=plan_reading_the_search_again)
@@ -1513,7 +1525,7 @@ def test_a_skipped_last_phase_leaves_the_answer_of_the_phase_before(phased):
     phased.command = _phased_command(plan=lambda input: [
         Phase("find", lambda: find_steps(input.name), output=Found),
         Phase("book", lambda find: book_steps(find), output=BookFacts),
-        Phase("report", report_steps, when=lambda book: not book.loan_uids)])
+        Phase("report", lambda book=None: report_steps(book), when=lambda book: not book.loan_uids)])
     phased.start()
     result = phased.ctx.process_turn("show the book Dune")
     assert result.answer == "b1 has two loans"
