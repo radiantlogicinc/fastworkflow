@@ -1012,6 +1012,24 @@ def _previous_turn_summaries_for_planner(chat_session_obj: fastworkflow.ChatSess
 #: More sub-tasks than this is a list too long to fan out: run the request whole.
 MAX_SUBTASKS = 10
 
+#: Output cap (tokens) of one splitter call; ``LLM_SPLIT_MAX_TOKENS`` overrides it. Without a cap
+#: the splitter's reasoning can loop for 100k+ characters, past the LM timeout. A capped answer
+#: that does not parse gets DSPy's JSON retry (capped too), then leaves the request whole. Set from the largest stored splitter output that
+#: did not loop: 17.6k characters, about 4,700 tokens at the fewest characters per token measured
+#: on long splitter outputs (3.77; fix-ajir.1).
+SPLIT_MAX_TOKENS = 4700
+
+
+def split_max_tokens() -> int:
+    """The splitter's output cap in tokens: ``LLM_SPLIT_MAX_TOKENS``, else ``SPLIT_MAX_TOKENS``."""
+    return int(fastworkflow.get_env_var("LLM_SPLIT_MAX_TOKENS", int, default=SPLIT_MAX_TOKENS))
+
+
+def _split_lm(planner_lm, temperature: float):
+    """The planner LM as the splitter uses it: ``temperature``, output capped at ``split_max_tokens()``."""
+    return planner_lm.copy(temperature=temperature, max_tokens=split_max_tokens())
+
+
 _NUMBERED_LINE = re.compile(r"^\s*\d+[.)]\s+(.*\S)\s*$")
 #: Typographic hyphens a model writes into names it was asked to copy exactly.
 _HYPHENS = str.maketrans({"\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-"})
@@ -1518,7 +1536,7 @@ def split_into_subtasks(user_query: str, planner_lm=None,
     usable = None
     for temperature in (0.0, 0.7):
         try:
-            with dspy.context(lm=planner_lm.copy(temperature=temperature),
+            with dspy.context(lm=_split_lm(planner_lm, temperature),
                               adapter=CommandsSystemPreludeAdapter()):
                 signature = _split_signature(workflow_folderpath) if workflow_folderpath else SplitIntoSubtasks
                 text = dspy.ChainOfThought(signature)(

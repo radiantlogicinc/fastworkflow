@@ -411,6 +411,23 @@ def test_a_clean_split_is_not_retried():
         "Audit as well as sweep Alice.", "Sweep Hubbard."]
 
 
+def test_the_splitter_call_is_capped_at_split_max_tokens(monkeypatch):
+    from fastworkflow import workflow_agent as agent
+
+    lm = DummyLM([{"reasoning": "r", "subtasks": "1. Part A.\n2. Part B."}])
+    copies = []
+    real_copy = lm.copy
+
+    def recording_copy(**kwargs):
+        copies.append(kwargs)
+        return real_copy(**kwargs)
+
+    monkeypatch.setattr(lm, "copy", recording_copy)
+    assert agent.split_into_subtasks("the request", planner_lm=lm) == ["Part A.", "Part B."]
+    assert copies == [{"temperature": 0.0, "max_tokens": agent.SPLIT_MAX_TOKENS}]
+    assert agent.SPLIT_MAX_TOKENS > 0
+
+
 def skill_file(text: str) -> str:
     """The skill file (``_skills/<name>.py``) of a skill without params: ``text``'s first line is its description,
     every other non-empty line one step."""
