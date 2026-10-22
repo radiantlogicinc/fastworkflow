@@ -61,9 +61,9 @@ def test_a_message_that_adds_a_topic_or_asks_something_else_does_not_match(messa
     assert not is_capability_question(message, UTTERANCES)
 
 
-def test_the_answer_names_each_skill_with_two_examples_then_each_command_then_other_contexts():
+def test_the_answer_names_each_skill_with_its_shortest_example_then_each_command_then_other_contexts():
     answer = render_capability_answer(
-        {"close_out": ("close this record", "note what was done", "a third one"),
+        {"close_out": ("close this record", "note what was done", "  ", "a third one"),
          "tag_record": ()},
         ["open_catalog", "who_am_i"],
         {"ControlFinding": ["explain_risk", "show_who_i_am"], "EmptyContext": []},
@@ -71,7 +71,7 @@ def test_the_answer_names_each_skill_with_two_examples_then_each_command_then_ot
     assert answer.splitlines() == [
         "Here is what I can do. Ask in your own words, for example:",
         "",
-        '- **Close out**: "close this record"; "note what was done"',
+        '- **Close out**: "a third one"',
         "- **Tag record**",
         "",
         "Or ask for a single action:",
@@ -124,9 +124,33 @@ def test_a_context_line_names_commands_while_it_fits_the_line_width(monkeypatch)
     assert lines == [
         "- In Directory: find a, find b and 4 more",
         "- In Short: list x, list y",
-        "- In Long: a command name far wider than the line itself and 1 more",
+        "- In Long: a command name far wider than the line itself, show z",
     ]
     assert len(lines[0]) <= 42 and len(lines[1]) <= 42
+
+
+def test_of_equally_short_examples_the_first_is_shown():
+    answer = render_capability_answer(
+        {"review": ("review this one carefully", "check it", "audit it", "go")}, [])
+    assert answer.splitlines()[2] == '- **Review**: "go"'
+    answer = render_capability_answer({"review": ("review it", "check it", "audit it")}, [])
+    assert answer.splitlines()[2] == '- **Review**: "check it"'
+
+
+def test_a_line_never_leaves_out_just_one_command(monkeypatch):
+    monkeypatch.setattr("fastworkflow.capability_answer.LINE_WIDTH", 50)
+    answer = render_capability_answer(
+        {}, [],
+        {"Account": ["find_a", "find_b", "find_c", "show_account_manager"],
+         "Group": ["find_a1", "find_b1", "find_c1", "find_d1", "find_e1", "find_f1"]},
+    )
+    lines = answer.splitlines()[-2:]
+    # "find a, find b, find c and 1 more" would fit in 50; the last one is named instead
+    assert lines == [
+        "- In Account: find a, find b, find c, show account manager",
+        "- In Group: find a1, find b1, find c1 and 3 more",
+    ]
+    assert len(lines[0]) > 50 and len(lines[1]) <= 50
 
 
 def test_the_shared_line_may_fill_two_line_widths(monkeypatch):

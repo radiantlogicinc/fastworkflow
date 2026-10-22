@@ -2,12 +2,13 @@
 
 When the app workflow has skills (``_skills/<name>.py``) and the whole user message asks
 what the assistant can do, the turn is answered here, before the split and the planner,
-with no model call: each skill in plain words with one or two of its own
-``plain_utterances`` as examples, then the current context's commands, one line each, then
-one line for the commands that more than half of the other contexts add, then one line per
-other context with the commands only it (or a minority) adds. Each other-context line names
-commands in order while it fits ``LINE_WIDTH`` characters (the shared line two lines' worth)
-and counts the rest ("and 3 more"); it always names at least one.
+with no model call: each skill in plain words with its shortest ``plain_utterance`` as the
+example, then the current context's commands, one line each, then one line for the commands
+that more than half of the other contexts add, then one line per other context with the
+commands only it (or a minority) adds. Each other-context line names commands in order while
+it fits ``LINE_WIDTH`` characters (the shared line two lines' worth) and counts the rest
+("and 3 more"); it always names at least one, and never leaves out just one (it names that
+one too, past the width).
 
 A capability question is one of the ``plain_utterances`` of the CME command
 ``IntentDetection/what_can_i_do``, up to minor wording deviations. Both sides are
@@ -38,8 +39,8 @@ from fastworkflow.command_metadata_api import CommandMetadataAPI
 WHAT_CAN_I_DO = "IntentDetection/what_can_i_do"
 
 #: The characters an other-context line of the answer fits in (the shared line gets twice
-#: that); the commands that do not fit are counted ("and 3 more").
-LINE_WIDTH = 100
+#: that); the commands that do not fit are counted ("and 3 more"), unless only one is left.
+LINE_WIDTH = 90
 
 _CONTRACTIONS = {
     "what's": "what is", "whats": "what is", "what're": "what are", "i'd": "i would",
@@ -116,14 +117,16 @@ def _plain_context_name(name: str) -> str:
 
 def _command_list(prefix: str, names: list[str], width: int) -> str:
     """*prefix* then *names* in plain words, as many in order as keep the whole line, with
-    " and K more" for the rest, within *width* characters; at least one name."""
+    " and K more" for the rest, within *width* characters; at least one name. When just one
+    would be left out it is named too (never "and 1 more"), and the line may pass *width*."""
     plain = [_plain_name(name, capitalize=False) for name in names]
-    for shown in range(len(plain), 0, -1):
+
+    def line(shown: int) -> str:
         rest = len(plain) - shown
-        line = prefix + ", ".join(plain[:shown]) + (f" and {rest} more" if rest else "")
-        if len(line) <= width or shown == 1:
-            return line
-    return prefix
+        return prefix + ", ".join(plain[:shown]) + (f" and {rest} more" if rest else "")
+
+    shown = next((n for n in range(len(plain), 1, -1) if len(line(n)) <= width), min(1, len(plain)))
+    return line(len(plain) if len(plain) - shown == 1 else shown)
 
 
 def _context_lines(other_contexts: dict[str, list[str]]) -> list[str]:
@@ -145,20 +148,23 @@ def _context_lines(other_contexts: dict[str, list[str]]) -> list[str]:
 
 def render_capability_answer(skills: dict[str, tuple[str, ...]], commands: list[str],
                              other_contexts: Optional[dict[str, list[str]]] = None) -> str:
-    """Markdown: each skill with up to two of its example requests, then one line per command,
+    """Markdown: each skill with its shortest example request, then one line per command,
     then one line for the commands more than half of the other contexts add, then one line per
     other context with the rest of its commands (each of these lines cut to ``LINE_WIDTH``
-    characters, the shared line to twice that, with the rest counted: "and 3 more").
+    characters, the shared line to twice that, with the rest counted: "and 3 more", never
+    "and 1 more").
 
     *skills* maps a skill's name to its ``plain_utterances`` (written as users talk, unlike
-    the ``Signature`` docstring, which is written for the matcher); *commands* are the names
-    of the current context's commands; *other_contexts* maps each other context's name to the
-    names of the commands it adds (``CommandMetadataAPI.get_other_context_commands``).
+    the ``Signature`` docstring, which is written for the matcher; the shortest by length is
+    shown, the first of equals); *commands* are the names of the current context's commands;
+    *other_contexts* maps each other context's name to the names of the commands it adds
+    (``CommandMetadataAPI.get_other_context_commands``).
     """
     lines = ["Here is what I can do. Ask in your own words, for example:", ""]
     for name, utterances in skills.items():
-        examples = "; ".join(f'"{u.strip()}"' for u in utterances[:2] if u.strip())
-        lines.append(f"- **{_plain_name(name)}**" + (f": {examples}" if examples else ""))
+        examples = [u.strip() for u in utterances if u.strip()]
+        example = f': "{min(examples, key=len)}"' if examples else ""
+        lines.append(f"- **{_plain_name(name)}**{example}")
     lines += ["", "Or ask for a single action:", ""]
     lines += [f"- {_plain_name(name)}" for name in commands]
     lines += _context_lines(other_contexts or {})
