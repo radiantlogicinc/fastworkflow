@@ -73,9 +73,8 @@ no ``steps()`` gets that concatenation as its ``steps()``.
 
 How the runner (``WorkflowExecutionContext``) runs a phased skill call, phase by phase:
 
-1. ``steps_fn`` is called with the earlier outputs bound; its steps (``@<skill>`` lines
-   expanded) are the phase's plan. The planner does not rewrite them. The skill call's
-   extra steps the request asked for before the skill's own (``steps_before``) run in a
+1. ``steps_fn`` is called with the earlier outputs bound; its steps are the phase's plan.
+   The planner does not rewrite them. The skill call's extra steps the request asked for before the skill's own (``steps_before``) run in a
    phase of their own before the first phase (``steps_before_phase``); those after go
    after the last phase's steps (``steps_after``); extra COMMAND steps after an answer-only
    last phase run in a phase of their own just before it (``extra_steps_phase``), so the

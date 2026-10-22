@@ -71,33 +71,26 @@ def test_load_skills_gives_the_description_and_template_and_a_plain_skill_its_st
     skills = {name: (desc, steps) for name, desc, steps in workflow_agent.load_skills(folder)}
     assert skills["close_out"] == ("Close out a record: note what was done.",
                                    ("write a short summary", "say what is left open"))
-    # steps() rendered on placeholder inputs, the included plain skill expanded
+    # steps() rendered on placeholder inputs
     assert skills["show_record"][1] == (
         "<find_group or find_unit, by kind> query=<name>",
         "list_members filter=<person> (only when person is given)",
         "list_members (only when person is empty)",
         "assess_risk (only when include_risk)",
-        "open member 1", "open member 2",
-        "write a short summary", "say what is left open")
+        "open member 1", "open member 2")
     assert workflow_agent.load_skill_commands(folder).keys() == {"show_record"}
     assert "- close_out: Close out a record" in workflow_agent._job_types_for(folder)
 
 
-def test_steps_expand_the_arguments_and_includes(tmp_path):
+def test_steps_expand_the_arguments(tmp_path):
     command = _example(tmp_path)
     assert sc.expand(command, _args(count=3)) == [
-        "find_group query=Payroll", "list_members", "open member 1", "open member 2", "open member 3",
-        "write a short summary", "say what is left open"]
+        "find_group query=Payroll", "list_members", "open member 1", "open member 2", "open member 3"]
     assert sc.expand(command, _args(kind="unit", person="Ann Lee", include_risk=True, count=0)) == [
-        "find_unit query=Payroll", "list_members filter=Ann Lee", "assess_risk",
-        "write a short summary", "say what is left open"]
+        "find_unit query=Payroll", "list_members filter=Ann Lee", "assess_risk"]
 
 
-def test_a_repeat_beyond_the_limit_and_a_failing_steps_are_skill_call_errors(tmp_path):
-    command = _example(tmp_path)
-    with pytest.raises(SkillCallError, match="more than"):
-        sc.expand(command, _args(count=sc.REPEAT_LIMIT + 1))
-    assert list(sc.repeat(3, 1)) == [2, 3] and list(sc.repeat(0)) == []
+def test_a_failing_steps_is_a_skill_call_error(tmp_path):
     # fails for one argument only (on the placeholder inputs it renders): the call fails, not the load
     broken = EXAMPLE.replace('out = [f"{FIND[input.kind]} query={input.name}"]',
                              'out = [FIND[input.name] if input.name == "Payroll" else input.name]')
@@ -105,35 +98,19 @@ def test_a_repeat_beyond_the_limit_and_a_failing_steps_are_skill_call_errors(tmp
         sc.expand(_example(tmp_path / "broken", broken), _args())
 
 
-def test_an_include_of_an_unknown_skill_fails_the_load_or_the_call(tmp_path):
-    # written for every argument: the rendered template holds it and the load fails
-    text = EXAMPLE.replace('out.append("@close_out")', 'out.append("@nowhere")')
-    folder = _write(tmp_path / "always", {"show_record": text, "close_out": CLOSE_OUT})
-    with pytest.raises(ValueError, match="includes unknown skill 'nowhere'"):
-        workflow_agent.load_skills(folder)
-    # written for an argument the template does not render (count 0): the call fails
-    text = EXAMPLE.replace('out.append("@close_out")', 'out.append("@close_out" if input.count else "@nowhere")')
-    folder = _write(tmp_path / "sometimes", {"show_record": text, "close_out": CLOSE_OUT})
-    with pytest.raises(SkillCallError, match="includes 'nowhere'"):
-        sc.expand(workflow_agent.load_skill_commands(folder)["show_record"], _args(count=0))
-
-
 def test_a_declared_template_is_the_planner_template_as_written(tmp_path):
     declared = (
         '    template = [\n'
         '        "<find_group or find_unit, by kind> query=<name>",\n'
         '        "repeat count times (n = 1 to count): open member <n>",\n'
-        '        "@close_out",\n'
         '    ]\n\n'
         '    @staticmethod')
     text = EXAMPLE.replace("    @staticmethod", declared, 1)
     assert text != EXAMPLE
     command = _example(tmp_path, text)
     assert command.template == ("<find_group or find_unit, by kind> query=<name>",
-                                "repeat count times (n = 1 to count): open member <n>",
-                                "write a short summary", "say what is left open")
-    assert sc.expand(command, _args(count=1))[-3:] == ["open member 1", "write a short summary",
-                                                       "say what is left open"]
+                                "repeat count times (n = 1 to count): open member <n>")
+    assert sc.expand(command, _args(count=1))[-1:] == ["open member 1"]
 
 
 LABEL = '''from typing import Literal
@@ -201,9 +178,9 @@ def test_the_template_leaves_out_what_the_validation_hook_changes_or_refuses(tmp
 
 
 def test_a_skill_file_without_input_may_take_the_empty_input(tmp_path):
-    text = '"""x"""\nclass Signature:\n    """Plain."""\n\n\ndef steps(input):\n    return ["one", "@close_out"]\n'
-    folder = _write(tmp_path, {"plain": text, "close_out": CLOSE_OUT})
-    assert ("plain", "Plain.", ("one", "write a short summary", "say what is left open")) in \
+    text = '"""x"""\nclass Signature:\n    """Plain."""\n\n\ndef steps(input):\n    return ["one", "two"]\n'
+    folder = _write(tmp_path, {"plain": text})
+    assert ("plain", "Plain.", ("one", "two")) in \
         workflow_agent.load_skills(folder)
 
 

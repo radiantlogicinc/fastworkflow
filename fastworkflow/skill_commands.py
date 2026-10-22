@@ -41,8 +41,6 @@ A skill file::
 
     from pydantic import BaseModel, Field
 
-    from fastworkflow.skill_commands import repeat
-
     FIND = {"group": "find_group", "unit": "find_unit"}
 
 
@@ -60,7 +58,7 @@ A skill file::
                                 json_schema_extra={"subject": True})
             include_risk: bool = Field(default=False, description="the request asks how risky it is",
                                        json_schema_extra={"verify": True})
-            count: int = Field(default=2, ge=0, description="how many members to open",
+            count: int = Field(default=2, ge=0, le=20, description="how many members to open",
                                json_schema_extra={"in_request": True})
 
         plain_utterances = ["who is in the Payroll group", "is Ann Lee in Billing"]
@@ -77,9 +75,8 @@ A skill file::
         out.append(f"list_members filter={input.person}" if input.person else "list_members")
         if input.include_risk:
             out.append("assess_risk")
-        for n in repeat(input.count):
+        for n in range(1, input.count + 1):
             out.append(f"open member {n}")
-        out.append("@close_out")   # the steps of the skill "close_out" (one without params)
         return out
 
 - ``Signature`` (required) with a docstring (required; its whitespace is collapsed to one
@@ -118,11 +115,9 @@ A skill file::
 
 - ``steps(input)`` (required) returns the steps as a list of str, one per step (empty
   ones are dropped). It builds text only: it must not call a backend or read state; it may
-  raise SkillCallError (the call then falls back). ``repeat(count, offset=0)`` gives the
-  iteration numbers ``offset+1 .. count`` and refuses more than ``REPEAT_LIMIT``. A step that
-  is exactly ``@<skill>`` stands for the steps of a skill without parameters (they are
-  plain text inside this one; a skill with parameters cannot be included). Lookup tables are
-  plain module-level dicts. For a skill without parameters ``steps()`` takes no argument and
+  raise SkillCallError (the call then falls back). A repeated part is a ``for`` loop over
+  ``range()``, bounded by the int field's ``le``; steps shared by several skills go in a
+  helper module (``_skills/_<name>.py``). Lookup tables are plain module-level dicts. For a skill without parameters ``steps()`` takes no argument and
   returns its fixed steps.
 - ``plain_utterances`` (optional, with or without params): example requests for the
   skill, written the way people ask for that job. The skill matcher shows the first
@@ -202,8 +197,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Callable, Literal, get_args, get_origin
 
-#: The most iterations one ``repeat()`` may give.
-REPEAT_LIMIT = 20
 #: A ``verify`` check replaces the planner's argument only at or above this probability.
 VERIFY_THRESHOLD = 0.65
 NUMBER_WORDS = {w: i for i, w in enumerate(
@@ -280,15 +273,12 @@ class SkillCommand:
     #: The skill file's ``steps(input)``.
     steps_fn: Callable | None = field(default=None, compare=False)
     #: The template text (``Signature.template``, or ``steps()`` rendered on placeholder
-    #: inputs), includes expanded at load.
+    #: inputs).
     template: tuple[str, ...] = field(default=(), compare=False)
     #: ``Signature.validate_extracted_parameters``, or None.
     validate: Callable | None = field(default=None, compare=False)
     #: ``Signature.plain_utterances``: example requests for the skill.
     plain_utterances: tuple[str, ...] = field(default=(), compare=False)
-    #: ``(name, steps)`` of the workflow's skills without params, for an ``@<skill>`` line
-    #: that ``steps()`` returns; set at load.
-    includes: tuple[tuple[str, tuple[str, ...]], ...] = field(default=(), compare=False)
     #: The skill file's ``plan(input) -> list[Phase]`` (``fastworkflow.skill_phases``), or None.
     plan_fn: Callable | None = field(default=None, compare=False)
     #: The phases' ``output`` models seen when ``plan()`` ran on the placeholder inputs at load.
@@ -406,20 +396,6 @@ def _flag(spec: dict, key: str, name: str, where: str) -> bool:
 
 #: Keys a skill file's ``Input`` field may set in ``json_schema_extra``.
 SKILL_FIELD_KEYS = frozenset({"strip", "subject", "verify", "means", "in_request"})
-_INCLUDE = re.compile(r"@(\S+)")
-
-
-def repeat(count: int, offset: int = 0) -> range:
-    """The iteration numbers ``offset + 1 .. count`` of a repeated part of a skill's steps.
-
-    For a skill file's ``steps()``: ``for n in repeat(input.count): ...``. Raises
-    SkillCallError when that is more than REPEAT_LIMIT iterations (the call falls back to the
-    template path).
-    """
-    times = int(count) - int(offset)
-    if times > REPEAT_LIMIT:
-        raise SkillCallError(f"{count} repeats more than {REPEAT_LIMIT} times")
-    return range(int(offset) + 1, int(offset) + 1 + max(times, 0))
 
 
 def _spec_from_field(name: str, info, where: str) -> dict:
@@ -477,10 +453,7 @@ def _spec_from_field(name: str, info, where: str) -> dict:
 @dataclass(frozen=True)
 class SkillFile:
     """What a skill file declares: its description and either a parsed command (a skill with
-    params) or its fixed steps (a skill without params, ``command`` None).
-
-    ``steps`` and ``command.template`` may hold ``@<skill>`` lines; the loader expands them.
-    """
+    params) or its fixed steps (a skill without params, ``command`` None)."""
 
     description: str
     steps: tuple[str, ...]
@@ -1086,27 +1059,15 @@ def call_phases(command: SkillCommand, args: dict) -> list:
 
 
 def expand_includes(command: SkillCommand, lines: list[str]) -> list[str]:
-    """``lines`` with each ``@<skill>`` line replaced by that skill's steps (a skill without
-    params). Raises SkillCallError for any other skill."""
-    included = dict(command.includes)
-    out: list[str] = []
-    for line in lines:
-        m = _INCLUDE.fullmatch(line)
-        if m is None:
-            out.append(line)
-        elif m.group(1) in included:
-            out.extend(included[m.group(1)])
-        else:
-            raise SkillCallError(f"steps() of {command.name} includes {m.group(1)!r}, "
-                                 "which is not a skill without params")
-    return out
+    """``lines`` unchanged: skills no longer include other skills. Kept only for the phase
+    runner's import (``WorkflowExecutionContext``); remove it with that import."""
+    return list(lines)
 
 
 def expand(command: SkillCommand, args: dict) -> list[str]:
     """The skill's command steps for ``args`` (complete, checked arguments), unnumbered:
-    ``steps(input)`` with an ``@<skill>`` line replaced by that skill's steps (a skill without
-    params). Raises SkillCallError when ``steps()`` fails, returns something else than a list
-    of text, or repeats more than REPEAT_LIMIT times."""
+    ``steps(input)``. Raises SkillCallError when ``steps()`` fails or returns something else
+    than a list of text."""
     instance = command.input_model.model_construct(**args)
     try:
         lines = _call_steps(command.steps_fn, instance, command.path)
@@ -1114,7 +1075,7 @@ def expand(command: SkillCommand, args: dict) -> list[str]:
         raise
     except Exception as exc:  # noqa: BLE001 - workflow code; the planner falls back to the template
         raise SkillCallError(f"steps() of {command.name} failed: {type(exc).__name__}: {exc}") from None
-    return expand_includes(command, lines)
+    return lines
 
 
 def number(steps: list[str]) -> str:

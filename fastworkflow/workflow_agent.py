@@ -1125,43 +1125,16 @@ def _build_parsed_skills(workflow_folderpath: str) -> tuple[
         loaded = _load_skill_file(name, path, workflow_folderpath)
         if loaded is not None:
             files.append((name, loaded))
-    raw_steps = {name: loaded.steps for name, loaded in files}
-    has_params = {name for name, loaded in files if loaded.command is not None}
-
-    def expand(name: str, chain: tuple[str, ...]) -> tuple[str, ...]:
-        expanded: list[str] = []
-        for step in raw_steps[name]:
-            include = re.fullmatch(r"@(\S+)", step)
-            if include is None:
-                expanded.append(step)
-                continue
-            included = include.group(1)
-            if included not in raw_steps:
-                raise ValueError(f"skill {name!r} includes unknown skill {included!r} "
-                                 f"({' -> '.join(chain + (included,))}) in {root}")
-            if included in chain:
-                raise ValueError(f"skill {name!r} includes {included!r} in a cycle "
-                                 f"({' -> '.join(chain + (included,))}) in {root}")
-            if included in has_params:
-                raise SkillFormatError(f"skill {name!r} includes {included!r}, which has params; only a "
-                                       f"skill without params can be included ({' -> '.join(chain + (included,))}) in {root}")
-            expanded.extend(expand(included, chain + (included,)))
-        return tuple(expanded)
-
     identifiers = identifier_patterns(workflow_folderpath)
-    plain = {name: expand(name, (name,)) for name, _ in files if name not in has_params}
     out = []
     for name, loaded in files:
         if loaded.command is None:
-            out.append((name, loaded.description, plain[name], None, loaded.plain_utterances))
+            out.append((name, loaded.description, loaded.steps, None, loaded.plain_utterances))
             continue
-        # the template's @<skill> lines are expanded here; steps() output's at each call
-        template = expand(name, (name,))
-        command = dataclasses.replace(loaded.command, template=template, identifiers=identifiers,
-                                      includes=tuple(plain.items()))
+        command = dataclasses.replace(loaded.command, identifiers=identifiers)
         if command.phase_outputs:
             _warn_phase_sources(command, workflow_folderpath)
-        out.append((name, loaded.description, template, command, loaded.plain_utterances))
+        out.append((name, loaded.description, command.template, command, loaded.plain_utterances))
     return tuple(out)
 
 
@@ -1191,9 +1164,7 @@ def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ..
     which files are skills: ``_skill_files``); the file stem is the skill's name and the
     ``Signature`` docstring its description. A
     skill without parameters gives its fixed ``steps()``; a skill with parameters gives its
-    template text, and ``load_skill_commands`` holds its parsed form. A step that is exactly
-    ``@<name>`` stands for the steps of skill ``<name>``, expanded in place; only a skill
-    without params can be included, and an unknown skill or a cycle raises ValueError. A skill
+    template text, and ``load_skill_commands`` holds its parsed form. A skill
     file that cannot be imported is logged and skipped; a malformed one raises
     SkillFormatError (a ValueError) naming its file. ``_skills`` also holds the workflow's
     split settings, ``_split.py`` (``split_settings``), and helper modules named ``_<name>.py``.

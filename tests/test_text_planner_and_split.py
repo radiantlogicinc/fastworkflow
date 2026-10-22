@@ -442,55 +442,10 @@ def _write_skills(tmp_path, skills):
     return str(tmp_path)
 
 
-def test_a_skill_include_line_is_replaced_by_the_included_steps_recursively(tmp_path):
-    from fastworkflow.workflow_agent import _job_types_for, load_skills
-
-    folder = _write_skills(tmp_path, {
-        "audit": "Audit one person.\nfind them\n  @reach  \nwrite it up\n",
-        "reach": "What a person can reach.\nlist groups\n@shares\nlist roles\n",
-        "shares": "Shares of a person.\nlist shares\n",
-        "plain": "No includes.\nsay @someone here\n@ spaced\n",
-    })
-
-    assert dict((name, steps) for name, _, steps in load_skills(folder)) == {
-        "audit": ("find them", "list groups", "list shares", "list roles", "write it up"),
-        "plain": ("say @someone here", "@ spaced"),
-        "reach": ("list groups", "list shares", "list roles"),
-        "shares": ("list shares",),
-    }
-    assert _job_types_for(folder).splitlines() == [
-        "- audit: Audit one person.", "- plain: No includes.",
-        "- reach: What a person can reach.", "- shares: Shares of a person."]
-
-
-def test_an_included_skill_is_expanded_wherever_it_is_named(tmp_path):
-    from fastworkflow.workflow_agent import load_skills
-
-    folder = _write_skills(tmp_path, {"twice": "Twice.\n@one\nmiddle\n@one\n", "one": "One.\nstep\n"})
-    assert load_skills(folder)[1] == ("twice", "Twice.", ("step", "middle", "step"))
-
-
-def test_an_unknown_or_cyclic_skill_include_fails_the_load_naming_the_chain(tmp_path):
-    from fastworkflow.workflow_agent import load_skills
-
-    unknown = _write_skills(tmp_path / "unknown", {"a": "A.\n@b\n", "b": "B.\n@nope\n"})
-    with pytest.raises(ValueError, match=r"'b' includes unknown skill 'nope' \(a -> b -> nope\)"):
-        load_skills(unknown)
-
-    cycle = _write_skills(tmp_path / "cycle", {"a": "A.\n@b\n", "b": "B.\nstep\n@a\n"})
-    with pytest.raises(ValueError, match=r"'b' includes 'a' in a cycle \(a -> b -> a\)"):
-        load_skills(cycle)
-
-    itself = _write_skills(tmp_path / "itself", {"a": "A.\n@a\n"})
-    with pytest.raises(ValueError, match=r"\(a -> a\)"):
-        load_skills(itself)
-
-
-def test_the_planner_template_gets_the_expanded_steps(tmp_path, monkeypatch):
+def test_the_planner_template_gets_the_skills_steps(tmp_path, monkeypatch):
     from fastworkflow import workflow_agent
 
-    folder = _write_skills(tmp_path, {"leaver": "Someone is leaving.\nfind them\n@close\n",
-                                      "close": "Close an account.\nclose it\n"})
+    folder = _write_skills(tmp_path, {"leaver": "Someone is leaving.\nfind them\nclose it\n"})
     monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: _fake_matcher("leaver", 0.9))
     assert workflow_agent.match_skill("Pat is leaving", folder) == ("leaver", ("find them", "close it"))
     assert "- find them\n- close it\n" in workflow_agent.plan_template_for("Pat is leaving", folder)

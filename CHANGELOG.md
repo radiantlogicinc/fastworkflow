@@ -402,6 +402,11 @@
 
 ### Removed
 
+- **Skill `repeat()` / `REPEAT_LIMIT` and `@<skill>` include lines**
+  (fix-ajir.18): a skill file's `steps()` loops with `range()` (bound the int
+  field with `le`) and shares steps through a helper module
+  (`_skills/_<name>.py`). A step written `@<name>` is now plain text.
+
 - **`run_fastapi_mcp --keep_dspy_history`** (fix-50pd): the bounded-history
   "inspect mode" of the server's DSPy memory policy is gone, with
   `install_policy(keep_history=..., history_entries=...)`,

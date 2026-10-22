@@ -705,15 +705,6 @@ def _fan_out_text(phase) -> str:
     return "; ".join(parts)
 
 
-def _expand(command, lines: list[str]) -> list[str]:
-    from fastworkflow import skill_commands
-
-    try:
-        return skill_commands.expand_includes(command, lines)
-    except skill_commands.SkillCallError:
-        return lines
-
-
 #: How many items of a fan-out over an earlier phase's list the preview renders: the first,
 #: and one later item (its steps may differ, e.g. by going back up first).
 FAN_OUT_SHOWN = 2
@@ -786,12 +777,11 @@ def _render_phases(command, args: dict) -> _Render:
         reads = [n for n in names if n in outputs]
         render.phases.append(_PhaseRender(
             name=phase.name, reads=reads, output=phase.output,
-            steps=_expand(command, lines), settings=_settings(phase), note=note,
+            steps=lines, settings=_settings(phase), note=note,
             condition=condition_text(phase.when, "when") if callable(phase.when) else "",
             fan_out=_fan_out_text(phase), optional=bool(getattr(phase, "optional", False)),
             placeholders=bool(reads) and not note,
-            items=None if per_item is None else [
-                (head, _expand(command, steps)) for head, steps in zip(heads, per_item)]))
+            items=None if per_item is None else list(zip(heads, per_item))))
         if phase.output is not None:
             width = FAN_OUT_SHOWN if phase.name in fanned else 1
             if phase.fans_out:

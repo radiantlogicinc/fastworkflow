@@ -121,7 +121,7 @@ class Signature:
 def steps(input: Signature.Input) -> list[str]:
     out = lookup_steps(input.kind, input.name)
     out.append(f"list_parts supplier={input.supplier}" if input.supplier else "list_parts")
-    return out + ["@close_out"]
+    return out + ["go_up", "say what was shown"]
 
 
 def lookup_steps(kind, name):

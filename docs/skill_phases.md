@@ -70,9 +70,8 @@ def steps(input: Signature.Input) -> list[str]:
 - `Phase(name, steps_fn, output=None, when=True, over=None, item="item", max_items=None,
   bind=True, until=None, noun=None, optional=False)`:
   - `name`: a Python identifier, unique in the plan.
-  - `steps_fn`: returns the phase's steps (a list of str; `@<skill>` lines are expanded
-    as in `steps()`). Its parameters are bound **by name** to the outputs of earlier
-    phases, as typed objects: `lambda find: ...` receives the `find` phase's filled
+  - `steps_fn`: returns the phase's steps (a list of str). Its parameters are bound
+    **by name** to the outputs of earlier phases, as typed objects: `lambda find: ...` receives the `find` phase's filled
     `Found`. A zero-argument `steps_fn` receives nothing. A parameter is bound only when
     an earlier phase of that name ran and declares an `output`; otherwise it keeps its
     default, and one without a default fails the phase. So when a phase may be left out,

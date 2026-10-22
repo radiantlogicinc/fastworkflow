@@ -15,8 +15,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from fastworkflow.skill_commands import repeat
-
 FIND = {"group": "find_group", "feed": "find_feed"}
 COUNT_WORD = {1: "one", 2: "two"}
 
@@ -51,7 +49,7 @@ def steps(input):
         out.append(f"assess_risk{{owner={input.owner}}}")
     if input.kind == "group" and not (input.person or input.include_risk):
         out.append(f"open_group_by_uid with the uid of the {input.name} match")
-    for n in repeat(input.count, 1):
+    for n in range(2, input.count + 1):
         out.append(f"open member {n}")
     out.append(f"stop after the first {COUNT_WORD.get(input.count, input.count)} members")
     return out
@@ -185,44 +183,15 @@ def test_a_skill_with_params_offers_its_steps_as_template_text(tmp_path):
 
 
 def test_a_skill_without_params_is_read_as_its_fixed_steps(tmp_path):
+    # an "@<skill>" line is plain text: skills do not include other skills
     folder = _write(tmp_path, {"leaver": _plain("Someone is leaving. One job per person.",
                                                  ["find {them} [if asked]", "[repeat x]", "@close"]),
                                "close": _plain("Close an account.", ["close it"])})
     assert workflow_agent.load_skills(folder) == (
         ("close", "Close an account.", ("close it",)),
-        ("leaver", "Someone is leaving. One job per person.", ("find {them} [if asked]", "[repeat x]", "close it")),
+        ("leaver", "Someone is leaving. One job per person.", ("find {them} [if asked]", "[repeat x]", "@close")),
     )
     assert workflow_agent.load_skill_commands(folder) == {}
-
-
-AUDIT = '''
-from pydantic import BaseModel
-
-
-class Signature:
-    """Audit one person."""
-
-    class Input(BaseModel):
-        name: str
-
-
-def steps(input):
-    return [f"find_person query={input.name}", "@notes"]
-'''
-
-
-def test_an_included_plain_skill_is_literal_text_inside_a_skill_with_params(tmp_path):
-    folder = _write(tmp_path, {"audit": AUDIT,
-                               "notes": _plain("Notes.", ["write {braces} and [if kept] as they are"])})
-    command = workflow_agent.load_skill_commands(folder)["audit"]
-    assert sc.expand(command, {"name": "Ann Lee"}) == [
-        "find_person query=Ann Lee", "write {braces} and [if kept] as they are"]
-
-
-def test_a_skill_with_params_cannot_be_included(tmp_path):
-    folder = _write(tmp_path, {"outer": _plain("Outer.", ["@lookup"]), "lookup": LOOKUP})
-    with pytest.raises(SkillFormatError, match=r"includes 'lookup', which has params"):
-        workflow_agent.load_skills(folder)
 
 
 # ---------------------------------------------------------------- expansion
@@ -238,11 +207,6 @@ def test_expansion_substitutes_values_drops_false_conditions_and_unrolls_repeats
         "open_directory", "find_feed query=NORTHFEED", "list_logins of NORTHFEED filter=Ann Lee",
         "assess_risk{owner=the customer}", "stop after the first one members"]
     assert sc.number(["a", "b"]) == "1. a\n2. b"
-
-
-def test_a_repeat_beyond_the_limit_is_refused(tmp_path):
-    with pytest.raises(SkillCallError, match="more than"):
-        sc.expand(_command(tmp_path), _args(count=sc.REPEAT_LIMIT + 2))
 
 
 # ---------------------------------------------------------------- guards
