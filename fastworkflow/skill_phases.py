@@ -1804,6 +1804,94 @@ def answer_from_steps(plan_text: str) -> str:
                      if line and answer_step_kind(line) != "guard")
 
 
+#: The fewest items of a comma run that ``bulleted_answer`` writes as sub-bullets.
+MIN_BULLETED_ITEMS = 4
+#: An item with a second value after it in brackets (``Emma [b2]``, ``Emma (b2)``).
+_TAGGED_ITEM_RE = re.compile(r"(.+) (?:\[([^\[\]]+)\]|\(([^()]+)\))")
+
+
+def _output_texts(value: Any, texts: set[str]) -> set[str]:
+    """Every text value in *value* (a model, mapping, list or text), stripped, added to *texts*."""
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json")
+    if isinstance(value, Mapping):
+        value = list(value.values())
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _output_texts(item, texts)
+    elif isinstance(value, str) and value.strip():
+        texts.add(value.strip())
+    return texts
+
+
+def _is_output_value(piece: str, texts: set[str]) -> bool:
+    """Whether *piece* is exactly one output text, or one followed by another in brackets."""
+    tagged = _TAGGED_ITEM_RE.fullmatch(piece)
+    return piece in texts or bool(
+        tagged and tagged[1] in texts and (tagged[2] or tagged[3]) in texts)
+
+
+def _first_value(candidates: Iterable[str], texts: set[str]) -> Optional[str]:
+    """The first of *candidates* that is an output value (``_is_output_value``), if any."""
+    return next((text for text in candidates if _is_output_value(text, texts)), None)
+
+
+def _list_runs(line: str, texts: set[str]) -> tuple[list[tuple[str, list[str]]], str]:
+    """*line*'s comma runs of ``MIN_BULLETED_ITEMS`` output values or more
+    (``_is_output_value``), as (text before the run, items), and the text after the last
+    run. The first item may follow ``(``, ``": "`` or a comma (the shortest value there);
+    the last may come before ``)``, ``.``, ``;`` or a comma (the longest)."""
+    pieces = line.split(", ")
+    for i, piece in enumerate(pieces):
+        first = _first_value([piece[m.end():] for m in re.finditer(r"\(|: ", piece)][::-1]
+                             + [piece], texts)
+        if first is None:
+            continue
+        n = i + 1                       # the first piece after the whole values
+        while n < len(pieces) and _is_output_value(pieces[n], texts):
+            n += 1
+        items, after = [first, *pieces[i + 1:n]], (pieces[n] if n < len(pieces) else "")
+        last = _first_value([after[:m.start()] for m in re.finditer(r"[).;]", after)][::-1], texts)
+        items += [last] if last else []
+        if len(items) >= MIN_BULLETED_ITEMS:
+            head = ", ".join(pieces[:i] + [piece[:len(piece) - len(first)]])
+            runs, tail = _list_runs(line[len(head) + len(", ".join(items)):], texts)
+            return [(head, items), *runs], tail
+    return [], line
+
+
+def bulleted_answer(answer: str, outputs: Mapping[str, Any]) -> str:
+    """A code-written answer (``answer_from_steps``) in Markdown, for a person to read.
+
+    Each line becomes a bullet when there are several. Inside a line, a comma run of
+    ``MIN_BULLETED_ITEMS`` items or more becomes sub-bullets, in order, only when EVERY
+    item is exactly a text value of *outputs* (or one with another in brackets after it,
+    ``Emma [b2]``); the text before the run stays on the line, ending in ``:``, and text
+    after it goes on below. Only the brackets, colon, commas or full stop around a run are
+    dropped; any other line is left as it is. The checks read the answer before this.
+    """
+    texts = _output_texts(outputs, set())
+    lines = [line for line in answer.splitlines() if line.strip()]
+    pad, bullet = ("  ", "- ") if len(lines) > 1 else ("", "")
+    out: list[str] = []
+    for line in lines:
+        runs, tail = _list_runs(line, texts)
+        if not runs or not runs[0][0].strip(" ,;"):    # no run, or no text before the first
+            out.append(bullet + line)
+            continue
+        for n, (head, items) in enumerate(runs):
+            head = head.lstrip(" ),.;").rstrip(" (:,;")
+            if n:
+                out.append("")
+            if head:
+                out.append((bullet if n == 0 else pad) + head + ":")
+            out.extend(f"{pad}- {item}" for item in items)
+        tail = tail.lstrip(" ),.;")
+        if re.search(r"\w", tail):
+            out += ["", pad + tail]
+    return "\n".join(out)
+
+
 def answer_by_code(plan_text: str) -> bool:
     """Whether code writes the answer of an answer-only phase with these steps, with no
     model call: every step is verbatim or a guard (``answer_step_kind``) and at
@@ -1964,12 +2052,15 @@ def answer_only_answer(query: str, plan_text: str, outputs: Mapping[str, Any]) -
     row of the lists the steps give in full that the answer does not name
     (``missing_list_items``, against *outputs*, the earlier phases' outputs) is appended
     after ``MISSING_ITEMS_LEAD``, so a list is never dropped, cut short or garbled out of
-    the answer.
+    the answer. Last, an answer code wrote is laid out for reading (``bulleted_answer``).
     """
-    answer = answer_from_steps(plan_text) if answer_by_code(plan_text) else write_answer(query)
+    by_code = answer_by_code(plan_text)
+    answer = answer_from_steps(plan_text) if by_code else write_answer(query)
     if is_empty_answer(answer):
-        answer = answer_from_steps(plan_text)
+        answer, by_code = answer_from_steps(plan_text), True
     missing = missing_list_items(answer, plan_text, outputs)
+    if by_code:
+        answer = bulleted_answer(answer, outputs)
     if missing:
         answer = f"{answer}\n\n{MISSING_ITEMS_LEAD} {', '.join(missing)}."
     return answer

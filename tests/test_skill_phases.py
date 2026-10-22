@@ -1982,6 +1982,44 @@ def test_answer_only_answer_makes_no_model_call_when_every_step_is_verbatim(monk
     assert len(calls) == 1
 
 
+def test_bulleted_answer_splits_only_runs_of_output_values():
+    from fastworkflow.skill_phases import bulleted_answer
+
+    class Shelf(BaseModel):
+        uids: list[str] = []
+        labels: list[str] = []
+
+    shelf = Shelf(uids=["b1", "b2", "b3", "b4"], labels=["Dune", "Emma", "Ivanhoe", "Kim"])
+    answer = ("B1 holds 4 books (Dune, Emma, Ivanhoe, Kim); 2 loans (l1, l2).\n"
+              "Tagged: Dune [b1], Emma [b2], Ivanhoe [b3], Kim [b4].\n"
+              "Readers: Dune, Emma, Ivanhoe, Bob.\n"
+              "Three: Dune, Emma, Ivanhoe.")
+    assert bulleted_answer(answer, {"shelf": shelf}) == (
+        "- B1 holds 4 books:\n  - Dune\n  - Emma\n  - Ivanhoe\n  - Kim\n\n  2 loans (l1, l2).\n"
+        "- Tagged:\n  - Dune [b1]\n  - Emma [b2]\n  - Ivanhoe [b3]\n  - Kim [b4]\n"
+        "- Readers: Dune, Emma, Ivanhoe, Bob.\n"     # Bob is no output value: as it was
+        "- Three: Dune, Emma, Ivanhoe.")             # fewer than four items: as it was
+    # One line is no bullet; two runs in it, then the text after them.
+    assert bulleted_answer("Books (Dune, Emma, Ivanhoe, Kim); copies (b1, b2, b3, b4), "
+                           "all on the shelf.", {"shelves": [shelf]}) == (
+        "Books:\n- Dune\n- Emma\n- Ivanhoe\n- Kim\n\ncopies:\n- b1\n- b2\n- b3\n- b4\n\n"
+        "all on the shelf.")
+    assert bulleted_answer("B1 has loans l1, l2.", {"shelf": shelf}) == "B1 has loans l1, l2."
+
+
+def test_answer_only_answer_bullets_a_code_written_answer_after_its_checks(monkeypatch):
+    monkeypatch.setattr("fastworkflow.skill_phases.write_answer", lambda query: "a, b, c, d")
+    book = BookFacts(uid="b1", loan_uids=["l1", "l2", "l3", "l4"])
+    steps = ("1. say what b1 has on loan, naming each: l1, l2, l3, l4\n"
+             "2. say that it is due back\n3. apply no change")
+    assert answer_only_answer("q", steps, {"book": book}) == (
+        "- What b1 has on loan, naming each:\n  - l1\n  - l2\n  - l3\n  - l4\n"
+        "- It is due back.")
+    # A model-written answer is left as the model wrote it.
+    assert answer_only_answer("q", "1. say which loan is due first", {"book": book}) == \
+        "a, b, c, d"
+
+
 def test_code_writes_an_answer_only_phase_and_its_span_says_so(phased, monkeypatch):
     # The fixture scripts the model's answers; here code writes this one.
     monkeypatch.setattr("fastworkflow.skill_phases.answer_by_code", answer_by_code)
