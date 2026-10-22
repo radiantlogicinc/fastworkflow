@@ -722,6 +722,29 @@ class CommandMetadataAPI:
             return base_text
 
     @staticmethod
+    def get_other_context_commands(
+        subject_workflow_path: str,
+        active_context_name: str,
+        exclude: frozenset[str] = frozenset(),
+    ) -> Dict[str, List[str]]:
+        """Each OTHER enterable context, by name, with the command names it adds to the active one.
+
+        Skips the active and global contexts and those that are not occupiable; the command
+        names are short (no context prefix), sorted, without ``wildcard`` and *exclude*.
+        Raises when the routing definition cannot be read.
+        """
+        crd = fastworkflow.RoutingRegistry.get_definition(subject_workflow_path)
+        occupiable = CommandMetadataAPI._occupiable_context_names(subject_workflow_path)
+        listed = set(crd.contexts.get(active_context_name, ()))
+        return {
+            context_name: sorted({name.split("/")[-1] for name in crd.contexts[context_name]
+                                  if name not in listed} - {"wildcard", *exclude})
+            for context_name in sorted(crd.contexts)
+            if context_name not in (active_context_name, "*")
+            and (occupiable is None or context_name in occupiable)
+        }
+
+    @staticmethod
     def get_other_contexts_text(
         subject_workflow_path: str,
         active_context_name: str,
@@ -739,21 +762,13 @@ class CommandMetadataAPI:
         from fastworkflow.context_navigation import navigation_steps_to_context
 
         try:
-            crd = fastworkflow.RoutingRegistry.get_definition(subject_workflow_path)
-            occupiable = CommandMetadataAPI._occupiable_context_names(subject_workflow_path)
-            listed = set(crd.contexts.get(active_context_name, ()))
             lines: List[str] = []
-            for context_name in sorted(crd.contexts):
-                if context_name in (active_context_name, "*"):
-                    continue
-                if occupiable is not None and context_name not in occupiable:
-                    continue
+            for context_name, added in CommandMetadataAPI.get_other_context_commands(
+                    subject_workflow_path, active_context_name, exclude).items():
                 context_class = (context_class_for(navigation_workflow, context_name)
                                  if navigation_workflow is not None else None)
                 description = (inspect.getdoc(context_class) or "").strip().split("\n")[0]
                 if not description:
-                    added = sorted({name.split("/")[-1] for name in crd.contexts[context_name]
-                                    if name not in listed} - {"wildcard", *exclude})
                     description = "commands: " + ", ".join(added) if added else ""
                 steps = None
                 if navigation_workflow is not None:

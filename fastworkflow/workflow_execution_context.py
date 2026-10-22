@@ -1939,6 +1939,13 @@ class WorkflowExecutionContext:
         self._turn_refined_message = refined_user_query
         self._clear_subtask_state()
 
+        # A workflow with skills answers a plain "what can you do?" in code, with no model call.
+        from fastworkflow.capability_answer import capability_answer
+
+        if self._app_workflow and (answer := capability_answer(
+                message, self._app_workflow, self._cme_workflow.folderpath)) is not None:
+            return dspy.Prediction(final_answer=answer, exhausted=False)
+
         from fastworkflow.workflow_agent import split_into_subtasks
 
         subtasks = split_into_subtasks(
