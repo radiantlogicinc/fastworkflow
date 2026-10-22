@@ -47,7 +47,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Optional
+from typing import Any, Callable, Iterable, Iterator, Mapping, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -111,7 +111,19 @@ _DEFAULT_SYNC_BREAKER_COOLDOWN_S = 60
 _PENDING_RETRY_MAX = 64
 
 _PRUNE_BATCH_ROWS = 5_000
-_PRUNE_MAX_BATCHES = 20
+# A bound, not a loop until under the cap: the size counts the -wal file, which
+# a long reader can pin, and an unbounded pass would then evict everything
+# unbound. 200 batches keep up with about 2,500 turns an hour (fix-ajir.27).
+_PRUNE_MAX_BATCHES = 200
+# Prune chooses its victims with a plain read, which in WAL blocks no writer,
+# and deletes them by key in write transactions this small, each re-checking
+# the victim's predicate. It pauses between them because SQLite's busy handler
+# polls and is not fair: without the pause a waiting turn write starves. The
+# vacuum frees pages the same way, a step at a time (fix-ajir.25).
+_PRUNE_TXN_ROWS = 200
+_PRUNE_TXN_TURNS = 2
+_PRUNE_PAUSE_S = 0.02
+_PRUNE_VACUUM_PAGES = 256
 # The writer re-runs the startup prune this often, so a long-lived server stays
 # inside the horizon and the cap, and a backlog larger than one bounded pass
 # drains over successive passes (fix-nczr.1). Not a knob: the horizon and the
@@ -758,6 +770,11 @@ def _utcnow_iso() -> str:
 def _chunked(values: list[Any], size: int = 400) -> Iterable[list[Any]]:
     for start in range(0, len(values), size):
         yield values[start:start + size]
+
+
+def _marks(values: list[Any]) -> str:
+    """One ``?`` placeholder per value, for an ``IN (...)`` list."""
+    return ",".join("?" for _ in values)
 
 
 def _iso_to_ms(value: Optional[str]) -> int:
@@ -5567,42 +5584,91 @@ class ObservabilityStore:
         # no experiment id, so evidence with no finished turn record may belong
         # to a turn still running: the cap never evicts it, only the horizon
         # does (which is also what clears a crashed turn's orphans) (fix-q2fy).
-        finished_turns = (
-            "SELECT turn_key FROM turns WHERE status IN ("
-            + ",".join(f"'{status}'" for status in sorted(TERMINAL_TURN_STATUSES))
-            + ")"
-        )
+        terminal = ",".join(f"'{status}'" for status in sorted(TERMINAL_TURN_STATUSES))
+        finished_turns = f"SELECT turn_key FROM turns WHERE status IN ({terminal})"
+        # The same two conditions on one turn record, re-checked by key just
+        # before its turn's evidence or record is deleted (fix-ajir.25).
+        finished_unbound = f"status IN ({terminal}) AND {unbound}"
 
         with self._connect() as conn:
             # As in `forget_channel`: retention deletes evidence text, and a
             # deleted cell must not survive in a page that still holds others.
             conn.execute("PRAGMA secure_delete=ON")
             has_prompt_slots = _has_prompt_slots(conn)
+
+            def offload_unbound(chunk: list[str]) -> int:
+                exempt = set(self._turn_keys_where(conn, chunk, f"experiment_id IN ({bound})"))
+                keys = [key for key in chunk if key not in exempt]
+                self._delete_offload_turns_in_txn(conn, keys, deleted)
+                return len(keys)
+
+            def offload_finished(chunk: list[str]) -> int:
+                keys = self._turn_keys_where(conn, chunk, finished_unbound)
+                self._delete_offload_turns_in_txn(conn, keys, deleted)
+                return len(keys)
+
+            def turn_records(chunk: list[str]) -> int:
+                keys = self._turn_keys_where(conn, chunk, finished_unbound)
+                self._delete_turn_records_in_txn(conn, keys, deleted, has_prompt_slots)
+                return len(keys)
+
+            # Each batch's victims are read outside any write transaction and
+            # deleted by key in short ones, each delete re-checking the
+            # condition that chose them (fix-ajir.25).
             for _ in range(_PRUNE_MAX_BATCHES):
-                conn.execute("BEGIN IMMEDIATE")
-                spans_cur = conn.execute(
-                    "DELETE FROM spans WHERE span_id IN "
-                    f"(SELECT span_id FROM spans WHERE start_ns < ? AND {unbound} "
-                    "LIMIT ?)",
-                    (horizon_ns, _PRUNE_BATCH_ROWS),
+                span_ids = [
+                    str(row[0])
+                    for row in conn.execute(
+                        f"SELECT span_id FROM spans WHERE start_ns < ? AND {unbound} "
+                        "LIMIT ?",
+                        (horizon_ns, _PRUNE_BATCH_ROWS),
+                    ).fetchall()
+                ]
+                deleted["spans"] += self._in_short_txns(
+                    conn, span_ids, _PRUNE_TXN_ROWS,
+                    lambda chunk: conn.execute(
+                        f"DELETE FROM spans WHERE span_id IN ({_marks(chunk)}) "
+                        f"AND start_ns < ? AND {unbound}",
+                        (*chunk, horizon_ns),
+                    ).rowcount,
                 )
-                deleted["spans"] += spans_cur.rowcount
-                artifacts_cur = conn.execute(
-                    "DELETE FROM artifacts WHERE artifact_id IN "
-                    "(SELECT artifact_id FROM artifacts WHERE turn_key < ? "
-                    f"AND {unbound} LIMIT ?)",
-                    (horizon_key, _PRUNE_BATCH_ROWS),
-                )
-                deleted["artifacts"] += artifacts_cur.rowcount
-                slots_deleted = 0
-                if has_prompt_slots:
-                    slots_deleted = conn.execute(
-                        "DELETE FROM prompt_slots WHERE rowid IN "
-                        "(SELECT rowid FROM prompt_slots WHERE turn_key < ? "
-                        f"AND {unbound} LIMIT ?)",
+                artifact_ids = [
+                    str(row[0])
+                    for row in conn.execute(
+                        "SELECT artifact_id FROM artifacts WHERE turn_key < ? "
+                        f"AND {unbound} LIMIT ?",
                         (horizon_key, _PRUNE_BATCH_ROWS),
-                    ).rowcount
-                    deleted["prompt_slots"] += slots_deleted
+                    ).fetchall()
+                ]
+                deleted["artifacts"] += self._in_short_txns(
+                    conn, artifact_ids, _PRUNE_TXN_ROWS,
+                    lambda chunk: conn.execute(
+                        f"DELETE FROM artifacts WHERE artifact_id IN ({_marks(chunk)}) "
+                        f"AND turn_key < ? AND {unbound}",
+                        (*chunk, horizon_key),
+                    ).rowcount,
+                )
+                slot_keys: list[tuple[str, str]] = []
+                if has_prompt_slots:
+                    slot_keys = [
+                        (str(row[0]), str(row[1]))
+                        for row in conn.execute(
+                            "SELECT turn_key, sha256 FROM prompt_slots WHERE turn_key < ? "
+                            f"AND {unbound} LIMIT ?",
+                            (horizon_key, _PRUNE_BATCH_ROWS),
+                        ).fetchall()
+                    ]
+                    deleted["prompt_slots"] += self._in_short_txns(
+                        conn, slot_keys, _PRUNE_TXN_ROWS,
+                        lambda chunk: sum(
+                            conn.execute(
+                                "DELETE FROM prompt_slots WHERE turn_key=? AND sha256=? "
+                                f"AND turn_key < ? AND {unbound}",
+                                (*key, horizon_key),
+                            ).rowcount
+                            for key in chunk
+                        ),
+                    )
                 # Offload evidence is aged by its TURN, like artifacts, so a
                 # turn's observations go whole. A turn's age is its earliest
                 # evidence write rather than its key, because a turn with no
@@ -5612,14 +5678,11 @@ class ObservabilityStore:
                     conn, before=horizon_evidence, limit=_OFFLOAD_PRUNE_BATCH_TURNS,
                     exempt=bound_turns,
                 )
-                self._delete_offload_turns_in_txn(
-                    conn, aged_turns, deleted
-                )
-                conn.commit()
+                self._in_short_txns(conn, aged_turns, _PRUNE_TXN_TURNS, offload_unbound)
                 if (
-                    spans_cur.rowcount < _PRUNE_BATCH_ROWS
-                    and artifacts_cur.rowcount < _PRUNE_BATCH_ROWS
-                    and slots_deleted < _PRUNE_BATCH_ROWS
+                    len(span_ids) < _PRUNE_BATCH_ROWS
+                    and len(artifact_ids) < _PRUNE_BATCH_ROWS
+                    and len(slot_keys) < _PRUNE_BATCH_ROWS
                     and len(aged_turns) < _OFFLOAD_PRUNE_BATCH_TURNS
                 ):
                     break
@@ -5652,21 +5715,27 @@ class ObservabilityStore:
             for _ in range(_PRUNE_MAX_BATCHES):
                 if self.db_size_bytes() <= max_bytes:
                     break
-                conn.execute("BEGIN IMMEDIATE")
-                cur = conn.execute(
-                    "DELETE FROM spans WHERE span_id IN "
-                    f"(SELECT span_id FROM spans WHERE {unbound} "
-                    "ORDER BY start_ns LIMIT ?)",
-                    (_PRUNE_BATCH_ROWS,),
+                span_ids = [
+                    str(row[0])
+                    for row in conn.execute(
+                        f"SELECT span_id FROM spans WHERE {unbound} "
+                        "ORDER BY start_ns LIMIT ?",
+                        (_PRUNE_BATCH_ROWS,),
+                    ).fetchall()
+                ]
+                deleted["spans"] += self._in_short_txns(
+                    conn, span_ids, _PRUNE_TXN_ROWS,
+                    lambda chunk: conn.execute(
+                        f"DELETE FROM spans WHERE span_id IN ({_marks(chunk)}) "
+                        f"AND {unbound}",
+                        chunk,
+                    ).rowcount,
                 )
-                deleted["spans"] += cur.rowcount
                 oldest_turns = self._offload_turns_in_txn(
                     conn, before=None, limit=_OFFLOAD_PRUNE_BATCH_TURNS,
                     exempt=bound_turns, only=finished_turns,
                 )
-                self._delete_offload_turns_in_txn(
-                    conn, oldest_turns, deleted
-                )
+                self._in_short_txns(conn, oldest_turns, _PRUNE_TXN_TURNS, offload_finished)
                 # A prompt's pieces are evicted a whole turn at a time, oldest
                 # turn first, beside the spans that referenced them.
                 slot_turns: list[str] = []
@@ -5679,14 +5748,15 @@ class ObservabilityStore:
                             (_OFFLOAD_PRUNE_BATCH_TURNS,),
                         ).fetchall()
                     ]
-                    for chunk in _chunked(slot_turns):
-                        marks = ",".join("?" for _ in chunk)
-                        deleted["prompt_slots"] += conn.execute(
-                            f"DELETE FROM prompt_slots WHERE turn_key IN ({marks})",
+                    deleted["prompt_slots"] += self._in_short_txns(
+                        conn, slot_turns, _PRUNE_TXN_TURNS,
+                        lambda chunk: conn.execute(
+                            f"DELETE FROM prompt_slots WHERE turn_key IN ({_marks(chunk)}) "
+                            f"AND {unbound}",
                             chunk,
-                        ).rowcount
-                conn.commit()
-                if cur.rowcount == 0 and not oldest_turns and not slot_turns:
+                        ).rowcount,
+                    )
+                if not span_ids and not oldest_turns and not slot_turns:
                     # Nothing but turn records is left to evict, so they go
                     # too, oldest first and whole, or the cap is no bound
                     # (fix-nczr.2). Only finished turns outside any bound
@@ -5694,7 +5764,6 @@ class ObservabilityStore:
                     # denominator and never go by eviction [DR44]; a sealed
                     # or released one's go like any other (fix-ajir.24).
                     marks = ",".join("?" for _ in TERMINAL_TURN_STATUSES)
-                    conn.execute("BEGIN IMMEDIATE")
                     keys = [
                         str(row[0])
                         for row in conn.execute(
@@ -5704,18 +5773,19 @@ class ObservabilityStore:
                              _OFFLOAD_PRUNE_BATCH_TURNS),
                         ).fetchall()
                     ]
-                    self._delete_turn_records_in_txn(
-                        conn, keys, deleted, has_prompt_slots
+                    deleted["turns"] = deleted.get("turns", 0) + self._in_short_txns(
+                        conn, keys, _PRUNE_TXN_TURNS, turn_records
                     )
-                    conn.commit()
-                    deleted["turns"] = deleted.get("turns", 0) + len(keys)
                     if not keys:
                         only_bound_left = True
                         break
-                # Fetched to completion: each step of this pragma frees one page.
-                conn.execute("PRAGMA incremental_vacuum").fetchall()
-                conn.commit()
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                self._vacuum_in_steps(conn)
+                if conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()[0][0]:
+                    # A reader pins the WAL, so the size cannot drop in this
+                    # pass, and each further batch would evict for nothing and
+                    # block writers for another busy timeout here. The next
+                    # pass carries on (fix-ajir.27).
+                    break
 
             bound_bytes = (
                 self._bound_evidence_bytes_in_txn(conn, bound, bound_turns)
@@ -5762,6 +5832,51 @@ class ObservabilityStore:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
         return deleted
+
+    @staticmethod
+    def _in_short_txns(
+        conn: sqlite3.Connection,
+        keys: list[Any],
+        size: int,
+        delete: Callable[[list[Any]], int],
+    ) -> int:
+        """Call *delete* on *keys*, *size* at a time, each chunk in its own short
+        write transaction followed by a pause, so a waiting writer gets in
+        between (fix-ajir.25). *delete* re-checks by key the condition that
+        chose the keys, since they were read outside the lock. Returns the sum
+        of what *delete* returned."""
+        total = 0
+        for chunk in _chunked(list(keys), size):
+            conn.execute("BEGIN IMMEDIATE")
+            total += delete(chunk)
+            conn.commit()
+            time.sleep(_PRUNE_PAUSE_S)
+        return total
+
+    @staticmethod
+    def _turn_keys_where(
+        conn: sqlite3.Connection, keys: list[str], where: str
+    ) -> list[str]:
+        """Those of *keys* whose turn record *where* selects, looked up by key."""
+        return [
+            str(row[0])
+            for row in conn.execute(
+                f"SELECT turn_key FROM turns WHERE turn_key IN ({_marks(keys)}) "
+                f"AND {where}",
+                keys,
+            ).fetchall()
+        ]
+
+    @staticmethod
+    def _vacuum_in_steps(conn: sqlite3.Connection) -> None:
+        """Return the free pages to the filesystem `_PRUNE_VACUUM_PAGES` at a
+        time, each step its own transaction followed by a pause (fix-ajir.25).
+        Bounded by the free pages counted first."""
+        free = conn.execute("PRAGMA freelist_count").fetchall()[0][0]
+        for _ in range(-(-free // _PRUNE_VACUUM_PAGES)):
+            conn.execute(f"PRAGMA incremental_vacuum({_PRUNE_VACUUM_PAGES})").fetchall()
+            conn.commit()
+            time.sleep(_PRUNE_PAUSE_S)
 
     def _delete_turn_records_in_txn(
         self,
