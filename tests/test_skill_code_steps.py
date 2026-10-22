@@ -90,6 +90,8 @@ def test_a_mechanical_step_runs_its_chain_and_never_its_note(text, command):
     "find_book query=Dune start=",                          # paging with no value
     "only if nothing was found, find_book query=Dune",      # conditional
     "find_book query=Dune (skip when it is already open)",  # conditional
+    "find_book query=Dune only when needed",                # condition in the chain (fix-ajir.32)
+    "open_book_by_uid with the uid of the Dune match if there is one",
     "then find_book query=Dune",                            # command not the first word
     "find_book query=Dune tags=[a]",                        # a word= that is no field
 ])

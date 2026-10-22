@@ -223,7 +223,8 @@ fastworkflow skill preview <workflow_folder> --check    # writes nothing; exit 1
 Each step is one string, one line of the plan. The framework reads it in code: the finish
 check (`observation_offloading/finish_check.py`), code-run steps and picks, and the
 answer-only phase (`skill_phases.py`). A step is classified by the FIRST declared command
-it names; the text before that command decides conditional, negated and answer steps.
+it names; the text before that command decides conditional, negated and answer steps (a
+condition word in its chain also makes it conditional).
 
 | Wording | What it triggers | Implemented at |
 |---|---|---|
@@ -242,9 +243,9 @@ it names; the text before that command decides conditional, negated and answer s
 | `cmd start=20` (`start`, `offset`, `skip`) | That page only; code never computes a next page | `facts.py` `PAGING_PARAMETERS` |
 | `cmd start=<n>`, or a step `next page with start=<n> until the list is read` | Open: the agent pages | `skill_phases.py` `_code_step` |
 | any other note, or none, on a paged command | Page 1 is what the step wants; code goes on | `skill_phases.py` `_paging` |
-| a condition word BEFORE the command: `if`, `only`, `when`, `whenever`, `unless`, `otherwise`, `optional(ly)`, `in case`, `as needed`, `where needed`, `where applicable`, `else` | Conditional: the agent decides; the finish check does not hold it; it stops code and keeps the phase from being answer-only | `finish_check.py` `_CONDITION_RE`, `_classify` |
+| a condition word before the command (or in its chain, next row): `if`, `only`, `when`, `whenever`, `unless`, `otherwise`, `optional(ly)`, `in case`, `as needed`, `where needed`, `where applicable`, `else` | Conditional: the agent decides; the finish check does not hold it; it stops code and keeps the phase from being answer-only | `finish_check.py` `_CONDITION_RE`, `_classify` |
 | ANYWHERE in the step: `if needed`, `if necessary`, `if required`, `as needed`, `optional(ly)`, `skip when/if/unless`, `skip it when/if/unless` | Conditional, as above | `finish_check.py` `_ANYWHERE_CONDITION_RE` |
-| `cmd k=v only when ...` (condition after the command, not one of the anywhere phrases) | A plain command step, held to a run. The prose joins the last value: code sends `cmd k=v only when ...` as written. To make it conditional, put the condition before the command or use an anywhere phrase | `finish_check.py` `_classify`, `_value_text` |
+| `cmd k=v only when ...` (a condition word in the command's chain: after it, up to the first `(` or `;`) | Conditional, as if the condition came before the command, so the prose never joins the last value. A condition in a note (`cmd k=v (only when overdue)`) is never read: the step stays a plain command step, held to a run | `finish_check.py` `_classify` |
 | a negation word before the command: `do not`, `don't`, `dont`, `never`, `none`, `not`, `no`, `nor`, `without`, `avoid`, `skip` | Negated (checked before conditions: `only when there is no match, cmd ...` is negated): code passes it over, never held to a run | `finish_check.py` `_NEGATION_RE`, `_classify` |
 | first word an answer verb: `answer report present return say give summarize summarise state tell reply respond compare note identify end stop finish confirm verify conclude offer mention describe include combine format output provide write` (and `list_nothing`, `explain_answer`) | An answer step, even if it names a command later (`say what find_item found`): code passes it over, never held to a run | `finish_check.py` `_ANSWER_VERBS` |
 | a step naming no command, no answer verb, no condition word (`read the notes`, `list the parts`) | "Other": not held to a run, but it stops code (an open step) | `finish_check.py` `_classify`; `skill_phases.py` `plan_code_steps` |

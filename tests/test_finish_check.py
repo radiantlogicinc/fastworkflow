@@ -152,6 +152,23 @@ def test_a_step_with_skip_when_after_its_command_is_conditional():
     assert fc.check(plan, [row(0, "show_details", "a")], COMMANDS, core_commands=CORE).unmet == []
 
 
+def test_a_condition_word_in_the_chain_after_the_command_is_conditional():
+    # fix-ajir.32: the condition is read in the chain (after the command, up to the first
+    # "(" or ";"), so it never runs as part of the last value; a note is never read.
+    plan = ("1. find_book query=Dune only when needed\n"
+            "2. open_book_by_uid with the uid of the Dune match if there is one\n"
+            "3. only when needed, find_book query=Dune\n"
+            "4. find_book query=Ann Lee\n"
+            "5. find_book query=Dune (only when overdue)\n"
+            "6. list_loans; only the first page")
+    steps = fc.parse_plan(plan, COMMANDS, CORE)
+    assert [(s.kind, s.command) for s in steps] == [
+        ("conditional", "find_book"), ("conditional", "open_book_by_uid"),
+        ("conditional", "find_book"), ("command", "find_book"), ("command", "find_book"),
+        ("command", "list_loans")]
+    assert fc.plain_value(steps[3].arguments["query"]) == "ann lee"
+
+
 def test_a_step_that_writes_an_argument_reads_it():
     steps = fc.parse_plan("1. list_loans book_uid=<the first book>\n2. list_loans\n"
                           "3. list_loans with the uid\n4. find_book query=Dune", COMMANDS)

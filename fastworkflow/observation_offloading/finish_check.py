@@ -66,7 +66,8 @@ FAILURE_MARKERS = (
 _STEP_RE = re.compile(r"^\s*(?:[-*]\s*)?(?:step\s*)?(\d{1,3})\s*[.):]\s+(.*\S)?\s*$", re.IGNORECASE)
 _BULLET_RE = re.compile(r"^\s*[-*\u2022]\s+(\S.*)$")
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-#: Words that, before a step's command, make the step conditional.
+#: Words that, before a step's command or in its chain (after it, up to the first
+#: ``(`` or ``;``), make the step conditional.
 _CONDITION_RE = re.compile(
     r"\b(?:if|only|when|whenever|unless|otherwise|optional(?:ly)?|in case|as needed|"
     r"where (?:needed|applicable)|else)\b", re.IGNORECASE)
@@ -212,7 +213,12 @@ def _classify(number: int, text: str, names: set, core: set) -> PlanStep:
     rest = clean[position + len(command):]
     wants_arguments = bool(_STEP_ARGUMENT_RE.match(rest))
     arguments = step_arguments(rest)
-    if _CONDITION_RE.search(before) or _ANYWHERE_CONDITION_RE.search(clean):
+    # A condition word in the command's chain (up to the first "(" or ";") makes the
+    # step conditional too, so "find_x query=A only when needed" is not run with that
+    # prose as its value; a note in parentheses never changes what runs.
+    chain = re.split(r"[(;]", rest, maxsplit=1)[0]
+    if (_CONDITION_RE.search(before) or _CONDITION_RE.search(chain)
+            or _ANYWHERE_CONDITION_RE.search(clean)):
         return PlanStep(number, text, KIND_CONDITIONAL, command, wants_arguments, arguments)
     return PlanStep(number, text, KIND_COMMAND, command, wants_arguments, arguments)
 

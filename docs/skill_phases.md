@@ -648,11 +648,12 @@ rebuilt from the skill and resumes. Nothing changes for the app developer.
   (`next page with start=<n> until the list is read`), which the agent pages. A note
   that asks for more pages in other words gets page 1.
 - A step the agent must decide is written as conditional: a condition word before the
-  command ("only when it is overdue, renew_loan ..."; `finish_check._CONDITION_RE`), or
-  one of the phrases that count anywhere in the step ("if needed", "as needed",
-  "optional", "skip when ..."; `_ANYWHERE_CONDITION_RE`). "renew_loan ... only when
-  overdue" is a plain command step: the finish check holds it to a run, and the prose
-  joins its last value (`loan_uid=l1 only when overdue`). A negation word
+  command ("only when it is overdue, renew_loan ..."; `finish_check._CONDITION_RE`) or
+  in its chain ("renew_loan loan_uid=l1 only when overdue": after the command, up to the
+  first `(` or `;`), or one of the phrases that count anywhere in the step ("if needed",
+  "as needed", "optional", "skip when ..."; `_ANYWHERE_CONDITION_RE`). A condition in a
+  note ("renew_loan loan_uid=l1 (only when overdue)") is never read: that step is a plain
+  command step, held to a run and run by code. A negation word
   before the command (`_NEGATION_RE`: "skip when paid, renew_loan ...", "only when
   there is no match, ...") makes the step negated instead: code passes it over and it is never
   held to a run. A concrete mutating step (`renew_loan loan_uid=l1`) is run by code.
