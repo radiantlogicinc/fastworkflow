@@ -2061,8 +2061,7 @@ class WorkflowExecutionContext:
             from fastworkflow import skill_phases
 
             try:
-                runs = [run for run in self._archived_command_runs()
-                        if int(run.get("step_index") or 0) >= int(floor or 0)]
+                runs = self._archived_command_runs(from_step=int(floor or 0))
                 item, others, planned = item_binding
                 binding = skill_phases.item_record_note(item, skill_phases.item_record_issues(
                     runs, item, others, self._current_record()[0], planned))
@@ -2322,12 +2321,15 @@ class WorkflowExecutionContext:
                                       not_run, notes=state.get("notes") or ()),
             exhausted=False, phase_failed=name)
 
-    def _archived_command_runs(self) -> list[dict[str, Any]]:
-        """The command runs archived for this turn, in run order (``offload_command_runs``)."""
+    def _archived_command_runs(self, *, from_step: Optional[int] = None,
+                               to_step: Optional[int] = None) -> list[dict[str, Any]]:
+        """The command runs archived for this turn, in run order (``offload_command_runs``);
+        only steps ``from_step``..``to_step`` (inclusive) when given, filtered in SQL."""
         from fastworkflow.observation_offloading.state import (
             archive_for_path, observability_db_path, scope_for_host)
 
-        return archive_for_path(observability_db_path(self)).command_runs(scope_for_host(self))
+        return archive_for_path(observability_db_path(self)).command_runs(
+            scope_for_host(self), from_step=from_step, to_step=to_step)
 
     def _phase_command_names(self) -> dict[str, list[str]]:
         """``commands`` / ``core_commands`` a phase's steps are read with, as the finish check
@@ -2530,11 +2532,10 @@ class WorkflowExecutionContext:
         try:
             ended_on, record_context = self._current_record() if need_runs else (None, None)
             record = ended_on
-            turn_runs = self._archived_command_runs() if need_runs else []
-            runs = [run for run in turn_runs
-                    if int(run.get("step_index") or 0) >= state["first_step"]]
-            earlier = [run for run in turn_runs
-                       if int(run.get("step_index") or 0) < state["first_step"]]
+            runs = (self._archived_command_runs(from_step=state["first_step"])
+                    if need_runs else [])
+            earlier = (self._archived_command_runs(to_step=state["first_step"] - 1)
+                       if phase.output is not None else [])
             if phase.fans_out and phase.bind:
                 # The item is bound to the record that names it, wherever the run ended.
                 issues = skill_phases.item_record_issues(runs, item, others, ended_on, planned)
@@ -2601,8 +2602,8 @@ class WorkflowExecutionContext:
         try:
             return skill_phases.CodeSteps(
                 plan_text, workflow=lambda: self.get_active_workflow() or self._app_workflow,
-                runs=lambda index: [run for run in self._archived_command_runs()
-                                    if int(run.get("step_index") or 0) == index],
+                runs=lambda index: self._archived_command_runs(from_step=index,
+                                                                to_step=index),
                 own_steps=own_steps, answers=answers, **names)
         except Exception as error:  # noqa: BLE001 - the agent runs the steps instead
             logger.warning("code-run steps skipped: %s: %s", type(error).__name__, error)

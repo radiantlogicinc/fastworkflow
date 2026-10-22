@@ -717,7 +717,12 @@ def phased(initialized_fastworkflow, todo_workflow_path, monkeypatch):
         SEEN.clear()  # loading the skill ran every steps_fn on placeholders
         executor = FakeExecutor(ctx, state.script, suspend_in=suspend_in)
         _set_agents(ctx, executor)
-        monkeypatch.setattr(ctx, "_archived_command_runs", lambda: list(executor.runs))
+        monkeypatch.setattr(
+            ctx, "_archived_command_runs",
+            lambda from_step=None, to_step=None: [
+                run for run in executor.runs
+                if (from_step is None or run["step_index"] >= from_step)
+                and (to_step is None or run["step_index"] <= to_step)])
         monkeypatch.setattr(ctx, "_current_record",
                             lambda: (executor.record, executor.record.split(" ")[0]))
         return executor

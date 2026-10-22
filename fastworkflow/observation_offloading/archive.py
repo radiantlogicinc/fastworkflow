@@ -405,8 +405,13 @@ class RuntimeHandleArchive:
         return [self._decode_row(row) for row in rows]
 
     def command_runs(self, scope: RuntimeHandleScope, alias: str = "", *,
+                     from_step: Optional[int] = None, to_step: Optional[int] = None,
                      timeout: float = 30.0) -> list[dict[str, Any]]:
         """The commands *scope*'s archived steps ran (or just *alias*'s), in run order.
+
+        ``from_step`` / ``to_step`` keep only the steps whose ``step_index`` is in that
+        inclusive range, read in SQL: a lookup of one step or of a turn's later steps
+        decodes only those rows, not the whole turn's.
 
         Each is ``{"alias", "step_index", "ordinal", "command", "success",
         "context_clause", "context_name", "input", "output"}``; ``input`` and ``output`` are the
@@ -424,6 +429,12 @@ class RuntimeHandleArchive:
         if alias:
             query += " AND alias = ?"
             params.append(alias)
+        if from_step is not None:
+            query += " AND step_index >= ?"
+            params.append(int(from_step))
+        if to_step is not None:
+            query += " AND step_index <= ?"
+            params.append(int(to_step))
         query += " ORDER BY step_index, ordinal"
         with closing(self._connect(timeout=timeout)) as conn:
             present = conn.execute(
@@ -599,6 +610,7 @@ class UnavailableHandleArchive:
         return []
 
     def command_runs(self, scope: RuntimeHandleScope, alias: str = "", *,
+                     from_step: Optional[int] = None, to_step: Optional[int] = None,
                      timeout: float = 30.0) -> list[dict[str, Any]]:
         return []
 
