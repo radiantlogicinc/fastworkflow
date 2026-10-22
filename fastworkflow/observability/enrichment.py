@@ -118,7 +118,10 @@ def _apply(raw: Mapping[str, Any], capped: MutableMapping[str, Any]) -> None:
                 if replacement not in accepted:
                     continue
                 stored = capped.get(name)
-                if isinstance(stored, dict) and stored.get("truncated"):
+                if (isinstance(stored, dict) and stored.get("truncated")
+                        and "replaced_by" not in stored):
+                    # The first enricher to blank an envelope names it; a later
+                    # one does not repoint it.
                     # cap_attr_value passes non-string objects through. Copy an
                     # envelope before mutation so caller-owned mappings remain raw.
                     stored = dict(stored)

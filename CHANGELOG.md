@@ -456,6 +456,15 @@
 
 ### Changed
 
+- **A prompt stored as pieces is no longer also kept as a 16 KB prefix**
+  (fix-ajir.37): an `fw.llm.call` that records `prompt_slots_ref` keeps only
+  the cut envelope of `messages` (`value: ""`, `replaced_by:
+  "prompt_slots_ref"`; length and sha256 unchanged), as a call blanked by the
+  trajectory manifest already did. The prompt is read from the pieces
+  (`prompt_as_sent`, `/api/prompt/…`, "LLM input as sent"). About 5% of a
+  heavy store's file. When two enrichers blank one envelope, the first keeps
+  its `replaced_by`.
+
 - **Skill API surface** (fix-ajir.19): `fastworkflow.skill_phases.__all__` is
   the author-facing API (`Phase`, `concatenated_steps`, `fact_from`,
   `facts_text`, `PhaseError`, and the helpers a workflow's tests use to check
