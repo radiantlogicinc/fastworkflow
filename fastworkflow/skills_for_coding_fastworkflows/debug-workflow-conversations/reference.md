@@ -158,7 +158,7 @@ Emitted by a DSPy callback, so it appears under whichever stage made the call
 | `module`, `module_chain`, `module_input` | Which DSPy module ran and with what inputs |
 | `model`, `messages`, `prompt`, `call_kwargs` | The exact request sent to the LM |
 | `output`, `provider_response`, `reasoning` | What came back (incl. provider-native reasoning when present) |
-| `usage`, `cost`, `cache_hit`, `response_model`, `history_uuid`, `capture_source` | Cost accounting; **`cache_hit: true` means the completion came from the DSPy cache** — the classic "stale/frozen LLM output" tell |
+| `usage`, `cost`, `cache_hit`, `response_model`, `history_uuid`, `capture_source` | Cost accounting; **`cache_hit: true` means the completion came from the DSPy cache** — the classic "stale/frozen LLM output" tell; a hit records `cost` 0 and empty `usage` (nothing was billed) |
 | `usage_capture` | Present when usage was unavailable: the LM's result never reached the capture hook and DSPy history was off (spans recorded before fix-sgsp all carry it) |
 | `exception` | The LM call failed (span `status: error`) — auth errors, timeouts |
 

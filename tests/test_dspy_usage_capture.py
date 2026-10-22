@@ -140,7 +140,7 @@ def test_two_threads_sharing_one_lm_each_get_their_own_usage(tmp_path):
     assert by_question["first"]["history_uuid"] != by_question["second"]["history_uuid"]
 
 
-def test_a_cache_hit_is_marked_and_bills_no_tokens(tmp_path, private_cache):
+def test_a_cache_hit_is_marked_and_bills_no_tokens_or_cost(tmp_path, private_cache):
     # The real LiteLLM engine, with litellm's own offline mock_response: a real
     # ModelResponse whose usage and response_cost litellm computes itself.
     lm = dspy.LM("openai/gpt-4o-mini", engine="litellm", cache=True,
@@ -151,6 +151,7 @@ def test_a_cache_hit_is_marked_and_bills_no_tokens(tmp_path, private_cache):
     assert miss["cost"] > 0
     assert hit["cache_hit"] is True
     assert json.loads(hit["usage"]) == {}
+    assert hit["cost"] == 0  # nothing was billed, though DSPy keeps the original cost
     assert miss["history_uuid"] != hit["history_uuid"]
 
 
@@ -189,3 +190,4 @@ def test_jev_usage_is_recorded_and_its_missing_cost_stays_unrecorded(tmp_path, m
     assert miss["response_model"] == "jev-latest"
     assert hit["cache_hit"] is True
     assert json.loads(hit["usage"]) == {}
+    assert hit["cost"] == 0

@@ -583,7 +583,8 @@ class TestRecordedCacheState:
     def test_a_cache_hit_does_not_touch_the_usage_or_cost_it_recorded(self):
         """A hit is an observation about how the answer arrived. It is not a
         reason to discard what the call recorded, and nothing here treats it as
-        a failure or a stale replay."""
+        a failure or a stale replay. (The recorder writes cost 0 on a hit; a
+        cost a hit recorded before that is summed as recorded.)"""
         rollup = usage_rollup(
             _rows(
                 [

@@ -517,6 +517,10 @@ class DSPyObservabilityCallback(BaseCallback):
             cached = _recorded_cache_hit(entry)
             if cached is not None:
                 attributes["cache_hit"] = cached
+            if cached is True:
+                # Nothing was billed. DSPy keeps the original response's cost on
+                # a hit (usage is cleared to {}), which would charge it again.
+                attributes["cost"] = 0.0
         elif entry is not None:
             attributes["provider_response"] = _json_text(entry)
         else:
