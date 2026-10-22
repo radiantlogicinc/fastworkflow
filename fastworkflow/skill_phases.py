@@ -43,8 +43,9 @@ bind=True, until=None, noun=None, optional=False)``:
   ``output`` model, as a typed object. A zero-argument ``steps_fn`` gets nothing. A
   parameter is bound only when a phase of that name ran earlier and declares an
   ``output``; otherwise it keeps its default, and one with no default fails the phase
-  (``PhaseError``) -- so a plan that leaves a phase out builds its later phases without
-  that parameter, rather than relying on a default.
+  (``PhaseError``) -- so a plan that leaves a phase out on its input builds its later
+  phases without that parameter, while a phase skipped at run time (a callable ``when``,
+  a failed ``optional`` phase) is read through a parameter defaulting to ``None``.
 - ``output`` is a facts model (``fastworkflow.observation_offloading.facts``): each field
   names the command field it is copied from. It is filled in code after the phase ran.
   ``None``: the phase passes nothing on (typically the last phase, which writes the answer).

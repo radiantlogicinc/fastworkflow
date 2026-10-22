@@ -142,7 +142,8 @@ A skill file::
   steps for the int's default: declare ``template`` when the planner should see how it
   repeats ("repeat count times (n = 1 to count): open member <n>").
 - ``plan(input)`` (optional, a skill with params only): the skill as phases, a list of
-  ``fastworkflow.skill_phases.Phase(name, steps_fn, output=None, when=True)``. A skill call
+  ``fastworkflow.skill_phases.Phase(name, steps_fn, output=None, when=True, over=None,
+  item="item", max_items=None, bind=True, until=None, noun=None, optional=False)``. A skill call
   of it then runs each phase as its own bounded sub-plan, and passes each phase's filled
   ``output`` (a facts model) to later phases' ``steps_fn`` by parameter name (see
   ``fastworkflow.skill_phases``). ``steps(input)`` stays the flat concatenation of the phases'

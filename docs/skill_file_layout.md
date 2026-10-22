@@ -21,11 +21,13 @@ Every skill file has these parts, in this order:
    `plain_utterances`, `Input` with its fields (and its validators, below the fields), and
    `validate_extracted_parameters` when there is one.
 4. **Fact models** (a phased skill only). The `output` models of the phases, in the order
-   of the phases that fill them, each field with its `"from"`.
-5. **`plan(input)` and `steps(input)`.** The table of contents. For a phased skill,
-   `plan()` lists the phases, and `steps()` follows it as the one line
-   `return concatenated_steps(plan(input))`. A flat skill has only `steps()`, written as a
-   list of calls to its step functions.
+   of the phases that fill them, each field written `fact_from("<command>.<field>")`.
+5. **`plan(input)` or `steps(input)`.** The table of contents. A phased skill has
+   `plan()`, listing the phases, and no `steps()`: the loader gives it
+   `concatenated_steps(plan(input))` (`skill_commands.command_from_module`). It writes
+   `steps()` only when `plan()` returns `None` for some inputs (the flat steps of those
+   calls), right after `plan()`. A flat skill has only `steps()`, written as a list of
+   calls to its step functions.
 6. **The step functions** (or phase functions), in the order `plan()` / `steps()` calls
    them. Each returns its steps.
 
@@ -53,7 +55,11 @@ type before its definition.
 - **Fact models**: CamelCase nouns ending in what they hold: `ItemMatch` (a search's hits),
   `ItemFacts` (a record as read).
 - **Parameters of a phase function**: the input values it prints (`name`), then the
-  earlier phases it reads, by their phase names, each `Optional[...] = None`.
+  earlier phases it reads, by their phase names, each `Optional[...] = None`: the
+  function gets `None` when the flat steps and the template are built
+  (`concatenated_steps` passes `None` for every parameter without a default) and when a
+  phase it reads was skipped at run time. Which earlier phases a phase reads in a given
+  plan is decided in `plan()` (below), not by these defaults.
 
 ## Writing the steps
 
@@ -64,7 +70,7 @@ type before its definition.
   above the first function that uses it. A lookup table (`FIND = {"group": "find_group",
   ...}`) is a module-level dict placed the same way.
 - A phase function called with no facts (every fact parameter `None`) returns the generic
-  wording: that is what `steps()` and the template show, and what the planner sees. With
+  wording: that is what the flat steps and the template show, and what the planner sees. With
   facts it names the real values. Write both branches next to each other, the no-facts
   branch first.
 
@@ -85,9 +91,11 @@ type before its definition.
   inside a step function: `Phase("check", ..., when=input.check)`, or an `if input.check:`
   block in `plan()`. A step function takes the values it prints, not the flags that decide
   whether it runs.
-- When a later phase is built with or without an optional phase's output, write both
-  `Phase(...)` calls in `plan()`, under the same `if` as the optional phase, so the reader
-  sees both shapes of the plan.
+- When a later phase is built with or without the output of a phase the input leaves
+  out, write both `Phase(...)` calls in `plan()`, under the same `if` as that phase, so
+  the reader sees both shapes of the plan. Only a phase skipped at run time (a callable
+  `when`, an `optional` phase) is read through a `None` default in the `steps_fn`
+  (`lambda item, checks=None: ...`).
 - A branch on facts, which exist only at run time (a search with no single match, two
   values that tie), lives in the phase function, at its top, with a comment saying what
   case it handles.
@@ -139,7 +147,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from fastworkflow.skill_phases import Phase, concatenated_steps
+from fastworkflow.skill_phases import Phase, fact_from
 
 
 class Signature:
@@ -155,16 +163,16 @@ class Signature:
 
 
 class ItemMatch(BaseModel):
-    item_uids: list[str] = Field(json_schema_extra={"from": "find_item.item_uids"}, min_length=1)
+    item_uids: list[str] = fact_from("find_item.item_uids", min_length=1)
 
 
 class ItemFacts(BaseModel):
-    uid: str = Field(json_schema_extra={"from": "open_item_by_uid.item_uid"})
-    part_labels: list[str] = Field(json_schema_extra={"from": "list_parts.labels"})
+    uid: str = fact_from("open_item_by_uid.item_uid")
+    part_labels: list[str] = fact_from("list_parts.labels")
 
 
 class CheckFacts(BaseModel):
-    total: int = Field(json_schema_extra={"from": "count_checks.total"})
+    total: int = fact_from("count_checks.total")
 
 
 def plan(input: Signature.Input) -> list[Phase]:
@@ -178,10 +186,6 @@ def plan(input: Signature.Input) -> list[Phase]:
     else:
         phases.append(Phase("report", lambda item: report_steps(item)))
     return phases
-
-
-def steps(input: Signature.Input) -> list[str]:
-    return concatenated_steps(plan(input))
 
 
 def find_steps(name):
@@ -299,7 +303,11 @@ shown by its source.
 **Byte-stable.** The output holds no time and no absolute path; inputs, phases and facts
 come in declaration order and combinations in a fixed order, so the same files render the
 same bytes. `--check` writes nothing and exits 1 when a preview in `<dir>` differs from a
-fresh render, is missing, or is an extra `.md` file no skill renders; run it in a test or
-in CI to keep committed previews current. Writing removes a stale preview (an `.md` file
+fresh render, is missing, or is an extra `.md` file no skill renders, or when a phase
+output's `"from"` names a command or field the workflow does not have (at load only a
+warning; `skill_preview.check_previews`); run it in a test or in CI to keep committed
+previews current. Both writing and `--check` fail, naming the file and its error, when a
+skill file does not load (the loader logs and skips it at run time;
+`skill_preview.render_previews`). Writing removes a stale preview (an `.md` file
 whose first line is the generated marker) and keeps any other file, which `--check` then
 reports as extra.

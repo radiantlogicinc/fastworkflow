@@ -173,6 +173,7 @@ name the feature, and load the companion skill before writing the change:
 | `available_from` producer hints | `declare-parameter-producers` |
 | `db_lookup` value resolution | `resolve-parameter-values` |
 | `validate_extracted_parameters` | `validate-command-parameters` |
+| Skill files (`_skills/<name>.py`): phases, facts, step wording (`fw.skill.phase` failures) | [author-workflow-skills](../author-workflow-skills/SKILL.md) |
 | Training utterance realism | `supply-training-personas` |
 | Retraining mechanics after any of the above | `train-and-publish-models` |
 | Publishing a regression task and creating a comparison experiment | [create-workflow-benchmarks](../create-workflow-benchmarks/SKILL.md) |

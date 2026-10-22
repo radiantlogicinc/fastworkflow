@@ -13,7 +13,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from fastworkflow.skill_phases import Phase, concatenated_steps, fact_from
+from fastworkflow.skill_phases import Phase, fact_from
 
 
 class Signature:
@@ -52,10 +52,6 @@ def plan(input: Signature.Input) -> list[Phase]:
               when=input.notes),
         Phase("report", lambda book: report_steps(book)),
     ]
-
-
-def steps(input: Signature.Input) -> list[str]:
-    return concatenated_steps(plan(input))
 ```
 
 - `plan(input) -> list[Phase]` is optional. A skill without it runs as ONE phase, named
@@ -71,11 +67,21 @@ def steps(input: Signature.Input) -> list[str]:
     receives the `find` phase's filled `Found`. A zero-argument `steps_fn` receives
     nothing. A parameter is bound only when an earlier phase of that name ran and declares
     an `output`; otherwise it keeps its default, and one without a default fails the
-    phase. So when a phase may be left out, build the later phases with or without that
-    parameter rather than relying on a default. A parameter defaulting to `None`
-    (`lambda find=None: ...`) must still name an earlier phase with an output in at least
-    one plan the inputs give, so a misspelled name fails the load; a parameter with
-    another default (`lambda find, kind=kind: ...`) keeps that value and is not bound.
+    phase (`skill_phases.bound_arguments`). Which default to rely on depends on when the
+    earlier phase is left out:
+    - left out by the input (`when=False`, or not listed): `plan()` knows it, so build
+      the later phase with or without that parameter (both `Phase(...)` calls in
+      `plan()`, under the same `if`), not with a default;
+    - skipped at run time (a callable `when` that is false, an `optional` phase that
+      failed): `plan()` cannot know it, so the parameter defaults to `None`
+      (`lambda find=None: ...`) and the function handles `None`.
+
+    The phase functions a `steps_fn` calls take each fact as `Optional[...] = None`
+    anyway: building the flat `steps()` and the template passes `None` for every
+    parameter without a default (`concatenated_steps`). A parameter defaulting to `None`
+    must still name an earlier phase with an output in at least one plan the inputs give,
+    so a misspelled name fails the load (`check_bindings`); a parameter with another
+    default (`lambda find, kind=kind: ...`) keeps that value and is not bound.
   - `output`: a facts model. Each field names the command field it is copied from,
     `json_schema_extra={"from": "<command>.<field>"}`, written `fact_from("<command>.<field>")`
     (`Field` keyword arguments pass through: `fact_from("find_book.book_uids",
@@ -91,11 +97,13 @@ def steps(input: Signature.Input) -> list[str]:
     answer can do without); its failure does not stop the job (see "Optional phases"
     below). A phase is required by default. A bool: `plan()` decides it from the input
     (`optional=not input.group`).
-- `steps(input)` stays. For a phased skill it is the phases' steps joined in order, each
-  built with no earlier outputs (`concatenated_steps`). Skill matching, the planner's
-  view of the skill call and the template fallback read it. A file with `plan()` and no
-  `steps()` gets this concatenation as its `steps()`. A phase with a callable `when` is
-  part of the concatenation (it may run).
+- `steps(input)` is optional in a file with `plan()`: the loader gives such a file
+  `concatenated_steps(plan(input))` as its `steps()` (`skill_commands.command_from_module`).
+  That is the phases' steps joined in order, each built with no earlier outputs, every
+  parameter without a default given `None`. Skill matching, the planner's view of the
+  skill call and the template fallback read it. A phase with a callable `when` is part of
+  the concatenation (it may run). Write `steps()` only when `plan()` returns `None` for
+  some inputs (below).
 
 ### Phased for some inputs only
 
@@ -129,7 +137,8 @@ like `steps_fn` (a fan-out phase's name gives the list of its items' outputs; a 
 with nothing to bind keeps its default). It is called when the runner reaches the phase
 (`skill_phases.runs_now`), and never again when the phase resumes after ask_user. A
 false result skips the phase: it runs nothing, fills no output and writes no answer, so
-it counts as not run and a later parameter named after it gets its default. Its
+it counts as not run and a later parameter named after it gets its default (so give that
+parameter one, `=None`, as above). Its
 `fw.skill.phase` span has `skipped: true` and no child. A `when` that raises, or a
 parameter with nothing to bind, fails the phase like a `steps_fn` that fails. Phase
 numbering ("part N of M") still counts it. When the last phase is skipped the answer is
@@ -638,8 +647,15 @@ rebuilt from the skill and resumes. Nothing changes for the app developer.
   (`list_loans (full list)`), or write the paging as a step of its own with `start=`
   (`next page with start=<n> until the list is read`), which the agent pages. A note
   that asks for more pages in other words gets page 1.
-- A step the agent must decide is written as conditional ("only when ...", "skip when
-  ...", "if needed"). A concrete mutating step (`renew_loan loan_uid=l1`) is run by code.
+- A step the agent must decide is written as conditional: a condition word before the
+  command ("only when it is overdue, renew_loan ..."; `finish_check._CONDITION_RE`), or
+  one of the phrases that count anywhere in the step ("if needed", "as needed",
+  "optional", "skip when ..."; `_ANYWHERE_CONDITION_RE`). "renew_loan ... only when
+  overdue" is a plain command step: the finish check holds it to a run, and the prose
+  joins its last value (`loan_uid=l1 only when overdue`). A negation word
+  before the command (`_NEGATION_RE`: "skip when paid, renew_loan ...", "only when
+  there is no match, ...") makes the step negated instead: code passes it over and it is never
+  held to a run. A concrete mutating step (`renew_loan loan_uid=l1`) is run by code.
 
 ## Tracing
 
