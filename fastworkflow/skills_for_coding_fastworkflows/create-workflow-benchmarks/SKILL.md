@@ -131,6 +131,9 @@ trace and [optimize-workflow-with-feedback](../optimize-workflow-with-feedback/S
 observations into a controlled comparison. For complex multi-turn test design, read
 [build-task-benchmarks](../build-task-benchmarks/SKILL.md); a small regression need not become a
 20–100-step suite.
+To score runs with checklists and decide keep or revert against run-to-run noise, read
+[grade-benchmark-runs](../grade-benchmark-runs/SKILL.md) and
+[judge-changes-against-noise](../judge-changes-against-noise/SKILL.md).
 
 Record run conclusions in experiment notes. Keep original evidence, human comments, description
 and notes in their respective fields; notes can cite them and summarize metrics but do not replace
