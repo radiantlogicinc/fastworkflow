@@ -4,7 +4,8 @@ When the app workflow has skills (``_skills/<name>.py``) and the whole user mess
 what the assistant can do, the turn is answered here, before the split and the planner,
 with no model call: each skill in plain words with one or two of its own
 ``plain_utterances`` as examples, then the current context's commands, one line each, then
-one line per other context with the commands it adds.
+one line for the commands that several other contexts add and one line per other context
+with the commands only it adds.
 
 A capability question is one of the ``plain_utterances`` of the CME command
 ``IntentDetection/what_can_i_do``, up to minor wording deviations. Both sides are
@@ -33,6 +34,9 @@ from fastworkflow.command_metadata_api import CommandMetadataAPI
 
 #: The CME command whose ``plain_utterances`` define a capability question.
 WHAT_CAN_I_DO = "IntentDetection/what_can_i_do"
+
+#: The most commands a line of the answer names; the rest are counted ("and 3 more").
+MAX_COMMANDS_PER_LINE = 6
 
 _CONTRACTIONS = {
     "what's": "what is", "whats": "what is", "what're": "what are", "i'd": "i would",
@@ -107,10 +111,35 @@ def _plain_context_name(name: str) -> str:
     return _plain_name(re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name))
 
 
+def _command_list(names: list[str]) -> str:
+    """*names* in plain words, at most ``MAX_COMMANDS_PER_LINE`` of them, the rest counted."""
+    shown = ", ".join(_plain_name(name, capitalize=False) for name in names[:MAX_COMMANDS_PER_LINE])
+    rest = len(names) - MAX_COMMANDS_PER_LINE
+    return f"{shown} and {rest} more" if rest > 0 else shown
+
+
+def _context_lines(other_contexts: dict[str, list[str]]) -> list[str]:
+    """One line for the commands that 2 or more contexts add, then one line per context with
+    the commands only it adds; a context left with none gets no line. Order is kept."""
+    seen: dict[str, int] = {}
+    for names in other_contexts.values():
+        for name in dict.fromkeys(names):
+            seen[name] = seen.get(name, 0) + 1
+    shared = [name for name, count in seen.items() if count >= 2]
+    lines = [f"- In several places: {_command_list(shared)}"] if shared else []
+    for context, names in other_contexts.items():
+        own = [name for name in names if seen[name] < 2]
+        if own:
+            lines.append(f"- In {_plain_context_name(context)}: {_command_list(own)}")
+    return lines
+
+
 def render_capability_answer(skills: dict[str, tuple[str, ...]], commands: list[str],
                              other_contexts: Optional[dict[str, list[str]]] = None) -> str:
     """Markdown: each skill with up to two of its example requests, then one line per command,
-    then one line per other context that adds commands.
+    then one line for the commands several other contexts add, then one line per other
+    context with the commands only it adds (each line names at most
+    ``MAX_COMMANDS_PER_LINE`` commands).
 
     *skills* maps a skill's name to its ``plain_utterances`` (written as users talk, unlike
     the ``Signature`` docstring, which is written for the matcher); *commands* are the names
@@ -123,9 +152,7 @@ def render_capability_answer(skills: dict[str, tuple[str, ...]], commands: list[
         lines.append(f"- **{_plain_name(name)}**" + (f": {examples}" if examples else ""))
     lines += ["", "Or ask for a single action:", ""]
     lines += [f"- {_plain_name(name)}" for name in commands]
-    lines += [f"- In {_plain_context_name(context)}: "
-              + ", ".join(_plain_name(name, capitalize=False) for name in names)
-              for context, names in (other_contexts or {}).items() if names]
+    lines += _context_lines(other_contexts or {})
     return "\n".join(lines)
 
 

@@ -82,6 +82,28 @@ def test_the_answer_names_each_skill_with_two_examples_then_each_command_then_ot
     ]
 
 
+def test_commands_several_contexts_add_are_named_once_and_each_line_is_capped():
+    shared = ["add_tag", "assess_risk", "propose_fix", "remove_tag", "show_metadata",
+              "show_properties", "show_risk_score"]
+    answer = render_capability_answer(
+        {}, ["who_am_i"],
+        {"Account": shared + ["list_permissions"],
+         "Group": ["list_members"] + shared + ["show_nesting"],
+         "Repository": shared,
+         "Finding": ["explain_risk", "show_metadata"],
+         "Directory": ["find_a", "find_b", "find_c", "find_d", "find_e", "find_f", "find_g"]},
+    )
+    assert answer.splitlines()[-6:] == [
+        "- Who am I",
+        "- In several places: add tag, assess risk, propose fix, remove tag, show metadata, "
+        "show properties and 1 more",
+        "- In Account: list permissions",
+        "- In Group: list members, show nesting",
+        "- In Finding: explain risk",
+        "- In Directory: find a, find b, find c, find d, find e, find f and 1 more",
+    ]
+
+
 @pytest.fixture
 def agent_ctx(monkeypatch):
     fastworkflow.init({})
