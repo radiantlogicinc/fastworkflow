@@ -1176,6 +1176,61 @@ def test_a_skill_past_max_grid_loads_quickly_warns_once_and_its_template_uses_th
     assert len([w for w in warnings if "survey_shelf" in w]) == 1
 
 
+#: An enum of forty values: its conditions are made from the values each line sees (fix-ajir.2).
+SHELVES = """
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+KINDS = [f"k{i}" for i in range(40)]
+
+
+class Signature:
+    \"\"\"Survey one named shelf of one kind. One job per shelf.\"\"\"
+
+    class Input(BaseModel):
+        name: str = Field(description="the shelf's name exactly as the request writes it")
+        kind: Literal[KINDS_LITERAL] = Field(description="the shelf's kind")
+        person: str = Field(default="", description="a person to compare with")
+        deep: bool = Field(default=False, description="the request asks for a deep survey")
+
+
+def steps(input):
+    out = [f"find_shelf query={input.name}"]
+    if input.kind in KINDS[:3]:
+        out.append("check_a")
+    if input.kind in KINDS[:20] and input.deep:
+        out.append("deep_scan")
+    if input.kind == KINDS[0] or input.deep:
+        out.append("extra")
+    if input.kind not in KINDS[:2] and input.person:
+        out.append(f"compare with {input.person}")
+    if input.kind != KINDS[-1]:
+        out.append("not_last")
+    out.append("say what the shelf holds")
+    return out
+""".replace("KINDS_LITERAL", ", ".join(repr(f"k{i}") for i in range(40)))
+
+
+def test_a_skill_with_a_forty_value_enum_loads_quickly_with_its_conditions(tmp_path):
+    import time
+
+    start = time.perf_counter()
+    template = list(_command(tmp_path, SHELVES, "survey_shelf").template)
+    assert time.perf_counter() - start < 1
+    first20 = " or ".join(f"k{i}" for i in range(20))
+    assert template == [
+        "find_shelf query=<name>",
+        "check_a (only when kind is k0 or k1 or k2)",
+        f"deep_scan (only when kind is {first20} and deep)",
+        "extra (only when kind is k0 or deep)",
+        "compare with <person> (only when kind is " + " or ".join(f"k{i}" for i in range(2, 40))
+        + " and person is given)",
+        "not_last (only when kind is not k39)",
+        "say what the shelf holds",
+    ]
+
+
 def test_threads_that_load_skills_together_build_them_once(tmp_path, monkeypatch):
     import threading
     import time

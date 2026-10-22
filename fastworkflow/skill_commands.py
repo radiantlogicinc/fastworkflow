@@ -641,14 +641,21 @@ def _condition_text(command: SkillCommand, present: set, grid: list[dict]) -> st
 
 class _Conditions:
     """``_condition_text`` for the point sets of one grid. A set of points is a bit mask (bit
-    i for grid point i), each parameter test the mask of the points it holds on, and a text
-    is kept by its mask. The tests are tried in ``_condition_text``'s order, so the first
-    that fits is the same; an ``and`` that already misses a wanted point, or an ``or`` whose
-    remaining terms cannot cover them, is skipped with everything that extends it."""
+    i for grid point i), each parameter test (a set of its values) the mask of the points it
+    holds on, and a text is kept by its mask. Tests are tried in ``_condition_text``'s order
+    (a parameter's sets by size, then in its values' order), so the first that fits is the
+    same; an ``and`` that already misses a wanted point, or an ``or`` whose remaining terms
+    cannot cover them, is skipped with everything that extends it.
+
+    Only tests that can win are made, from the values a parameter takes on the wanted points
+    (``seen``). In an ``and`` every test holds on all of them, so it allows at least ``seen``,
+    and the test allowing just ``seen`` comes first. In an ``or`` a winning test allows only
+    values of ``seen`` (one more makes a later test), so each set of them is tried while
+    ``seen`` has at most ``MAX_OR_VALUES`` values; past it, each one value alone."""
+
+    MAX_OR_VALUES = 8
 
     def __init__(self, command: SkillCommand, grid: list[dict]):
-        import itertools
-
         self.size = len(grid)
         self.full = (1 << self.size) - 1
         self.cache: dict[int, str | None] = {}
@@ -659,11 +666,10 @@ class _Conditions:
                            if v != env[p.name] for j in [index.get(tuple({**env, p.name: v}.items()))]
                            if j is not None])
                       for p in command.params]
-        # per parameter: its tests, (p, allowed values, mask of the points it holds on)
-        self.tests = {p.name: [(p, allowed, sum(1 << i for i, env in enumerate(grid) if env[p.name] in allowed))
-                               for k in range(1, len(_template_values(p)))
-                               for allowed in map(frozenset, itertools.combinations(_template_values(p), k))]
-                      for p in command.params}
+        # per parameter: (value, mask of the points with that value), in _template_values order
+        self.values = {p.name: [(v, sum(1 << i for i, env in enumerate(grid) if env[p.name] == v))
+                                for v in _template_values(p)]
+                       for p in command.params}
 
     def text(self, present: set) -> str | None:
         want = 0
@@ -675,33 +681,45 @@ class _Conditions:
         return self.cache[want]
 
     def _text(self, want: int) -> str | None:
+        import itertools
+
         if want == self.full:
             return ""
         relevant = [p for p, pairs in self.pairs   # whose value alone can change whether the line is written
                     if any((want >> i & 1) != (want >> j & 1) for i, j in pairs)]
-        literals = [test for p in relevant for test in self.tests[p.name]]
+        seen = {p.name: [(v, mask) for v, mask in self.values[p.name] if mask & want] for p in relevant}
+
+        def test(p: Param, chosen) -> tuple:   # (p, allowed values, mask of the points it holds on)
+            mask = 0
+            for _, m in chosen:
+                mask |= m
+            return p, frozenset(v for v, _ in chosen), mask
+
+        found = self._and([test(p, seen[p.name]) for p in relevant
+                           if len(seen[p.name]) < len(self.values[p.name])], want)
+        if found is not None:
+            return found
+        return self._or([test(p, chosen) for p in relevant
+                         for k in range(1, min(len(seen[p.name]), len(self.values[p.name]) - 1) + 1)
+                         if k == 1 or len(seen[p.name]) <= self.MAX_OR_VALUES
+                         for chosen in itertools.combinations(seen[p.name], k)], want)
+
+    @staticmethod
+    def _words(literals: list[tuple], conj) -> str:
+        return " and ".join(_literal_words(literals[k][0], literals[k][1]) for k in conj)
+
+    def _and(self, literals: list[tuple], want: int) -> str | None:
+        """The first ``and`` of up to three *literals* of different parameters true exactly on *want*."""
         names = [p.name for p, _, _ in literals]
         masks = [mask for _, _, mask in literals]
         n = len(literals)
-
-        def words(conj) -> str:
-            return " and ".join(_literal_words(literals[k][0], literals[k][1]) for k in conj)
-
-        small: list[tuple] = []   # (literal indexes, mask): the ands of one or two that hold only within want
         for a in range(n):
             if masks[a] == want:
-                return words((a,))
-            if not masks[a] & ~want:
-                small.append(((a,), masks[a]))
+                return self._words(literals, (a,))
         for a in range(n):
             for b in range(a + 1, n):
-                if names[a] == names[b]:
-                    continue
-                t = masks[a] & masks[b]
-                if t == want:
-                    return words((a, b))
-                if not t & ~want:
-                    small.append(((a, b), t))
+                if names[a] != names[b] and masks[a] & masks[b] == want:
+                    return self._words(literals, (a, b))
         for a in range(n):
             if masks[a] & want != want:
                 continue
@@ -711,10 +729,27 @@ class _Conditions:
                     continue
                 for c in range(b + 1, n):
                     if t & masks[c] == want and names[c] != names[a] and names[c] != names[b]:
-                        return words((a, b, c))
+                        return self._words(literals, (a, b, c))
+        return None
+
+    def _or(self, literals: list[tuple], want: int) -> str | None:
+        """The first ``or`` of two or three ``and``s of up to two *literals* true exactly on *want*."""
+        names = [p.name for p, _, _ in literals]
+        masks = [mask for _, _, mask in literals]
+        n = len(literals)
+        small: list[tuple] = []   # (literal indexes, mask): the ands of one or two that hold only within want
+        for a in range(n):
+            if not masks[a] & ~want:
+                small.append(((a,), masks[a]))
+        for a in range(n):
+            for b in range(a + 1, n):
+                t = masks[a] & masks[b]
+                if names[a] != names[b] and not t & ~want:
+                    small.append(((a, b), t))
 
         def joined(terms) -> str:
-            return " or ".join(f"({words(c)})" if len(c) > 1 else words(c) for c in terms)
+            return " or ".join(f"({self._words(literals, c)})" if len(c) > 1 else self._words(literals, c)
+                               for c in terms)
 
         m = len(small)
         rest = [0] * (m + 1)   # rest[k]: the points the terms from k on hold on
