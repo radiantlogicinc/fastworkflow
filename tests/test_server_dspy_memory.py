@@ -515,12 +515,12 @@ def test_install_policy_asserts_dspy_actually_reads_both_keys():
 
 
 def test_inspect_mode_retains_a_bounded_history_carrying_usage():
-    """keep_history=True trades retention for the usage the trace cannot otherwise get.
+    """keep_history=True retains a bounded history (for inspect_history).
 
-    Off-history servers lose token usage, cost and cache-hit status entirely:
-    DSPy hands the LM callback the completion text and nothing else, so every
-    one of those fields is read back off a history entry. This mode keeps the
-    smallest history that still carries them, and the retention it costs is
+    The trace no longer needs it for token usage, cost or cache-hit status:
+    those come from each call's own result (fix-sgsp,
+    tests/test_dspy_usage_capture.py). This mode keeps the smallest history
+    that still carries an entry, and the retention it costs is
     bounded on BOTH axes — DSPy's own ceiling for the global list is 10_000
     request-sized entries, which is the leak the default policy exists to stop.
     """

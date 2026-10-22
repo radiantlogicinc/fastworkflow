@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 from dspy.utils.callback import BaseCallback
+from dspy.utils.callback_context import ACTIVE_CALL_ID
 from pydantic import BaseModel
 
 from fastworkflow import tracing
@@ -310,6 +311,8 @@ def _recorded_cache_hit(entry: Any) -> Optional[bool]:
 
     Rules, in order:
 
+    0. The entry's own ``cache_hit`` bool: what the call's result said
+       (``_entry_from_result``) or what ``TypeSafe`` writes into its entries.
     1. A per-response ``cache_hit`` flag, read as an explicit bool only. DSPy 3.4
        stamps ``cache_hit=True`` on the response only on a cache hit
        (``dspy/clients/cache.py``, ``_prepare_cached_response``); nothing stamps
@@ -334,6 +337,8 @@ def _recorded_cache_hit(entry: Any) -> Optional[bool]:
 
     if not isinstance(entry, Mapping):
         return None
+    if isinstance(entry.get("cache_hit"), bool):
+        return entry["cache_hit"]
     response = entry.get("response")
     members = list(response) if isinstance(response, tuple) else [response]
     flags = {flag for flag in map(flag_of, members) if flag is not None}
@@ -359,13 +364,25 @@ class DSPyObservabilityCallback(BaseCallback):
     from ``lm.history``: run_fastapi_mcp runs with ``disable_history=True``
     (a memory bound, see run_fastapi_mcp/server_memory.py), which leaves that
     history permanently empty in the process the chatbot actually traces.
-    History is still harvested opportunistically for usage and cost, which the
-    callback payloads do not carry.
+    Usage, cost and cache status, which the callback payloads do not carry,
+    come from the call's own result (``_capture_call_result``), so they need
+    no history; history is read only for an LM whose result never reaches
+    that hook.
     """
 
     def __init__(self) -> None:
         self._calls: dict[str, tuple[Any, Any, Any, int]] = {}
+        # call_id -> that call's own result, handed over by the result hook.
+        self._results: dict[str, Any] = {}
         self._calls_lock = threading.Lock()
+
+    def capture_result(self, call_id: Optional[str], result: Any) -> None:
+        """Keep an observed call's result until its ``on_lm_end`` reads it."""
+        if call_id is None:
+            return
+        with self._calls_lock:
+            if call_id in self._calls:
+                self._results[call_id] = result
 
     def on_module_start(self, call_id: str, instance: Any, inputs: dict[str, Any]):
         if _active_observability_host.get() is None:
@@ -474,13 +491,18 @@ class DSPyObservabilityCallback(BaseCallback):
     ):
         with self._calls_lock:
             call = self._calls.pop(call_id, None)
+            result = self._results.pop(call_id, None)
         if call is None:
             return
 
         host, span, instance, previous_entry = call
-        history = list(getattr(instance, "history", None) or [])
-        newest = history[-1] if history else None
-        entry = newest if newest is not None and newest is not previous_entry else None
+        if result is not None:
+            entry = _entry_from_result(call_id, result)
+        else:
+            # An LM whose result skipped the hook: the history entry, if any.
+            history = list(getattr(instance, "history", None) or [])
+            newest = history[-1] if history else None
+            entry = newest if newest is not None and newest is not previous_entry else None
         attributes: dict[str, Any] = {"output": _json_text(outputs)}
         if isinstance(entry, dict):
             attributes.update(
@@ -499,7 +521,7 @@ class DSPyObservabilityCallback(BaseCallback):
             attributes["provider_response"] = _json_text(entry)
         else:
             attributes["usage_capture"] = (
-                "unavailable: DSPy history is disabled in this process"
+                "unavailable: the call returned no result and DSPy history is disabled in this process"
             )
         response = entry.get("response") if isinstance(entry, dict) else None
         reasoning = _reasoning_from([outputs, response])
@@ -516,6 +538,98 @@ class DSPyObservabilityCallback(BaseCallback):
 
 
 _OBSERVABILITY_CALLBACK = DSPyObservabilityCallback()
+
+
+def _entry_from_result(call_id: str, result: Any) -> dict[str, Any]:
+    """The history-entry fields DSPy would have written for this call, read from
+    the call's own result instead of from ``lm.history``.
+
+    ``history_uuid`` becomes the callback's ``call_id``: one id per provider
+    call, which is all the rollups' duplicate folding asks of it.
+    """
+    if isinstance(result, tuple):  # TypeSafe (Jev): (response dict, cache_hit)
+        response, cache_hit = result
+        response = response if isinstance(response, Mapping) else {}
+        # Jev reports input/output tokens and no cost; cost stays unrecorded.
+        return {
+            "usage": {} if cache_hit else response.get("usage"),
+            "cost": None,
+            "uuid": call_id,
+            "response_model": response.get("model"),
+            "response": response,
+            "cache_hit": cache_hit,
+        }
+    raw = getattr(result, "raw", None)
+    return {
+        "usage": getattr(result, "usage", None),
+        "cost": getattr(result, "cost", None),
+        "uuid": call_id,
+        "response_model": getattr(result, "response_model", None),
+        "response": raw if raw is not None else getattr(result, "responses", None),
+        # True is DSPy's own cache hit. False is only the field's default, so
+        # it is left to `_recorded_cache_hit`'s evidence rules (response flag,
+        # then reported tokens) rather than claimed as a miss.
+        "cache_hit": True if getattr(result, "cache_hit", None) is True else None,
+    }
+
+
+def _capture_call_result(result: Any) -> None:
+    """Hand the running LM call's result to the callback, on the call's own thread.
+
+    DSPy sets ``ACTIVE_CALL_ID`` to the LM call's callback id for the duration
+    of the call, so the result is keyed to exactly the call that produced it --
+    never to another worker's call on a shared LM, which is what reading the
+    newest ``lm.history`` entry could do.
+    """
+    try:
+        _OBSERVABILITY_CALLBACK.capture_result(ACTIVE_CALL_ID.get(), result)
+    except Exception:  # observability must never fail the call
+        pass
+
+
+def _install_result_hooks() -> None:
+    """Wrap the two places DSPy holds an LM call's full result, once per process.
+
+    ``dspy.clients.execution.finalize(lm, call, result)`` is where every
+    ``BaseLM.__call__``/``acall`` (native, LiteLLM, cached, DummyLM) receives its
+    ``CallResult`` (usage, cost, cache_hit, raw response); ``TypeSafe._finish``
+    is the same point for the Jev client. Both run before DSPy decides whether
+    to write history, so capture does not depend on it. If a DSPy upgrade
+    renames either, nothing is wrapped and the span says usage is unavailable;
+    tests/test_dspy_usage_capture.py fails loudly first.
+    """
+    try:
+        from dspy.clients import execution
+    except ImportError:
+        execution = None
+    finalize = getattr(execution, "finalize", None)
+    if callable(finalize) and not getattr(finalize, "_fastworkflow_capture", False):
+
+        @functools.wraps(finalize)
+        def finalize_with_capture(lm, call, result):
+            _capture_call_result(result)
+            return finalize(lm, call, result)
+
+        finalize_with_capture._fastworkflow_capture = True
+        execution.finalize = finalize_with_capture
+
+    try:
+        from dspy.clients.typesafe import TypeSafe
+    except ImportError:
+        return
+    finish = getattr(TypeSafe, "_finish", None)
+    if callable(finish) and not getattr(finish, "_fastworkflow_capture", False):
+
+        @functools.wraps(finish)
+        def finish_with_capture(self, request, response, cache_hit):
+            _capture_call_result((response, cache_hit))
+            return finish(self, request, response, cache_hit)
+
+        finish_with_capture._fastworkflow_capture = True
+        TypeSafe._finish = finish_with_capture
+
+
+_install_result_hooks()
 
 
 def observability_callback() -> DSPyObservabilityCallback:

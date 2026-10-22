@@ -1499,16 +1499,17 @@ class TestTheProducerOnlyClaimsACacheStateItRead:
         )
         assert _cache_state_of(attributes) == CACHE_UNKNOWN
 
-    def test_a_disabled_history_records_no_cache_state_at_all(self, tmp_path):
+    def test_a_disabled_history_still_records_the_cache_state(self, tmp_path):
         """`disable_history=True` is what run_fastapi_mcp installs process-wide,
-        so this is the shape most production spans actually have."""
+        so this is the shape most production spans actually have. The state is
+        read from the call's own result (fix-sgsp), not from history."""
         spans = _capture_llm_call(
             tmp_path, _EchoLM(cache_hit=True), disable_history=True
         )
         attributes = json.loads(spans[0]["attributes"])
 
-        assert "cache_hit" not in attributes
-        assert _cache_state_of(attributes) == CACHE_UNKNOWN
+        assert attributes["cache_hit"] is True
+        assert _cache_state_of(attributes) == CACHE_HIT
 
     @pytest.mark.parametrize(
         "response, expected",

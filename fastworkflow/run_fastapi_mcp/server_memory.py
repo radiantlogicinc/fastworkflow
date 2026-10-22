@@ -7,11 +7,11 @@ History and trace are turned off; the in-memory cache is bounded; the disk cache
 stays enabled (capped) so repeat prompts hit disk and skip provider calls.
 
 ``install_policy(keep_history=True)`` selects a second mode for servers whose
-job is to be inspected — the one the chatbot spawns. Token usage, cost and
-cache-hit status reach the observability trace only through a history entry
-(DSPy hands the LM callback nothing but the completion text), so that server
-keeps history bounded rather than off: one entry per LM, and a global list
-replaced with one that trims itself. Both modes are proven the same way.
+job is to be inspected — the one the chatbot spawns: history bounded rather
+than off, one entry per LM, and a global list replaced with one that trims
+itself. Both modes are proven the same way. Token usage, cost and cache-hit
+status no longer need it: the observability callback reads them from each
+call's own result (utils/dspy_logger.py, fix-sgsp), history on or off.
 
 This module installs that policy, and — because configuring is not evidence that
 a policy is in force — proves it structurally before the server accepts traffic,
@@ -69,12 +69,11 @@ POLICY_SETTINGS: dict[str, Any] = {
 }
 
 # Inspect mode (``keep_history=True``): history ON, but bounded on both axes.
-# Turning history off costs the observability trace its token usage, cost and
-# cache-hit status — DSPy hands the LM callback only the completion text, and
-# every one of those fields is read from a history entry. A single-developer
-# debug server wants them, so this mode keeps the smallest history that still
-# carries them: ``max_history_size=1`` means each LM retains only the call the
-# callback is about to read.
+# It was added so the observability trace could read token usage, cost and
+# cache-hit status from a history entry; those are now captured from each
+# call's own result whether history is on or not (fix-sgsp), so this mode only
+# keeps ``lm.inspect_history()`` working on a debug server.
+# ``max_history_size=1`` means each LM retains only its latest call.
 INSPECT_POLICY_SETTINGS: dict[str, Any] = {
     "disable_history": False,
     "max_history_size": 1,
