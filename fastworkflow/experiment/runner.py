@@ -960,6 +960,17 @@ class ExperimentHarness:
                     CommandRouter(str(command_info_root / "*"))
         except Exception as exc:
             logger.debug(f"Router warm-up skipped: {exc!r}")
+        # Skills and command utterances, so N threads do not each read them on their first
+        # turn. Their cache is keyed by the path string the turn path passes, the Workflow's
+        # `folderpath`, which is the resolved path.
+        try:
+            from pathlib import Path
+
+            from fastworkflow.workflow_agent import warm_skills
+
+            warm_skills(str(Path(self.workflow_folderpath).resolve()))
+        except Exception as exc:
+            logger.debug(f"Skill warm-up skipped: {exc!r}")
 
     # -- running ----------------------------------------------------------
 

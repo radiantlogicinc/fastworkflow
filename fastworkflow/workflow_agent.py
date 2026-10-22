@@ -1220,6 +1220,23 @@ def skill_utterances(workflow_folderpath: str) -> dict[str, tuple[str, ...]]:
     return {name: utterances for name, _, _, _, utterances in _parsed_skills(workflow_folderpath)}
 
 
+def warm_skills(workflow_folderpath: str) -> None:
+    """Read the workflow's skills and its commands' utterances once, at startup, so the first
+    request does not pay for them (``load_skills``; ``skill_commands.command_utterances``,
+    which ``plan_skill_call`` reaches through ``command_texts``). The skill cache is keyed by
+    the path string: pass the one the turn path uses, the app workflow's ``folderpath``.
+    A workflow without a ``_skills`` folder has nothing to warm. Never raises: a failure is
+    logged and the turn path meets it again."""
+    if not os.path.isdir(os.path.join(workflow_folderpath, "_skills")):
+        return
+    for step in (load_skills, skill_commands.command_utterances):
+        try:
+            step(workflow_folderpath)
+        except Exception as error:  # noqa: BLE001 - warm-up must not stop startup
+            logger.warning(f"skill warm-up: {step.__name__} failed for {workflow_folderpath}: "
+                           f"{type(error).__name__}: {error}")
+
+
 #: The workflow's split settings file, ``_skills/_split.py`` (see ``split_settings``).
 SPLIT_FILE = "_split.py"
 #: The fields of ``SplitIntoSubtasks`` a split settings file may describe, as ``Signature.Input``

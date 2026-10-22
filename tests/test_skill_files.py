@@ -461,3 +461,45 @@ def test_a_skill_file_is_planned_as_a_call_and_its_hook_refusal_falls_back(tmp_p
     assert "the risk is assessed for the whole record" in span.attributes["skill_fallback"]
     assert "was refused: validate_extracted_parameters: the risk is assessed" in _prompt(lm, 1)
     assert "TEMPLATE TEXT" in _prompt(lm, 2)
+
+
+def test_warm_skills_fills_the_caches_the_first_turn_reads(tmp_path, monkeypatch):
+    """fix-ajir.6: after the startup warm-up the first turn's skill load is a cache hit and
+    the commands' utterances have been read once, under the path string the turn passes."""
+    folder = _write(tmp_path, {"show_record": EXAMPLE, "close_out": CLOSE_OUT})
+    read = []
+    monkeypatch.setattr(sc, "command_utterances", lambda path: read.append(path) or {})
+    workflow_agent.warm_skills(folder)
+    assert read == [folder]
+    misses = workflow_agent._build_parsed_skills.cache_info().misses
+    assert [s[0] for s in workflow_agent.load_skills(folder)] == ["close_out", "show_record"]
+    assert workflow_agent._build_parsed_skills.cache_info().misses == misses
+
+
+def test_warm_skills_never_raises_and_skips_a_workflow_without_skills(tmp_path, monkeypatch):
+    def fail(path):
+        raise RuntimeError("no routing definition")
+
+    monkeypatch.setattr(sc, "command_utterances", fail)
+    workflow_agent.warm_skills(_write(tmp_path / "with", {"close_out": CLOSE_OUT}))
+    (tmp_path / "without").mkdir()
+    monkeypatch.setattr(workflow_agent, "load_skills", fail)
+    workflow_agent.warm_skills(str(tmp_path / "without"))
+
+
+def test_chat_session_startup_warms_the_skills_of_the_workflow_it_binds(workflow_env, monkeypatch):
+    """The warm-up gets the bound workflow's own ``folderpath`` string, the skill cache's key."""
+    import uuid
+    from fastworkflow.chat_session import ChatSession
+    from tests.test_text_planner_and_split import TODO_WORKFLOW
+
+    workflow_env()
+    warmed = []
+    monkeypatch.setattr(workflow_agent, "warm_skills", warmed.append)
+    session = ChatSession()
+    session.start_workflow(TODO_WORKFLOW, workflow_id_str=f"warm-{uuid.uuid4().hex}", keep_alive=True)
+    try:
+        assert warmed == [session.app_workflow.folderpath]
+    finally:
+        session._keep_alive = False
+        session.stop_workflow()
