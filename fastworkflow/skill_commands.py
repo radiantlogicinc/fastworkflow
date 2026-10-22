@@ -149,7 +149,8 @@ A skill file::
   returns must be phases whose parameters bind (one defaulting to None in at least one
   result: ``_checked_plan``) and whose ``"from"`` are well formed
   (``SkillFormatError`` otherwise); a ``"from"`` naming a command or field the workflow
-  lacks is a logged warning (``check_phase_sources``), not a failure.
+  lacks is a logged warning (``check_phase_sources``), not a load failure
+  (``fastworkflow skill preview --check`` fails on it).
 - ``validate_extracted_parameters`` (optional, the signature of a command's): called with
   the checked arguments as an ``Input`` (``validate_call``); ``(False, message)`` refuses the
   call (the planner gets the message and one more try, see the rules below), an exception

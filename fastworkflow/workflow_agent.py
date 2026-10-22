@@ -1155,8 +1155,16 @@ def _warn_phase_sources(command: SkillCommand, workflow_folderpath: str) -> None
 
     Not a load failure: the workflow may add the command's ``Output`` later
     (``skill_commands.check_phase_sources``). A phase whose field is still missing
-    when it runs fails then, naming the field.
+    when it runs fails then, naming the field; ``fastworkflow skill preview --check``
+    fails on it (``phase_source_problems``).
     """
+    for warning in phase_source_problems(command, workflow_folderpath):
+        logger.warning(f"skill {command.name!r}: phase output source not found (loaded anyway): {warning}")
+
+
+def phase_source_problems(command: SkillCommand, workflow_folderpath: str) -> list[str]:
+    """``skill_commands.check_phase_sources`` of *command* against the workflow's command
+    signatures; empty, with a logged warning, when they cannot be read."""
     from fastworkflow.observation_offloading.facts import workflow_signatures
 
     try:
@@ -1164,9 +1172,8 @@ def _warn_phase_sources(command: SkillCommand, workflow_folderpath: str) -> None
     except Exception as error:  # noqa: BLE001 - the check is advice; the skill still loads
         logger.warning(f"skill {command.name!r}: could not read the workflow's command signatures "
                        f"to check its phase outputs: {type(error).__name__}: {error}")
-        return
-    for warning in skill_commands.check_phase_sources(command, signatures):
-        logger.warning(f"skill {command.name!r}: phase output source not found (loaded anyway): {warning}")
+        return []
+    return skill_commands.check_phase_sources(command, signatures)
 
 
 def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ...]], ...]:

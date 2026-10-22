@@ -13,11 +13,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from fastworkflow.skill_phases import Phase, concatenated_steps
-
-
-def _from(source, **kwargs):
-    return Field(json_schema_extra={"from": source}, **kwargs)
+from fastworkflow.skill_phases import Phase, concatenated_steps, fact_from
 
 
 class Signature:
@@ -29,12 +25,12 @@ class Signature:
 
 
 class Found(BaseModel):
-    book_uids: list[str] = _from("find_book.book_uids", min_length=1)
+    book_uids: list[str] = fact_from("find_book.book_uids", min_length=1)
 
 
 class BookFacts(BaseModel):
-    uid: str = _from("open_book_by_uid.book_uid")
-    loan_uids: list[str] = _from("list_loans.loan_uids")
+    uid: str = fact_from("open_book_by_uid.book_uid")
+    loan_uids: list[str] = fact_from("list_loans.loan_uids")
 
 
 def book_steps(find: Optional[Found] = None):
@@ -81,9 +77,10 @@ def steps(input: Signature.Input) -> list[str]:
     one plan the inputs give, so a misspelled name fails the load; a parameter with
     another default (`lambda find, kind=kind: ...`) keeps that value and is not bound.
   - `output`: a facts model. Each field names the command field it is copied from,
-    `json_schema_extra={"from": "<command>.<field>"}`: a field of that command's
-    `Signature.Output` (returned as `CommandResponse.output`), else of its
-    `Signature.Input`. See "Command outputs and facts" in `observation_search.md`.
+    `json_schema_extra={"from": "<command>.<field>"}`, written `fact_from("<command>.<field>")`
+    (`Field` keyword arguments pass through: `fact_from("find_book.book_uids",
+    min_length=1)`): a field of that command's `Signature.Output` (returned as
+    `CommandResponse.output`), else of its `Signature.Input`. See "Command outputs and facts" in `observation_search.md`.
     `None`: the phase passes nothing on.
   - `when=False` leaves the phase out, the same as not listing it. `when` may also be a
     callable of earlier phases' outputs, decided just before the phase runs (see
@@ -149,7 +146,8 @@ with an output provides in any of the results, or a malformed `"from"` fails the
 preview` fails naming it. Each output model is then checked against the workflow's command
 signatures (`check_fact_sources`): a `"from"` naming a command or field the workflow does
 not have is logged as a warning and the skill still loads, so a workflow can add a
-command's `Output` after the skill that reads it. A plain command name that several
+command's `Output` after the skill that reads it; `fastworkflow skill preview --check`
+fails on it, so a misspelled source is caught before a run. A plain command name that several
 contexts define passes when some context resolves every field of the model; at run time
 it resolves against the context of the phase's record.
 
@@ -418,16 +416,16 @@ item is its own sub-plan: its own executor run (or answer-only call), budget, fi
 check and fill.
 
 ```python
-from fastworkflow.skill_phases import Phase, facts_text
+from fastworkflow.skill_phases import Phase, fact_from, facts_text
 
 
 class Found(BaseModel):
-    item_uids: list[str] = _from("find_item.item_uids", min_length=1)
+    item_uids: list[str] = fact_from("find_item.item_uids", min_length=1)
 
 
 class ItemFacts(BaseModel):
-    uid: str = _from("open_item_by_uid.item_uid")
-    part_labels: list[str] = _from("list_parts.labels")
+    uid: str = fact_from("open_item_by_uid.item_uid")
+    part_labels: list[str] = fact_from("list_parts.labels")
 
 
 def plan(input):

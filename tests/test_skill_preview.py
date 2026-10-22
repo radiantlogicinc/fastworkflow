@@ -283,6 +283,18 @@ def test_check_fails_on_a_skill_file_the_loader_skips(workflow, monkeypatch, cap
     assert "broken: SkillFormatError:" in capsys.readouterr().out
 
 
+def test_check_fails_on_a_fact_source_the_workflow_does_not_have(workflow, monkeypatch, capsys):
+    skill_preview.write_previews(workflow)
+    # the fixture has no _commands: its signatures cannot be read, so its sources go unchecked
+    assert _run_cli(monkeypatch, "skill", "preview", workflow, "--check") == 0
+    # a workflow whose commands have none of the fields the facts name
+    monkeypatch.setattr("fastworkflow.observation_offloading.facts.workflow_signatures", lambda folder: {})
+    capsys.readouterr()
+    assert _run_cli(monkeypatch, "skill", "preview", workflow, "--check") == 1
+    out = capsys.readouterr().out
+    assert "fact source not found: " in out and "show_item.py: " in out and "no command named" in out
+
+
 def test_a_workflow_without_skills_is_an_error(tmp_path):
     with pytest.raises(skill_preview.PreviewError):
         skill_preview.render_previews(str(tmp_path))

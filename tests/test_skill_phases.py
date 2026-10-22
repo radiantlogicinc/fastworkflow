@@ -31,6 +31,7 @@ from fastworkflow.skill_phases import (
     PhaseError,
     bound_arguments,
     concatenated_steps,
+    fact_from,
     phase_query,
     phase_step_budget,
     fill_output,
@@ -56,21 +57,17 @@ LIBRARY = "Library"
 BOOK = "Book b1 Dune"
 
 
-def _from(source, **kwargs):
-    return Field(json_schema_extra={"from": source}, **kwargs)
-
-
 class Found(BaseModel):
-    book_uids: list[str] = _from("find_book.book_uids", min_length=1)
+    book_uids: list[str] = fact_from("find_book.book_uids", min_length=1)
 
 
 class BookFacts(BaseModel):
-    uid: str = _from("open_book_by_uid.book_uid")
-    loan_uids: list[str] = _from("list_loans.loan_uids")
+    uid: str = fact_from("open_book_by_uid.book_uid")
+    loan_uids: list[str] = fact_from("list_loans.loan_uids")
 
 
 class NoteFacts(BaseModel):
-    total: int = _from("count_notes.total")
+    total: int = fact_from("count_notes.total")
 
 
 #: What each steps_fn was called with, by phase name.
@@ -168,7 +165,7 @@ def test_when_false_leaves_the_phase_out():
 
 def test_a_malformed_from_fails_the_load():
     class Bad(BaseModel):
-        uid: str = _from("open_book_by_uid")
+        uid: str = fact_from("open_book_by_uid")
 
     with pytest.raises(SkillFormatError, match="must be"):
         _phased_command(plan=lambda input: [Phase("find", lambda: ["x"], output=Bad)])
@@ -313,7 +310,7 @@ FIND_PLAN = "1. open_library\n2. find_book query=Dune"
 
 
 class Opened(BaseModel):
-    uid: str = _from("open_book_by_uid.book_uid")
+    uid: str = fact_from("open_book_by_uid.book_uid")
 
 
 def test_an_off_plan_lookup_does_not_replace_the_planned_fact():
@@ -361,8 +358,8 @@ def test_a_command_no_step_names_keeps_the_earlier_rules():
 
 
 class FoundNamed(BaseModel):
-    book_uids: list[str] = _from("find_book.book_uids", min_length=1)
-    labels: list[str] = _from("find_book.labels")
+    book_uids: list[str] = fact_from("find_book.book_uids", min_length=1)
+    labels: list[str] = fact_from("find_book.labels")
 
 
 FIND_TITLE_PLAN = "1. open_library\n2. find_book query=Dune Messiah"
@@ -430,7 +427,7 @@ def test_a_listing_with_another_scope_never_counts_for_the_planned_scope():
     # The wrong-record case: the planned scope word is not in the output, so an empty
     # listing of another scope never fills the planned listing's facts.
     class Loans(BaseModel):
-        loan_uids: list[str] = _from("list_loans.loan_uids")
+        loan_uids: list[str] = fact_from("list_loans.loan_uids")
 
     plan = "1. list_loans scope=branch scope_uid=x1 (no filter)"
     runs = [_cmd_run("list_loans", {"scope": "shelf", "scope_uid": "x1"},
@@ -445,7 +442,7 @@ def test_an_opener_with_another_value_never_counts_even_when_its_output_names_th
     # open b2 moved the workflow onto b2; its output mentions b1, but an opener of another
     # record never stands in for the planned opener.
     class OpenedWithLink(BaseModel):
-        uid: str = _from("open_book_by_uid.book_uid")
+        uid: str = fact_from("open_book_by_uid.book_uid")
 
     runs = [_cmd_run("open_book_by_uid", {"book_uid": "b2"}, {"book_uid": "b2", "sequel_of": "b1"}),
             _cmd_run("list_loans", {}, {"loan_uids": []}, context=OTHER_BOOK)]
@@ -455,9 +452,9 @@ def test_an_opener_with_another_value_never_counts_even_when_its_output_names_th
 
 
 class OpenedBook(BaseModel):
-    uid: str = _from("open_book_by_uid.book_uid")
-    title: str = _from("open_book_by_uid.title")
-    loan_uids: list[str] = _from("list_loans.loan_uids")
+    uid: str = fact_from("open_book_by_uid.book_uid")
+    title: str = fact_from("open_book_by_uid.title")
+    loan_uids: list[str] = fact_from("list_loans.loan_uids")
 
 
 BOOK_PLAN = "1. open_book_by_uid book_uid=b1\n2. list_loans (full list)"
@@ -1678,8 +1675,8 @@ SHELF = "Shelf s1 Fiction"
 
 
 class ListedBook(BaseModel):
-    uid: str = _from("Shelf/list_books.book_uid")
-    loan_uids: list[str] = _from("list_loans.loan_uids")
+    uid: str = fact_from("Shelf/list_books.book_uid")
+    loan_uids: list[str] = fact_from("list_loans.loan_uids")
 
 
 LISTED_PLAN = "1. go_up\n2. list_books book_uid=b1 (this opens it)\n3. list_loans (full list)"
@@ -1912,6 +1909,19 @@ def test_write_answer_retries_an_empty_reply_once_and_strips_field_markers():
     with dspy.context(lm=lm):
         assert write_answer("1. say that b1 has loans l1, l2") == "Dune (b1) is on loan: l1, l2."
     assert len(lm.history) == 2
+
+
+def test_fact_from_is_the_field_of_a_fact_copied_from_a_command_field():
+    class Page(BaseModel):
+        uids: list[str] = fact_from("list_items.item_uids", min_length=1,
+                                    json_schema_extra={"page_by": "cursor"})
+        total: int = fact_from(["count_items.total", "list_items.total"], default=0)
+
+    uids, total = Page.model_fields["uids"], Page.model_fields["total"]
+    assert uids.json_schema_extra == {"page_by": "cursor", "from": "list_items.item_uids"}
+    assert uids.is_required() and Page.model_json_schema()["properties"]["uids"]["minItems"] == 1
+    assert total.json_schema_extra == {"from": ["count_items.total", "list_items.total"]}
+    assert total.default == 0
 
 
 def test_the_answer_checks_in_code():

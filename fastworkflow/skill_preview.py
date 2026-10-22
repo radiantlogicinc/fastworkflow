@@ -6,7 +6,8 @@ workflow's skills with the skill loader (``workflow_agent.load_skills`` /
 ``<out>`` is ``docs/skill_previews`` next to the workflow folder
 (``<workflow_folder>/../docs/skill_previews``, see ``default_out_dir``). With
 ``--check`` nothing is written: the command exits non-zero when a preview in ``<out>``
-differs from a fresh render, is missing, or is an extra ``.md`` file no skill renders.
+differs from a fresh render, is missing, or is an extra ``.md`` file no skill renders, and
+when a phase output field's ``"from"`` names a command or field the workflow lacks.
 
 A preview, in the order of the skill-file layout (``docs/skill_file_layout.md``):
 
@@ -1370,8 +1371,12 @@ def _load_error(name: str, path: str, folder: str) -> str:
 def check_previews(workflow_folder: str, out_dir: Optional[str] = None) -> list[str]:
     """The problems of the previews in *out_dir* against a fresh render; empty when current.
 
-    A problem is a preview that differs, one that is missing, or an extra ``.md`` file.
+    A problem is a preview that differs, one that is missing, an extra ``.md`` file, or a
+    phase output field whose ``"from"`` names a command or field the workflow does not have
+    (``workflow_agent.phase_source_problems``; at load only a warning).
     """
+    from fastworkflow import workflow_agent
+
     out_dir = out_dir or default_out_dir(workflow_folder)
     fresh = render_previews(workflow_folder)
     present = sorted(f for f in os.listdir(out_dir) if f.endswith(".md")) if os.path.isdir(out_dir) else []
@@ -1385,6 +1390,11 @@ def check_previews(workflow_folder: str, out_dir: Optional[str] = None) -> list[
             if handle.read() != text:
                 problems.append(f"stale: {name}")
     problems += [f"extra: {name}" for name in present if name not in fresh]
+    folder = os.path.abspath(workflow_folder)
+    for name, command in sorted(workflow_agent.load_skill_commands(folder).items()):
+        if command.phase_outputs:
+            problems += [f"fact source not found: {problem}"
+                         for problem in workflow_agent.phase_source_problems(command, folder)]
     return problems
 
 
@@ -1430,7 +1440,7 @@ def preview_main(args) -> int:
         if problems:
             print(f"skill previews in {out_dir} are not current "
                   f"(run: fastworkflow skill preview {args.workflow_folder}"
-                  f"{' --out ' + args.out if args.out else ''}):")
+                  f"{' --out ' + args.out if args.out else ''}), or a skill's fact source is not found:")
             for problem in problems:
                 print(f"  {problem}")
             return 1

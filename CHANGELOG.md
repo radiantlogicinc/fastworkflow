@@ -4,6 +4,13 @@
 
 ### Added
 
+- **`fact_from("<command>.<field>")`** (fix-ajir.15, `docs/skill_phases.md`):
+  the field of a facts model copied from a command field,
+  `Field(json_schema_extra={"from": ...}, **kwargs)`, in place of the `_from`
+  helper each skill file wrote. `fastworkflow skill preview --check` now fails
+  on a `"from"` naming a command or field the workflow does not have (at load
+  it stays a warning, so a command's `Output` can come later).
+
 - **Phase facts: stand-in openers, re-bind to the planned record, plainer
   step values; `name=value` parameters parsed in code** (fix-hia1.10).
   In agent mode a command written as `cmd key=value key2=value2`, every key a

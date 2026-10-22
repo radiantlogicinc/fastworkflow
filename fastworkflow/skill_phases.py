@@ -201,6 +201,19 @@ DEFAULT_FANOUT_MAX_ITEMS = 10
 _REFERENCE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$")
 
 
+def fact_from(source: str | Sequence[str], **kwargs: Any) -> Any:
+    """A facts-model field copied from ``"<command>.<field>"``: ``Field(**kwargs)`` with
+    ``json_schema_extra={"from": source}`` (merged into any ``json_schema_extra`` given,
+    e.g. ``{"page_by": "cursor"}``). *source* may also be a list of such names.
+
+    ``uid: str = fact_from("open_book_by_uid.book_uid")``
+    """
+    from pydantic import Field
+
+    extra = {**(kwargs.pop("json_schema_extra", None) or {}), "from": source}
+    return Field(json_schema_extra=extra, **kwargs)
+
+
 @dataclass(frozen=True)
 class Phase:
     """One phase of a skill's ``plan()``: a bounded sub-plan with a typed output.
@@ -2413,6 +2426,7 @@ __all__ = [
     "steps_before_phase",
     "facts_list_cap",
     "facts_text",
+    "fact_from",
     "failure_text",
     "fan_out_cap",
     "fan_out_items",
