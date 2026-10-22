@@ -2370,7 +2370,7 @@ class WorkflowExecutionContext:
         model call with no tools writes its answer (``skill_phases.write_answer``).
         """
         from fastworkflow import skill_phases
-        from fastworkflow.skill_commands import SkillCallError, expand_includes, number
+        from fastworkflow.skill_commands import number
         from fastworkflow.observation_offloading.facts import FactsError, fact_sources
         from fastworkflow.workflow_agent import _what_can_i_do
 
@@ -2416,10 +2416,9 @@ class WorkflowExecutionContext:
         if not resumed:
             outputs = self._phase_outputs(phases, index)
             try:
-                lines = (skill_phases.phase_steps(phase, outputs, item) if phase.fans_out
+                steps = (skill_phases.phase_steps(phase, outputs, item) if phase.fans_out
                          else skill_phases.phase_steps(phase, outputs))
-                steps = expand_includes(command, lines)
-            except (skill_phases.PhaseError, SkillCallError) as error:
+            except skill_phases.PhaseError as error:
                 tracing.end_span(self, span, status=tracing.STATUS_ERROR,
                                  attributes={"steps": "", "facts_error": str(error)})
                 return "failed", str(error)

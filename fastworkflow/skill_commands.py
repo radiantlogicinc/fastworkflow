@@ -1098,12 +1098,6 @@ def call_phases(command: SkillCommand, args: dict) -> list:
     return [Phase(command.name, lambda: list(steps))]
 
 
-def expand_includes(command: SkillCommand, lines: list[str]) -> list[str]:
-    """``lines`` unchanged: skills no longer include other skills. Kept only for the phase
-    runner's import (``WorkflowExecutionContext``); remove it with that import."""
-    return list(lines)
-
-
 def expand(command: SkillCommand, args: dict) -> list[str]:
     """The skill's command steps for ``args`` (complete, checked arguments), unnumbered:
     ``steps(input)``. Raises SkillCallError when ``steps()`` fails or returns something else
