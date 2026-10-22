@@ -790,20 +790,87 @@ def _render_phases(command, args: dict) -> _Render:
             fan_out=_fan_out_text(phase), optional=bool(getattr(phase, "optional", False)),
             placeholders=bool(reads) and not note,
             items=None if per_item is None else list(zip(heads, per_item))))
-        if phase.output is not None:
-            width = FAN_OUT_SHOWN if phase.name in fanned else 1
-            if phase.fans_out:
-                # A fan-out phase passes on the list of its items' outputs, one per item rendered.
-                shown = items if items is not None else [None]
-                value = [placeholder_output(phase.output, f"{phase.name}[{i}]", width,
-                                            _linked_values(phase.output, earlier, phase, item, i))
-                         for i, item in enumerate(shown)]
-            else:
-                value = placeholder_output(phase.output, phase.name, width,
-                                           _linked_values(phase.output, earlier))
-            outputs[phase.name] = value
-            earlier.append((phase.name, value))
+        pass_on_placeholders(phase, outputs, earlier, items,
+                             FAN_OUT_SHOWN if phase.name in fanned else 1)
     return render
+
+
+def pass_on_placeholders(phase, outputs: dict, earlier: list, items: Optional[list] = None,
+                         width: int = 1) -> None:
+    """Add *phase*'s placeholder output to *outputs* (and *earlier*), as a later phase reads
+    it: a fan-out phase passes on the list of its items' outputs, one per item in *items*."""
+    if phase.output is None:
+        return
+    if phase.fans_out:
+        shown = items if items is not None else [None]
+        value = [placeholder_output(phase.output, f"{phase.name}[{i}]", width,
+                                    _linked_values(phase.output, earlier, phase, item, i))
+                 for i, item in enumerate(shown)]
+    else:
+        value = placeholder_output(phase.output, phase.name, width,
+                                   _linked_values(phase.output, earlier))
+    outputs[phase.name] = value
+    earlier.append((phase.name, value))
+
+
+def not_run_wording_problems(command) -> list[str]:
+    """Phases whose template wording (built with ``None`` facts) is their "did not run"
+    wording: a fact of a phase that may not run (a callable ``when``, ``optional``) is tested
+    for ``None`` before the facts that are only ``None`` in the template, so the planner's
+    template reads as if that phase had not run. Checked on the template's inputs."""
+    from fastworkflow import skill_commands
+    from fastworkflow.skill_phases import (NO_ITEM, PhaseError, active_phases, is_flat_plan,
+                                           phase_steps, runs_now)
+
+    problems: list[str] = []
+    if command.plan_fn is None:
+        return problems
+    for env in skill_commands._template_grid(command):
+        try:
+            raw = command.plan_fn(skill_commands.input_instance(command, env))
+            if is_flat_plan(raw):
+                continue
+            phases = active_phases(raw)
+        except Exception:  # noqa: BLE001 - the load reports plan() failures
+            continue
+        outputs: dict = {}
+        earlier: list = []
+        may_not_run: set[str] = set()
+        for phase in phases:
+            item = NO_ITEM
+            if phase.fans_out:
+                try:
+                    found, _ = _fan_out_items(phase, outputs)
+                    item = found[0] if found else NO_ITEM
+                except PhaseError:
+                    pass
+            for name in sorted(may_not_run & set(outputs)):
+                rest = {k: v for k, v in outputs.items() if k != name}
+                try:
+                    # a phase whose own `when` reads that fact runs only as `when` says
+                    if phase.has_condition and name in inspect.signature(phase.when).parameters \
+                            and not runs_now(phase, rest):
+                        continue
+                except Exception:  # noqa: BLE001 - workflow code
+                    continue
+                try:
+                    # as concatenated_steps builds it: None for each fact
+                    template = phase_steps(phase, dict.fromkeys(outputs), item)
+                    not_run = phase_steps(phase, rest, item)
+                    ran = phase_steps(phase, outputs, item)
+                except PhaseError:
+                    continue
+                if template == not_run != ran:
+                    problem = (f"{command.name}: phase {phase.name!r}: its template wording is "
+                               f"its wording when phase {name!r} did not run; test the facts "
+                               f"that are always there for None first")
+                    if problem not in problems:
+                        problems.append(problem)
+            if phase.has_condition or phase.optional:
+                may_not_run.add(phase.name)
+            pass_on_placeholders(phase, outputs, earlier,
+                                 [item] if phase.fans_out and item is not NO_ITEM else None)
+    return problems
 
 
 def _render(command, args: dict) -> _Render:
@@ -1476,7 +1543,8 @@ def check_previews(workflow_folder: str, out_dir: Optional[str] = None) -> list[
 
     A problem is a preview that differs, one that is missing, an extra ``.md`` file, or a
     phase output field whose ``"from"`` names a command or field the workflow does not have
-    (``workflow_agent.phase_source_problems``; at load only a warning).
+    (``workflow_agent.phase_source_problems``; at load only a warning), or a phase whose
+    planner template reads as if an earlier phase had not run (``not_run_wording_problems``).
     """
     from fastworkflow import workflow_agent
 
@@ -1498,6 +1566,8 @@ def check_previews(workflow_folder: str, out_dir: Optional[str] = None) -> list[
         if command.phase_outputs:
             problems += [f"fact source not found: {problem}"
                          for problem in workflow_agent.phase_source_problems(command, folder)]
+        problems += [f"template reads as not run: {problem}"
+                     for problem in not_run_wording_problems(command)]
     return problems
 
 
@@ -1543,7 +1613,7 @@ def preview_main(args) -> int:
         if problems:
             print(f"skill previews in {out_dir} are not current "
                   f"(run: fastworkflow skill preview {args.workflow_folder}"
-                  f"{' --out ' + args.out if args.out else ''}), or a skill's fact source is not found:")
+                  f"{' --out ' + args.out if args.out else ''}), or a skill's fact source is not found or its template reads as not run:")
             for problem in problems:
                 print(f"  {problem}")
             return 1

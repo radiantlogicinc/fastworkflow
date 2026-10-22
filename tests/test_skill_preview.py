@@ -766,3 +766,88 @@ def test_without_command_names_no_answer_mode_is_shown(workflow):
     assert "Answer: " not in bare
     assert [line for line in named.splitlines() if line not in bare.splitlines()] == [
         "Answer: written by code, word for word (step 1 verbatim)."] * 2
+
+
+# ------------------------------------------------- template wording vs did not run (fix-ajir.13)
+
+SHELF_WALK = '''
+"""shelf_walk: one shelf, its first box when the request names one, and its label."""
+from typing import Optional
+
+from pydantic import BaseModel, Field
+
+from fastworkflow.skill_phases import Phase, concatenated_steps
+
+
+class Signature:
+    """Walk one shelf, its named box when there is one, and its label. One job per shelf."""
+
+    class Input(BaseModel):
+        shelf: str = Field(description="the shelf's name exactly as the request writes it")
+        box: str = Field(default="", description="a box to open; empty for none")
+
+
+class ShelfMatch(BaseModel):
+    uid: str = Field(json_schema_extra={"from": "find_shelf.shelf_uid"})
+
+
+class BoxFacts(BaseModel):
+    uid: str = Field(json_schema_extra={"from": "open_box_by_uid.box_uid"})
+
+
+def plan(input: Signature.Input) -> list[Phase]:
+    return [
+        Phase("find", lambda: [f"find_shelf query={input.shelf}"], output=ShelfMatch),
+        Phase("box", lambda find: box_steps(input.box, find), output=BoxFacts,
+              when=lambda find: bool(input.box)),
+        Phase("label", lambda find, box=None: label_steps(find, back=CHECK)),
+        Phase("only_after_box",
+              lambda box=None: [f"list_items on {box.uid if box else 'the box'}"],
+              when=lambda box: box is not None),
+    ]
+
+
+def steps(input: Signature.Input) -> list[str]:
+    return concatenated_steps(plan(input))
+
+
+def box_steps(box, find: Optional[ShelfMatch] = None):
+    return [f"open_box_by_uid with the uid of the {box} match"]
+
+
+def label_steps(find: Optional[ShelfMatch] = None, back=True):
+    return (["go_up (back to the shelf)"] if back else []) + ["show_label"]
+'''
+
+
+def _shelf_walk(tmp_path, check: str):
+    from fastworkflow import workflow_agent
+
+    folder = tmp_path / "shelf_wf"
+    (folder / "_skills").mkdir(parents=True)
+    (folder / "_skills" / "shelf_walk.py").write_text(
+        textwrap.dedent(SHELF_WALK).replace("CHECK", check))
+    return str(folder), workflow_agent.load_skill_commands(str(folder))["shelf_walk"]
+
+
+def test_a_template_that_reads_as_did_not_run_is_flagged(tmp_path, monkeypatch, capsys):
+    # The None test of a fact of a phase that may not run, before the facts that are only
+    # None in the template: the planner's template drops the go_up the run has.
+    folder, command = _shelf_walk(tmp_path, "box is not None")
+    problems = skill_preview.not_run_wording_problems(command)
+    assert problems == ["shelf_walk: phase 'label': its template wording is its wording when "
+                        "phase 'box' did not run; test the facts that are always there for "
+                        "None first"]
+    skill_preview.write_previews(folder)
+    assert _run_cli(monkeypatch, "skill", "preview", folder, "--check") == 1
+    assert "template reads as not run: shelf_walk: phase 'label'" in capsys.readouterr().out
+
+
+def test_the_generic_wording_first_passes_and_a_phase_its_own_when_skips_is_not_flagged(
+        tmp_path, monkeypatch):
+    # The template tests the always-there fact first; "only_after_box" reads box in its own
+    # `when`, so without box it does not run and is not compared.
+    folder, command = _shelf_walk(tmp_path, "box is not None or find is None")
+    assert skill_preview.not_run_wording_problems(command) == []
+    skill_preview.write_previews(folder)
+    assert _run_cli(monkeypatch, "skill", "preview", folder, "--check") == 0

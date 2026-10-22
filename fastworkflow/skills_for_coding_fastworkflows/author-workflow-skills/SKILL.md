@@ -215,8 +215,11 @@ fastworkflow skill preview <workflow_folder> --check    # writes nothing; exit 1
 4. Check each step against the grammar table below: is it run by code, held by the finish
    check, written into the answer as intended?
 5. Commit the previews and run `--check` in CI (`skill_preview.py` `check_previews`):
-   it fails on a stale, missing or extra preview, a skill file that does not load, and a
-   fact source the workflow does not have.
+   it fails on a stale, missing or extra preview, a skill file that does not load, a
+   fact source the workflow does not have, and a phase whose planner template (built with
+   None facts) reads as if an earlier phase that may not run (a `when`, `optional`) had
+   not run: test the facts that are always there for None first
+   (`skill_preview.not_run_wording_problems`).
 
 ## Step grammar
 
@@ -283,7 +286,8 @@ Consequences worth designing for:
 - [ ] A phased file has plan() and no steps() unless plan() can return None
 - [ ] Every fact field uses fact_from with a real "<command>.<field>"
 - [ ] Phases left out by the input: both Phase(...) shapes in plan(); skipped at run time: =None
-- [ ] Every phase function handles None facts with the generic wording first
+- [ ] Every phase function handles None facts with the generic wording first (`--check` flags
+  a template that reads as "did not run")
 - [ ] Each step checked against the grammar table (code-run, held, answered as intended)
 - [ ] skill preview written and committed; --check passes in CI
 ```

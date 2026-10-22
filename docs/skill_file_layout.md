@@ -311,7 +311,11 @@ come in declaration order and combinations in a fixed order, so the same files r
 same bytes. `--check` writes nothing and exits 1 when a preview in `<dir>` differs from a
 fresh render, is missing, or is an extra `.md` file no skill renders, or when a phase
 output's `"from"` names a command or field the workflow does not have (at load only a
-warning; `skill_preview.check_previews`); run it in a test or in CI to keep committed
+warning; `skill_preview.check_previews`), or when a phase's planner template (its steps
+with None facts) is its wording for an earlier phase that did not run (a callable `when`
+or `optional` phase), while its wording when that phase ran differs: the template would
+read as if it had not run (`skill_preview.not_run_wording_problems`; test the facts that
+are always there for None first). Run it in a test or in CI to keep committed
 previews current. Both writing and `--check` fail, naming the file and its error, when a
 skill file does not load (the loader logs and skips it at run time;
 `skill_preview.render_previews`). Writing removes a stale preview (an `.md` file
