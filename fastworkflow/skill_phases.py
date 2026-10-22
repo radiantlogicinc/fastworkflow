@@ -58,7 +58,7 @@ bind=True, until=None, noun=None, optional=False)``:
   gets the item as its parameter named ``item``. ``until`` (a fan-out only) stops it
   early once the items' outputs so far meet a condition (see 9 below). ``noun`` (a
   fan-out only) is the plural noun its items are called in the answer's notes
-  (``"people"``, ``"holders"``); without it the notes say "items" and name the phase.
+  (``"people"``, ``"holders"``); without it the notes say "items".
 - ``optional=True``: a phase the request does not need; its failure does not stop the
   job (see 10 below).
 
@@ -230,7 +230,7 @@ class Phase:
     per-item outputs, in item order. ``until`` stops a fan-out early: called after each
     item with the outputs so far (its parameter named after the phase), true stops it.
     ``noun``: the plural noun for the items in the answer's notes (``cap_note``,
-    ``fan_out_note``), e.g. ``"people"``; None says "items" and names the phase.
+    ``fan_out_note``), e.g. ``"people"``; None says "items". The notes never name the phase.
 
     ``when`` is a bool, or a callable of earlier phases' outputs (bound by parameter
     name, like ``steps_fn``) evaluated just before the phase runs (``runs_now``).
@@ -2242,13 +2242,11 @@ def item_record_note(item: Any, issues: Sequence[str], max_bytes: int = 1024) ->
 def cap_note(name: str, kept: int, total: int, noun: Optional[str] = None) -> str:
     """The line the answer gets when fan-out phase *name* ran only *kept* of *total* items.
 
-    With *noun* (the phase's ``noun``, a plural like ``"people"``) the line counts in it
-    and does not name the phase: "Note: only the first 3 of 5 people were covered."
+    The line never names the phase (an internal name). It counts in *noun* (the phase's
+    ``noun``, a plural like ``"people"``), else in "items": "Note: only the first 3 of 5
+    people were covered."
     """
-    if noun:
-        return f"Note: only the first {kept} of {total} {noun.strip()} were covered."
-    return (f"Note: only the first {kept} of {total} items were covered (part {name!r} "
-            f"runs at most {kept} items).")
+    return f"Note: only the first {kept} of {total} {(noun or 'items').strip()} were covered."
 
 
 def fan_out_note(name: str, ran: int, total: int, stopped: bool,
@@ -2257,17 +2255,14 @@ def fan_out_note(name: str, ran: int, total: int, stopped: bool,
 
     *ran* items of *total* ran. *stopped*: its ``until`` condition was met, so the rest
     did not run (a note only when some were left). Otherwise a fan-out that ran fewer
-    than *total* was capped (``cap_note``). With *noun* the line counts in it and does
-    not name the phase.
+    than *total* was capped (``cap_note``). The line counts in *noun*, else in "items",
+    and never names the phase.
     """
     if stopped:
         if ran >= total:
             return None
-        if noun:
-            return (f"Note: the work stopped after {ran} of {total} {noun.strip()} because "
-                    "its stop condition was met.")
-        return (f"Note: part {name!r} stopped after {ran} of {total} items because its "
-                "stop condition was met.")
+        return (f"Note: the work stopped after {ran} of {total} {(noun or 'items').strip()} "
+                "because its stop condition was met.")
     return cap_note(name, ran, total, noun) if total > ran else None
 
 

@@ -1281,7 +1281,7 @@ def test_the_cap_is_applied_and_said_in_the_answer(fanned, monkeypatch):
     assert len(executor.calls) == 3  # find + two items
     assert [b.uid for b in SEEN["report_books"]["books"]] == ["b1", "b2"]
     assert result.answer.endswith(
-        "Note: only the first 2 of 3 items were covered (part 'books' runs at most 2 items).")
+        "Note: only the first 2 of 3 items were covered.")
     spans = fanned.sink.named(tracing.SPAN_SKILL_PHASE)
     assert {(s.attributes["item_count"], s.attributes["items_total"])
             for s in spans if "item" in s.attributes} == {(2, 3)}
@@ -1576,7 +1576,7 @@ def test_a_fan_out_stops_once_its_condition_holds(five):
     assert len(executor.calls) == 4    # find + b1, b2, b3: b1 and b3 have loans
     assert [b.uid for b in SEEN["report_books"]["books"]] == ["b1", "b2", "b3"]
     assert result.answer.endswith(
-        "Note: part 'books' stopped after 3 of 5 items because its stop condition was met.")
+        "Note: the work stopped after 3 of 5 items because its stop condition was met.")
     items = [s for s in five.sink.named(tracing.SPAN_SKILL_PHASE) if "item" in s.attributes]
     assert [s.attributes["stop_condition_met"] for s in items] == [False, False, True]
 
@@ -1589,13 +1589,13 @@ def test_the_cap_still_applies_to_a_fan_out_with_a_condition(five):
     assert len(executor.calls) == 3    # find + b1, b2: one match, then the cap
     assert [b.uid for b in SEEN["report_books"]["books"]] == ["b1", "b2"]
     assert result.answer.endswith(
-        "Note: only the first 2 of 5 items were covered (part 'books' runs at most 2 items).")
+        "Note: only the first 2 of 5 items were covered.")
     assert "stop condition" not in result.answer
 
 
 def test_the_fan_out_notes_tell_stopped_from_capped():
     assert fan_out_note("books", 3, 5, stopped=True) == (
-        "Note: part 'books' stopped after 3 of 5 items because its stop condition was met.")
+        "Note: the work stopped after 3 of 5 items because its stop condition was met.")
     assert fan_out_note("books", 5, 5, stopped=True) is None      # nothing was left out
     assert fan_out_note("books", 2, 5, stopped=False).startswith("Note: only the first 2 of 5")
     assert fan_out_note("books", 5, 5, stopped=False) is None

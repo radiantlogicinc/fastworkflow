@@ -470,24 +470,25 @@ def plan(input):
   (or the parameter's default).
 - `max_items`: at most this many items run (default `FW_SKILL_FANOUT_MAX_ITEMS`, else 10).
   The rest are left out, and the answer ends with "Note: only the first N of M items were
-  covered (part '<name>' runs at most N items)."
+  covered."
 - `until`: a callable that stops the fan-out early (`skill_phases.stops_after`). It is
   called after each item's output is filled. Its parameter named after the phase gets the
   list of the items' outputs so far (typed, in item order); its other parameters bind to
   earlier phases' outputs. True stops it: the remaining items do not run, and the
-  answer ends with "Note: part '<name>' stopped after K of M items because its stop
+  answer ends with "Note: the work stopped after K of M items because its stop
   condition was met." (none when no item was left). `max_items` still caps the items
   run; a fan-out capped before its condition held ends with the cap note instead
   (`fan_out_note`). `until` needs `over`, and at load its parameters must bind (the
   phase's own name only when it declares an `output`). For "the first two items that pass":
   `until=lambda checks: sum(c.passed for c in checks) >= 2`.
-- `noun`: the plural noun the answer's notes call the items (`"people"`, `"holders"`).
-  With it the notes leave out the internal phase name: "Note: only the first N of M
-  people were covered." and "Note: the work stopped after K of M people because its stop
-  condition was met." Without it they read as above. It must be a non-empty str and
-  needs `over`; the skill preview shows it in the "fans out" column. A note already in the
-  answer is not repeated, so two fan-outs over the same items (one job split in two to fit
-  the step budget) with the same noun say it once.
+- `noun`: the plural noun the answer's notes call the items (`"people"`, `"holders"`):
+  "Note: only the first N of M people were covered." and "Note: the work stopped after
+  K of M people because its stop condition was met." Without it they say "items", as
+  above. The notes never name the phase (an internal name), so `noun` is only wording.
+  It must be a non-empty str and needs `over`; the skill preview shows it in the "fans
+  out" column. A note already in the answer is not repeated, so two fan-outs over the
+  same items (one job split in two to fit the step budget) with the same noun say it
+  once.
 - A later phase's parameter named after the fan-out phase receives the **list** of the
   per-item outputs (`list[ItemFacts]`), in item order.
 - Each item's executor input is framed "This is part 2 of 3 (items) for item 1 of 2 (u1)
