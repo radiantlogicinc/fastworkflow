@@ -400,3 +400,101 @@ def test_the_step_check_names_unknown_commands_and_parameters():
     with picks_noted() as picks:
         pick("open_x_by_uid", x_uid=None, named="A")
     assert picks == [("open_x_by_uid", "x_uid")]
+
+
+# ------------------------------------------------- a PlanGenerator subclassing another skill's
+
+class Lookup:
+    """A base skill's plan: find, then open the match, then answer."""
+
+    def find(self, input) -> Found:
+        return [f"find_item query={input.name}"]
+
+    class Item(BaseModel):
+        uid: str = fact_from("open_item_by_uid.item_uid")
+
+    def item(self, input, find) -> "Item":                 # a string annotation: base's model
+        if not find.uids:
+            return []
+        return [pick("open_item_by_uid", item_uid=find.uids[0], named=input.name)]
+
+    def answer(self, input, item=None):
+        return [f"say that {input.name} is {self._uid(item)}"]
+
+    def _uid(self, item):
+        return item.uid if item is not None else "not found"
+
+
+def test_a_subclass_inherits_the_base_phases_first_in_their_order():
+    class Parts(Lookup):
+        class PartFacts(BaseModel):
+            labels: list[str] = fact_from("list_parts.labels")
+
+        def parts(self, item=None) -> PartFacts:
+            if item is None:
+                return []
+            return ["list_parts (full list)"]
+
+    phases = planned(Parts)(_input())
+    assert [p.name for p in phases] == ["find", "item", "answer", "parts"]
+    assert phases[1].output is Lookup.Item and phases[3].output is Parts.PartFacts
+    loaded = skill_commands.command_from_module("parts", _module(plan=Parts), "_skills/parts.py")
+    assert list(loaded.steps) == [
+        "find_item query=<name>",
+        "open_item_by_uid with the uid of the <name> match (only when find.uids)",
+        "say that <name> is <uid>", "list_parts (full list)"]   # `is None` is not seen
+
+
+def test_an_override_keeps_the_base_phase_place_and_call_orders_new_phases():
+    class Parts(Lookup):
+        def __call__(self, input):
+            return [self.find, self.item, self.parts, self.answer]
+
+        class PartFacts(BaseModel):
+            labels: list[str] = fact_from("list_parts.labels")
+
+        def parts(self, item=None) -> PartFacts:
+            if item is None:
+                return []
+            return ["list_parts (full list)"]
+
+        def answer(self, input, item=None, parts=None):           # overrides Lookup.answer
+            if parts is None:
+                return [f"say that no item named {input.name} was found"]
+            return [f"say that {input.name} has parts {', '.join(parts.labels)}"]
+
+    from fastworkflow.skill import phase_methods
+
+    assert [n for n, _ in phase_methods(Parts)] == ["find", "item", "answer", "parts"]
+    assert phase_methods(Parts)[2][1] is Parts.answer
+    phases = planned(Parts)(_input())
+    assert [p.name for p in phases] == ["find", "item", "parts", "answer"]
+    facts = {"find": Found(uids=["u1"], labels=["Dune"])}
+    assert phase_steps(phases[1], facts) == ["open_item_by_uid item_uid=u1"]
+    facts["item"] = Lookup.Item(uid="u1")
+    facts["parts"] = Parts.PartFacts(labels=["gear", "axle"])
+    assert phase_steps(phases[3], facts) == ["say that Dune has parts gear, axle"]
+    assert not runs_now(phases[1], {"find": Found(uids=[], labels=[])})
+
+
+def test_a_subclass_with_no_phases_of_its_own_runs_the_base_plan_and_inherits_call():
+    class Same(Lookup):
+        pass
+
+    class Chosen(Lookup):
+        def __call__(self, input):
+            return [self.find, self.answer]
+
+    class Inherits(Chosen):
+        pass
+
+    assert [p.name for p in planned(Same)(_input())] == ["find", "item", "answer"]
+    assert [p.name for p in planned(Inherits)(_input())] == ["find", "answer"]
+    assert skill_commands.command_from_module("same", _module(plan=Same), "_skills/same.py")
+
+
+def test_a_name_a_subclass_sets_to_a_non_function_is_not_a_phase():
+    class NoAnswer(Lookup):
+        answer = None
+
+    assert [p.name for p in planned(NoAnswer)(_input())] == ["find", "item"]

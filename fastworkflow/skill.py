@@ -50,6 +50,11 @@ Optional: ``PlanGenerator.__call__(self, input)`` returns the phases a call runs
 plan. ``@phase(over=..., max_items=..., until=..., noun=..., optional=...)`` makes a phase a
 fan-out (once per item) or optional.
 
+Reuse: a ``PlanGenerator`` may subclass another skill's (``class PlanGenerator(BookLookup)``)
+and inherits its phases as Python inherits methods: the base's come first, in their order; a
+method of the same name overrides a base phase in its place; the new phases follow. Its
+``__call__``, helpers and nested facts models are inherited too.
+
 The template (what the planner sees) calls each method once per input with every fact a
 ``skill_phases.Placeholder``: it reads ``<find.total>``, ``<find.uids[0]>``,
 ``<find.labels[*]>``; a helper method called with one reads as its name in words
@@ -191,9 +196,28 @@ def phase(**options: Any) -> Callable:
 
 def phase_methods(cls: type) -> list[tuple[str, Callable]]:
     """The phase methods of a ``PlanGenerator`` class, in definition order (``_name`` are
-    helpers)."""
-    return [(name, value) for name, value in vars(cls).items()
-            if not name.startswith("_") and inspect.isfunction(value)]
+    helpers). A class inherits its bases' phases, as Python inherits methods: the bases'
+    come first, in their order; a method of the same name overrides a base's phase in its
+    place, and the class's new phases follow."""
+    order: dict[str, None] = {}
+    for klass in reversed(cls.__mro__):
+        order.update(dict.fromkeys(vars(klass)))
+    return [(name, value) for name in order if not name.startswith("_")
+            and inspect.isfunction(value := inspect.getattr_static(cls, name))]
+
+
+def _custom_call(cls: type) -> Optional[Callable]:
+    """``cls.__call__`` when the class or a base (not ``object``) defines one."""
+    return next((vars(klass)["__call__"] for klass in cls.__mro__
+                 if klass is not object and "__call__" in vars(klass)), None)
+
+
+def _namespace(cls: type) -> dict[str, Any]:
+    """The names of *cls* and its bases, as its attributes resolve them."""
+    names: dict[str, Any] = {}
+    for klass in reversed(cls.__mro__):
+        names.update(vars(klass))
+    return names
 
 
 def _parameters(fn: Callable) -> list[str]:
@@ -206,7 +230,7 @@ def _output(cls: type, fn: Callable, options: dict, input: Any) -> Optional[type
     annotation = fn.__annotations__.get("return")
     if isinstance(annotation, str):
         try:
-            annotation = eval(annotation, fn.__globals__, dict(vars(cls)))  # noqa: S307
+            annotation = eval(annotation, fn.__globals__, _namespace(cls))  # noqa: S307
         except Exception as error:  # noqa: BLE001
             raise PhaseError(f"phase {fn.__name__!r}: cannot read its return annotation "
                              f"{annotation!r}: {error}") from None
@@ -356,7 +380,7 @@ def planned(cls: type) -> Callable[[Any], list[Phase]]:
             raise PhaseError(f"PlanGenerator.{name}: a phase method takes self first, as a "
                              "ResponseGenerator's methods do")
     order = list(methods)
-    custom = vars(cls).get("__call__")
+    custom = _custom_call(cls)
     instance = cls()
 
     def chosen(input) -> list[str]:
@@ -430,7 +454,7 @@ def skill_parts(cls: type) -> tuple[Callable, Optional[Callable]]:
         return concatenated_steps(phases)
 
     methods = phase_methods(cls)
-    always_flat = (len(methods) == 1 and vars(cls).get("__call__") is None
+    always_flat = (len(methods) == 1 and _custom_call(cls) is None
                    and not getattr(methods[0][1], "__phase_options__", None)
                    and _parameters(methods[0][1]) in ([], ["input"])
                    and _output(cls, methods[0][1], {}, None) is None)

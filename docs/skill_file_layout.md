@@ -47,7 +47,9 @@ the order written. (2) Its parameters name what it reads: `input`, and earlier p
 (their facts; `=None` when that phase may have been skipped). (3) Its return annotation is the
 facts model it fills: each field says its source, `fact_from("command.field")`. (4) It
 returns its steps, exactly the lines the agent reads. `return []` skips it: decided when the
-phase is reached, on the real facts.
+phase is reached, on the real facts. A `PlanGenerator` that subclasses another skill's
+inherits its phases, first and in their order; a method of the same name overrides one in
+its place, and its new phases follow.
 
 **Steps.** `command k=v (note)` runs a command: code runs it when every value is written, the
 note is never sent, a listing read whole says `full list`. `pick(command, x_uid=uid,
