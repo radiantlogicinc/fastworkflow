@@ -4,7 +4,8 @@ A skill file (`_skills/<name>.py`; reference: the `fastworkflow.skill` module do
 the runtime: [skill_phases.md](skill_phases.md)) is a command file for a whole job. It is read
 far more often than it is written, so every skill file has one form, the same few idioms as a
 command file, read top to bottom in the same order. `fastworkflow skill preview` (below)
-renders what each call of it runs.
+renders what each call of it runs. A step-by-step tutorial, on a toy workflow:
+[tutorials/skills](tutorials/skills/README.md).
 
 ## How to write a skill (one page)
 
