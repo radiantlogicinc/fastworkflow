@@ -1983,7 +1983,7 @@ class WorkflowExecutionContext:
         from fastworkflow.workflow_agent import (
             build_query_with_next_steps, _what_can_i_do, planner_skill_for)
 
-        # One skill match gives both the template and, for a skill with params, its parsed
+        # One skill match gives both the template and, for a skill with params or phases, its parsed
         # form; a hand-off continuation (query differs from its original text) plans from
         # the template only, since the skill call would plan the whole job again.
         plan_template, skill_command = (

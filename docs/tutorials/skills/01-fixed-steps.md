@@ -99,9 +99,8 @@ steps are added to the request as a template, and the text planner writes the pl
 them, adapting them to the request. There are no phases and no facts, so there is nothing
 for a dry run to show: what runs is the plan the planner writes.
 
-A skill with no inputs is one method. Two phase methods without an `Input` fail the load
-("plan() needs a skill with params", shown in [troubleshooting](12-troubleshooting.md)):
-phases start on the next pages, once the skill takes an input.
+A skill with no inputs is one method here. With two or more phase methods it is a skill
+call with no arguments, run as phases (phases start on page 3).
 
 ## What you learned
 

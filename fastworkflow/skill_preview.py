@@ -1056,8 +1056,10 @@ def variants(command) -> tuple[list[_Variant], list[str]]:
 
 def _inputs_section(command) -> list[str]:
     lines = ["## Inputs", ""]
-    if command is None or not command.params:
+    if command is None:
         return lines + ["None: the steps are fixed.", ""]
+    if not command.params:
+        return lines + ["None: every call runs the same plan.", ""]
     lines += ["| input | type | default | sample | verify | subject | description |",
               "|---|---|---|---|---|---|---|"]
     notes = []
@@ -1417,14 +1419,15 @@ def _render_lines(render: _Render, level: str, first: Optional[_Render] = None,
 
 
 def _steps_section(found: list[_Variant], changing: list[str], phased: bool,
-                   command_names: Optional[dict] = None) -> list[str]:
+                   command_names: Optional[dict] = None, inputs: bool = True) -> list[str]:
     title = "Plan" if phased else "Steps"
     lines = [f"## {title}", ""]
     rendered = [v for v in found if v.render is not None]
     shown = [v for v in rendered if v.shown]
     refused = [v for v in found if v.render is None]
     if not changing:
-        lines += ["For the sample inputs; no input changes them.", ""]
+        lines += ["For the sample inputs; no input changes them." if inputs else
+                  "One for every call: the skill takes no inputs.", ""]
         if rendered:
             lines += _render_lines(rendered[0].render, "###", names=command_names)
     else:
@@ -1475,7 +1478,7 @@ def render_preview(name: str, description: str, steps: tuple, command,
         found, changing = variants(command)
         if phased:
             lines += _phases_section(found)
-        lines += _steps_section(found, changing, phased, names)
+        lines += _steps_section(found, changing, phased, names, bool(command.params))
     while lines and lines[-1] == "":
         lines.pop()
     return "\n".join(lines) + "\n"

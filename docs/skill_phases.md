@@ -4,7 +4,8 @@ A skill with parameters (`_skills/<name>.py`, see the `fastworkflow.skill` and
 `fastworkflow.skill_commands` module documentation) may expand into one flat list of steps
 that one executor run works through. A long skill can instead be written as **phases**: bounded sub-plans run
 one after another, each by a fresh executor run with its own step budget, with the facts
-one phase found passed in code to the next.
+one phase found passed in code to the next. A skill without parameters can have phases
+too: every call then has the same plan, and the planner's skill call has no arguments.
 
 ## The skill file
 

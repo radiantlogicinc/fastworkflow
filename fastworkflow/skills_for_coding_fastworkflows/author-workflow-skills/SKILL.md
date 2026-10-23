@@ -41,6 +41,8 @@ Code references below name a module of the `fastworkflow` package and a symbol i
 A skill adds no capability: every step it writes runs an existing command (checked at load).
 A one-command skill is a command with a worse name. Fixed steps with no parameters are
 allowed (a `PlanGenerator` with one method taking no `input`): the text planner adapts them.
+A skill with no parameters may also have phases: every call has the one plan, and the
+planner's skill call has no arguments (`skill_commands.py` `skill_from_parts`).
 
 ## The file
 

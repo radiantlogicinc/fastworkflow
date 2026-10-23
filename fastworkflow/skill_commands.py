@@ -6,8 +6,9 @@ the text planner read) and whose pydantic ``Input`` declares typed parameters, a
 ``class PlanGenerator`` (as a command has a ``ResponseGenerator``) whose methods write the
 skill's steps for one set of arguments (``fastworkflow.skill``). The planner fills the
 parameters from the request (one typed dspy call), the arguments are checked, and the
-``PlanGenerator`` expands them into the numbered plan. A skill without parameters
-gives fixed steps the text planner adapts (see ``workflow_agent.load_skills``).
+``PlanGenerator`` expands them into the numbered plan. A skill without parameters and
+without phases gives fixed steps the text planner adapts (see ``workflow_agent.load_skills``);
+one without parameters that has phases is a skill call with no arguments (its one plan).
 
 The ``_skills`` folder is laid out as the root of ``_commands`` is: a skill is the file
 ``_skills/<name>.py`` and the file stem is the skill's name, so it is a Python identifier
@@ -127,12 +128,12 @@ A skill file::
   backend or read state. A repeated part is a ``for`` loop over ``range()``, bounded by the
   int field's ``le``; steps shared by several skills go in a helper module
   (``_skills/_<name>.py``). Lookup tables are plain module-level dicts. A skill whose one
-  phase reads and fills no facts runs flat (one plan); one without parameters gives fixed
-  steps (its one method takes no ``input``).
+  phase reads and fills no facts runs flat (one plan); one without parameters whose one
+  method takes no ``input`` gives fixed steps.
 - ``plain_utterances`` (optional, with or without params): example requests for the
   skill, written the way people ask for that job. The skill matcher shows the first
   ``workflow_agent.MATCHER_EXAMPLES`` of them after the description ("e.g. ..."); a skill
-  with params also keeps them on its command (``SkillCommand.plain_utterances``). Write
+  call also keeps them on its command (``SkillCommand.plain_utterances``). Write
   them generically: they are in every matcher prompt.
 - ``template`` (optional): the template text of the skill, shown to the planner in the
   skill call's "expands to:" and used as the text planner's template when a skill call
@@ -146,7 +147,8 @@ A skill file::
   (``<find_group or find_unit, by kind> query=<name>``). A repeated part shows only its
   steps for the int's default: declare ``template`` when the planner should see how it
   repeats ("repeat count times (n = 1 to count): open member <n>").
-- Phases (a skill with params): a ``PlanGenerator`` method that reads an earlier phase's
+- Phases (with or without params; without, every call has the one plan of the empty
+  ``Input``): a ``PlanGenerator`` method that reads an earlier phase's
   facts, or fills its own (its return annotation), makes the call run as phases: each its
   own bounded sub-plan, passing its filled facts model to later phases by parameter name
   (``fastworkflow.skill_phases``; the loader builds its ``Phase`` list,
@@ -270,7 +272,8 @@ class Param:
 
 @dataclass(frozen=True)
 class SkillCommand:
-    """A skill with parameters: its signature and its ``steps()``."""
+    """A skill called with typed arguments (a skill with parameters, or with phases: its
+    ``params`` may then be empty): its signature and its ``steps()``."""
 
     name: str
     description: str
@@ -472,7 +475,7 @@ def _spec_from_field(name: str, info, where: str) -> dict:
 @dataclass(frozen=True)
 class SkillFile:
     """What a skill file declares: its description and either a parsed command (a skill with
-    params) or its fixed steps (a skill without params, ``command`` None)."""
+    params or phases) or its fixed steps (a skill without either, ``command`` None)."""
 
     description: str
     steps: tuple[str, ...]
@@ -1048,9 +1051,7 @@ def skill_from_parts(name: str, signature, path: str, *, steps_fn: Callable | No
 
     params = {n: _parse_param(n, _spec_from_field(n, info, path), path)
               for n, info in input_model.model_fields.items()}
-    if not params and plan_fn is not None:
-        raise SkillFormatError(f"{path}: plan() needs a skill with params (a Signature.Input with fields)")
-    if not params:
+    if not params and plan_fn is None:
         try:
             lines = _call_steps(steps_fn, input_model(), path)
         except SkillCallError as exc:
@@ -1072,7 +1073,7 @@ def skill_from_parts(name: str, signature, path: str, *, steps_fn: Callable | No
     else:
         template = placeholder_template(command)
     if not template:
-        raise SkillFormatError(f"{path}: a skill with params needs steps")
+        raise SkillFormatError(f"{path}: a skill needs steps")
     return SkillFile(description=description, steps=tuple(template), command=replace(command, template=tuple(template)),
                      plain_utterances=tuple(utterances))
 

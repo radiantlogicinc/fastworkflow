@@ -55,6 +55,9 @@ and inherits its phases as Python inherits methods: the base's come first, in th
 method of the same name overrides a base phase in its place; the new phases follow. Its
 ``__call__``, helpers and nested facts models are inherited too.
 
+No ``Input`` fields: a skill may still have phases (methods without ``input``); every call
+then has the one plan, and the planner's skill call has no arguments.
+
 The template (what the planner sees) calls each method once per input with every fact a
 ``skill_phases.Placeholder``: it reads ``<find.total>``, ``<find.uids[0]>``,
 ``<find.labels[*]>``; a helper method called with one reads as its name in words

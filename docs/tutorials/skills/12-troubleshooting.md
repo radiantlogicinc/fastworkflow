@@ -200,32 +200,6 @@ SkillFormatError: _skills/bad_binding.py: plan(): phase 'answer' takes 'found', 
 **Fix:** name the phase (`def answer(self, input, find)`). A phase that may be skipped is
 read with a default: `book=None`.
 
-## Phases without an input
-
-A skill with no inputs is fixed steps (page 1); two phase methods need an `Input` with
-fields:
-
-<!-- broken: bad_no_input -->
-```python
-class Signature:
-    """Summarize the library: its branches and how many loans are overdue."""
-
-
-class PlanGenerator:
-    def branches(self):
-        return ["list_branches"]
-
-    def overdue(self):
-        return ["count_overdue", "say how many loans are overdue"]
-```
-
-<!-- load-error -->
-```text
-SkillFormatError: _skills/bad_no_input.py: plan() needs a skill with params (a Signature.Input with fields)
-```
-
-**Fix:** write the fixed steps in one method, or give the skill an input.
-
 ## A fact source the workflow does not have
 
 `fact_from("find_book.matches")` names a field `find_book` does not have. The skill still

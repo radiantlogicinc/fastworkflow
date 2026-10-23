@@ -608,7 +608,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # v3: `subjects` is no longer written (see SPAN_CONTRACT_VERSION v12).
     # v4: skills as parameterized commands. `plan_source` may be "skill_call" (the
     # planner filled a skill's typed parameters and code expanded its steps);
-    # `skill` names the matched skill with params (None otherwise, and on a replan),
+    # `skill` names the matched skill with params or phases (None otherwise, and on a replan),
     # `skill_args` holds the arguments of a skill call, `skill_fallback` why a
     # skill call fell back to the text planner.
     # v5: `skill_notes`, the notes of a skill call (``SkillCallPlan.notes``: an argument

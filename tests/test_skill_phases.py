@@ -208,15 +208,15 @@ def test_a_plan_that_does_not_return_phases_fails_the_load():
         _phased_command(plan=lambda input: [Phase("a", lambda: ["x"]), Phase("a", lambda: ["y"])])
 
 
-def test_a_plan_needs_a_skill_with_params():
+def test_a_plan_without_params_is_one_plan_for_every_call():
+    from fastworkflow.skill_commands import skill_from_parts
+
     class NoParams:
         """Show the shelves."""
 
-    module = types.ModuleType("shelves")
-    module.Signature = NoParams
-    module.plan = lambda input: [Phase("a", lambda: ["list_shelves"])]
-    with pytest.raises(SkillFormatError, match="needs a skill with params"):
-        command_from_module("shelves", module, "_skills/shelves.py")
+    loaded = skill_from_parts("shelves", NoParams, "_skills/shelves.py", plan_fn=lambda input: [
+        Phase("a", lambda: ["list_shelves"]), Phase("b", lambda: ["say how many shelves"])])
+    assert loaded.command.params == () and loaded.steps == ("list_shelves", "say how many shelves")
 
 
 class FindBook:

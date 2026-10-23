@@ -1224,8 +1224,8 @@ def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ..
     A skill is defined by the file ``_skills/<name>.py`` (format: ``fastworkflow.skill_commands``;
     which files are skills: ``_skill_files``); the file stem is the skill's name and the
     ``Signature`` docstring its description. A
-    skill without parameters gives its fixed ``steps()``; a skill with parameters gives its
-    template text, and ``load_skill_commands`` holds its parsed form. A skill
+    skill without parameters or phases gives its fixed ``steps()``; a skill with parameters
+    or phases gives its template text, and ``load_skill_commands`` holds its parsed form. A skill
     file that cannot be imported or is malformed is logged as an error and skipped (the
     other skills still load; ``fastworkflow skill preview`` fails on it); a malformed split
     settings file raises SkillFormatError. ``_skills`` also holds the workflow's
@@ -1235,7 +1235,8 @@ def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ..
 
 
 def load_skill_commands(workflow_folderpath: str) -> dict[str, SkillCommand]:
-    """The workflow's skills that have params, by name."""
+    """The workflow's skills called with typed arguments (those with params or phases), by
+    name."""
     return {name: command for name, _, _, command, _ in _parsed_skills(workflow_folderpath) if command is not None}
 
 
@@ -1492,7 +1493,7 @@ def planner_skill_for(text: str, workflow_folderpath: str) -> tuple[str, SkillCo
     """``(template, command)`` for the skill ``text`` asks for: one Jev match.
 
     ``template`` is ``plan_template_for``'s text ("" when no skill matches); ``command`` is
-    the matched skill's parsed form when it has params, else None.
+    the matched skill's parsed form when it has params or phases, else None.
     """
     matched = match_skill(text, workflow_folderpath)
     if matched is None:
@@ -1735,7 +1736,7 @@ def build_query_with_next_steps(user_query: str,
             request in the planner prompt (not in the returned string). Used on
             the turn's initial plan, not on a replan.
         done_only: With a trajectory, return only the "what's done" summary.
-        skill_command: The matched skill's parsed form when it has params. On the
+        skill_command: The matched skill's parsed form when it has params or phases. On the
             turn's initial plan the planner then fills the skill's typed parameters
             and code expands its steps (``skill_commands.plan_skill_call``; span
             ``plan_source`` "skill_call"); Jev, when configured, checks the skill's

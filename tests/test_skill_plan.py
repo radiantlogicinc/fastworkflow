@@ -498,3 +498,63 @@ def test_a_name_a_subclass_sets_to_a_non_function_is_not_a_phase():
         answer = None
 
     assert [p.name for p in planned(NoAnswer)(_input())] == ["find", "item"]
+
+
+# ------------------------------------------------- phases with no Input (fix-bh1e.11)
+
+class NoInputSignature:
+    """Summarize the catalog: its sections, then its late items."""
+
+
+class NoInputPlan:
+    def sections(self):
+        return ["list_sections"]
+
+    def late(self):
+        return ["count_late", "say how many items are late"]
+
+
+@pytest.mark.parametrize("signature", [
+    NoInputSignature,
+    type("EmptyInput", (NoInputSignature,), {"__doc__": NoInputSignature.__doc__,
+                                             "Input": type("Input", (BaseModel,), {})})])
+def test_a_skill_with_no_inputs_can_have_phases(signature):
+    loaded = skill_commands.command_from_module("summary", _module(signature, NoInputPlan),
+                                                "_skills/summary.py")
+    command = loaded.command
+    assert command is not None and command.params == ()
+    assert loaded.steps == ("list_sections", "count_late", "say how many items are late")
+    assert command.signature_text().splitlines()[0] == "summary()"
+    assert skill_commands._template_grid(command) == [{}]           # one plan, one template
+    phases = skill_commands.call_phases(command, {})
+    assert [p.name for p in phases] == ["sections", "late"]
+    assert [phase_steps(p, {}) for p in phases] == [
+        ["list_sections"], ["count_late", "say how many items are late"]]
+    fields = skill_commands.typed_signature(command).output_fields
+    assert list(fields) == ["steps_before", "steps_after"]          # a call with no arguments
+
+
+def test_a_skill_with_no_inputs_and_one_method_stays_fixed_steps():
+    class OnePlan:
+        def summary(self):
+            return ["list_sections", "say how many sections there are"]
+
+    loaded = skill_commands.command_from_module("summary", _module(NoInputSignature, OnePlan),
+                                                "_skills/summary.py")
+    assert loaded.command is None
+    assert loaded.steps == ("list_sections", "say how many sections there are")
+
+
+def test_a_no_input_phased_skill_call_has_no_arguments():
+    import dspy
+    from dspy.utils import DummyLM
+
+    command = skill_commands.command_from_module(
+        "summary", _module(NoInputSignature, NoInputPlan), "_skills/summary.py").command
+    lm = DummyLM([{"reasoning": "r", "steps_before": [], "steps_after": []}])
+    with dspy.context(lm=lm):
+        call = skill_commands.plan_skill_call(command, "give me the catalog summary",
+                                              "list_sections: x\ncount_late: y")
+    assert call.args == {} and [p.name for p in call.phases] == ["sections", "late"]
+    assert call.plan.splitlines() == ["1. list_sections", "2. count_late",
+                                      "3. say how many items are late"]
