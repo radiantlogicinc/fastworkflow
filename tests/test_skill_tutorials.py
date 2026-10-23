@@ -303,11 +303,22 @@ def test_refusal_and_a_plain_call():
     assert refusal("member_loans", {"member": "Ann Lee"}) == ""
 
 
-def test_the_composed_skill_runs_the_base_phases_then_its_own():
+def test_the_composed_skill_places_the_base_phases_and_extends_the_base_answer():
     text = dry_run("book_loans", {"title": "Emma"})
     assert [line for line in text.splitlines() if line.startswith("Phase")] == [
         "Phase find", "Phase book", "Phase loans", "Phase answer"]
-    assert text.endswith("answer written by code:\n    Emma is on loan to 1 borrower (Raj Patel).")
+    assert text.endswith("answer written by code:\n"
+                         "    Emma is by Jane Austen; the library owns 2 copies.\n"
+                         "    It is on loan to 1 borrower (Raj Patel).")
+
+
+def test_a_skill_with_no_inputs_runs_its_two_phases():
+    command = workflow_agent.load_skill_commands(WORKFLOW)["overdue_summary"]
+    assert command.params == ()
+    text = dry_run("overdue_summary", {})
+    assert [line for line in text.splitlines() if line.startswith("Phase")] == [
+        "Phase branches", "Phase overdue"]
+    assert "code runs: list_branches" in text and "code runs: count_overdue" in text
 
 
 if __name__ == "__main__":

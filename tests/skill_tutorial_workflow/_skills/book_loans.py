@@ -1,7 +1,7 @@
-"""book_loans: who has the book the request names on loan.
+"""book_loans: the book the request names and who has it on loan.
 
-Reuses book_by_title's find and book phases by inheriting its PlanGenerator, adds a loans
-phase and writes its own answer.
+Reuses book_by_title's phases by subclassing its PlanGenerator: __call__ places them and the
+new loans phase in order, and answer extends book_by_title's answer with super().
 """
 from pydantic import BaseModel, Field
 
@@ -11,7 +11,7 @@ from .book_by_title import PlanGenerator as BookByTitle
 
 
 class Signature:
-    """Say who has the book whose title the request names on loan."""
+    """Show the book whose title the request names and who has it on loan."""
 
     plain_utterances = ["who has borrowed Dune", "is anyone reading Emma right now"]
 
@@ -33,7 +33,8 @@ class PlanGenerator(BookByTitle):
         return [f"list_loans book_uid={book.uid} (full list)"]
 
     def answer(self, input, book=None, loans=None):
-        if book is None or loans is None:
-            return [f"say that no book matches {input.title}"]
-        return [f"say that {book.name} is on loan to "
-                f"{listed(loans.borrowers, loans.total, 'borrower')}"]
+        steps = super().answer(input, book)
+        if loans is None:
+            return steps
+        return [*steps, f"say that it is on loan to "
+                        f"{listed(loans.borrowers, loans.total, 'borrower')}"]

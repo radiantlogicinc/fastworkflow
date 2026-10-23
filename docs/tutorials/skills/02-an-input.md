@@ -46,8 +46,8 @@ class PlanGenerator:
 - **`"say which books were found"`** is an answer step that needs the agent: only a step
   starting `say that` is copied into the answer word for word (page 3).
 
-One method that reads only `input` makes a **flat** skill: the whole call is one plan, run
-by one executor run.
+This job is one search, so it is one method. A skill whose one phase reads only `input`
+(and hands on no facts) runs **flat**: the whole call is one plan, run by one executor run.
 
 ## What the planner sees
 

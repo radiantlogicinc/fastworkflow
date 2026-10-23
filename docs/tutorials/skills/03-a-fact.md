@@ -1,8 +1,8 @@
-# 3. Phases that pass a fact
+# 3. A fact passed from one phase to the next
 
 **Goal:** "how many books by Jane Austen do you have?" answered by code, with no model
-writing the answer. The skill splits into two **phases**: `find` runs the search and keeps
-its total as a **fact**; `answer` writes the answer from that fact.
+writing the answer. Page 1's phases passed nothing on; here the `find` phase runs the search
+and keeps its total as a **fact**, and the `answer` phase writes the answer from that fact.
 
 ## The skill file
 
@@ -41,9 +41,8 @@ class PlanGenerator:
 
 ## Line by line
 
-- **Two public methods, two phases**, run in the order written: `find`, then `answer`. A
-  phase that runs commands is its own executor run, with its own step budget. Nothing
-  passes from one phase to the next but the workflow's position and the facts.
+- **Two phases**, as on page 1: `find`, then `answer`. Nothing passes from one phase to the
+  next but the workflow's position and the facts, so `find` declares the fact it hands on.
 - **`class Found(BaseModel)`** is a **facts model**: what the `find` phase hands on. It is
   nested right above the method that fills it.
 - **`total: int = fact_from("find_book.total")`** says where the fact comes from: the
@@ -127,7 +126,11 @@ Code ran `find_book`, filled `Found(total=2)` from its output, called `answer` w
 wrote the answer from the `say that` step: no model wrote a word of it. With one match the
 same code writes "1 books"; page 6 fixes that wording.
 
+Page 1's overview could say its branches the same way: a `branches` phase that fills
+`total: int = fact_from("list_branches.total")`, read by `overdue` as a parameter named
+`branches`.
+
 ## What you learned
 
-Each public method is a phase; a facts model with `fact_from("command.field")` is what a
-phase hands on, and a later phase reads it by naming the phase as a parameter.
+A facts model with `fact_from("command.field")` is what a phase hands on, and a later phase
+reads it by naming the phase as a parameter.

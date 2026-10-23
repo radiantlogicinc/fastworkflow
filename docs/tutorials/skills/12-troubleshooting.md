@@ -200,6 +200,34 @@ SkillFormatError: _skills/bad_binding.py: plan(): phase 'answer' takes 'found', 
 **Fix:** name the phase (`def answer(self, input, find)`). A phase that may be skipped is
 read with a default: `book=None`.
 
+## A subclass that adds a phase without saying where
+
+A `PlanGenerator` that subclasses another and adds a phase must write `__call__` with the
+order (page 11). Here `Overview` adds `overdue` to `Branches`' phase:
+
+<!-- broken: bad_order -->
+```python
+class Signature:
+    """List the library's branches, then say how many loans are overdue."""
+
+
+class Branches:
+    def branches(self):
+        return ["list_branches"]
+
+
+class PlanGenerator(Branches):
+    def overdue(self):
+        return ["count_overdue", "say how many loans are overdue across the library"]
+```
+
+<!-- load-error -->
+```text
+SkillFormatError: _skills/bad_order.py: PlanGenerator adds the phase(s) overdue to those of bad_order.Branches: write __call__(self, input) returning the phases a call runs, in order (from: self.branches, self.overdue)
+```
+
+**Fix:** write the order: `def __call__(self, input): return [self.branches, self.overdue]`.
+
 ## A fact source the workflow does not have
 
 `fact_from("find_book.matches")` names a field `find_book` does not have. The skill still

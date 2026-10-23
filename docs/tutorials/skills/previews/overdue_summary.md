@@ -2,21 +2,45 @@
 
 # overdue_summary
 
-Summarize the library: its branches and how many loans are overdue.
+List the library's branches, then say how many loans are overdue across the library.
 
-Source: `_skills/overdue_summary.py`. Kind: fixed steps, no inputs.
+Source: `_skills/overdue_summary.py`. Kind: phased: `PlanGenerator` runs it as bounded sub-plans, each passing facts on.
 
 ## Inputs
 
-None: the steps are fixed.
+None: every call runs the same plan.
 
 ## Example requests
 
 - give me the library overview
 - how many loans are overdue overall
 
-## Steps
+## Phases
+
+| phase | output | runs | fans out |
+|---|---|---|---|
+| `branches` | none | always | no |
+| `overdue` | none | always | no |
+
+## Facts
+
+What each phase's output holds, filled in code from the commands the phase ran.
+
+No phase passes facts on.
+
+## Plan
+
+One for every call: the skill takes no inputs.
+
+### Phase 1: `branches`
+
+Reads no earlier facts. Output: none.
 
 1. `list_branches`
-2. `count_overdue`
-3. `say how many branches the library has and how many loans are overdue`
+
+### Phase 2: `overdue`
+
+Reads no earlier facts. Output: none.
+
+1. `count_overdue`
+2. `say how many loans are overdue across the library`

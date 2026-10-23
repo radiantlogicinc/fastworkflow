@@ -34,12 +34,12 @@ is.
 
 ## The pages
 
-1. [Fixed steps: a skill with no inputs](01-fixed-steps.md): `Signature`, `PlanGenerator`,
-   steps as text, the preview.
+1. [The simplest skill: two phases, no inputs](01-two-phases.md): `Signature`,
+   `PlanGenerator`, each method a phase, steps as text, the preview, a dry run.
 2. [An input](02-an-input.md): an `Input` field, its description as the planner's
    instruction, a flat skill.
-3. [Phases that pass a fact](03-phases-and-a-fact.md): a facts model, `fact_from`, reading
-   a phase by its name, an answer code writes.
+3. [A fact passed on](03-a-fact.md): a facts model, `fact_from`, reading a phase by its
+   name, an answer code writes.
 4. [Skipping a phase](04-skipping-a-phase.md): `return []`, `=None`, and "(only when ...)".
 5. [Picking a row by name](05-pick.md): `pick(...)`.
 6. [Wording the answer](06-answer-wording.md): `listed`, `count`, `num`.
@@ -50,7 +50,7 @@ is.
 10. [A facts model chosen by the input](10-a-facts-model-per-input.md):
     `@phase(output=lambda input: ...)`.
 11. [Composing skills](11-composing-skills.md): a `PlanGenerator` that extends another
-    skill's.
+    skill's: its phases placed by `__call__`, its steps extended with `super()`.
 12. [Troubleshooting](12-troubleshooting.md): the load errors, what they mean, how to fix them.
 
 ## Three readers of a skill

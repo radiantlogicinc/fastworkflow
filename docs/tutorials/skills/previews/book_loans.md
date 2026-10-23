@@ -2,7 +2,7 @@
 
 # book_loans
 
-Say who has the book whose title the request names on loan.
+Show the book whose title the request names and who has it on loan.
 
 Source: `_skills/book_loans.py`. Kind: phased: `PlanGenerator` runs it as bounded sub-plans, each passing facts on.
 
@@ -89,6 +89,7 @@ Reads: `book`, `loans`. Output: none.
 
 _Steps below are rendered with placeholder facts: `<phase.fact>` stands for that fact as read at run time, and 999999 (or 999,999) for a number fact the code converted; values computed from facts (counts, comparisons, matches) are not real._
 
-1. `say that <book.name> is on loan to <loans.total> borrower (<loans.borrowers[0]>)`
+1. `say that <book.name> is by <book.author>; the library owns <book.copies> copies`
+2. `say that it is on loan to <loans.total> borrower (<loans.borrowers[0]>)`
 
-Answer: written by code, word for word (step 1 verbatim).
+Answer: written by code, word for word (steps 1 and 2 verbatim).
