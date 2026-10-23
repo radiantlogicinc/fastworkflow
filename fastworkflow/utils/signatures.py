@@ -1219,7 +1219,11 @@ Today's date is {today}.
                     if "command_text" in inspect.signature(hook).parameters
                     else {}
                 )
-                is_valid, message = hook(app_workflow, subject_command_name, cmd_parameters, **hook_kwargs)
+                try:
+                    is_valid, message = hook(app_workflow, subject_command_name, cmd_parameters,
+                                             **hook_kwargs)
+                except fastworkflow.Refused as refusal:
+                    is_valid, message = False, str(refusal)
                 if diagnostics is not None:
                     diagnostics["validation_hook"] = {
                         "ran": True,

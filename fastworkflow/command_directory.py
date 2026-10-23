@@ -1,4 +1,5 @@
 import contextlib
+import functools
 import hashlib
 import os
 from typing import Optional
@@ -35,6 +36,24 @@ class CommandMetadata(BaseModel):
         return self
 
 
+#: ``UtteranceMetadata.generated_utterances_func_name`` of a command whose ``Signature``
+#: defines no ``generate_utterances``: the framework's default (``default_generate_utterances``).
+DEFAULT_UTTERANCES_FUNC = "<default>"
+
+
+def default_generate_utterances(signature, workflow, command_name: str) -> list[str]:
+    """The utterances of a command whose ``Signature`` defines no ``generate_utterances``:
+    exactly what the standard command-file body returns (``build/command_file_template``):
+    the command's name in words, then ``generate_diverse_utterances`` of its
+    ``plain_utterances``. A ``Signature`` that defines (or inherits) ``generate_utterances``
+    keeps its own; this is never used for it."""
+    from fastworkflow.train import generate_synthetic
+
+    return [command_name.split("/")[-1].lower().replace("_", " ")] + \
+        generate_synthetic.generate_diverse_utterances(
+            getattr(signature, "plain_utterances", []), command_name)
+
+
 class UtteranceMetadata(BaseModel):
     workflow_folderpath: Optional[str] = None
     plain_utterances: list[str]
@@ -51,7 +70,11 @@ class UtteranceMetadata(BaseModel):
         # Get the function from the module and execute it
         if not module or not self.generated_utterances_func_name:
             return None
-            
+
+        if self.generated_utterances_func_name == DEFAULT_UTTERANCES_FUNC:
+            signature = getattr(module, "Signature", None)
+            return functools.partial(default_generate_utterances, signature) if signature else None
+
         if '.' in self.generated_utterances_func_name:
             parts = self.generated_utterances_func_name.split('.')
             func = module
@@ -311,16 +334,16 @@ class CommandDirectory(BaseModel):
         if not Signature:
             return
 
-        # UtteranceMetadata requires generated_utterances_module_filepath and generated_utterances_func_name.
-        # So, only proceed if Signature.generate_utterances exists.
-        if not hasattr(Signature, "generate_utterances"):
-            return
-
+        # A Signature that defines (or inherits) generate_utterances keeps it; one that does
+        # not gets the framework default, the standard body (default_generate_utterances).
         plain_utterances = getattr(Signature, "plain_utterances", [])
         template_utterances = getattr(Signature, "template_utterances", [])
-        
+
+        # The command file stays the source path: training fingerprints hash it.
         generated_utterances_module_filepath = command_metadata.response_generation_module_path
-        generated_utterances_func_name = "Signature.generate_utterances"
+        generated_utterances_func_name = (
+            "Signature.generate_utterances" if hasattr(Signature, "generate_utterances")
+            else DEFAULT_UTTERANCES_FUNC)
 
         utterance_metadata = UtteranceMetadata(
             workflow_folderpath=command_metadata.workflow_folderpath or workflow_folderpath,

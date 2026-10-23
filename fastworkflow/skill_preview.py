@@ -515,6 +515,9 @@ def condition_text(fn: Any, hint: str = "") -> str:
     name. A lambda whose source cannot be read (or told apart from another on its line)
     falls back to its name, ``<lambda>``.
     """
+    only_when = getattr(fn, "only_when", None)
+    if callable(only_when):   # a PlanGenerator phase: the tests its template call made
+        return " and ".join(only_when())
     name = getattr(fn, "__name__", None) or type(fn).__name__
     if name == "<lambda>":
         try:
@@ -689,8 +692,9 @@ def _settings(phase) -> list[str]:
     out = []
     if not dataclasses.is_dataclass(phase):
         return out
-    if callable(getattr(phase, "when", None)):
-        out.append(f"when={condition_text(phase.when, 'when')}")
+    cond = condition_text(phase.when, "when") if callable(getattr(phase, "when", None)) else ""
+    if cond:
+        out.append(f"when={cond}")
     for f in dataclasses.fields(phase):
         if f.name in _PHASE_FIELDS:
             continue
@@ -741,7 +745,8 @@ def _fan_out_items(phase, outputs: dict) -> tuple[list[Any], list[str]]:
 
 def _render_phases(command, args: dict) -> _Render:
     from fastworkflow import skill_commands
-    from fastworkflow.skill_phases import Phase, PhaseError, active_phases, is_flat_plan, phase_steps
+    from fastworkflow.skill_phases import (Phase, PhaseError, active_phases, is_flat_plan,
+                                           phase_steps, placeholder_steps)
 
     try:
         raw = command.plan_fn(skill_commands.input_instance(command, args))
@@ -778,17 +783,17 @@ def _render_phases(command, args: dict) -> _Render:
                 lines = [line for steps in per_item for line in steps]
             else:
                 per_item, lines = None, phase_steps(phase, outputs)
+                if not lines and callable(phase.when):
+                    lines = placeholder_steps(phase)
+                    note = ("With the sample facts it writes no steps (skipped when reached); "
+                            "shown as the template has them.")
         except PhaseError as error:
             items = heads = per_item = None
-            note = f"Rendered without earlier facts: with placeholder facts, {error}."
+            note = f"Rendered as the template has it: with placeholder facts, {error}."
             try:
-                lines = phase_steps(phase, {})
-            except PhaseError:
-                kwargs = {n: None for n in names}
-                try:
-                    lines = [str(s) for s in phase.steps_fn(**kwargs)]
-                except Exception as inner:  # noqa: BLE001
-                    lines, note = [], f"steps_fn failed: {type(inner).__name__}: {inner}"
+                lines = placeholder_steps(phase)
+            except PhaseError as inner:
+                lines, note = [], str(inner)
         reads = [n for n in names if n in outputs]
         render.phases.append(_PhaseRender(
             name=phase.name, reads=reads, output=phase.output,
@@ -818,66 +823,6 @@ def pass_on_placeholders(phase, outputs: dict, earlier: list, items: Optional[li
                                    _linked_values(phase.output, earlier))
     outputs[phase.name] = value
     earlier.append((phase.name, value))
-
-
-def not_run_wording_problems(command) -> list[str]:
-    """Phases whose template wording (built with ``None`` facts) is their "did not run"
-    wording: a fact of a phase that may not run (a callable ``when``, ``optional``) is tested
-    for ``None`` before the facts that are only ``None`` in the template, so the planner's
-    template reads as if that phase had not run. Checked on the template's inputs."""
-    from fastworkflow import skill_commands
-    from fastworkflow.skill_phases import (NO_ITEM, PhaseError, active_phases, is_flat_plan,
-                                           phase_steps, runs_now)
-
-    problems: list[str] = []
-    if command.plan_fn is None:
-        return problems
-    for env in skill_commands._template_grid(command):
-        try:
-            raw = command.plan_fn(skill_commands.input_instance(command, env))
-            if is_flat_plan(raw):
-                continue
-            phases = active_phases(raw)
-        except Exception:  # noqa: BLE001 - the load reports plan() failures
-            continue
-        outputs: dict = {}
-        earlier: list = []
-        may_not_run: set[str] = set()
-        for phase in phases:
-            item = NO_ITEM
-            if phase.fans_out:
-                try:
-                    found, _ = _fan_out_items(phase, outputs)
-                    item = found[0] if found else NO_ITEM
-                except PhaseError:
-                    pass
-            for name in sorted(may_not_run & set(outputs)):
-                rest = {k: v for k, v in outputs.items() if k != name}
-                try:
-                    # a phase whose own `when` reads that fact runs only as `when` says
-                    if phase.has_condition and name in inspect.signature(phase.when).parameters \
-                            and not runs_now(phase, rest):
-                        continue
-                except Exception:  # noqa: BLE001 - workflow code
-                    continue
-                try:
-                    # as concatenated_steps builds it: None for each fact
-                    template = phase_steps(phase, dict.fromkeys(outputs), item)
-                    not_run = phase_steps(phase, rest, item)
-                    ran = phase_steps(phase, outputs, item)
-                except PhaseError:
-                    continue
-                if template == not_run != ran:
-                    problem = (f"{command.name}: phase {phase.name!r}: its template wording is "
-                               f"its wording when phase {name!r} did not run; test the facts "
-                               f"that are always there for None first")
-                    if problem not in problems:
-                        problems.append(problem)
-            if phase.has_condition or phase.optional:
-                may_not_run.add(phase.name)
-            pass_on_placeholders(phase, outputs, earlier,
-                                 [item] if phase.fans_out and item is not NO_ITEM else None)
-    return problems
 
 
 def _render(command, args: dict) -> _Render:
@@ -1374,9 +1319,9 @@ def _phases_section(found: list[_Variant]) -> list[str]:
     phased = _universe(found)
     if len(phased) < len(every):
         when = describe_inputs(phased, every, _axes_of(found))
-        lines += [_text(f"`plan()` returns phases only {when}" if when.startswith("when ")
-                        else f"`plan()` returns phases {when}")
-                  + "; for other inputs the call runs flat, from `steps()`. The table is "
+        lines += [_text(f"The call runs as phases only {when}" if when.startswith("when ")
+                        else f"The call runs as phases {when}")
+                  + "; for other inputs it runs flat, as one plan. The table is "
                   "about the phased calls.", ""]
     lines += ["| phase | output | runs | fans out |", "|---|---|---|---|"]
     for name in order:
@@ -1420,7 +1365,7 @@ PLACEHOLDER_NOTE = ("Steps below are rendered with placeholder facts: `<phase.fa
                     "fact the code converted; values computed from facts (counts, comparisons, "
                     "matches) are not real.")
 #: The line a render for inputs ``plan()`` returns no phases for gets.
-FLAT_NOTE = "`plan()` returns no phases for these inputs: the call runs flat, from `steps()`."
+FLAT_NOTE = "For these inputs the call runs flat: one phase that reads no facts, as one plan."
 #: The line a fan-out phase over an empty list of items gets.
 NO_ITEMS_NOTE = "No items: `over` is empty for these inputs, so the phase runs nothing."
 
@@ -1517,7 +1462,7 @@ def render_preview(name: str, description: str, steps: tuple, command,
     a phase's steps are read with (``phase_command_names``), to show who writes an
     answer-only phase's answer (none given: not shown)."""
     phased = command is not None and command.plan_fn is not None
-    kind = ("phased: `plan()` runs it as bounded sub-plans, each passing facts on" if phased
+    kind = ("phased: `PlanGenerator` runs it as bounded sub-plans, each passing facts on" if phased
             else "flat: one list of steps" if command is not None
             else "fixed steps, no inputs")
     lines = [MARKER.format(source=source), "", f"# {name}", "", _text(description), "",
@@ -1577,9 +1522,13 @@ def _load_error(name: str, path: str, folder: str) -> str:
     from fastworkflow import workflow_agent
 
     try:
-        workflow_agent._read_skill_file(name, path, folder)
+        loaded = workflow_agent._read_skill_file(name, path, folder)
     except Exception as error:  # noqa: BLE001 - reported, not raised
         return f"{name}: {type(error).__name__}: {error}"
+    problems = (workflow_agent.step_command_problems(loaded.command, folder)
+                if loaded.command is not None else [])
+    if problems:
+        return f"{name}: " + "; ".join(problems)
     return f"{name}: skipped by the loader (see the log)"
 
 
@@ -1588,8 +1537,7 @@ def check_previews(workflow_folder: str, out_dir: Optional[str] = None) -> list[
 
     A problem is a preview that differs, one that is missing, an extra ``.md`` file, or a
     phase output field whose ``"from"`` names a command or field the workflow does not have
-    (``workflow_agent.phase_source_problems``; at load only a warning), or a phase whose
-    planner template reads as if an earlier phase had not run (``not_run_wording_problems``).
+    (``workflow_agent.phase_source_problems``; at load only a warning).
     """
     from fastworkflow import workflow_agent
 
@@ -1611,8 +1559,6 @@ def check_previews(workflow_folder: str, out_dir: Optional[str] = None) -> list[
         if command.phase_outputs:
             problems += [f"fact source not found: {problem}"
                          for problem in workflow_agent.phase_source_problems(command, folder)]
-        problems += [f"template reads as not run: {problem}"
-                     for problem in not_run_wording_problems(command)]
     return problems
 
 

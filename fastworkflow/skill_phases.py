@@ -1,38 +1,14 @@
 """Skill phases: a skill run as bounded sub-plans, with facts passed between them.
 
-A skill file (``_skills/<name>.py``, see ``fastworkflow.skill_commands``) may define,
-next to ``steps(input)``, a function ``plan(input) -> list[Phase]``::
+A skill file writes its phases as the methods of ``class PlanGenerator``
+(``fastworkflow.skill``); the loader builds this module's runtime form from it: a list of
+``Phase`` per call (``skill.planned``), each method's steps as its ``steps_fn`` and its
+``return []`` as its ``when`` (decided when the phase is reached; the method runs once). The
+runtime form, as the loader builds it or a test writes it by hand::
 
-    from pydantic import BaseModel, Field
-
-    from fastworkflow.skill_phases import Phase, concatenated_steps
-
-
-    class Found(BaseModel):
-        item_uids: list[str] = Field(json_schema_extra={"from": "find_item.item_uids"}, min_length=1)
-
-
-    class ItemFacts(BaseModel):
-        uid: str = Field(json_schema_extra={"from": "open_item_by_uid.item_uid"})
-        part_labels: list[str] = Field(json_schema_extra={"from": "list_parts.labels"})
-
-
-    def item_steps(found=None):
-        uid = found.item_uids[0] if found else "<the uid of the match>"
-        return [f"open_item_by_uid item_uid={uid}", "list_parts (full list)"]
-
-
-    def plan(input):
-        return [
-            Phase("find", lambda: ["open_catalog", f"find_item query={input.name}"], output=Found),
-            Phase("item", lambda find: item_steps(find), output=ItemFacts),
-            Phase("check", lambda item: check_steps(item), when=input.check),
-            Phase("report", lambda item: [f"say which parts {item.uid} has: {item.part_labels}"]),
-        ]
-
-
-    def steps(input):
-        return concatenated_steps(plan(input))
+    Phase("find", find_steps, output=Found)
+    Phase("item", item_steps, output=ItemFacts, when=item_writes_steps)
+    Phase("book", book_steps, output=Book, over="find.uids", item="uid", max_items=3)
 
 ``Phase(name, steps_fn, output=None, when=True, over=None, item="item", max_items=None,
 bind=True, until=None, noun=None, optional=False)``:
@@ -62,15 +38,13 @@ bind=True, until=None, noun=None, optional=False)``:
 - ``optional=True``: a phase the request does not need; its failure does not stop the
   job (see 10 below).
 
-``plan(input)`` may return ``None`` (or ``[]``): this call is not phased. It runs flat,
-from ``steps(input)`` (``is_flat_plan``), as one phase named after the skill, as a skill
-without ``plan()`` does (``skill_commands.call_phases``). A skill can so be phased for
-some inputs only; its file then defines its own ``steps()``.
+A call whose ``PlanGenerator`` gives one phase that reads and fills no facts is not phased:
+it runs flat (``is_flat_plan``: the loader's plan gives ``None``), as one phase named after
+the skill (``skill_commands.call_phases``). A skill can so be phased for some inputs only.
 
-``steps(input)`` stays: for a phased skill it is the plain concatenation of the phases'
-steps with no earlier outputs (``concatenated_steps``), which is what skill matching, the
-skill call's plan text and the template fallback read. A skill file with ``plan()`` and
-no ``steps()`` gets that concatenation as its ``steps()``.
+The skill's template (what skill matching, the skill call's plan text and the template
+fallback read) is the phases' steps joined with every earlier fact a ``Placeholder``
+(``concatenated_steps``).
 
 How the runner (``WorkflowExecutionContext``) runs a phased skill call, phase by phase:
 
@@ -176,6 +150,8 @@ Each phase run is a ``fw.skill.phase`` span (see ``tracing.SPAN_CONTRACTS``).
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import inspect
 import re
 from dataclasses import dataclass
@@ -276,6 +252,162 @@ class Phase:
             if match:
                 return match.group(1), match.group(2)
         return None
+
+
+class Placeholder(str):
+    """A fact that is not known yet: what a phase method gets for each earlier phase's
+    output (and a fan-out's item) while the TEMPLATE is built (``building_template``).
+
+    Lenient for reading: any attribute, index or call gives another placeholder named by
+    its path (``<find.total>``, ``<find.uids[0]>``, ``<find.only_uid()>``); iterating gives
+    one item, ``<find.labels[*]>`` (each of them). A number the code converts reads 999999.
+
+    EVERY TEST ON IT READS AS TRUE: ``bool()``, ``len()`` (one item), ``==``, ``!=``, ``<``,
+    ``in`` ... so the template shows the steps written when each condition holds. Each test
+    is noted while ``tests_noted`` is open (``find.uids``, ``find.total > 3``): the template
+    says the phase's steps are written "only when" they hold. ``x is None`` is not a test
+    it can see (a placeholder is never None).
+    """
+
+    def __new__(cls, path: str):
+        self = super().__new__(cls, f"<{path}>")
+        self._path = path
+        return self
+
+    __hash__ = str.__hash__
+
+    def __getattr__(self, name):
+        if name.startswith("__") or name == "_path":
+            raise AttributeError(name)
+        return Placeholder(f"{self._path}.{name}")
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            return self
+        return Placeholder(f"{self._path}[{key!r}]" if isinstance(key, str)
+                           else f"{self._path}[{key}]")
+
+    def __call__(self, *args, **kwargs):
+        return Placeholder(f"{self._path}()")
+
+    def __iter__(self):
+        _noted(self._path)
+        yield Placeholder(f"{self._path}[*]")
+
+    def index(self, *args, **kwargs):
+        """As a list's: the one item's place, 0 (not ``str.index``)."""
+        return 0
+
+    def __len__(self):
+        _noted(self._path)
+        return 1
+
+    def __bool__(self):
+        _noted(self._path)
+        return True
+
+    def __contains__(self, item):
+        _noted(f"{_expr(item)} in {self._path}")
+        return True
+
+    def _compared(self, op: str, other: Any) -> bool:
+        _noted(f"{self._path} {op} {_expr(other)}")
+        return True
+
+    def __eq__(self, other):
+        return self._compared("==", other)
+
+    def __ne__(self, other):
+        return self._compared("!=", other)
+
+    def __lt__(self, other):
+        return self._compared("<", other)
+
+    def __le__(self, other):
+        return self._compared("<=", other)
+
+    def __gt__(self, other):
+        return self._compared(">", other)
+
+    def __ge__(self, other):
+        return self._compared(">=", other)
+
+    def __int__(self):
+        return 999999
+
+    def __float__(self):
+        return 999999.0
+
+    def __str__(self):
+        return f"<{self._path}>"
+
+    __repr__ = __str__
+
+    def __format__(self, spec):
+        return str(self)
+
+
+def _expr(value: Any) -> str:
+    return value._path if isinstance(value, Placeholder) else repr(value)
+
+
+def is_placeholder(value: Any) -> bool:
+    """Whether *value* is a fact not known yet (``Placeholder``)."""
+    return isinstance(value, Placeholder)
+
+
+_BUILDING_TEMPLATE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "fw_skill_building_template", default=False)
+_TESTS: contextvars.ContextVar[Optional[list]] = contextvars.ContextVar(
+    "fw_skill_tests", default=None)
+
+
+@contextlib.contextmanager
+def building_template():
+    """Set while the framework builds a phased skill's TEMPLATE (``concatenated_steps``,
+    ``placeholder_steps``): phase methods then get ``Placeholder`` facts. Never set while
+    a phase runs."""
+    token = _BUILDING_TEMPLATE.set(True)
+    try:
+        yield
+    finally:
+        _BUILDING_TEMPLATE.reset(token)
+
+
+def is_building_template() -> bool:
+    """Whether the template is being built (``building_template``)."""
+    return _BUILDING_TEMPLATE.get()
+
+
+@contextlib.contextmanager
+def tests_noted():
+    """A list of the tests made on placeholders inside the block (``find.uids``,
+    ``find.total > 3``), each once, in order."""
+    tests: list = []
+    token = _TESTS.set(tests)
+    try:
+        yield tests
+    finally:
+        _TESTS.reset(token)
+
+
+def _noted(test: str) -> None:
+    tests = _TESTS.get()
+    if tests is not None and test not in tests:
+        tests.append(test)
+
+
+def _template_kwargs(phase: Phase, earlier: Optional[set] = None) -> dict[str, Any]:
+    """Every parameter of *phase*'s ``steps_fn`` (a fact, or the fan-out's item) as a
+    ``Placeholder`` named after it. With *earlier* (the names of the earlier phases of the
+    call that fill facts), a parameter with a default that names none of them keeps its
+    default: that phase is not in the call, so its facts are never there."""
+    return {
+        parameter.name: Placeholder(parameter.name) for parameter in _parameters(phase)
+        if parameter.kind not in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD)
+        and (earlier is None or parameter.default is parameter.empty
+             or parameter.name in earlier or (phase.fans_out and parameter.name == phase.item))
+    }
 
 
 def phase_step_budget() -> int:
@@ -538,44 +670,41 @@ def fan_out_items(phase: Phase, outputs: Mapping[str, Any]) -> tuple[list[Any], 
 
 
 def concatenated_steps(phases: Iterable[Phase]) -> list[str]:
-    """The phases' steps joined in order, each built with no earlier outputs.
+    """The phases' steps joined in order, each built with no earlier outputs: the TEMPLATE.
 
-    The flat ``steps(input)`` of a phased skill. Every parameter of ``steps_fn``
-    keeps its default, or is ``None`` when it has none. Phases with ``when`` false
+    The flat ``steps(input)`` of a phased skill. Built under ``building_template``: every
+    parameter of ``steps_fn`` naming an earlier phase of the call (its facts) or a fan-out's
+    item is a ``Placeholder``, so the steps read as if every phase ran; one naming a phase
+    the call does not have keeps its default. Phases with ``when`` false
     are left out; a phase with a callable ``when`` is kept (it may run). A fan-out phase
     over a list of items gives its steps once per item (capped); one over an earlier
-    phase's field gives them once, with its item parameter ``None`` (or its default).
-    A flat ``plan()`` result (``is_flat_plan``) has no phases to join: PhaseError, since
-    a skill whose ``plan()`` may run flat writes its own ``steps()``.
+    phase's field gives them once, with its item a placeholder.
     """
     if is_flat_plan(phases):
-        raise PhaseError("plan() returned no phases (run flat): steps() must give the flat "
-                         "steps itself, not concatenated_steps(plan(input))")
+        raise PhaseError("plan() returned no phases (run flat): the skill's flat steps are "
+                         "its own, not concatenated_steps(...)")
     out: list[str] = []
-    for phase in active_phases(list(phases)):
-        kwargs = {
-            parameter.name: None for parameter in _parameters(phase)
-            if parameter.default is parameter.empty
-            and parameter.kind not in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD)
-        }
-        if phase.fans_out and phase.over_reference is None:
-            for item in fan_out_items(phase, {})[0]:
-                out.extend(_checked_steps(phase.steps_fn(**{**kwargs, phase.item: item}), phase))
-            continue
-        out.extend(_checked_steps(phase.steps_fn(**kwargs), phase))
+    earlier: set[str] = set()
+    with building_template():
+        for phase in active_phases(list(phases)):
+            kwargs = _template_kwargs(phase, earlier)
+            if phase.output is not None:
+                earlier.add(phase.name)
+            if phase.fans_out and phase.over_reference is None:
+                for item in fan_out_items(phase, {})[0]:
+                    out.extend(_checked_steps(phase.steps_fn(**{**kwargs, phase.item: item}),
+                                              phase))
+                continue
+            out.extend(_checked_steps(phase.steps_fn(**kwargs), phase))
     return out
 
 
 def placeholder_steps(phase: Phase) -> list[str]:
-    """*phase*'s steps built with no earlier outputs, as ``concatenated_steps`` builds them
-    (one item's, with the item ``None``, for a fan-out). Raises PhaseError."""
-    kwargs = {
-        parameter.name: None for parameter in _parameters(phase)
-        if parameter.default is parameter.empty
-        and parameter.kind not in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD)
-    }
+    """*phase*'s steps as the template has them (``concatenated_steps``; one item's, the
+    item a placeholder, for a fan-out). Raises PhaseError."""
     try:
-        return _checked_steps(phase.steps_fn(**kwargs), phase)
+        with building_template():
+            return _checked_steps(phase.steps_fn(**_template_kwargs(phase)), phase)
     except PhaseError:
         raise
     except Exception as error:  # noqa: BLE001 - workflow code
@@ -2460,6 +2589,11 @@ FOUND_FACTS_LEAD = "Found before the job stopped (facts read from the commands t
 #: without a model. The other names serve the framework (runner, loader, preview).
 __all__ = [
     "Phase",
+    "Placeholder",
+    "building_template",
+    "is_building_template",
+    "tests_noted",
+    "is_placeholder",
     "PhaseError",
     "active_phases",
     "answer_by_code",

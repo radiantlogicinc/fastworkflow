@@ -1162,6 +1162,10 @@ def _build_parsed_skills(workflow_folderpath: str) -> tuple[
             out.append((name, loaded.description, loaded.steps, None, loaded.plain_utterances))
             continue
         command = dataclasses.replace(loaded.command, identifiers=identifiers)
+        problems = step_command_problems(command, workflow_folderpath)
+        if problems:
+            logger.error(f"skipping skill {name!r}: " + "; ".join(problems))
+            continue
         if command.phase_outputs:
             _warn_phase_sources(command, workflow_folderpath)
         out.append((name, loaded.description, command.template, command, loaded.plain_utterances))
@@ -1178,6 +1182,23 @@ def _warn_phase_sources(command: SkillCommand, workflow_folderpath: str) -> None
     """
     for warning in phase_source_problems(command, workflow_folderpath):
         logger.warning(f"skill {command.name!r}: phase output source not found (loaded anyway): {warning}")
+
+
+def step_command_problems(command: SkillCommand, workflow_folderpath: str) -> list[str]:
+    """``skill_commands.check_step_commands`` of *command* against the workflow's command
+    signatures: a step naming a command the workflow lacks, or a parameter its
+    ``Signature.Input`` lacks. A load error (the skill is skipped); empty, with a logged
+    warning, when the signatures cannot be read (``fastworkflow skill preview --check``
+    still checks)."""
+    from fastworkflow.observation_offloading.facts import workflow_signatures
+
+    try:
+        signatures = workflow_signatures(workflow_folderpath)
+    except Exception as error:  # noqa: BLE001 - checked again by the preview's --check
+        logger.warning(f"skill {command.name!r}: could not read the workflow's command signatures "
+                       f"to check its steps: {type(error).__name__}: {error}")
+        return []
+    return skill_commands.check_step_commands(command, signatures)
 
 
 def phase_source_problems(command: SkillCommand, workflow_folderpath: str) -> list[str]:

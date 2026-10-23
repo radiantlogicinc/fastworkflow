@@ -254,8 +254,8 @@ def validate_command_file_components_in_dir(directory: str) -> list:
                         errors.append((file_path, 'Output class does not inherit from BaseModel'))
                     if not has_plain_utterances:
                         errors.append((file_path, 'Missing plain_utterances in Signature'))
-                    if not has_generate_utterances:
-                        errors.append((file_path, 'Missing generate_utterances static method in Signature'))
+                    # generate_utterances is optional: without it the framework's default
+                    # (command_directory.default_generate_utterances) gives the standard ones.
                     if not has_validate_extracted_parameters:
                         errors.append((file_path, 'Missing validate_extracted_parameters method in Signature'))
                     if not has_response_generator:

@@ -80,6 +80,21 @@ class CommandTraceEvent:
     # None only for events emitted outside any logical turn.
     turn_key: str | None = None
 
+class Refused(ValueError):
+    """The one way a command or skill hook declines: ``raise fastworkflow.Refused(message)``.
+
+    A decision, not a crash. Raised from a command's ``ResponseGenerator.__call__``, the
+    command answers ``CommandOutput(CommandResponse(response=message, success=False))``, as
+    if it had returned that. Raised from a ``validate_extracted_parameters`` hook (a
+    command's or a skill's), it is the hook's ``(False, message)``. Returning those forms
+    still works exactly as before. A ``ValueError``, so code that caught ``ValueError``
+    around a command's helpers keeps catching it.
+    """
+
+    def as_output(self) -> "CommandOutput":
+        return CommandOutput(command_response=CommandResponse(response=str(self), success=False))
+
+
 class CommandOutput(BaseModel):
     """The result of one command execution.
 

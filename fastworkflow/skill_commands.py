@@ -3,9 +3,10 @@ r'''Skills as parameterized commands.
 A skill is one Python file, ``_skills/<name>.py``, written with the abstractions of a
 command file: a ``Signature`` whose docstring describes the job (what the skill matcher and
 the text planner read) and whose pydantic ``Input`` declares typed parameters, and a
-function ``steps(input)`` that returns the skill's command steps for one set of arguments.
-The planner fills the parameters from the request (one typed dspy call), the arguments are
-checked, and ``steps()`` expands them into the numbered plan. A skill without parameters
+``class PlanGenerator`` (as a command has a ``ResponseGenerator``) whose methods write the
+skill's steps for one set of arguments (``fastworkflow.skill``). The planner fills the
+parameters from the request (one typed dspy call), the arguments are checked, and the
+``PlanGenerator`` expands them into the numbered plan. A skill without parameters
 gives fixed steps the text planner adapts (see ``workflow_agent.load_skills``).
 
 The ``_skills`` folder is laid out as the root of ``_commands`` is: a skill is the file
@@ -70,14 +71,15 @@ A skill file::
             return True, ""
 
 
-    def steps(input: Signature.Input) -> list[str]:
-        out = [f"{FIND[input.kind]} query={input.name}"]
-        out.append(f"list_members filter={input.person}" if input.person else "list_members")
-        if input.include_risk:
-            out.append("assess_risk")
-        for n in range(1, input.count + 1):
-            out.append(f"open member {n}")
-        return out
+    class PlanGenerator:
+        def members(self, input):
+            out = [f"{FIND[input.kind]} query={input.name}"]
+            out.append(f"list_members filter={input.person}" if input.person else "list_members")
+            if input.include_risk:
+                out.append("assess_risk")
+            for n in range(1, input.count + 1):
+                out.append(f"open member {n}")
+            return out
 
 - ``Signature`` (required) with a docstring (required; its whitespace is collapsed to one
   line). ``Input`` (a pydantic ``BaseModel``) declares the parameters in order; a skill
@@ -87,7 +89,7 @@ A skill file::
   load: the model sets it true only when the request asks for that part). A ``str``
   default is the value ``steps()`` gets when the request gives none, so ``"NOT_FOUND"``
   would be written into the steps: an argument the request may leave out defaults to
-  ``""``, or is ``Optional[str] = None`` (``steps()``, ``plan()``, the hook and the
+  ``""``, or is ``Optional[str] = None`` (the ``PlanGenerator``, the hook and the
   validators then get None for it; to the planner it is a str that defaults to empty).
   ``description``
   is what the planner and a ``verify`` check read; ``ge``/``le`` bounds are enforced by the
@@ -119,12 +121,14 @@ A skill file::
     them; otherwise it takes the only one written, or its default when that is written, and
     with several others the call fails ("the first two" never runs as 3).
 
-- ``steps(input)`` (required) returns the steps as a list of str, one per step (empty
-  ones are dropped). It builds text only: it must not call a backend or read state; it may
-  raise SkillCallError (the call then falls back). A repeated part is a ``for`` loop over
-  ``range()``, bounded by the int field's ``le``; steps shared by several skills go in a
-  helper module (``_skills/_<name>.py``). Lookup tables are plain module-level dicts. For a skill without parameters ``steps()`` takes no argument and
-  returns its fixed steps.
+- ``PlanGenerator`` (required): its public methods are the skill's phases, in order, each
+  returning its steps as a list of str, one per step (empty ones are dropped); see
+  ``fastworkflow.skill`` for the rules. The methods build text only: they must not call a
+  backend or read state. A repeated part is a ``for`` loop over ``range()``, bounded by the
+  int field's ``le``; steps shared by several skills go in a helper module
+  (``_skills/_<name>.py``). Lookup tables are plain module-level dicts. A skill whose one
+  phase reads and fills no facts runs flat (one plan); one without parameters gives fixed
+  steps (its one method takes no ``input``).
 - ``plain_utterances`` (optional, with or without params): example requests for the
   skill, written the way people ask for that job. The skill matcher shows the first
   ``workflow_agent.MATCHER_EXAMPLES`` of them after the description ("e.g. ..."); a skill
@@ -132,7 +136,7 @@ A skill file::
   them generically: they are in every matcher prompt.
 - ``template`` (optional): the template text of the skill, shown to the planner in the
   skill call's "expands to:" and used as the text planner's template when a skill call
-  fails. Without it the template is ``steps()`` rendered on placeholder inputs
+  fails. Without it the template is the steps rendered on placeholder inputs
   (``placeholder_template``): every combination of a ``<name>`` for a str (and "" when that
   is its default), true and false for a bool, the default of an int and each value of an
   enum (past ``MAX_GRID`` combinations, the defaults and each one or two changes of them,
@@ -142,22 +146,17 @@ A skill file::
   (``<find_group or find_unit, by kind> query=<name>``). A repeated part shows only its
   steps for the int's default: declare ``template`` when the planner should see how it
   repeats ("repeat count times (n = 1 to count): open member <n>").
-- ``plan(input)`` (optional, a skill with params only): the skill as phases, a list of
-  ``fastworkflow.skill_phases.Phase(name, steps_fn, output=None, when=True, over=None,
-  item="item", max_items=None, bind=True, until=None, noun=None, optional=False)``. A skill call
-  of it then runs each phase as its own bounded sub-plan, and passes each phase's filled
-  ``output`` (a facts model) to later phases' ``steps_fn`` by parameter name (see
-  ``fastworkflow.skill_phases``). ``steps(input)`` stays the flat concatenation of the phases'
-  steps, which skill matching and the template read; a file with ``plan()`` and no
-  ``steps()`` gets it. ``plan()`` may return ``None`` (or ``[]``) for some inputs: that
-  call then runs flat, from ``steps()``, as one phase, as for a skill without ``plan()``
-  (``call_phases``); such a file
-  must define ``steps()``. At load ``plan()`` runs on the placeholder inputs: what it
-  returns must be phases whose parameters bind (one defaulting to None in at least one
-  result: ``_checked_plan``) and whose ``"from"`` are well formed
-  (``SkillFormatError`` otherwise); a ``"from"`` naming a command or field the workflow
-  lacks is a logged warning (``check_phase_sources``), not a load failure
-  (``fastworkflow skill preview --check`` fails on it).
+- Phases (a skill with params): a ``PlanGenerator`` method that reads an earlier phase's
+  facts, or fills its own (its return annotation), makes the call run as phases: each its
+  own bounded sub-plan, passing its filled facts model to later phases by parameter name
+  (``fastworkflow.skill_phases``; the loader builds its ``Phase`` list,
+  ``skill.planned``). At load the phases are built on the placeholder inputs: their
+  parameters must bind (``_checked_plan``), their ``"from"`` must be well formed, and each
+  method's template call must succeed (``SkillFormatError`` otherwise); every command step
+  must name a workflow command and only parameters of its ``Signature.Input``
+  (``check_step_commands``: the skill is skipped at load, logged as an error, and
+  ``fastworkflow skill preview --check`` fails); a ``"from"`` naming a command or field the
+  workflow lacks is a logged warning (``check_phase_sources``), not a load failure.
 - ``validate_extracted_parameters`` (optional, the signature of a command's): called with
   the checked arguments as an ``Input`` (``validate_call``); ``(False, message)`` refuses the
   call (the planner gets the message and one more try, see the rules below), an exception
@@ -774,12 +773,33 @@ class _Conditions:
         return None
 
 
+def _words(text: str) -> list[str]:
+    """*text* cut into the parts ``_alternatives`` compares: after each space, ``=`` and
+    ``(``, and before each ``)`` (``query=``, ``(``, ``identity_uid ``, ``)``), a
+    placeholder (``<reach text>``) kept whole, so a varying part never starts inside a
+    placeholder."""
+    out: list[str] = []
+    depth = 0
+    for part in re.split(r"(?<=[ =(])|(?=\))", text):
+        if not part:
+            continue
+        if depth and out:
+            out[-1] += part
+        else:
+            out.append(part)
+        depth = max(0, depth + part.count("<") - part.count(">"))
+    return out
+
+
 def _alternatives(texts: list[str], by: str, whole: bool = True) -> str | None:
     """One line for the lines ``texts`` (one per value of enum ``by``, in its order) that differ
     only in a middle part: ``<find_group or find_unit, by kind> query=<name>``; None when every
     one differs in more than a few words and in more than they share (different steps), and,
-    without ``whole``, when they share no part (lines not at one place in their branches)."""
-    pieces = [re.split(r"(?<=[ =])", t) for t in texts]   # words, and "key=" apart from its value
+    without ``whole``, when they share no part (lines not at one place in their branches).
+    Lines are compared by ``_words``; a middle keeps its brackets balanced and a ``key=``
+    its value (the shared ``(``, ``)`` or value it needs is given back to it), so no merge
+    cuts a bracket or parts a key from its value."""
+    pieces = [_words(t) for t in texts]
     pre = 0
     while all(len(w) > pre for w in pieces) and len({w[pre] for w in pieces}) == 1:
         pre += 1
@@ -787,6 +807,14 @@ def _alternatives(texts: list[str], by: str, whole: bool = True) -> str | None:
     while all(len(w) - pre > suf for w in pieces) and len({w[-1 - suf] for w in pieces}) == 1:
         suf += 1
     raw = ["".join(w[pre:len(w) - suf]) for w in pieces]
+    while any(m.count("(") != m.count(")") or m.endswith("=") for m in raw):
+        if suf and any(m.count("(") > m.count(")") or m.endswith("=") for m in raw):
+            suf -= 1   # a "(" needs its ")"; a "key=" keeps its value
+        elif pre and any(m.count(")") > m.count("(") for m in raw):
+            pre -= 1
+        else:
+            break
+        raw = ["".join(w[pre:len(w) - suf]) for w in pieces]
     middles = list(dict.fromkeys(m.strip() for m in raw))
     if len(middles) == 1:
         return texts[0]
@@ -915,10 +943,14 @@ def placeholder_template(command: SkillCommand) -> list[str]:
     Raises SkillFormatError when ``steps()`` fails on the base inputs (the first of each, or
     the first combination ``validate_extracted_parameters`` leaves in).
     """
+    from fastworkflow.skill import TemplateError
+
     grid, runs = [], []
     for env in _template_grid(command):
         try:
             lines = _call_steps(command.steps_fn, input_instance(command, env), command.path)
+        except TemplateError as exc:
+            raise SkillFormatError(f"{command.path}: {exc}") from None
         except Exception as exc:  # noqa: BLE001 - a set steps() refuses is left out of the template
             if not grid and not runs:
                 raise SkillFormatError(f"{command.path}: steps() fails on placeholder inputs "
@@ -942,9 +974,17 @@ def placeholder_template(command: SkillCommand) -> list[str]:
         condition = conditions.text(points)
         if condition is None:
             out.append(f"{line} (only for some of the arguments)")
+        elif condition and line.endswith(")") and _FACT_CONDITION in line:
+            # the facts' condition (skill.PlanGenerator) and the inputs': one "only when"
+            both = f"({condition})" if " or " in condition else condition
+            out.append(f"{line[:-1]} and {both})")
         else:
             out.append(f"{line} (only when {condition})" if condition else line)
     return out
+
+
+#: How a phase's template lines end when its method tested facts (``fastworkflow.skill``).
+_FACT_CONDITION = " (only when "
 
 
 def command_from_module(name: str, module, path: str) -> SkillFile:
@@ -962,18 +1002,38 @@ def command_from_module(name: str, module, path: str) -> SkillFile:
     description = " ".join(inspect.cleandoc(signature.__doc__ or "").split())
     if not description:
         raise SkillFormatError(f"{path}: Signature needs a docstring (the skill's description)")
-    plan_fn = getattr(module, "plan", None)
-    if plan_fn is not None:
-        if not callable(plan_fn) or len(inspect.signature(plan_fn).parameters) != 1:
-            raise SkillFormatError(f"{path}: plan() takes one argument, the Input, and returns a list of Phase")
-    steps_fn = getattr(module, "steps", None)
+    from fastworkflow import skill as skill_api
+    from fastworkflow.skill_phases import PhaseError
+
+    plan_cls = getattr(module, "PlanGenerator", None)
+    if not inspect.isclass(plan_cls) or not skill_api.phase_methods(plan_cls):
+        raise SkillFormatError(f"{path}: a skill file needs a class PlanGenerator with at "
+                               "least one phase method (fastworkflow.skill)")
+    try:
+        steps_fn, plan_fn = skill_api.skill_parts(plan_cls)
+    except PhaseError as exc:
+        raise SkillFormatError(f"{path}: {exc}") from None
+    return skill_from_parts(name, signature, path, steps_fn=steps_fn, plan_fn=plan_fn)
+
+
+def skill_from_parts(name: str, signature, path: str, *, steps_fn: Callable | None = None,
+                     plan_fn: Callable | None = None) -> SkillFile:
+    """The skill a ``Signature`` and its behaviour define: a flat ``steps_fn(input)`` or a
+    ``plan_fn(input) -> list[Phase]`` (or both: a plan that may return no phases runs flat,
+    from ``steps_fn``). ``command_from_module`` builds them from the file's ``PlanGenerator``
+    class; the runtime reads only these. Raises SkillFormatError."""
+    import inspect
+
+    from pydantic import BaseModel
+
+    description = " ".join(inspect.cleandoc(signature.__doc__ or "").split())
+    if not description:
+        raise SkillFormatError(f"{path}: Signature needs a docstring (the skill's description)")
     own_steps = steps_fn is not None
-    if steps_fn is None and plan_fn is not None:
+    if steps_fn is None:
+        if plan_fn is None:
+            raise SkillFormatError(f"{path}: a skill needs its steps or its phases")
         steps_fn = _concatenated_steps_fn(plan_fn)
-    if not callable(steps_fn):
-        raise SkillFormatError(f"{path}: a skill file needs a function steps(input) -> list[str]")
-    if len(inspect.signature(steps_fn).parameters) > 1:
-        raise SkillFormatError(f"{path}: steps() takes one argument, the Input")
     input_model = getattr(signature, "Input", None)
     if input_model is None:
         input_model = type(f"{signature.__name__}Input", (BaseModel,), {})
@@ -1119,6 +1179,71 @@ def check_phase_sources(command: SkillCommand, signatures: dict) -> list[str]:
     return warnings
 
 
+#: A step that names a command: its first word, snake_case (``find_item``, ``go_up``) or a
+#: qualified name (``Resource/show_metadata``); then its chain, cut at ``(``, ``;`` or ``,``
+#: (``go_up, then ...`` is prose after the command).
+_STEP_COMMAND = re.compile(r"^([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+|[A-Z]\w*/\w+)\b([^(;,]*)")
+_STEP_ARG = re.compile(r"(?<![\w<])([A-Za-z_]\w*)=")
+
+
+def step_commands(lines, known: set[str]) -> list[tuple[str, tuple[str, ...]]]:
+    """``(command, parameters)`` of each command step of *lines*: a step whose first word is
+    a snake_case name or one of *known* (``find_item query=Dune (note)`` gives
+    ``("find_item", ("query",))``); the parameters are the ``key=`` of its chain, before
+    the first ``(``, ``;`` or ``,``, as code reads them (``skill_phases.code_step``)."""
+    out = []
+    for line in lines:
+        text = re.sub(r"\s*\(only when .*\)$", "", str(line).strip())
+        first = re.match(r"[\w/]+", text)
+        match = _STEP_COMMAND.match(text)
+        if match is None and not (first and first.group(0) in known):
+            continue
+        name = match.group(1) if match else first.group(0)
+        chain = match.group(2) if match else re.split(r"[(;,]", text[len(name):], maxsplit=1)[0]
+        out.append((name, tuple(_STEP_ARG.findall(chain))))
+    return out
+
+
+def check_step_commands(command: SkillCommand, signatures: dict) -> list[str]:
+    """Problems with the commands a skill's steps name: each command step of its template
+    (every placeholder combination; ``step_commands``) and each ``pick`` must name a
+    command of the workflow (*signatures*: ``facts.workflow_signatures``), and each
+    parameter it passes must be a field of that command's ``Signature.Input``, the schema a
+    command call is checked against. Returned as messages: the skill fails its load
+    (``workflow_agent``) and ``fastworkflow skill preview --check`` fails."""
+    from fastworkflow import skill as skill_api
+
+    fields: dict[str, list[set]] = {}
+    for key, sig in signatures.items():
+        for name in {key, key.rsplit("/", 1)[-1]}:
+            fields.setdefault(name, []).append(
+                set(getattr(getattr(sig, "Input", None), "model_fields", {}) or {}))
+    known = set(fields)
+    seen: dict[tuple[str, tuple[str, ...]], None] = {}
+    for env in _template_grid(command):
+        with skill_api.picks_noted() as picks:
+            try:
+                lines = _call_steps(command.steps_fn, input_instance(command, env), command.path)
+            except Exception:  # noqa: BLE001 - the template build reports it
+                continue
+        for found in step_commands(lines, known) + [(c, (p,)) for c, p in picks]:
+            seen.setdefault(found)
+    problems = []
+    for name, args in seen:
+        if name not in fields:
+            problem = (f"{command.path}: a step runs {name!r}, which is not a command of the "
+                       "workflow")
+        else:
+            unknown = [a for a in args if not any(a in f for f in fields[name])]
+            if not unknown:
+                continue
+            problem = (f"{command.path}: a step passes {', '.join(unknown)} to {name!r}, whose "
+                       "Signature.Input has no such field")
+        if problem not in problems:
+            problems.append(problem)
+    return problems
+
+
 def phases_for(command: SkillCommand, args: dict) -> list | None:
     """The phases ``plan()`` gives for ``args`` (complete, checked arguments): those that run.
 
@@ -1184,8 +1309,12 @@ def _run_validate(command: SkillCommand, args: dict, request: str, workflow) -> 
     instance = input_instance(command, args)
     hook = command.validate
     kwargs = {"command_text": request} if "command_text" in inspect.signature(hook).parameters else {}
+    import fastworkflow
+
     try:
         result = hook(workflow, command.name, instance, **kwargs)
+    except fastworkflow.Refused as refusal:
+        result = (False, str(refusal))
     except Exception as exc:  # noqa: BLE001 - workflow code; the planner falls back to the template
         raise SkillCallError(f"validate_extracted_parameters raised {type(exc).__name__}: {exc}") from None
     ok, message = result if isinstance(result, tuple) else (bool(result), "")
