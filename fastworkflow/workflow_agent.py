@@ -22,7 +22,8 @@ import fastworkflow
 from fastworkflow import tracing
 from fastworkflow import skill_commands
 from fastworkflow.skill_commands import SkillCommand, SkillFormatError, plan_skill_call
-from fastworkflow.split_merge import definite_descriptions, merge_subtasks, unnamed_subjects, with_referent
+from fastworkflow.split_merge import (
+    definite_descriptions, merge_subtasks, request_subjects, subjects_in, unnamed_subjects, with_referent)
 from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
@@ -1556,6 +1557,26 @@ def _visibly_broken(subtasks: list[str]) -> bool:
     return len(set(subtasks)) < len(subtasks) or any(_UNRESOLVED_REFERENCE.search(t) for t in subtasks)
 
 
+def _breakage(user_query: str, subtasks: list[str], workflow_folderpath: str | None) -> tuple[int, int]:
+    """How broken a visibly broken split is, for choosing between two: (the request's records named by more
+    than one sub-task, each extra naming once; the sub-tasks with a leftover reference).
+
+    A record in two sub-tasks is a job split twice, or a summary sub-task repeating jobs the others hold
+    ("Quarterly review of A, B and C: each of them ...", next to A's, B's and C's own), or a job the model
+    invented for a record another sub-task already covers; the merge then runs those jobs twice.
+    """
+    references = sum(bool(_UNRESOLVED_REFERENCE.search(t)) for t in subtasks)
+    try:
+        identifiers = identifier_patterns(workflow_folderpath) if workflow_folderpath else ()
+        known = request_subjects(user_query, identifiers)
+        in_request = subjects_in(user_query, known, identifiers)
+        named = [s for t in subtasks for s in subjects_in(t, known, identifiers) if s in in_request]
+    except Exception:  # noqa: BLE001 - only a tie-break; never fail the turn
+        logger.warning("could not count the records the split names twice", exc_info=True)
+        named = []
+    return len(named) - len(set(named)), references
+
+
 def split_into_subtasks(user_query: str, planner_lm=None,
                         workflow_folderpath: str | None = None) -> list[str]:
     """The request as independent sub-tasks, in order; ``[user_query]`` when it is not split.
@@ -1567,8 +1588,9 @@ def split_into_subtasks(user_query: str, planner_lm=None,
     request whole. A reply cut off at ``split_max_tokens()`` is not an answer, even
     when it parses (a field header written mid-reasoning, e.g. the output template
     echoed back, parses as "{subtasks}"): it gets the one retry, and a second
-    cut-off reply leaves the request whole. The model's split then goes through ``split_merge.merge_subtasks``
-    (code only), which joins parts that are not independent jobs and returns the
+    cut-off reply leaves the request whole. When both replies are visibly broken, the
+    one that names fewer of the request's records in two sub-tasks is used (``_breakage``).
+    The model's split then goes through ``split_merge.merge_subtasks`` (code only), which joins parts that are not independent jobs and returns the
     request whole when one job is left.
     """
     if planner_lm is None:
@@ -1578,8 +1600,9 @@ def split_into_subtasks(user_query: str, planner_lm=None,
     # visibly broken or cut off at the cap is retried once at 0.7, which also
     # misses the LM cache.
     # A split whose only flaw is a leftover reference ("each of them") is still
-    # better than none, so it is kept when the retry does not fix it.
-    usable = None
+    # better than none, so it is kept when the retry does not fix it; when both
+    # attempts are like that, the less broken one (``_breakage``; the first on a tie).
+    usable: list[list[str]] = []
     for temperature in (0.0, 0.7):
         replies: list = []
         try:
@@ -1604,9 +1627,12 @@ def split_into_subtasks(user_query: str, planner_lm=None,
             return [user_query]
         if not _visibly_broken(subtasks):
             return _merged(user_query, subtasks, workflow_folderpath)
-        if usable is None and len(set(subtasks)) == len(subtasks):
-            usable = subtasks
-    return _merged(user_query, usable, workflow_folderpath) if usable else [user_query]
+        if len(set(subtasks)) == len(subtasks):
+            usable.append(subtasks)
+    if not usable:
+        return [user_query]
+    best = min(usable, key=lambda subtasks: _breakage(user_query, subtasks, workflow_folderpath))
+    return _merged(user_query, best, workflow_folderpath)
 
 
 def _merged(user_query: str, subtasks: list[str], workflow_folderpath: str | None = None) -> list[str]:

@@ -511,6 +511,66 @@ def test_a_split_cut_off_twice_leaves_the_request_whole():
     assert lm.finishes == ["length", "length"]
 
 
+_TWICE_REQUEST = ("Audit the right Billing_Admin. Ann Lee, Bob Kerr and Cid Moss need the same treatment, so I want "
+                  "each of them down to their logins. Dee Ray leaves on Friday, so sweep Dee Ray's reach.")
+
+
+def _reply(*subtasks):
+    numbered = "\n".join(f"{n}. {text}" for n, text in enumerate(subtasks, 1))
+    return (f"[[ ## reasoning ## ]]\nJobs.\n\n[[ ## subtasks ## ]]\n{numbered}\n\n[[ ## completed ## ]]", "stop", 40)
+
+
+# Both replies keep "the same treatment"; the first also invents a job for Ann Lee and adds a summary sub-task
+# naming the people the others already hold (stage-17 T5 5.09 R1).
+_SUMMARY_AND_INVENTED = _reply(
+    "Audit the right Billing_Admin.",
+    "Ann Lee leaves on Friday, so sweep Ann Lee's reach.",
+    "Bob Kerr needs the same treatment, down to Bob Kerr's logins.",
+    "Cid Moss needs the same treatment, down to Cid Moss's logins.",
+    "Review the list: Ann Lee, Bob Kerr and Cid Moss, each of them down to their logins.")
+_ONE_PER_JOB = _reply(
+    "Audit the right Billing_Admin.",
+    "Ann Lee needs the same treatment, down to Ann Lee's logins.",
+    "Bob Kerr needs the same treatment, down to Bob Kerr's logins.",
+    "Cid Moss needs the same treatment, down to Cid Moss's logins.",
+    "Dee Ray leaves on Friday, so sweep Dee Ray's reach.")
+
+
+def test_of_two_broken_splits_the_one_naming_no_record_twice_is_used(monkeypatch):
+    import fastworkflow.workflow_agent as agent
+    from fastworkflow.split_merge import merge_subtasks
+
+    monkeypatch.setattr(agent, "_jev_lm", lambda: None)
+    lm = _ScriptedReplies([_SUMMARY_AND_INVENTED, _ONE_PER_JOB])
+    retry = [line.split(". ", 1)[1] for line in _ONE_PER_JOB[0].splitlines() if line[:1].isdigit()]
+    assert agent.split_into_subtasks(_TWICE_REQUEST, planner_lm=lm) == merge_subtasks(_TWICE_REQUEST, retry)
+    assert lm.finishes == ["stop", "stop"]
+    # the order of the attempts does not matter: the split naming no record twice wins either way
+    lm = _ScriptedReplies([_ONE_PER_JOB, _SUMMARY_AND_INVENTED])
+    assert agent.split_into_subtasks(_TWICE_REQUEST, planner_lm=lm) == merge_subtasks(_TWICE_REQUEST, retry)
+
+
+def test_two_equally_broken_splits_keep_the_first(monkeypatch):
+    import fastworkflow.workflow_agent as agent
+    from fastworkflow.split_merge import merge_subtasks
+
+    monkeypatch.setattr(agent, "_jev_lm", lambda: None)
+    first = [line.split(". ", 1)[1] for line in _ONE_PER_JOB[0].splitlines() if line[:1].isdigit()]
+    reworded = _reply(*[t.replace(", down to", " down to") for t in first])
+    lm = _ScriptedReplies([_ONE_PER_JOB, reworded])
+    assert agent.split_into_subtasks(_TWICE_REQUEST, planner_lm=lm) == merge_subtasks(_TWICE_REQUEST, first)
+
+
+def test_breakage_counts_records_named_twice_then_leftover_references():
+    from fastworkflow.workflow_agent import _breakage
+
+    summary = [line.split(". ", 1)[1] for line in _SUMMARY_AND_INVENTED[0].splitlines() if line[:1].isdigit()]
+    per_job = [line.split(". ", 1)[1] for line in _ONE_PER_JOB[0].splitlines() if line[:1].isdigit()]
+    # Ann Lee, Bob Kerr and Cid Moss each appear in a second sub-task; three sub-tasks keep a reference
+    assert _breakage(_TWICE_REQUEST, summary, None) == (3, 3)
+    assert _breakage(_TWICE_REQUEST, per_job, None) == (0, 3)
+
+
 def test_a_reply_is_cut_off_by_its_finish_reason_or_by_reaching_max_tokens():
     from types import SimpleNamespace
 
