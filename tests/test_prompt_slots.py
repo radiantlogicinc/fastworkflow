@@ -193,7 +193,7 @@ def test_a_call_under_the_cap_keeps_its_messages_and_stores_no_pieces(db_path):
 
 
 def test_a_slotted_call_keeps_only_the_envelope_of_its_messages(db_path):
-    """The pieces hold the whole prompt; the cut prefix is not kept beside them."""
+    """A registered retained representation replaces the cut prefix."""
     turn_key = f"20260901T000000.000000Z-{uuid.uuid4().hex[:12]}"
     messages = _messages(6)
     wire = json.dumps(messages, ensure_ascii=False).encode("utf-8")
@@ -202,12 +202,19 @@ def test_a_slotted_call_keeps_only_the_envelope_of_its_messages(db_path):
 
     [row] = obs.ReadOnlyObservabilityStore(db_path).get_spans(turn_key)
     envelope = json.loads(row["attributes"])["messages"]
-    assert envelope == {
+    assert {
+        key: value for key, value in envelope.items() if key != "replaced_by"
+    } == {
         "truncated": True,
         "original_length": len(wire),
         "sha256": hashlib.sha256(wire).hexdigest(),
         "value": "",
-        "replaced_by": prompt_slots.REF_ATTRIBUTE,
+    }
+    # The manifest is installed process-wide when an offloading agent was
+    # constructed before this test. The registry retains the first
+    # representation that claimed the cut envelope.
+    assert envelope["replaced_by"] in {
+        prompt_slots.REF_ATTRIBUTE, "trajectory_manifest",
     }
     assert len(row["attributes"].encode("utf-8")) < tracing.MAX_ATTR_BYTES
     prompt = obs.ReadOnlyObservabilityStore(db_path).prompt_as_sent(turn_key, span_id)
@@ -224,15 +231,41 @@ def test_an_over_cap_call_without_pieces_keeps_its_prefix():
 
 
 def test_a_caller_supplied_ref_does_not_blank_the_messages():
-    """The enricher's ref was not accepted, so it cannot stand in for the prefix."""
+    """A rejected prompt-slot ref cannot blank the prefix by itself."""
     capped = tracing._capped({
         "messages": json.dumps(_messages(6)),
         prompt_slots.REF_ATTRIBUTE: {"contract": "caller-value"},
     })
 
     assert capped[prompt_slots.REF_ATTRIBUTE] == {"contract": "caller-value"}
-    assert capped["messages"]["value"]
-    assert "replaced_by" not in capped["messages"]
+    assert capped["messages"].get("replaced_by") != prompt_slots.REF_ATTRIBUTE
+    if "trajectory_manifest" in capped:
+        # The independent manifest enricher was accepted first, so it can
+        # still replace the prefix with its own complete representation.
+        assert capped["messages"]["value"] == ""
+        assert capped["messages"]["replaced_by"] == "trajectory_manifest"
+    else:
+        assert capped["messages"]["value"]
+        assert "replaced_by" not in capped["messages"]
+
+
+def test_a_manifest_can_replace_a_prefix_when_the_caller_supplied_slots_ref():
+    """A caller ref blocks slots, not another accepted enricher."""
+    from fastworkflow.observation_offloading.manifest import (
+        install_span_policy, uninstall_span_policy,
+    )
+    install_span_policy()
+    try:
+        capped = tracing._capped({
+            "messages": json.dumps(_messages(6)),
+            prompt_slots.REF_ATTRIBUTE: {"contract": "caller-value"},
+        })
+    finally:
+        uninstall_span_policy()
+
+    assert capped[prompt_slots.REF_ATTRIBUTE] == {"contract": "caller-value"}
+    assert capped["messages"]["value"] == ""
+    assert capped["messages"]["replaced_by"] == "trajectory_manifest"
 
 
 def test_the_trajectory_manifest_keeps_its_claim_on_a_slotted_call():
