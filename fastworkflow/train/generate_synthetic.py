@@ -635,8 +635,8 @@ def utterance_fingerprint(
     `utterance_cache.compute_fingerprint`.
 
     The proxy base is read with a code default so an absent one does not log a
-    warning per command; `LITELLM_PROXY_API_BASE` is an env-file setting in this
-    project, never a shell export.
+    warning per command. `LITELLM_PROXY_API_BASE` is an env-file setting in this
+    project; `get_env_var` also reads a process value when one is set.
     """
     api_base = fastworkflow.get_env_var("LITELLM_PROXY_API_BASE", str, default="")
     corpus_identity = callable_identity(

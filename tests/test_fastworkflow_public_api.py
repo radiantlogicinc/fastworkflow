@@ -46,6 +46,7 @@ PUBLIC = (
     ("NoOpTraceSink", "type", "fastworkflow.tracing"),
     ("Optional", "_SpecialForm", "typing"),
     ("Recommendation", "ModelMetaclass", "fastworkflow"),
+    ("Refused", "type", "fastworkflow"),
     ("RoutingDefinition", "NoneType", ""),
     ("RoutingRegistry", "NoneType", ""),
     ("Span", "type", "fastworkflow.tracing"),

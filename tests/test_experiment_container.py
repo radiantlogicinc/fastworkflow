@@ -1501,6 +1501,13 @@ class TestDeterminismSeams:
         dspy_utils.get_lm("LLM_AGENT")
         assert captured["cache"] is False
 
+        # The process environment is enough: no init entry for the cache (fix-hia1.40).
+        captured.clear()
+        fastworkflow.init({"LLM_AGENT": "test/model"})
+        monkeypatch.setenv("FW_LM_CACHE", "0")
+        dspy_utils.get_lm("LLM_AGENT")
+        assert captured["cache"] is False
+
     def test_the_utterance_cache_can_be_sharded_per_attempt(
         self, tmp_path, restore_env_vars
     ):
