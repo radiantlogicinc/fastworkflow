@@ -30,7 +30,10 @@ CAPTURE_DSPY_API = "dspy_api"
 _active_observability_host: ContextVar[Any] = ContextVar(
     "fastworkflow_dspy_observability_host", default=None
 )
-_module_frames: ContextVar[Optional[list]] = ContextVar(
+# A tuple, replaced rather than mutated: a copied context (a worker thread,
+# an asyncio task) shares the value, so pushing in place would mix its frames
+# with the caller's. Copy-on-write makes each context's stack its own.
+_module_frames: ContextVar[Optional[tuple]] = ContextVar(
     "fastworkflow_dspy_module_frames", default=None
 )
 
@@ -65,7 +68,7 @@ def _push_module_frame(frame: _ModuleFrame) -> Optional[_ModuleFrame]:
     frames = _module_frames.get()
     if frames is None:
         return None
-    frames.append(frame)
+    _module_frames.set(frames + (frame,))
     return frame
 
 
@@ -79,7 +82,7 @@ def _close_module_frame(
         return
     frames = _module_frames.get()
     if frames and frame in frames:
-        del frames[frames.index(frame):]
+        _module_frames.set(frames[:frames.index(frame)])
     if not frame.spans:
         return
 
@@ -102,7 +105,7 @@ def _close_module_frame(
         tracing.end_span(host, span, status=span.status, attributes=merged, close=False)
 
 
-def _module_chain(frames: list) -> str:
+def _module_chain(frames: tuple) -> str:
     """The enclosing module path, without the repetition that comes from
     seeing the same module twice — once via DSPy's ``__call__`` callback and
     once via the decorator on its ``forward``."""
@@ -132,7 +135,7 @@ def observe_dspy_host(host: Any):
         yield
         return
     host_token = _active_observability_host.set(host)
-    frames_token = _module_frames.set([])
+    frames_token = _module_frames.set(())
     callback = observability_callback()
     active = list(dspy.settings.get("callbacks", None) or [])
     try:
@@ -418,7 +421,7 @@ class DSPyObservabilityCallback(BaseCallback):
             if call_id in self._calls:
                 return  # registered both in settings and on the LM instance
 
-        frames = list(_module_frames.get() or [])
+        frames = _module_frames.get() or ()
         innermost = frames[-1] if frames else None
         # Module logging first, DSPy's own module identity as the fallback.
         identity = next(
@@ -463,11 +466,15 @@ class DSPyObservabilityCallback(BaseCallback):
         if identity is not None and identity.inputs:
             attributes["module_input"] = _json_text(identity.inputs)
 
+        # A model call is a leaf: it takes its parent from the stack but is
+        # never pushed, so a span opened while it runs (on another thread, in
+        # a parallel vote) cannot be parented under it.
         span = tracing.start_span(
             host,
             tracing.SPAN_LLM_CALL,
             kind=tracing.KIND_LLM,
             attributes=attributes,
+            use_stack=False,
         )
         if span is None:
             return

@@ -7,10 +7,15 @@ that reads ``lm.history`` records nothing in the one process the chatbot traces.
 
 from __future__ import annotations
 
+import contextvars
 import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import dspy
 import pytest
+from dspy.clients.engines.dummy_engine import AsyncDummyEngine, DummyEngine
 from dspy.utils import DummyLM
 
 from fastworkflow import tracing
@@ -171,3 +176,104 @@ def test_no_spans_are_recorded_outside_an_observed_turn(tmp_path):
     finally:
         sink.close()
     assert ObservabilityStore(db_path).get_spans(host.current_turn_key) == []
+
+
+# --- Concurrent calls in copied contexts (fix-ajir.30) ----------------------
+
+
+class _MemorySink:
+    """Keeps the newest emission of each span; a re-emit is an upsert."""
+
+    def __init__(self):
+        self.spans = {}
+        self._lock = threading.Lock()
+
+    def emit_span(self, span):
+        with self._lock:
+            self.spans[span.span_id] = span
+
+    def emit_turn_record(self, record):
+        pass
+
+
+class _DelayedEngine(DummyEngine):
+    """DummyLM's engine, with a provider call that takes ``delay`` seconds."""
+
+    def __init__(self, lm, delay: float):
+        super().__init__(lm)
+        self.delay = delay
+
+    def _complete_messages(self, messages):
+        time.sleep(self.delay)
+        return super()._complete_messages(messages)
+
+
+class _SlowLM(DummyLM):
+    def __init__(self, tag: int, delay: float):
+        super().__init__([{"reasoning": f"reasoning-{tag}", "answer": f"answer-{tag}"}] * 2)
+        self._engine_spec = _DelayedEngine(self, delay)
+        self._async_engine_spec = AsyncDummyEngine(self._engine_spec)
+
+
+def _vote(tag: int, delay: float) -> str:
+    with dspy.context(lm=_SlowLM(tag, delay)):
+        return dspy.ChainOfThought("question -> answer")(question=f"question-{tag}").answer
+
+
+def _run_vote(*, early_stop: bool):
+    """Three calls in copied contexts, as a parallel vote runs them, while
+    the main thread opens a planner span and makes its own call."""
+    host = _TraceHost(_MemorySink())
+    with observe_dspy_host(host):
+        turn = tracing.start_span(
+            host,
+            tracing.SPAN_TURN,
+            span_id=tracing.root_span_id(host.current_turn_key),
+            use_stack=False,
+        )
+        pool = ThreadPoolExecutor(3)
+        futures = [
+            pool.submit(contextvars.copy_context().run, _vote, tag, delay)
+            for tag, delay in enumerate((0.05, 0.4, 0.6))
+        ]
+        if early_stop:
+            next(as_completed(futures)).result()  # the vote is decided
+        else:
+            time.sleep(0.1)  # the slower calls are still running
+        plan = tracing.start_span(host, "fw.planner.plan")
+        with dspy.context(lm=_SlowLM(9, 0.0)):
+            dspy.Predict("question -> answer")(question="question-9")
+        tracing.end_span(host, plan)
+        for future in futures:
+            future.result()
+        pool.shutdown()
+        tracing.end_span(host, turn)
+    return host, list(host.trace_sink.spans.values())
+
+
+@pytest.mark.parametrize("early_stop", [False, True])
+def test_a_model_call_span_is_never_a_parent(early_stop):
+    host, spans = _run_vote(early_stop=early_stop)
+    llm_ids = {span.span_id for span in spans if span.name == tracing.SPAN_LLM_CALL}
+    assert len(llm_ids) == 4
+    assert [span.name for span in spans if span.parent_span_id in llm_ids] == []
+    assert host.trace_span_stack == []
+    if early_stop:
+        turn = next(span for span in spans if span.name == tracing.SPAN_TURN)
+        plan = next(span for span in spans if span.name == "fw.planner.plan")
+        assert plan.parent_span_id == turn.span_id
+
+
+def test_concurrent_calls_keep_their_own_module_frames():
+    _, spans = _run_vote(early_stop=False)
+    votes = [
+        span
+        for span in spans
+        if span.name == tracing.SPAN_LLM_CALL and "question-9" not in span.attributes["messages"]
+    ]
+    assert len(votes) == 3
+    for span in votes:
+        tag = next(t for t in range(3) if f"question-{t}" in span.attributes["messages"])
+        assert span.attributes["module_chain"] == "ChainOfThought > Predict"
+        assert f"answer-{tag}" in span.attributes["module_output"]
+        assert all(f"answer-{t}" not in span.attributes["module_output"] for t in range(3) if t != tag)
