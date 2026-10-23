@@ -18,7 +18,7 @@ Read them in this order — each introduces exactly one new concept.
 ## 1. hello_world — the minimum viable workflow
 - App: `application/add_two_numbers.py` (one function).
 - Commands: `_commands/add_two_numbers.py` — a single "global" command (no context class).
-- Teaches: the command-file anatomy (Signature, process_extracted_parameters, ResponseGenerator)
+- Teaches: the command-file anatomy (Signature, validate_extracted_parameters, ResponseGenerator)
   and the train→run loop. `_commands/README.md` inside it explains the layout.
 
 ## 2. messaging_app_1 — smallest hand-written workflow

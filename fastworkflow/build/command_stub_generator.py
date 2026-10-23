@@ -311,10 +311,10 @@ This file contains ContextExpander implementation for {context} context.
 \"\"\"
 
 
-from fastworkflow.context import ContextExpander
+import fastworkflow
 
 
-class ContextExpander(ContextExpander):
+class ContextExpander:
     \"\"\"Implements context delegation for {context} context.\"\"\"
     
     def move_to_parent_context(self, workflow: fastworkflow.Workflow):

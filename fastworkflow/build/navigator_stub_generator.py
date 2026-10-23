@@ -209,11 +209,10 @@ relationships.
 
 from typing import Optional
 
+import fastworkflow
 
-from fastworkflow.context import ContextExpander
 
-
-class {context}Navigator(ContextExpander):
+class {context}Navigator:
     """Navigator for {context} context.
     
     Implements context delegation for {context} objects.

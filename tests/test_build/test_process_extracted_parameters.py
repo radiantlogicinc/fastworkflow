@@ -32,9 +32,9 @@ def todo_item_class():
     return class_info
 
 
-def test_validate_extracted_parameters_is_instance_method(temp_dir, todo_item_class):
-    """Test that validate_extracted_parameters is defined as an instance method, not a static method."""
-    # Generate the command file
+def test_validate_extracted_parameters_is_static_method(temp_dir, todo_item_class):
+    """validate_extracted_parameters is a @staticmethod returning (is_valid, message): the
+    framework calls it on the Signature class as hook(workflow, command, cmd_parameters)."""
     output_dir = temp_dir / "TodoItem"
     output_dir.mkdir(exist_ok=True)
     file_path = create_command_file(
@@ -44,41 +44,27 @@ def test_validate_extracted_parameters_is_instance_method(temp_dir, todo_item_cl
         file_name="complete.py",
         source_dir="."
     )
-    
-    # Read the generated file
+
     with open(file_path, 'r') as f:
         file_content = f.read()
-    
-    # Parse the file
     tree = ast.parse(file_content)
-    
-    # Find the Signature class
-    signature_class = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef) and node.name == 'Signature':
-            signature_class = node
-            break
-    
-    assert signature_class is not None, "Could not find Signature class"
-    
-    # Find the validate_extracted_parameters method
-    process_method = None
-    for node in signature_class.body:
-        if isinstance(node, ast.FunctionDef) and node.name == 'validate_extracted_parameters':
-            process_method = node
-            break
-    
-    assert process_method is not None, "Could not find validate_extracted_parameters method"
-    
-    # Check if it's an instance method (first parameter is 'self')
-    assert len(process_method.args.args) > 0, "validate_extracted_parameters should have parameters"
-    assert process_method.args.args[0].arg == 'self', "First parameter of validate_extracted_parameters should be 'self'"
-    
-    # Check that it's not decorated with @staticmethod or @classmethod
-    for decorator in process_method.decorator_list:
-        if isinstance(decorator, ast.Name):
-            assert decorator.id not in ('staticmethod', 'classmethod'), \
-                "validate_extracted_parameters should not be decorated with @staticmethod or @classmethod"
+
+    signature_class = next(node for node in ast.walk(tree)
+                           if isinstance(node, ast.ClassDef) and node.name == 'Signature')
+    hook = next(node for node in signature_class.body
+                if isinstance(node, ast.FunctionDef) and node.name == 'validate_extracted_parameters')
+
+    assert [d.id for d in hook.decorator_list if isinstance(d, ast.Name)] == ['staticmethod']
+    assert [a.arg for a in hook.args.args] == ['workflow', 'command', 'cmd_parameters']
+    assert ast.unparse(hook.returns) == 'tuple[bool, str]'
+
+    # Compiled with the file's absolute imports and called on the class as
+    # utils/signatures.py calls it, the generated hook accepts.
+    imports = [node for node in tree.body
+               if isinstance(node, ast.Import) or (isinstance(node, ast.ImportFrom) and node.level == 0)]
+    namespace = {}
+    exec(compile(ast.Module(body=imports + [signature_class], type_ignores=[]), file_path, 'exec'), namespace)
+    assert namespace['Signature'].validate_extracted_parameters(None, 'TodoItem/complete', None) == (True, '')
 
 
 def test_generate_utterances_is_static_method(temp_dir, todo_item_class):

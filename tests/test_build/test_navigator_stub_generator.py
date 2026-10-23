@@ -149,7 +149,7 @@ def test_generate_navigator_stub(navigators_dir, basic_context_model):
     
     # Check that the file contains the expected content
     content = file_path.read_text()
-    assert 'class TodoListNavigator(ContextExpander):' in content
+    assert 'class TodoListNavigator:' in content
     assert 'def move_to_parent_context(self, workflow: fastworkflow.Workflow)' in content
     assert 'Project' in content  # Should mention container context
     
@@ -235,7 +235,7 @@ def test_generate_navigator_stub_force_overwrite(navigators_dir):
     # Check that the file content was changed
     content = file_path.read_text()
     assert "# Existing content" not in content
-    assert 'class ForceNavigator(ContextExpander):' in content
+    assert 'class ForceNavigator:' in content
 
 
 def test_generate_navigator_stubs(navigators_dir, basic_context_model):

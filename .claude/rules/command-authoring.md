@@ -45,18 +45,21 @@ class Signature:
     @staticmethod                          # Optional; see the section below
     def db_lookup(workflow, field_name, field_value
                   ) -> tuple[bool, str | None, list[str]]: ...
-    @staticmethod
-    def process_extracted_parameters(...): ...  # Optional post-extraction hook
+    @staticmethod                          # Optional post-extraction check, called on the class
+    def validate_extracted_parameters(workflow, command: str, cmd_parameters: "Signature.Input"
+                                      ) -> tuple[bool, str]:
+        return (True, '')                  # (False, message) refuses the call with message
 
 
 class ResponseGenerator:
-    def __call__(self, workflow_snapshot, command: str, cmd_parameters: Signature.Input) -> fastworkflow.CommandOutput:
-        return self._process_command(workflow_snapshot, command, cmd_parameters)
-
-    @staticmethod
-    def _process_command(workflow_snapshot, command, cmd_parameters) -> fastworkflow.CommandOutput:
+    def _process_command(self, workflow: fastworkflow.Workflow, input: Signature.Input) -> Signature.Output:
         # Your business logic here
         ...
+
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, command_parameters: Signature.Input) -> fastworkflow.CommandOutput:
+        output = self._process_command(workflow, command_parameters)
+        return fastworkflow.CommandOutput(
+            command_response=fastworkflow.CommandResponse(response=output.model_dump_json()))
 ```
 
 ## `plain_utterances` — the seed list is the highest-leverage thing you write
@@ -191,8 +194,6 @@ the command with its defaults.
 
 ## Context Model (`context_inheritance_model.json`)
 
-Each context entry has exactly two possible keys:
-- `/` — list of command names available in that context
-- `base` — list of parent context names whose commands are inherited
+Each context entry has exactly one key, `base` (required): the list of parent context names whose commands are inherited. A `/` key is rejected; a context's own commands come from the filesystem (`_commands/<Context>/<command_name>.py`, or `_commands/<command_name>.py` for the global context `*`).
 
-To add a new command: update the JSON, then create `_commands/<command_name>.py`. `CommandRoutingDefinition` validates that every declared command has an implementation.
+To add a new command: create its `.py` file in the context's folder; add the context to the JSON only to give it a `base`.
