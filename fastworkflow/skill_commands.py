@@ -976,7 +976,7 @@ def placeholder_template(command: SkillCommand) -> list[str]:
     for line, points in merged:
         condition = conditions.text(points)
         if condition is None:
-            out.append(f"{line} (only for some of the arguments)")
+            out.append(f"{line}{_SOME_ARGUMENTS}")
         elif condition and line.endswith(")") and _FACT_CONDITION in line:
             # the facts' condition (skill.PlanGenerator) and the inputs': one "only when"
             both = f"({condition})" if " or " in condition else condition
@@ -988,6 +988,14 @@ def placeholder_template(command: SkillCommand) -> list[str]:
 
 #: How a phase's template lines end when its method tested facts (``fastworkflow.skill``).
 _FACT_CONDITION = " (only when "
+#: How a template line ends when no condition on the arguments says when it is written.
+_SOME_ARGUMENTS = " (only for some of the arguments)"
+
+
+def _is_template_line(text: str) -> bool:
+    """Whether *text* carries a condition only the skill's TEMPLATE writes (``(only when
+    find.uids)``, ``(only for some of the arguments)``): the planner copied a template line."""
+    return _FACT_CONDITION in text or _SOME_ARGUMENTS in text
 
 
 def command_from_module(name: str, module, path: str) -> SkillFile:
@@ -1895,7 +1903,9 @@ def filter_extra_steps(extra, expanded: list[str], names: frozenset[str], skill_
     An entry first loses its ``<...>`` placeholders (with the ``key=`` holding one): the
     model cannot know a value the run finds, and the agent passes a placeholder on as one
     (``list_logins login_id=<the person's uid>`` becomes ``list_logins``). Dropped: empty
-    entries, entries holding a uid-shaped token ``request`` does not write, entries naming
+    entries, lines copied from the skill's template (``_is_template_line``: the expansion
+    already writes them for these arguments, or they do not apply to them), entries
+    holding a uid-shaped token ``request`` does not write, entries naming
     the skill itself (the expansion already runs it), entries naming no available command,
     and entries whose every command the expansion already runs. With ``request`` given, an
     entry is also dropped unless one of the commands it names outside the expansion is asked
@@ -1907,7 +1917,7 @@ def filter_extra_steps(extra, expanded: list[str], names: frozenset[str], skill_
     with what the command says of itself, so a request that names it by a synonym its
     description or sample utterances use still asks for it ("every invoice" for
     ``list_bills`` whose utterances say "invoices"). With no command names known only the
-    first three rules apply. ``notes`` (when given) gets one line per placeholder removed.
+    first four rules apply. ``notes`` (when given) gets one line per placeholder removed.
     """
     expanded_cmds = {w for s in expanded for w in _IDENT.findall(s) if w in names}
     lowered = (request or "").lower()
@@ -1918,7 +1928,7 @@ def filter_extra_steps(extra, expanded: list[str], names: frozenset[str], skill_
         text = str(entry).strip()
         if not text:
             continue
-        if any(uid.lower() not in lowered for uid in _UID.findall(text)):
+        if _is_template_line(text) or any(uid.lower() not in lowered for uid in _UID.findall(text)):
             dropped.append(text)
             continue
         cleaned = _without_placeholders(text)

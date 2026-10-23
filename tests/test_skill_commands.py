@@ -293,6 +293,23 @@ def test_extra_steps_the_expansion_already_runs_are_dropped():
     assert sc.command_names("Commands:\n- open_directory\n  Enter it.\n- find_group\n") == {"open_directory", "find_group"}
 
 
+def test_an_extra_step_copied_from_the_template_is_dropped():
+    # the planner sees the template; a line it copies keeps the template's condition. For
+    # these arguments the expansion writes that line already, or it does not apply to them.
+    names = frozenset({"open_directory", "find_group", "list_members", "open_group_by_uid",
+                       "show_tags", "assess_risk"})
+    expanded = ["open_directory", "find_group query=Payroll"]
+    request = "Who is in the Payroll group, which tags does it carry, and how risky is it?"
+    kept, dropped = sc.filter_extra_steps(
+        ["open_group_by_uid with the uid of the Payroll match (only when find.uids and (kind is group))",
+         "assess_risk (only when include_risk)", "list_members (only for some of the arguments)",
+         "show_tags"], expanded, names, "lookup", request=request)
+    assert kept == ["show_tags"]
+    assert dropped == ["open_group_by_uid with the uid of the Payroll match (only when find.uids and "
+                       "(kind is group))", "assess_risk (only when include_risk)",
+                       "list_members (only for some of the arguments)"]
+
+
 def test_the_typed_signature_has_one_field_per_param_plus_extra_steps(tmp_path):
     signature = sc.typed_signature(_command(tmp_path))
     assert list(signature.output_fields) == ["name", "kind", "person", "include_risk", "count", "owner",
