@@ -428,6 +428,104 @@ def test_the_splitter_call_is_capped_at_split_max_tokens(monkeypatch):
     assert agent.SPLIT_MAX_TOKENS > 0
 
 
+class _ScriptedReplies(DummyLM):
+    """An LM that returns scripted raw replies ``(text, finish_reason, completion_tokens)``, in order,
+    across its copies; ``finishes`` records each call's finish reason."""
+
+    def __init__(self, script):
+        super().__init__([])
+        self.script = iter(script)
+        self.finishes = []
+        self._engine_spec = self._engine()
+
+    def _engine(self):
+        from dspy.clients.engines.dummy_engine import DummyEngine
+        from dspy.lm15 import Message, Response, TextPart, Usage
+
+        owner = self
+
+        class Engine(DummyEngine):
+            def _complete_messages(self, messages):
+                text, finish, tokens = next(owner.script)
+                owner.finishes.append(finish)
+                return Response(id=None, model="scripted", message=Message.assistant([TextPart(text)]),
+                                finish_reason=finish,
+                                usage=Usage(input_tokens=0, output_tokens=tokens, total_tokens=tokens))
+
+        return Engine(self)
+
+    def copy(self, **kwargs):
+        copied = super().copy(**kwargs)
+        copied._engine_spec = self._engine()  # the copy answers from this LM's script
+        return copied
+
+
+_SPLIT = "[[ ## reasoning ## ]]\nTwo jobs.\n\n[[ ## subtasks ## ]]\n1. Audit right A.\n2. Sweep Hubbard.\n\n[[ ## completed ## ]]"
+_GOOD = (_SPLIT, "stop", 40)
+# Cut off mid-reasoning after echoing the output template: the chat adapter parses it, as "{subtasks}".
+_ECHOED_THEN_CUT = ("[[ ## reasoning ## ]]\nThe request names two jobs. Now we must produce the output fields:\n\n"
+                    "[[ ## reasoning ## ]]\n{reasoning}\n\n[[ ## subtasks ## ]]\n{subtasks}\n\n"
+                    "[[ ## completed ## ]]\n\nNow we need to write the reasoning that walks through", "length", 4700)
+# Cut off mid-reasoning with no field header: does not parse, so DSPy retries with its JSON adapter.
+_CUT = ("[[ ## reasoning ## ]]\nRule 7 says to name it; but rule 9 says not to; so rule 7 again", "length", 4700)
+_JSON_SPLIT = ('{"reasoning": "Two jobs.", "subtasks": "1. Audit right A.\\n2. Sweep Hubbard."}', "stop", 40)
+
+
+def test_a_normal_split_reply_is_one_call():
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    lm = _ScriptedReplies([_GOOD, _GOOD])
+    assert split_into_subtasks("the request", planner_lm=lm) == ["Audit right A.", "Sweep Hubbard."]
+    assert lm.finishes == ["stop"]
+
+
+def test_a_cut_off_reply_that_parses_is_not_the_split_and_is_retried():
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    lm = _ScriptedReplies([_ECHOED_THEN_CUT, _GOOD])
+    assert split_into_subtasks("the request", planner_lm=lm) == ["Audit right A.", "Sweep Hubbard."]
+    assert lm.finishes == ["length", "stop"]
+
+
+def test_a_cut_off_reply_that_does_not_parse_uses_dspys_json_retry():
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    lm = _ScriptedReplies([_CUT, _JSON_SPLIT, _GOOD])
+    assert split_into_subtasks("the request", planner_lm=lm) == ["Audit right A.", "Sweep Hubbard."]
+    assert lm.finishes == ["length", "stop"]
+
+
+def test_a_cut_off_json_retry_still_gets_the_split_retry():
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    lm = _ScriptedReplies([_CUT, ('{"reasoning": "Rule 7 says', "length", 4700), _GOOD])
+    assert split_into_subtasks("the request", planner_lm=lm) == ["Audit right A.", "Sweep Hubbard."]
+    assert lm.finishes == ["length", "length", "stop"]
+
+
+def test_a_split_cut_off_twice_leaves_the_request_whole():
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    lm = _ScriptedReplies([_ECHOED_THEN_CUT, _ECHOED_THEN_CUT, _GOOD])
+    assert split_into_subtasks("the request", planner_lm=lm) == ["the request"]
+    assert lm.finishes == ["length", "length"]
+
+
+def test_a_reply_is_cut_off_by_its_finish_reason_or_by_reaching_max_tokens():
+    from types import SimpleNamespace
+
+    from fastworkflow.utils.dspy_logger import reply_cut_off
+
+    lm = SimpleNamespace(kwargs={"max_tokens": 4700})
+    call = SimpleNamespace(kwargs={})
+    assert reply_cut_off(lm, call, SimpleNamespace(raw={"choices": [{"finish_reason": "length"}]}))
+    assert reply_cut_off(lm, call, SimpleNamespace(responses=(SimpleNamespace(finish_reason="length"),)))
+    assert reply_cut_off(lm, call, SimpleNamespace(usage={"completion_tokens": 4700}))
+    assert not reply_cut_off(lm, call, SimpleNamespace(usage={"completion_tokens": 4699},
+                                                       raw={"choices": [{"finish_reason": "stop"}]}))
+    assert not reply_cut_off(SimpleNamespace(kwargs={}), call, SimpleNamespace(usage={"completion_tokens": 9}))
+
+
 def skill_file(text: str) -> str:
     """The skill file (``_skills/<name>.py``) of a skill without params: ``text``'s first line is its description,
     every other non-empty line one step."""

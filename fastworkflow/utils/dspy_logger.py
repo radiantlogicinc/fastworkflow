@@ -598,6 +598,61 @@ def _capture_call_result(result: Any) -> None:
         pass
 
 
+# The replies of the LM calls made inside ``watch_cut_off_replies``, in order:
+# True for one cut off at its output cap. None outside any watch.
+_cut_off_replies: ContextVar[Optional[list]] = ContextVar(
+    "fastworkflow_cut_off_replies", default=None
+)
+
+
+@contextmanager
+def watch_cut_off_replies():
+    """Yield a list that gets one entry per LM call made inside the block, in order:
+    True when that reply was cut off at its output cap, else False.
+
+    Fed by the same result hook as usage capture (``_install_result_hooks``), so it
+    needs no DSPy history. The list stays empty if the hook is not installed.
+    """
+    replies: list = []
+    token = _cut_off_replies.set(replies)
+    try:
+        yield replies
+    finally:
+        _cut_off_replies.reset(token)
+
+
+def _finish_reasons(result: Any) -> list:
+    reasons = [getattr(response, "finish_reason", None) for response in getattr(result, "responses", ()) or ()]
+    raw = getattr(result, "raw", None)
+    choices = raw.get("choices") if isinstance(raw, Mapping) else getattr(raw, "choices", None)
+    for choice in choices or ():
+        reasons.append(choice.get("finish_reason") if isinstance(choice, Mapping) else getattr(choice, "finish_reason", None))
+    return reasons
+
+
+def reply_cut_off(lm: Any, call: Any, result: Any) -> bool:
+    """Whether an LM call's reply stopped at its output cap: the provider says
+    ``finish_reason == "length"``, or the reported completion tokens reached ``max_tokens``.
+    """
+    if "length" in _finish_reasons(result):
+        return True
+    kwargs = {**(getattr(lm, "kwargs", None) or {}), **(getattr(call, "kwargs", None) or {})}
+    cap = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens")
+    usage = getattr(result, "usage", None)
+    tokens = usage.get("completion_tokens") if isinstance(usage, Mapping) else None
+    return isinstance(cap, int) and isinstance(tokens, int) and tokens > 0 and tokens >= cap
+
+
+def _note_cut_off(lm: Any, call: Any, result: Any) -> None:
+    replies = _cut_off_replies.get()
+    if replies is None:
+        return
+    try:
+        replies.append(reply_cut_off(lm, call, result))
+    except Exception:  # never fail the call over this
+        pass
+
+
 def _install_result_hooks() -> None:
     """Wrap the two places DSPy holds an LM call's full result, once per process.
 
@@ -605,7 +660,8 @@ def _install_result_hooks() -> None:
     ``BaseLM.__call__``/``acall`` (native, LiteLLM, cached, DummyLM) receives its
     ``CallResult`` (usage, cost, cache_hit, raw response); ``TypeSafe._finish``
     is the same point for the Jev client. Both run before DSPy decides whether
-    to write history, so capture does not depend on it. If a DSPy upgrade
+    to write history, so capture does not depend on it. The same wrapper feeds
+    ``watch_cut_off_replies``. If a DSPy upgrade
     renames either, nothing is wrapped and the span says usage is unavailable;
     tests/test_dspy_usage_capture.py fails loudly first.
     """
@@ -619,6 +675,7 @@ def _install_result_hooks() -> None:
         @functools.wraps(finalize)
         def finalize_with_capture(lm, call, result):
             _capture_call_result(result)
+            _note_cut_off(lm, call, result)
             return finalize(lm, call, result)
 
         finalize_with_capture._fastworkflow_capture = True

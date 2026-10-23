@@ -33,6 +33,7 @@ from fastworkflow.context_navigation import (
 from fastworkflow.context_navigation import home_contexts as context_homes
 from fastworkflow.utils.react import AskUserSuspend
 from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
+from fastworkflow.utils.dspy_logger import watch_cut_off_replies
 from fastworkflow.observation_offloading.agent import build_tool_agent
 from fastworkflow.observation_offloading.search import search_memory as search_observation
 from fastworkflow.observation_offloading.labels import annotated_observation
@@ -1014,7 +1015,9 @@ MAX_SUBTASKS = 10
 
 #: Output cap (tokens) of one splitter call; ``LLM_SPLIT_MAX_TOKENS`` overrides it. Without a cap
 #: the splitter's reasoning can loop for 100k+ characters, past the LM timeout. A capped answer
-#: that does not parse gets DSPy's JSON retry (capped too), then leaves the request whole. Set from the largest stored splitter output that
+#: that does not parse gets DSPy's JSON retry (capped too). A reply cut off at the cap is never
+#: used as the split, even when it parses: ``split_into_subtasks`` retries once, then leaves the
+#: request whole (fix-rj86). Set from the largest stored splitter output that
 #: did not loop: 17.6k characters, about 4,700 tokens at the fewest characters per token measured
 #: on long splitter outputs (3.77; fix-ajir.1).
 SPLIT_MAX_TOKENS = 4700
@@ -1560,7 +1563,10 @@ def split_into_subtasks(user_query: str, planner_lm=None,
     request, not about how to carry it out. It is shown the workflow's skills
     (``_skills``), as the kinds of job it may contain.
     Any failure, an empty answer, or more than MAX_SUBTASKS sub-tasks leaves the
-    request whole. The model's split then goes through ``split_merge.merge_subtasks``
+    request whole. A reply cut off at ``split_max_tokens()`` is not an answer, even
+    when it parses (a field header written mid-reasoning, e.g. the output template
+    echoed back, parses as "{subtasks}"): it gets the one retry, and a second
+    cut-off reply leaves the request whole. The model's split then goes through ``split_merge.merge_subtasks``
     (code only), which joins parts that are not independent jobs and returns the
     request whole when one job is left.
     """
@@ -1568,20 +1574,29 @@ def split_into_subtasks(user_query: str, planner_lm=None,
         planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
     job_types = _job_types_for(workflow_folderpath)
     # Temperature 0, so the same request splits the same way; a split that is
-    # visibly broken is retried once at 0.7, which also misses the LM cache.
+    # visibly broken or cut off at the cap is retried once at 0.7, which also
+    # misses the LM cache.
     # A split whose only flaw is a leftover reference ("each of them") is still
     # better than none, so it is kept when the retry does not fix it.
     usable = None
     for temperature in (0.0, 0.7):
+        replies: list = []
         try:
             with dspy.context(lm=_split_lm(planner_lm, temperature),
-                              adapter=CommandsSystemPreludeAdapter()):
+                              adapter=CommandsSystemPreludeAdapter()), watch_cut_off_replies() as replies:
                 signature = _split_signature(workflow_folderpath) if workflow_folderpath else SplitIntoSubtasks
                 text = dspy.ChainOfThought(signature)(
                     job_types=job_types, user_query=user_query).subtasks or ""
         except Exception:  # noqa: BLE001 - splitting is an optimisation; never fail the turn
+            if any(replies):
+                logger.warning(f"the split was cut off at {split_max_tokens()} tokens and did not parse")
+                continue
             logger.warning("could not split the request; running it whole", exc_info=True)
             return [user_query]
+        if replies and replies[-1]:
+            # The parsed reply stopped at the cap: whatever parsed is not the model's answer.
+            logger.warning(f"the split was cut off at {split_max_tokens()} tokens; not using it")
+            continue
         subtasks = [match.group(1).translate(_HYPHENS) for line in text.splitlines()
                     if (match := _NUMBERED_LINE.match(line))]
         if not subtasks or len(subtasks) > MAX_SUBTASKS:
