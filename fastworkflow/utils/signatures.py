@@ -340,6 +340,42 @@ def out_of_range_value_message(field_name: str, field_value: Any, problem: str) 
     )
 
 
+# --- "Not given" text in an Optional str ---------------------------------------------
+#
+# The extraction signature tells the model to answer ``NOT_FOUND`` (or ``None``, the
+# displayed default of an Optional field) for a value the request does not give.
+# For a required field ``NOT_FOUND`` means "ask the user", and that stays. For an
+# ``Optional[str]`` field the text used to reach the command as the value, while
+# the key=value and XML paths give the field's default; it is now replaced by the
+# default, as the "not given" int marker is (fix-3t6p, the str analogue of fix-7t0q).
+
+def is_optional_str_field(field_info: Any) -> bool:
+    """Whether the field is ``Optional[str]`` (``str`` and ``None`` only)."""
+    args = get_args(field_info.annotation)
+    return type(None) in args and [t for t in args if t is not type(None)] == [str]
+
+
+def default_unfilled_optional_strs(cmd_parameters: BaseModel, not_found: Optional[str]) -> List[str]:
+    """Give each ``Optional[str]`` field holding ``not_found`` or ``"None"`` its default.
+
+    Returns the names of the fields changed. The default is the field's declared one
+    (a factory is called), or None when it declares none. Required fields are left
+    alone, so a missing one is still reported and asked for.
+    """
+    markers = {"None"} | ({not_found} if not_found else set())
+    changed: List[str] = []
+    for field_name, field_info in type(cmd_parameters).model_fields.items():
+        value = getattr(cmd_parameters, field_name, None)
+        if not isinstance(value, str) or isinstance(value, Enum) or value.strip() not in markers:
+            continue
+        if not is_optional_str_field(field_info):
+            continue
+        default = field_info.get_default(call_default_factory=True)
+        setattr(cmd_parameters, field_name, None if default is PydanticUndefined else default)
+        changed.append(field_name)
+    return changed
+
+
 # --- One pass over a call's values, shared by commands and skill calls -----------------
 
 
@@ -807,6 +843,7 @@ Today's date is {today}.
         )
         quote_texts = " \n ".join(t for t in (self.command, user_request) if t)
 
+        default_unfilled_optional_strs(cmd_parameters, NOT_FOUND)
         screen = screen_parameter_values(cmd_parameters, quote_texts, grounding_text)
         placeholder_fields = screen.placeholder_fields
         unwrapped_fields = screen.unwrapped_fields

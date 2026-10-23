@@ -570,6 +570,14 @@
   longer lands in an Optional `filter` declared before it while `name` is
   asked again. A comma-separated reply with one part per asked field fills
   those fields. With no Optional field unset, the merge is unchanged.
+- **An unmentioned `Optional[str]` reaches the command as its default**
+  (fix-3t6p, the str analogue of fix-7t0q). On the LLM path an `Optional[str]`
+  field the request does not give came back as the text `NOT_FOUND` (or
+  `None`) and reached the command as that value, while the key=value and XML
+  paths gave the default. `validate_parameters` now gives such a field its
+  declared default (None when it declares none;
+  `signatures.default_unfilled_optional_strs`). Required fields are unchanged:
+  `NOT_FOUND` there is still reported missing and asked for.
 - **A misspelled phase parameter with a default fails the load** (fix-ajir.11).
   A `steps_fn`, `when` or `until` parameter defaulting to `None` must name an
   earlier phase with an output in at least one plan the placeholder inputs
