@@ -269,40 +269,9 @@ At run time a required fact no run holds fails its phase.
 
 ## A fact named like a `str` method
 
-While the template is built, a phase's facts are one placeholder, which is a `str`. A fact
-named like a `str` method (`title`, `count`, `index`, `format`, `split`, ...) reads as
-that method, not as the fact. The skill loads and its preview looks right (the preview
-fills each fact separately), but the template, what the planner sees, reads:
-
-<!-- broken: bad_fact_name -->
-```python
-from pydantic import BaseModel, Field
-
-from fastworkflow.skill import fact_from
-
-
-class Signature:
-    """Show the title of the book with the uid the request gives."""
-
-    class Input(BaseModel):
-        uid: str = Field(description="the book's uid exactly as the request writes it")
-
-
-class PlanGenerator:
-    class Book(BaseModel):
-        title: str = fact_from("show_book.title")
-
-    def book(self, input) -> Book:
-        return [f"show_book book_uid={input.uid}"]
-
-    def answer(self, book):
-        return [f"say that the book is {book.title}"]
-```
-
-<!-- template-line -->
-```text
-say that the book is <built-in method title of Placeholder object at 0x
-```
-
-**Fix:** name the fact otherwise: `name: str = fact_from("show_book.title")`, as these
-pages do.
+While the template is built, a phase's facts are one placeholder, which is a `str`
+(`skill_phases.Placeholder`). A fact named like a public `str` method (`title`, `count`,
+`format`, `split`, ...) still reads as the fact, not the method: `Placeholder` intercepts
+every `str` method name it does not mean itself, so `book.title` is `<book.title>`, not
+`<built-in method title of Placeholder object at 0x...>`. Only a name the class means
+differently (`index`: the one item's place, not `str.index`) keeps that meaning.

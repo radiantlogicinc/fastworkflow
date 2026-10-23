@@ -273,6 +273,10 @@ class Placeholder(str):
     is noted while ``tests_noted`` is open (``find.uids``, ``find.total > 3``): the template
     says the phase's steps are written "only when" they hold. ``x is None`` is not a test
     it can see (a placeholder is never None).
+
+    A fact named like a public ``str`` method (``title``, ``count``, ``format``, ``split``,
+    ...) still reads as the fact, not the method (``__getattribute__``): only a name this
+    class means itself (``index``, below) or a dunder keeps ``str``'s own meaning.
     """
 
     def __new__(cls, path: str):
@@ -281,6 +285,15 @@ class Placeholder(str):
         return self
 
     __hash__ = str.__hash__
+
+    def __getattribute__(self, name):
+        # A public name only ``str`` defines, not this class (``title``, ``count``,
+        # ``format``, ``split``, ...): raise so ``__getattr__`` reads it as the fact's own
+        # attribute, instead of the str method a fact named like one would otherwise hit.
+        if (not name.startswith("_") and name not in type(self).__dict__
+                and hasattr(str, name)):
+            raise AttributeError(name)
+        return object.__getattribute__(self, name)
 
     def __getattr__(self, name):
         if name.startswith("__") or name == "_path":
