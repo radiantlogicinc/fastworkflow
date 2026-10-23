@@ -387,6 +387,33 @@ def test_a_dropped_statement_is_written_before_the_job_pointing_back_to_its_reco
         "Explain the control 'Shared logins': why it was flagged."]
 
 
+#: An asking sentence naming the unit, then a walk of "it" that names no record, then two leavers.
+RESTRUCTURE = ("Field Sales and Sons 1 is being restructured and I need the access picture before it happens. "
+               "Walk the whole roster - every identity on it, down to logins, rights and collections. "
+               "Ann Lee and Bob Kerr leave at the end of the month, so each of them down to their first login.")
+LEAVERS = ["Ann Lee leaves at the end of the month: down to Ann Lee's first login.",
+           "Bob Kerr leaves at the end of the month: down to Bob Kerr's first login."]
+
+
+def test_an_asking_sentence_whose_record_no_subtask_names_is_written_before_the_recordless_job_after_it():
+    split = ["Walk the whole roster - every identity on it, down to logins, rights and collections."] + LEAVERS
+    assert merge_subtasks(RESTRUCTURE, split) == [
+        "Field Sales and Sons 1 is being restructured and I need the access picture before it happens. "
+        "Walk the whole roster - every identity on it, down to logins, rights and collections."] + LEAVERS
+
+
+def test_an_asking_sentence_is_not_written_before_jobs_that_name_a_record():
+    # the next sentence's sub-tasks name records of their own: the sentence is put back as its own job
+    q = ("Field Sales and Sons 1 is being restructured and I need the access picture before it happens. "
+         "Ann Lee and Bob Kerr leave at the end of the month, so each of them down to their first login.")
+    assert merge_subtasks(q, LEAVERS) == [
+        "Field Sales and Sons 1 is being restructured and I need the access picture before it happens."] + LEAVERS
+    # a sub-task names the sentence's record: nothing is written in
+    split = ["Walk the whole Field Sales and Sons 1 roster - every identity on it, down to logins, rights "
+             "and collections."] + LEAVERS
+    assert merge_subtasks(RESTRUCTURE, split) == split
+
+
 def test_statements_and_asks():
     from fastworkflow.split_merge import _asks, _is_statement
     for statement in ("Ann Lee leaves at the end of the week.", "I am closing out Field Sales for the year.",

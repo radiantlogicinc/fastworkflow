@@ -27,7 +27,8 @@ feed, a control, a tag). The rules, applied in order:
    checks a change ("before and after", "the change"): "Show me the tags on
    Ann Lee before and after" after "Put `on-leave` on Ann Lee".
    Before that, **a statement is context, not a job** (3a): a request sentence that asks nothing
-   ("Ann Lee leaves on Friday.", "I am closing out Payroll.") is written before the job it is about,
+   ("Ann Lee leaves on Friday.", "I am closing out Payroll.") is written before the job it is about, as
+   is a sentence whose record no sub-task names before the record-less sub-tasks of the next sentence,
    and **a sub-task with the wrong record is dropped** (3b, see ``_restore_cut_subjects``).
 4. **A comparison is one job**: consecutive sub-tasks that each name one
    different subject and say the same thing about it ("Open Billing ...",
@@ -695,6 +696,11 @@ def _attach_context(user_query: str, items: list[str], known: list[str],
     - A statement naming a record no sub-task names ("I am closing out Payroll for the year.") is written
       before the sub-tasks taken from the next sentence that has any ("Walk the whole unit: ..."), so they
       keep the record they point back to. With none, rule 6 puts it back.
+    - So is a sentence that asks ("Payroll is being restructured and I need the picture."), when no
+      sub-task names its records and the sub-tasks taken from the next sentence that has any name no
+      record ("Walk the whole roster: every identity on it"): they are about its record. Else rule 3
+      would join the record-less sub-task to the next job (another record's) and rule 6 would put the
+      sentence back as a job of its own.
     """
     out: list[str] = []
     for text in items:
@@ -709,11 +715,14 @@ def _attach_context(user_query: str, items: list[str], known: list[str],
     named = set().union(*(subjects_in(t, known, identifiers) for t in out))
     for k, sentence in enumerate(sentences):
         own = subjects_in(sentence, known, identifiers)
-        if not own or own & named or not _is_statement(sentence):
+        if not own or own & named or _is_limit(sentence):   # a limit is carried by rule 5
             continue
-        sources = [_source_sentence(t, sentences, subjects_in(t, known, identifiers)) for t in out]
+        subj = [subjects_in(t, known, identifiers) for t in out]
+        sources = [_source_sentence(t, sentences, s) for t, s in zip(out, subj)]
         later = sorted({s for s in sources if s is not None and s > k})
         if not later:
+            continue
+        if not _is_statement(sentence) and any(s for s, src in zip(subj, sources) if src == later[0]):
             continue
         out = [_join([sentence, t]) if src == later[0] else t for t, src in zip(out, sources)]
         named |= own
