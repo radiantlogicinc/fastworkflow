@@ -1013,22 +1013,45 @@ class ParameterExtraction:
                 + " or ".join(f"{name}={token}" for name in names))
 
     @staticmethod
+    def _is_asked_field(field_info, value) -> bool:
+        """Whether a stored field is one the clarification asked the user for.
+
+        ``_extract_impl`` stores each missing or invalid field as ``NOT_FOUND``
+        (an empty list for a list field), so those are asked; so is a required
+        field (annotation without ``None``) still holding a "not given" value.
+        An Optional field left at ``None`` or an empty list was not asked for.
+        """
+        if value in [NOT_FOUND, INVALID_INT_VALUE, INVALID_FLOAT_VALUE]:
+            return True
+        is_optional = type(None) in get_args(field_info.annotation)
+        return not is_optional and (
+            value is None or (isinstance(value, list) and len(value) == 0))
+
+    @staticmethod
     def _extract_and_merge_missing_parameters(stored_params: BaseModel, command: str):
         """
         Identify fields to fill by scanning for sentinel values and merge values
         parsed from the command string into a new params instance. This preserves
         existing behavior for token/field count mismatches and leaves values as
         strings (no type coercion).
+
+        The reply answers the clarification, so the fields it asked for
+        (``_is_asked_field``) are filled first, in declaration order, and an
+        unset Optional field only after them (fix-mbkw): "Ann" for a missing
+        ``name`` no longer lands in an Optional ``filter`` declared before it.
+        A comma-separated reply with one part per asked field fills those fields.
         """
         # Initialize with existing values to avoid triggering validation
-        field_names = list(type(stored_params).model_fields.keys())
+        model_fields = type(stored_params).model_fields
+        field_names = list(model_fields.keys())
         params_data = {
             field_name: getattr(stored_params, field_name, None)
             for field_name in field_names
         }
 
         # Determine which fields still need user-provided input based on sentinels
-        fields_to_fill = []
+        asked_fields = []
+        other_fields = []
         for field_name in field_names:
             value = getattr(stored_params, field_name, None)
             if value in [
@@ -1037,7 +1060,11 @@ class ParameterExtraction:
                 INVALID_INT_VALUE,
                 INVALID_FLOAT_VALUE,
             ] or (isinstance(value, list) and len(value) == 0):
-                fields_to_fill.append(field_name)
+                if ParameterExtraction._is_asked_field(model_fields[field_name], value):
+                    asked_fields.append(field_name)
+                else:
+                    other_fields.append(field_name)
+        fields_to_fill = asked_fields + other_fields
 
         if not fields_to_fill:
             return stored_params
@@ -1046,7 +1073,10 @@ class ParameterExtraction:
         if "," in command:
             parts = [part.strip() for part in command.split(",")]
 
-            if (
+            if len(asked_fields) > 1 and len(parts) == len(asked_fields):
+                for field, part in zip(asked_fields, parts):
+                    params_data[field] = part
+            elif (
                 len(parts) == len(fields_to_fill) == 1
                 or len(parts) != len(fields_to_fill)
                 and parts

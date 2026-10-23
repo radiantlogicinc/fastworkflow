@@ -563,6 +563,13 @@
 
 ### Fixed
 
+- **A clarification reply fills the field it was asked for** (fix-mbkw).
+  When parameter extraction asks for a missing or invalid field, the reply is
+  merged into the asked fields (stored as `NOT_FOUND`, or a required field
+  still unset) before any unset Optional field: "Ann" for a missing `name` no
+  longer lands in an Optional `filter` declared before it while `name` is
+  asked again. A comma-separated reply with one part per asked field fills
+  those fields. With no Optional field unset, the merge is unchanged.
 - **A misspelled phase parameter with a default fails the load** (fix-ajir.11).
   A `steps_fn`, `when` or `until` parameter defaulting to `None` must name an
   earlier phase with an output in at least one plan the placeholder inputs
