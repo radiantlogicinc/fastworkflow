@@ -148,3 +148,20 @@ def test_public_names_still_resolve():
     assert found == sorted(name for name, _, _ in PUBLIC)
     fresh_types = dict(line.split() for line in init_part.splitlines() if line)
     assert fresh_types == {name: "NoneType" for name in INIT_ASSIGNED}
+
+
+def test_get_env_var_reads_the_env_files_then_the_process_then_the_default(monkeypatch):
+    """The process environment is read with or without a default (fix-hia1.40)."""
+    name = "FW_TEST_GET_ENV_VAR"
+    monkeypatch.delitem(fastworkflow._env_vars, name, raising=False)
+    monkeypatch.delenv(name, raising=False)
+    assert fastworkflow.get_env_var(name, default="d") == "d"
+    assert fastworkflow.get_env_var(name, int, default=5) == 5
+    assert fastworkflow.get_env_var(name) is None
+    monkeypatch.setenv(name, "0")
+    assert fastworkflow.get_env_var(name, default="1") == "0"
+    assert fastworkflow.get_env_var(name, int, default=5) == 0
+    assert fastworkflow.get_env_var(name, bool, default=True) is False
+    # The env files fastworkflow.init loaded outrank the process environment.
+    monkeypatch.setitem(fastworkflow._env_vars, name, "7")
+    assert fastworkflow.get_env_var(name, int, default=5) == 7

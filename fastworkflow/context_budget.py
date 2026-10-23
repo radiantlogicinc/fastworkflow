@@ -91,10 +91,8 @@ SOURCE_FALLBACK = "fallback"
 def env_value(name: str) -> str:
     """The raw setting of *name*, from the fastworkflow env file or the process.
 
-    ``fastworkflow.get_env_var`` short-circuits on its ``default`` before it
-    consults ``os.environ``, so a variable exported into the process but absent
-    from the env file would read as the default. Both are checked, file first --
-    which is also what makes an override written into a workflow's own
+    Both are checked, file first, as ``fastworkflow.get_env_var`` does -- which
+    is also what makes an override written into a workflow's own
     ``fastworkflow.env`` take effect, where the per-knob readers this module
     replaced saw only ``os.environ``.
     """

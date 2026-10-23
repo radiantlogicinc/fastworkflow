@@ -314,14 +314,16 @@ def init(env_vars: dict):
         import datasets  # noqa: F401 – pre-load Hugging Face datasets
 
 def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str, int, float, bool]] = None) -> Union[str, int, float, bool]:
-    """get the environment variable"""
+    """The value of *var_name*, converted to *var_type*: from the env files
+    ``fastworkflow.init`` loaded, else the process environment, else *default*
+    (returned as given)."""
     global _env_vars
 
     value = _env_vars.get(var_name)
     if value is None:
-        if default is not None:
-            return default
         value = os.getenv(var_name)
+    if value is None and default is not None:
+        return default
 
     if value is None:
         from fastworkflow.utils.logging import logger

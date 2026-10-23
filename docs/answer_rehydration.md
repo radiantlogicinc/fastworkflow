@@ -102,12 +102,9 @@ rule is the trajectory's content, not a setting.
 |---|---|---|
 | `FW_ANSWER_REHYDRATION_MAX_BYTES` | derived (**250,000** at a 131,072-token window) | Tuning override on the extraction byte budget. Below 4,096 or unparseable, the derived budget stands and a warning is logged. |
 
-It is read **env file first, then the process environment**:
-`fastworkflow.get_env_var` short-circuits on its default before consulting
-`os.environ`, so a variable exported into the process but absent from the
-workflow env file would otherwise read as the default — and, unlike the
-readers it replaces, one written into the workflow's own `fastworkflow.env`
-now takes effect.
+It is read **env file first, then the process environment**, as
+`fastworkflow.get_env_var` reads every variable — so, unlike the readers it
+replaces, one written into the workflow's own `fastworkflow.env` takes effect.
 
 ## Events
 
