@@ -774,10 +774,11 @@ class _Conditions:
         return None
 
 
-def _alternatives(texts: list[str], by: str) -> str | None:
+def _alternatives(texts: list[str], by: str, whole: bool = True) -> str | None:
     """One line for the lines ``texts`` (one per value of enum ``by``, in its order) that differ
     only in a middle part: ``<find_group or find_unit, by kind> query=<name>``; None when every
-    one differs in more than a few words and in more than they share (different steps)."""
+    one differs in more than a few words and in more than they share (different steps), and,
+    without ``whole``, when they share no part (lines not at one place in their branches)."""
     pieces = [re.split(r"(?<=[ =])", t) for t in texts]   # words, and "key=" apart from its value
     pre = 0
     while all(len(w) > pre for w in pieces) and len({w[pre] for w in pieces}) == 1:
@@ -789,6 +790,8 @@ def _alternatives(texts: list[str], by: str) -> str | None:
     middles = list(dict.fromkeys(m.strip() for m in raw))
     if len(middles) == 1:
         return texts[0]
+    if not whole and not pre and not suf:
+        return None
     sizes = [len(m.split()) for m in middles]
     if min(sizes) > 3 and max(sizes) > pre + suf:
         return None
@@ -833,6 +836,13 @@ def _merge_enum_lines(p: Param, merged: list[list], grid: list[dict]) -> list[li
                 blocks[-1].append(k)
             else:
                 blocks.append([k])
+        # A block's place in its values' branches (None when its values differ in it): lines
+        # that share no part join only at the same place ("check_a", the second line of
+        # k0..k2's branches, is not the k3 branch's first line "find_k3"; fix-ajir.38).
+        offset: dict[int, int | None] = {}   # by a block's first line
+        for b in blocks:
+            places = {sum(1 for k in range(i, b[0]) if v in info[k][0]) for v in info[b[0]][0]}
+            offset[b[0]] = places.pop() if len(places) == 1 else None
         if joinable(blocks):   # the branches in the enum's order
             blocks.sort(key=lambda b: min(p.values.index(v) for v in info[b[0]][0]))
         start = 0
@@ -845,13 +855,25 @@ def _merge_enum_lines(p: Param, merged: list[list], grid: list[dict]) -> list[li
                 out.extend(merged[k] for k in segment[0])
             else:
                 segment.sort(key=lambda b: min(p.values.index(v) for v in info[b[0]][0]))
+                aligned = len({offset[b[0]] for b in segment}) == 1 and offset[segment[0][0]] is not None
                 for n in range(len(segment[0])):
                     members = [merged[b[n]] for b in segment]
-                    text = _alternatives([m[0] for m in members], p.name)
-                    if text is None:   # different steps, one line each
-                        out.extend(members)
-                    else:
+                    text = _alternatives([m[0] for m in members], p.name, whole=aligned)
+                    if text is not None:
                         out.append([text, set().union(*(m[1] for m in members))])
+                    elif aligned:   # different steps, one line each
+                        out.extend(members)
+                    else:           # the lines at each place in their branches, joined apart
+                        by_place: dict[int | None, list] = {}
+                        for b, m in zip(segment, members):
+                            by_place.setdefault(offset[b[0]], []).append(m)
+                        for place, group in by_place.items():
+                            text = _alternatives([m[0] for m in group], p.name) \
+                                if len(group) > 1 and place is not None else None
+                            if text is None:
+                                out.extend(group)
+                            else:
+                                out.append([text, set().union(*(m[1] for m in group))])
             start = end
         i = j
     return out

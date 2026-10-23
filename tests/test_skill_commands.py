@@ -1259,3 +1259,36 @@ def test_threads_that_load_skills_together_build_them_once(tmp_path, monkeypatch
         t.join()
     assert built == ["lookup"]
     assert len(results) == 6 and all(r == results[0] for r in results)
+
+
+SHARED_CHECK = '''
+from typing import Literal
+from pydantic import BaseModel, Field
+
+class Signature:
+    """Look a record up by kind."""
+    class Input(BaseModel):
+        name: str = Field(description="the record's name")
+        kind: Literal["k0", "k1", "k2", "k3", "k4"] = Field(description="the kind")
+
+
+def steps(input):
+    out = ["open_directory", f"find_{input.kind} query={input.name}"]
+    if input.kind in ("k0", "k1", "k2"):
+        out.append("check_a")
+    out.append("say done")
+    return out
+'''
+
+
+def test_an_enum_joins_only_lines_at_one_place_in_their_branches(tmp_path):
+    """fix-ajir.38: "check_a", the second step of k0..k2, is not joined with "find_k3", the
+    first step of k3 (it was ``<check_a or find_k3 query=<name> or find_k4 query=<name>, by kind>``)."""
+    (_name, _desc, steps), = workflow_agent.load_skills(_write(tmp_path, {"shared_check": SHARED_CHECK}))
+    assert steps == (
+        "open_directory",
+        "<find_k0 or find_k1 or find_k2, by kind> query=<name> (only when kind is k0 or k1 or k2)",
+        "check_a (only when kind is k0 or k1 or k2)",
+        "<find_k3 or find_k4, by kind> query=<name> (only when kind is k3 or k4)",
+        "say done",
+    )
