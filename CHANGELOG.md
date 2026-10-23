@@ -4,6 +4,21 @@
 
 ### Added
 
+- **Skills are written as `Signature` + `PlanGenerator`** (`fastworkflow/skill.py`,
+  `docs/skill_file_layout.md`). A skill file reads like a command file: `class
+  Signature` declares it as a command's does, and `class PlanGenerator` generates its
+  plan. Each public method is a phase in the order written (`_name` methods are
+  helpers); its parameters name `input` and earlier phases; its return annotation is
+  the facts model it fills; it returns its steps as text, and `return []` skips it
+  (decided when the phase is reached). `@phase(over=..., max_items=..., until=...,
+  noun=..., optional=...)` for fan-outs and optional phases; `pick` and the filters
+  `num`, `count`, `listed` for steps. Skills are unreleased, so the old form is gone.
+  A step naming a command or parameter the workflow lacks is a load error.
+- **`fastworkflow.Refused(message)`** (commands, backward compatible): raised from a
+  `ResponseGenerator.__call__` it is a failed `CommandOutput` with that message; from a
+  `validate_extracted_parameters` hook (a command's or a skill's) it is `(False,
+  message)`. A `Signature` without `generate_utterances` gets the standard body as a
+  default; a defined or inherited one wins.
 - **`fact_from("<command>.<field>")`** (fix-ajir.15, `docs/skill_phases.md`):
   the field of a facts model copied from a command field,
   `Field(json_schema_extra={"from": ...}, **kwargs)`, in place of the `_from`

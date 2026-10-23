@@ -171,7 +171,8 @@ from fastworkflow import tracing  # noqa: E402
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (  # noqa: E402
     ParameterExtraction)
 from fastworkflow.command_executor import CommandExecutor  # noqa: E402
-from fastworkflow.skill_commands import SkillCallPlan, call_phases, command_from_module  # noqa: E402
+from fastworkflow.skill_commands import SkillCallPlan, call_phases  # noqa: E402
+
 from fastworkflow.skill_phases import Phase  # noqa: E402
 from fastworkflow.turn import TurnStatus  # noqa: E402
 from fastworkflow.utils.react import _step_indexes  # noqa: E402
@@ -183,6 +184,16 @@ from tests.test_turn_result_capture import (  # noqa: E402,F401 - shared fixture
     initialized_fastworkflow,
     todo_workflow_path,
 )
+
+
+def command_from_module(name, module, path):
+    """The skill a module of runtime parts gives (``plan(input) -> list[Phase]`` and/or
+    ``steps(input)``), through ``skill_commands.skill_from_parts``, as the loader builds it
+    from a ``PlanGenerator``: these runtime tests hand-build their ``Phase`` lists."""
+    from fastworkflow import skill_commands
+    return skill_commands.skill_from_parts(name, module.Signature, path,
+                                           steps_fn=getattr(module, "steps", None),
+                                           plan_fn=getattr(module, "plan", None))
 
 
 def _from(source, **kwargs):

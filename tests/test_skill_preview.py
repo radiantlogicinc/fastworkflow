@@ -19,11 +19,7 @@ from fastworkflow import cli, skill_preview
 
 SHOW_ITEM = '''
 """show_item: one named item, its parts and, when asked, its open checks."""
-from typing import Optional
-
 from pydantic import BaseModel, Field
-
-from fastworkflow.skill_phases import Phase, concatenated_steps
 
 
 class Signature:
@@ -53,42 +49,29 @@ class CheckFacts(BaseModel):
     total: int = Field(json_schema_extra={"from": "count_checks.total"})
 
 
-def plan(input: Signature.Input) -> list[Phase]:
-    phases = [
-        Phase("find", lambda: find_steps(input.name), output=ItemMatch),
-        Phase("item", lambda find: item_steps(input.name, find), output=ItemFacts),
-        Phase("checks", lambda item: checks_steps(item), output=CheckFacts, when=input.checks),
-    ]
-    if input.checks:
-        phases.append(Phase("report", lambda item, checks: report_steps(item, checks)))
-    else:
-        phases.append(Phase("report", lambda item: report_steps(item)))
-    return phases
+class PlanGenerator:
+    """find -> item -> checks (when asked) -> report."""
 
+    def __call__(self, input):
+        checks = [self.checks] if input.checks else []
+        return [self.find, self.item, *checks, self.report]
 
-def steps(input: Signature.Input) -> list[str]:
-    return concatenated_steps(plan(input))
+    def find(self, input) -> ItemMatch:
+        return ["open_catalog", f"find_item query={input.name}"]
 
+    def item(self, find) -> ItemFacts:
+        return [f"open_item_by_uid item_uid={find.item_uids[0]}", "list_parts (full list)"]
 
-def find_steps(name):
-    return ["open_catalog", f"find_item query={name}"]
+    def checks(self, item) -> CheckFacts:
+        return [f"count_checks on {item.uid}"]
 
+    def report(self, item, checks=None):
+        counted = f"; open checks: {checks.total}" if checks is not None else ""
+        return [f"say that {item.uid} has the parts {self._parts(item)}{counted}, "
+                f"weight {item.weight:.1f}"]
 
-def item_steps(name, find: Optional[ItemMatch] = None):
-    uid = find.item_uids[0] if find else f"<the uid of the {name} match>"
-    return [f"open_item_by_uid item_uid={uid}", "list_parts (full list)"]
-
-
-def checks_steps(item: Optional[ItemFacts] = None):
-    return [f"count_checks on {item.uid if item else 'the item'}"]
-
-
-def report_steps(item: Optional[ItemFacts] = None, checks: Optional[CheckFacts] = None):
-    if item is None:
-        return ["say which parts the item has"]
-    counted = f"; open checks: {checks.total}" if checks else ""
-    return [f"say that {item.uid} has the parts {', '.join(item.part_labels)}{counted}, "
-            f"weight {item.weight:.1f}"]
+    def _parts(self, item):
+        return ", ".join(item.part_labels)
 '''
 
 LIST_PARTS = '''
@@ -120,10 +103,11 @@ class Signature:
         return True, ""
 
 
-def steps(input: Signature.Input) -> list[str]:
-    out = lookup_steps(input.kind, input.name)
-    out.append(f"list_parts supplier={input.supplier}" if input.supplier else "list_parts")
-    return out + ["go_up", "say what was shown"]
+class PlanGenerator:
+    def steps(self, input):
+        out = lookup_steps(input.kind, input.name)
+        out.append(f"list_parts supplier={input.supplier}" if input.supplier else "list_parts")
+        return out + ["go_up", "say what was shown"]
 
 
 def lookup_steps(kind, name):
@@ -135,8 +119,9 @@ class Signature:
     """Go back to the catalog. Fixed steps."""
 
 
-def steps():
-    return ["go_up", "say what was shown"]
+class PlanGenerator:
+    def steps(self):
+        return ["go_up", "say what was shown"]
 '''
 
 
@@ -313,7 +298,7 @@ CHECK_ITEMS = '''
 """check_items: the named items checked one by one, phased only for the deep check."""
 from pydantic import BaseModel, Field
 
-from fastworkflow.skill_phases import Phase
+from fastworkflow.skill import phase
 
 
 class Signature:
@@ -333,35 +318,39 @@ class Check(BaseModel):
     passed: bool = Field(json_schema_extra={"from": "run_check.passed"})
 
 
-def plan(input: Signature.Input):
-    if not input.deep:
-        return None
-    return [
-        Phase("find", lambda: [f"find_item query={input.names}"], output=Match),
-        Phase("checks", lambda uid=None: check_steps(uid), output=Check,
-              over="find.item_uids", item="uid", max_items=5, noun="matches",
-              until=lambda checks: sum(c.passed for c in checks) >= 2),
-        Phase("extra", lambda find: [f"count_checks for {len(find.item_uids)} items"],
-              when=lambda find: len(find.item_uids) > 1),
-        Phase("report", lambda checks: report_steps(checks), when=has_checks),
-    ]
+class PlanGenerator:
+    """Without the deep check: one plan (flat). With it: find, checks (once per match, until
+    two passed), extra (more than one match), report (when an item was checked)."""
 
+    def __call__(self, input):
+        if not input.deep:
+            return [self.quick]
+        return [self.find, self.checks, self.extra, self.report]
 
-def steps(input: Signature.Input):
-    return [f"find_item query={input.names}", "run_check on each match", "say which passed"]
+    def quick(self, input):
+        return [f"find_item query={input.names}", "run_check on each match", "say which passed"]
 
+    def find(self, input) -> Match:
+        return [f"find_item query={input.names}"]
 
-def has_checks(checks):
-    return bool(checks)
+    @phase(over="find.item_uids", max_items=5, noun="matches",
+           until=lambda checks: sum(c.passed for c in checks) >= 2)
+    def checks(self, uid) -> Check:
+        return [f"open_item_by_uid item_uid={uid}", "run_check"]
 
+    def extra(self, find):
+        if not len(find.item_uids) > 1:
+            return []
+        return [f"count_checks for {len(find.item_uids)} items"]
 
-def check_steps(uid=None):
-    return [f"open_item_by_uid item_uid={uid or '<the uid>'}", "run_check"]
+    def report(self, checks):
+        if not checks:
+            return []
+        return [f"say that {self._passed(checks)}"]
 
-
-def report_steps(checks=None):
-    passed = [c.uid for c in checks or [] if c.passed]
-    return [f"say that {len(passed)} items passed: {', '.join(passed) or 'none'}"]
+    def _passed(self, checks):
+        passed = [c.uid for c in checks if c.passed]
+        return f"{len(passed)} items passed: {', '.join(passed) or 'none'}"
 '''
 
 
@@ -376,22 +365,23 @@ def checks_workflow(tmp_path):
 def test_conditions_fan_out_settings_and_a_flat_plan_are_rendered(checks_workflow):
     text = skill_preview.render_previews(checks_workflow)["check_items.md"]
     assert "| phase | output | runs | fans out |" in text
-    # When plan() is phased is said once; the table is about the phased calls.
-    assert ("`plan()` returns phases only when deep = true; for other inputs the call runs "
-            "flat, from `steps()`.") in text
+    # When the call runs as phases is said once; the table is about the phased calls.
+    assert ("The call runs as phases only when deep = true; for other inputs it runs flat, "
+            "as one plan.") in text
     assert "| `find` | `Match` | always | no |" in text
     assert ("| `checks` | `Check` | always | per item of `find.item_uids` as "
             "`uid` (matches); at most 5; until `lambda checks: sum(c.passed for c in checks) >= 2` |") in text
-    assert "| `extra` | none | only when `lambda find: len(find.item_uids) > 1` | no |" in text
-    # A named function is shown by its name.
-    assert "| `report` | none | only when `has_checks` | no |" in text
-    assert "Settings: `when=lambda find: len(find.item_uids) > 1`." in text
+    # A phase's condition is the tests its method made on placeholder facts (len() reads
+    # one item: a test that the list is not empty).
+    assert "| `extra` | none | only when `find.item_uids` | no |" in text
+    assert "| `report` | none | only when `checks` | no |" in text
+    assert "Settings: `when=find.item_uids`." in text
     assert ("Settings: `over='find.item_uids'`, `item='uid'`, `max_items=5`, "
             "`until=lambda checks: sum(c.passed for c in checks) >= 2`, `noun='matches'`.") in text
-    # For deep = false plan() returns None: the flat steps() are rendered, and said so.
+    # For deep = false __call__ gives one phase that reads no facts: it runs flat, said so.
     flat = text.index("### Plan when deep = false")
     phased = text.index("### Plan when deep = true")
-    assert ("`plan()` returns no phases for these inputs: the call runs flat, from `steps()`."
+    assert (f"{skill_preview.FLAT_NOTE}"
             "\n\n1. `find_item query=<names>`\n2. `run_check on each match`") in text[flat:phased]
 
 
@@ -439,7 +429,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from fastworkflow.skill_phases import Phase
+from fastworkflow.skill import phase
 
 
 class Signature:
@@ -472,36 +462,37 @@ class Box(BaseModel):
     weight: float = Field(json_schema_extra={"from": "weigh_box.weight"})
 
 
-def plan(input: Signature.Input):
-    phases = [Phase("shelf", lambda: [f"find_shelf query={input.shelf}", "list_boxes"], output=Shelf)]
-    if input.scope == "named":
-        names = [name for name in (input.first, input.second) if name]
-        phases.append(Phase("box", lambda name: [f"open_box label={name}", "weigh_box"],
-                            output=Box, over=names, item="name", bind=False))
-    else:
-        phases.append(Phase("box", lambda uid, shelf: box_steps(uid, shelf), output=Box,
-                            over="shelf.box_uids", item="uid", max_items=input.boxes or None))
-    phases.append(Phase("report", lambda shelf=None, box=None: report_steps(shelf, box)))
-    return phases
+class PlanGenerator:
+    def shelf(self, input) -> Shelf:
+        return [f"find_shelf query={input.shelf}", "list_boxes"]
+
+    @phase(over=lambda input: [n for n in (input.first, input.second) if n]
+           if input.scope == "named" else "shelf.box_uids",
+           bind=lambda input: input.scope != "named",
+           max_items=lambda input: None if input.scope == "named" else input.boxes or None)
+    def box(self, input, uid, shelf=None) -> Box:
+        if input.scope == "named":
+            return [f"open_box label={uid}", "weigh_box"]
+        return box_steps(uid, shelf)
+
+    def report(self, shelf, box=None):
+        if box is None:
+            return ["say that no box was opened"]
+        lines = []
+        for one in box:
+            kind = one.label.split("_", 1)[0]
+            where = "on the shelf" if one.uid in shelf.box_uids else "not on the shelf"
+            lines.append(f"say that {one.label} (kind {kind}) is {where} and weighs "
+                         f"{int(one.weight)}")
+        return lines or ["say that no box was opened"]
 
 
-def box_steps(uid=None, shelf=None):
-    if shelf is None or uid not in shelf.box_uids:
+def box_steps(uid, shelf):
+    if uid not in shelf.box_uids:
         return ["open_box with the uid of the next box", "weigh_box"]
-    index = shelf.box_uids.index(uid)
+    index = next(i for i, one in enumerate(shelf.box_uids) if one == uid)
     return (["go_up"] if index else []) + [
         f"open_box box_uid={uid} ({shelf.box_labels[index]})", "weigh_box"]
-
-
-def report_steps(shelf=None, box=None):
-    if shelf is None or box is None:
-        return ["say what each box opened weighs"]
-    lines = []
-    for one in box:
-        kind = one.label.split("_", 1)[0]
-        where = "on the shelf" if one.uid in shelf.box_uids else "not on the shelf"
-        lines.append(f"say that {one.label} (kind {kind}) is {where} and weighs {int(one.weight)}")
-    return lines or ["say that no box was opened"]
 '''
 
 PICK_KIT = '''
@@ -510,7 +501,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from fastworkflow.skill_phases import Phase
+from fastworkflow.skill import phase
 
 
 class Signature:
@@ -543,23 +534,28 @@ class Inner(BaseModel):
 MODELS = {"box": BoxMatch, "crate": CrateMatch, "bin": BoxMatch, "tray": BoxMatch}
 
 
-def plan(input: Signature.Input):
-    wanted = input.name
-    phases = [Phase("find", lambda: [f"find_{input.kind} query={input.name} mode={input.mode}"
-                                     + (f" note={input.note}" if input.note else "")],
-                    output=MODELS[input.kind])]
-    if input.kind == "crate" and input.mode == "deep":
-        phases.append(Phase("inner", lambda find: [f"open_inner of {uid_of(find)}"], output=Inner,
-                            optional=True))
-    phases.append(Phase("audit", lambda: ["run_audit"], when=input.audit))
-    phases.append(Phase("answer", lambda find: [f"say what {uid_of(find)} holds"],
-                        when=lambda find: find.matches(
-                            wanted)))
-    return phases
+class PlanGenerator:
+    def __call__(self, input):
+        inner = [self.inner] if input.kind == "crate" and input.mode == "deep" else []
+        audit = [self.audit] if input.audit else []
+        return [self.find, *inner, *audit, self.answer]
 
+    @phase(output=lambda input: MODELS[input.kind])
+    def find(self, input):
+        return [f"find_{input.kind} query={input.name} mode={input.mode}"
+                + (f" note={input.note}" if input.note else "")]
 
-def uid_of(find=None):
-    return find.uid if find else "the record found"
+    @phase(optional=True)
+    def inner(self, find) -> Inner:
+        return [f"open_inner of {find.uid}"]
+
+    def audit(self):
+        return ["run_audit"]
+
+    def answer(self, input, find):
+        if not find.matches(input.name):
+            return []
+        return [f"say what {find.uid} holds"]
 '''
 
 
@@ -584,8 +580,8 @@ def test_a_fan_out_over_a_literal_list_renders_each_item(shelf_workflow):
     text = skill_preview.render_previews(shelf_workflow)["walk_boxes.md"]
     assert "=None" not in text
     both = _plan(text, "when second = given")
-    assert "For item 1 of 2, `name` = `<first>`:\n\n1. `open_box label=<first>`" in both
-    assert "For item 2 of 2, `name` = `<second>`:\n\n1. `open_box label=<second>`" in both
+    assert "For item 1 of 2, `uid` = `<first>`:\n\n1. `open_box label=<first>`" in both
+    assert "For item 2 of 2, `uid` = `<second>`:\n\n1. `open_box label=<second>`" in both
     # a fan-out over an empty list runs nothing, and says so
     none = _plan(text, "when scope = named, first = empty")
     assert skill_preview.NO_ITEMS_NOTE in none
@@ -614,7 +610,7 @@ def test_fan_out_caps_and_outputs_are_shown_with_the_inputs_that_give_them(shelf
     cell = next(line for line in previews["walk_boxes.md"].splitlines() if line.startswith("| `box` |"))
     alternatives = cell.split(" | ")[3].split("<br>")
     assert "when scope = every, boxes = 3: per item of `shelf.box_uids` as `uid`; at most 3" in alternatives
-    assert ("when second = given: per item of `['<first>', '<second>']` as `name`; not bound "
+    assert ("when second = given: per item of `['<first>', '<second>']` as `uid`; not bound "
             "to a record") in alternatives
     assert all(a.startswith(("when ", "unless ")) for a in alternatives)
     find = next(line for line in previews["pick_kit.md"].splitlines() if line.startswith("| `find` |"))
@@ -676,9 +672,10 @@ def test_many_renders_show_plans_that_need_two_changed_inputs(shelf_workflow):
 
 def test_a_condition_shows_its_bound_values_on_one_line(shelf_workflow):
     """Fix 9: a closure name reads as its value, and a lambda over two lines joins without
-    a space after the bracket."""
+    a space after the bracket. A PlanGenerator phase's condition is the tests its method
+    made on the placeholder facts (a call reads with no arguments)."""
     text = skill_preview.render_previews(shelf_workflow)["pick_kit.md"]
-    assert "| `answer` | none | only when `lambda find: find.matches('<name>')` | no |" in text
+    assert "| `answer` | none | only when `find.matches()` | no |" in text
     assert "( " not in text
 
     def outer(kind):
@@ -842,15 +839,13 @@ def test_a_flat_skill_shows_its_pages_line(workflow):
     assert "Pages: step 2 reads page 1 only." in text.splitlines()
 
 
-# ------------------------------------------------- template wording vs did not run (fix-ajir.13)
+# ------------------------------------------------- a phase that may be skipped, in the template
 
 SHELF_WALK = '''
-"""shelf_walk: one shelf, its first box when the request names one, and its label."""
-from typing import Optional
-
+"""shelf_walk: one shelf, its named box when the request names one, and its label."""
 from pydantic import BaseModel, Field
 
-from fastworkflow.skill_phases import Phase, concatenated_steps
+from fastworkflow.skill import fact_from
 
 
 class Signature:
@@ -861,67 +856,47 @@ class Signature:
         box: str = Field(default="", description="a box to open; empty for none")
 
 
-class ShelfMatch(BaseModel):
-    uid: str = Field(json_schema_extra={"from": "find_shelf.shelf_uid"})
+class PlanGenerator:
+    def __call__(self, input):
+        box = [self.box] if input.box else []
+        return [self.find, *box, self.label, self.only_after_box]
 
+    class ShelfMatch(BaseModel):
+        uid: str = fact_from("find_shelf.shelf_uid")
 
-class BoxFacts(BaseModel):
-    uid: str = Field(json_schema_extra={"from": "open_box_by_uid.box_uid"})
+    def find(self, input) -> ShelfMatch:
+        return [f"find_shelf query={input.shelf}"]
 
+    class BoxFacts(BaseModel):
+        uid: str = fact_from("open_box_by_uid.box_uid")
 
-def plan(input: Signature.Input) -> list[Phase]:
-    return [
-        Phase("find", lambda: [f"find_shelf query={input.shelf}"], output=ShelfMatch),
-        Phase("box", lambda find: box_steps(input.box, find), output=BoxFacts,
-              when=lambda find: bool(input.box)),
-        Phase("label", lambda find, box=None: label_steps(find, back=CHECK)),
-        Phase("only_after_box",
-              lambda box=None: [f"list_items on {box.uid if box else 'the box'}"],
-              when=lambda box: box is not None),
-    ]
+    def box(self, input, find) -> BoxFacts:
+        return [f"open_box_by_uid with the uid of the {input.box} match"]
 
+    def label(self, find, box=None):
+        return (["go_up (back to the shelf)"] if box is not None else []) + ["show_label"]
 
-def steps(input: Signature.Input) -> list[str]:
-    return concatenated_steps(plan(input))
-
-
-def box_steps(box, find: Optional[ShelfMatch] = None):
-    return [f"open_box_by_uid with the uid of the {box} match"]
-
-
-def label_steps(find: Optional[ShelfMatch] = None, back=True):
-    return (["go_up (back to the shelf)"] if back else []) + ["show_label"]
+    def only_after_box(self, box=None):
+        if box is None:
+            return []
+        return [f"list_items on {box.uid}"]
 '''
 
 
-def _shelf_walk(tmp_path, check: str):
+def test_a_phase_reading_a_skipped_phase_reads_as_if_it_ran_in_the_template(tmp_path):
+    """The template is built with placeholder facts, never None (the former "template reads
+    as not run" check, fix-ajir.13, is gone): a phase reading a phase the call has shows its
+    wording for when that phase ran; for a call without that phase its default holds."""
     from fastworkflow import workflow_agent
 
     folder = tmp_path / "shelf_wf"
     (folder / "_skills").mkdir(parents=True)
-    (folder / "_skills" / "shelf_walk.py").write_text(
-        textwrap.dedent(SHELF_WALK).replace("CHECK", check))
-    return str(folder), workflow_agent.load_skill_commands(str(folder))["shelf_walk"]
-
-
-def test_a_template_that_reads_as_did_not_run_is_flagged(tmp_path, monkeypatch, capsys):
-    # The None test of a fact of a phase that may not run, before the facts that are only
-    # None in the template: the planner's template drops the go_up the run has.
-    folder, command = _shelf_walk(tmp_path, "box is not None")
-    problems = skill_preview.not_run_wording_problems(command)
-    assert problems == ["shelf_walk: phase 'label': its template wording is its wording when "
-                        "phase 'box' did not run; test the facts that are always there for "
-                        "None first"]
-    skill_preview.write_previews(folder)
-    assert _run_cli(monkeypatch, "skill", "preview", folder, "--check") == 1
-    assert "template reads as not run: shelf_walk: phase 'label'" in capsys.readouterr().out
-
-
-def test_the_generic_wording_first_passes_and_a_phase_its_own_when_skips_is_not_flagged(
-        tmp_path, monkeypatch):
-    # The template tests the always-there fact first; "only_after_box" reads box in its own
-    # `when`, so without box it does not run and is not compared.
-    folder, command = _shelf_walk(tmp_path, "box is not None or find is None")
-    assert skill_preview.not_run_wording_problems(command) == []
-    skill_preview.write_previews(folder)
-    assert _run_cli(monkeypatch, "skill", "preview", folder, "--check") == 0
+    (folder / "_skills" / "shelf_walk.py").write_text(textwrap.dedent(SHELF_WALK))
+    command = workflow_agent.load_skill_commands(str(folder))["shelf_walk"]
+    assert list(command.template) == [
+        "find_shelf query=<shelf>",
+        "open_box_by_uid with the uid of the <box> match (only when box is given)",
+        "go_up (back to the shelf) (only when box is given)",
+        "show_label",
+        "list_items on <box.uid> (only when box is given)",
+    ]

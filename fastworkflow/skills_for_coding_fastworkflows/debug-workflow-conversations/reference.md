@@ -82,8 +82,8 @@ one command inside a tool call — this is the whole loop). Attributes include
 `agent_input`, `resumed`, `attempts`, `suspended`, `final_answer`.
 
 ### `fw.skill.phase` (kind `internal`) — one phase of a phased skill call
-Added in aggregate span contract 16. A skill call whose skill file defines
-`plan()` runs each phase as its own executor run, so a turn has one
+Added in aggregate span contract 16. A phased skill call (its `PlanGenerator`'s
+phases) runs each phase as its own executor run, so a turn has one
 `fw.skill.phase` span per phase run, each the parent of that run's
 `fw.agent.execute`. Opened with `skill`, `phase`, `phase_index` (0-based) of
 `phase_count`, `step_budget`, `first_step` and `resumed` (a run resumed after

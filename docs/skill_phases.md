@@ -1,164 +1,101 @@
 # Skill phases
 
-A skill with parameters (`_skills/<name>.py`, see the `fastworkflow.skill_commands`
-module documentation) normally expands into one flat list of steps that one executor run
-works through. A long skill can instead be written as **phases**: bounded sub-plans run
+A skill with parameters (`_skills/<name>.py`, see the `fastworkflow.skill` and
+`fastworkflow.skill_commands` module documentation) may expand into one flat list of steps
+that one executor run works through. A long skill can instead be written as **phases**: bounded sub-plans run
 one after another, each by a fresh executor run with its own step budget, with the facts
 one phase found passed in code to the next.
 
 ## The skill file
 
-```python
-from typing import Optional
-
-from pydantic import BaseModel, Field
-
-from fastworkflow.skill_phases import Phase, fact_from
-
-
-class Signature:
-    """Show one named book and who has it on loan."""
-
-    class Input(BaseModel):
-        name: str = Field(description="the book's title")
-        notes: bool = Field(default=False, description="the request asks about its notes")
-
-
-class Found(BaseModel):
-    book_uids: list[str] = fact_from("find_book.book_uids", min_length=1)
-
-
-class BookFacts(BaseModel):
-    uid: str = fact_from("open_book_by_uid.book_uid")
-    loan_uids: list[str] = fact_from("list_loans.loan_uids")
-
-
-def book_steps(find: Optional[Found] = None):
-    uid = find.book_uids[0] if find else "<the uid of the match>"
-    return [f"open_book_by_uid book_uid={uid}", "list_loans (full list)"]
-
-
-def report_steps(book: Optional[BookFacts] = None):
-    if book is None:
-        return ["say who has the book on loan"]
-    return [f"say that {book.uid} has loans {', '.join(book.loan_uids) or 'none'}"]
-
-
-def plan(input: Signature.Input) -> list[Phase]:
-    return [
-        Phase("find", lambda: ["open_library", f"find_book query={input.name}"], output=Found),
-        Phase("book", lambda find: book_steps(find), output=BookFacts),
-        Phase("notes", lambda book: [f"count_notes on {book.uid if book else 'the book'}"],
-              when=input.notes),
-        Phase("report", lambda book: report_steps(book)),
-    ]
-```
-
-- `plan(input) -> list[Phase]` is optional. A skill without it runs as ONE phase, named
-  after the skill, whose steps are `steps(input)` (`skill_commands.call_phases`; see
-  "Steps run by code" below). `plan()` needs a skill with parameters. It may return
-  `None` (or `[]`) for some inputs: that call then runs the same way, as one phase of
-  `steps(input)` (see "Phased for some inputs only" below).
-- `Phase(name, steps_fn, output=None, when=True, over=None, item="item", max_items=None,
-  bind=True, until=None, noun=None, optional=False)`:
-  - `name`: a Python identifier, unique in the plan.
-  - `steps_fn`: returns the phase's steps (a list of str). Its parameters are bound
-    **by name** to the outputs of earlier phases, as typed objects: `lambda find: ...`
-    receives the `find` phase's filled `Found`. A zero-argument `steps_fn` receives
-    nothing. A parameter is bound only when an earlier phase of that name ran and declares
-    an `output`; otherwise it keeps its default, and one without a default fails the
-    phase (`skill_phases.bound_arguments`). Which default to rely on depends on when the
-    earlier phase is left out:
-    - left out by the input (`when=False`, or not listed): `plan()` knows it, so build
-      the later phase with or without that parameter (both `Phase(...)` calls in
-      `plan()`, under the same `if`), not with a default;
-    - skipped at run time (a callable `when` that is false, an `optional` phase that
-      failed): `plan()` cannot know it, so the parameter defaults to `None`
-      (`lambda find=None: ...`) and the function handles `None`.
-
-    The phase functions a `steps_fn` calls take each fact as `Optional[...] = None`
-    anyway: building the flat `steps()` and the template passes `None` for every
-    parameter without a default (`concatenated_steps`). A parameter defaulting to `None`
-    must still name an earlier phase with an output in at least one plan the inputs give,
-    so a misspelled name fails the load (`check_bindings`); a parameter with another
-    default (`lambda find, kind=kind: ...`) keeps that value and is not bound.
-  - `output`: a facts model. Each field names the command field it is copied from,
-    `json_schema_extra={"from": "<command>.<field>"}`, written `fact_from("<command>.<field>")`
-    (`Field` keyword arguments pass through: `fact_from("find_book.book_uids",
-    min_length=1)`): a field of that command's `Signature.Output` (returned as
-    `CommandResponse.output`), else of its `Signature.Input`. See "Command outputs and facts" in `observation_search.md`.
-    `None`: the phase passes nothing on.
-  - `when=False` leaves the phase out, the same as not listing it. `when` may also be a
-    callable of earlier phases' outputs, decided just before the phase runs (see
-    "Conditions on earlier facts" below).
-  - `over`, `item`, `max_items`, `bind`, `until`, `noun`: a fan-out phase, run once per item (see
-    "Fan-out phases" below).
-  - `optional`: `True` for a phase the request does not need (it reads something the
-    answer can do without); its failure does not stop the job (see "Optional phases"
-    below). A phase is required by default. A bool: `plan()` decides it from the input
-    (`optional=not input.group`).
-- `steps(input)` is optional in a file with `plan()`: the loader gives such a file
-  `concatenated_steps(plan(input))` as its `steps()` (`skill_commands.command_from_module`).
-  That is the phases' steps joined in order, each built with no earlier outputs, every
-  parameter without a default given `None`. Skill matching, the planner's view of the
-  skill call and the template fallback read it. A phase with a callable `when` is part of
-  the concatenation (it may run). Write `steps()` only when `plan()` returns `None` for
-  some inputs (below).
-
-### Phased for some inputs only
+A skill file writes its phases as the methods of `class PlanGenerator` (the one-page guide:
+[skill_file_layout.md](skill_file_layout.md); reference: the `fastworkflow.skill` module
+documentation):
 
 ```python
-def plan(input):
-    if not input.person:
-        return None          # run this call flat, from steps()
-    return [Phase("find", ...), Phase("person", ...), Phase("report", ...)]
+class PlanGenerator:
+    def __call__(self, input):                      # the shape of this call
+        notes = [self.notes] if input.notes else []
+        return [self.find, self.book, *notes, self.report]
 
+    def find(self, input) -> Found:
+        return ["open_library", f"find_book query={input.name}"]
 
-def steps(input):
-    return [...]             # the flat steps, written out
+    def book(self, input, find) -> BookFacts:
+        return [pick("open_book_by_uid", book_uid=find.only_uid(input.name), named=input.name),
+                "list_loans (full list)"]
+
+    def notes(self, book):
+        return [f"count_notes on {book.uid}"]
+
+    def report(self, book):
+        return [f"say that {book.uid} has loans {self._loans(book)}"]
+
+    def _loans(self, book):
+        return ", ".join(book.loan_uids) or "none"
 ```
 
-`plan()` returning `None` or `[]` (`skill_phases.is_flat_plan`) means "run this call
-flat": `phases_for` returns `None`, and the skill call (`plan_skill_call`) gets one phase
-named after the skill whose steps are `steps(input)` (`call_phases`), exactly as a skill
-without `plan()` does. Such a file must define its own `steps()`: `concatenated_steps(None)` raises, and a file with
-no `steps()` whose `plan()` runs flat for some placeholder input fails the load. A plan
-whose phases are all left out by `when=False` is still an error, not a flat run.
+The loader (`fastworkflow.skill.planned`) builds the runtime form of each call: a list of
+`skill_phases.Phase(name, steps_fn, output=None, when=True, over=None, item="item",
+max_items=None, bind=True, until=None, noun=None, optional=False)`, one per method
+`__call__` returns (default: every public method, in order):
 
-### Conditions on earlier facts
+- `name`: the method's name; `steps_fn`: the method with `input` given, its other
+  parameters bound **by name** to the outputs of earlier phases, as typed objects
+  (`skill_phases.bound_arguments`). A parameter is bound only when an earlier phase of
+  that name ran and fills facts; otherwise it keeps its default (`=None` for a phase that
+  may be skipped or fail), and one without a default fails the phase. A parameter must
+  still name an earlier phase with facts in at least one call the inputs give, so a
+  misspelled name fails the load (`check_bindings`).
+- `output`: the method's return annotation (or `@phase(output=lambda input: ...)`), a facts
+  model. Each field names the command field it is copied from,
+  `fact_from("<command>.<field>")` (`Field` keyword arguments pass through:
+  `fact_from("find_book.book_uids", min_length=1)`): a field of that command's
+  `Signature.Output` (returned as `CommandResponse.output`), else of its `Signature.Input`.
+  See "Command outputs and facts" in `observation_search.md`. `None`: the phase passes
+  nothing on.
+- `when`: the method itself. The runner calls it when it reaches the phase
+  (`skill_phases.runs_now`) with the real facts; `return []` skips the phase, otherwise its
+  steps are kept and are the phase's plan (the method runs once). A fan-out phase has no
+  `when`: an empty `over` runs no item.
+- `over`, `item`, `max_items`, `bind`, `until`, `noun`, `optional`: from `@phase(...)` (see
+  "Fan-out phases" and "Optional phases" below); `item` is the method's one parameter that
+  is neither `input` nor a phase.
 
-```python
-Phase("details", lambda find: detail_steps(find), output=DetailFacts,
-      when=lambda find: bool(find.item_uids))
-```
+A call whose `__call__` gives one phase that reads and fills no facts runs flat:
+`phases_for` returns `None`, and the skill call (`plan_skill_call`) gets one phase named
+after the skill whose steps are that method's (`call_phases`), exactly as a skill of one
+such method does.
 
-A callable `when` has its parameters bound by name to earlier phases' outputs, exactly
-like `steps_fn` (a fan-out phase's name gives the list of its items' outputs; a parameter
-with nothing to bind keeps its default). It is called when the runner reaches the phase
-(`skill_phases.runs_now`), and never again when the phase resumes after ask_user. A
-false result skips the phase: it runs nothing, fills no output and writes no answer, so
-it counts as not run and a later parameter named after it gets its default (so give that
-parameter one, `=None`, as above). Its
-`fw.skill.phase` span has `skipped: true` and no child. A `when` that raises, or a
-parameter with nothing to bind, fails the phase like a `steps_fn` that fails. Phase
-numbering ("part N of M") still counts it. When the last phase is skipped the answer is
-that of the last phase that ran, so keep the answer phase unconditional. At load a
-`when` parameter without a default must name an earlier phase with an output.
+The skill's template (what skill matching, the planner's view of the skill call and the
+template fallback read) is the phases' steps joined, each method called with every earlier
+fact a `skill_phases.Placeholder` (`concatenated_steps`): see "What the planner sees" in
+the guide.
+
+### Skipped phases
+
+A skipped phase runs nothing, fills no output and writes no answer, so it counts as not run
+and a later parameter named after it gets its default. Its `fw.skill.phase` span has
+`skipped: true` and no child. A method that raises fails the phase. Phase numbering ("part
+N of M") still counts it. The decision is never made again when the phase resumes after
+ask_user. When the last phase is skipped the answer is that of the last phase that ran, so
+keep the answer phase unskippable.
 
 ### Load-time checks
 
-`plan()` runs on the same placeholder inputs the template is rendered from. A result that
-is not a list of `Phase`, a repeated or invalid name, a parameter no earlier phase with an
-output provides (and no default), a parameter defaulting to `None` that no earlier phase
-with an output provides in any of the results, or a malformed `"from"` fails the load
-(`SkillFormatError`): the skill is logged as an error and skipped, and `fastworkflow skill
-preview` fails naming it. Each output model is then checked against the workflow's command
-signatures (`check_fact_sources`): a `"from"` naming a command or field the workflow does
-not have is logged as a warning and the skill still loads, so a workflow can add a
-command's `Output` after the skill that reads it; `fastworkflow skill preview --check`
-fails on it, so a misspelled source is caught before a run. A plain command name that several
-contexts define passes when some context resolves every field of the model; at run time
-it resolves against the context of the phase's record.
+The phases are built on the same placeholder inputs the template is rendered from. A method
+without `self`, an annotation that is not a model, a parameter no earlier phase with facts
+provides (and no default) or that names no such phase in any call, a malformed `"from"`, a
+method that fails while its template is built or writes `None` into a step, and a step that
+names a command the workflow lacks or a parameter its `Signature.Input` lacks
+(`skill_commands.check_step_commands`) fail the load: the skill is logged as an error and
+skipped, and `fastworkflow skill preview` fails naming it. Each output model is then checked
+against the workflow's command signatures (`check_fact_sources`): a `"from"` naming a
+command or field the workflow does not have is logged as a warning and the skill still
+loads, so a workflow can add a command's `Output` after the skill that reads it;
+`fastworkflow skill preview --check` fails on it. A plain command name that several
+contexts define passes when some context resolves every field of the model; at run time it
+resolves against the context of the phase's record.
 
 ## How a phased skill call runs
 
@@ -404,20 +341,23 @@ sub-task runs its phases in order instead of one executor run on the whole list.
 ## Optional phases
 
 ```python
-Phase("group", lambda find: group_steps(find), output=GroupFacts,
-      when=lambda find: bool(find.group_uids), optional=not input.group)
+@phase(optional=lambda input: not input.group)
+def group(self, find) -> GroupFacts:
+    if not find.group_uids:
+        return []
+    return [f"open_group_by_uid group_uid={find.group_uids[0]}", "list_members (full list)"]
 ```
 
 A phase is required by default: its failure stops the job (step 6 above). An
 `optional=True` phase is one the request does not need. When it fails (its fill, its
-`steps_fn`, a callable `when` that raises, a fan-out item, its `over`), the job goes on:
+method, a fan-out item, its `over`), the job goes on:
 
 - the phase counts as not run: no output (a later parameter named after it keeps its
   default), and the answers its runs wrote and the notes it added are dropped;
 - its `fw.skill.phase` span still ends with status `error` and `facts_error`;
-- the next phase runs, and the answer is written as for a phase whose `when` was false.
+- the next phase runs, and the answer is written as for a skipped phase.
 
-So a later `steps_fn` that tells "not run" from "skipped" reads the earlier facts: the
+So a later phase that tells "not run" from "skipped" reads the earlier facts: the
 answer phase of a skill whose optional group phase failed sees `group=None` while the
 match list still has the group, and says the group was found but not read. Keep the answer
 phase required. The skill preview shows "optional (its failure does not stop the job)" in
@@ -431,43 +371,43 @@ item is its own sub-plan: its own executor run (or answer-only call), budget, fi
 check and fill.
 
 ```python
-from fastworkflow.skill_phases import Phase, fact_from, facts_text
+from fastworkflow.skill import fact_from, phase
+from fastworkflow.skill_phases import facts_text
 
 
-class Found(BaseModel):
-    item_uids: list[str] = fact_from("find_item.item_uids", min_length=1)
+class PlanGenerator:
+    class Found(BaseModel):
+        item_uids: list[str] = fact_from("find_item.item_uids", min_length=1)
 
+    def find(self, input) -> Found:
+        return ["open_catalog", f"find_item query={input.query}"]
 
-class ItemFacts(BaseModel):
-    uid: str = fact_from("open_item_by_uid.item_uid")
-    part_labels: list[str] = fact_from("list_parts.labels")
+    class ItemFacts(BaseModel):
+        uid: str = fact_from("open_item_by_uid.item_uid")
+        part_labels: list[str] = fact_from("list_parts.labels")
 
+    # One sub-plan per uid the search found; `uid` is the item.
+    @phase(over="find.item_uids")
+    def items(self, uid) -> ItemFacts:
+        return [f"open_item_by_uid item_uid={uid}", "list_parts (full list)"]
 
-def plan(input):
-    return [
-        Phase("find", lambda: ["open_catalog", f"find_item query={input.query}"], output=Found),
-        # One sub-plan per uid the search found; `uid` is the item.
-        Phase("items", lambda uid=None: [f"open_item_by_uid item_uid={uid or '<the uid>'}",
-                                         "list_parts (full list)"],
-              output=ItemFacts, over="find.item_uids", item="uid"),
-        # `items` is the list of the per-item ItemFacts, in item order. No command: answer-only.
-        Phase("report", lambda items=None: [
-            "say which parts each item has: "
-            + " | ".join(facts_text(i) for i in items or []) if items else
-            "say which parts each item has"]),
-    ]
+    # `items` is the list of the per-item ItemFacts, in item order. No command: answer-only.
+    def report(self, items):
+        return [f"say which parts each item has: {self._parts(items)}"]
+
+    def _parts(self, items):
+        return " | ".join(facts_text(i) for i in items)
 ```
 
-- `over`: a list of items (`over=[n.strip() for n in input.names.split(",")]`), or
+- `over`: a list of items (`over=lambda input: [n.strip() for n in input.names.split(",")]`), or
   `"<earlier phase>.<list field>"`, a list field of an earlier phase's output (of a
   fan-out phase's outputs: that field of each, joined). Any other string fails the load,
   as does a reference to a phase that is not earlier or has no output, or to a field its
   output does not have. Empty values and repeats are dropped, order kept.
-- `item`: the name of the `steps_fn` parameter the item is bound to (default `"item"`);
-  it must not be an earlier phase's name. Other parameters bind to earlier outputs as
-  usual. In the flat `steps()` (`concatenated_steps`), a fan-out over a list gives its
-  steps once per item; one over an earlier field gives them once, with the item `None`
-  (or the parameter's default).
+- `item`: the method's one parameter that is neither `input` nor an earlier phase.
+  Other parameters bind to earlier outputs as usual. In the template
+  (`concatenated_steps`), a fan-out over a list gives its steps once per item; one over an
+  earlier field gives them once, with the item a placeholder (`<uid>`).
 - `max_items`: at most this many items run (default `FW_SKILL_FANOUT_MAX_ITEMS`, else 10).
   The rest are left out, and the answer ends with "Note: only the first N of M items were
   covered."

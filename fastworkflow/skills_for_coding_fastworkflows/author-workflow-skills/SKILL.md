@@ -3,28 +3,30 @@ name: author-workflow-skills
 description: >-
   Write fastWorkflow skill files (`_skills/<name>.py`): parameterized multi-command jobs whose
   steps are built in code and expanded into the agent's numbered plan, flat or as phases that
-  pass facts to each other. Covers when to write a skill instead of a command, the file shape,
-  the `Input` rules, `plan()`/`Phase`/`fact_from`, `plan()` returning None, the `skill preview`
-  / `--check` loop, and the step wording the framework reads in code (what code runs, what the
-  finish check holds, what writes the answer). Use when adding, reviewing or debugging a skill
-  file, or when a skill's steps are run, checked or answered differently than intended.
+  pass facts to each other. Covers when to write a skill instead of a command, the file shape
+  (`Signature` + `PlanGenerator`), the `Input` rules, phases, facts and `fact_from`, `@phase`,
+  `__call__`, the `skill preview` / `--check` loop, and the step wording the framework reads
+  in code (what code runs, what the finish check holds, what writes the answer). Use when
+  adding, reviewing or debugging a skill file, or when a skill's steps are run, checked or
+  answered differently than intended.
 ---
 
 # Writing workflow skills
 
-A skill is one Python file, `_skills/<name>.py`, next to `_commands/`. Its `Signature`
-describes a job; its `Input` declares the job's typed arguments; `steps(input)` (flat) or
-`plan(input)` (phases) builds the job's steps as text. At run time the skill matcher picks
-the skill for a request (`workflow_agent.match_skill`, from the description and
-`plain_utterances`), the planner fills `Input` in one typed call
-(`skill_commands.plan_skill_call`), the arguments are checked, and the steps become the
-agent's numbered plan.
+A skill is one Python file, `_skills/<name>.py`, next to `_commands/`, written like a command
+file. Its `Signature` describes a job and its `Input` declares the job's typed arguments,
+exactly as a command's; where a command has a `ResponseGenerator` (it generates a response), a
+skill has a `PlanGenerator` (it generates a plan): each public method is a phase that returns
+its steps as text. At run time the skill matcher picks the skill for a request
+(`workflow_agent.match_skill`, from the description and `plain_utterances`), the planner fills
+`Input` in one typed call (`skill_commands.plan_skill_call`), the arguments are checked, and
+the steps become the agent's numbered plan.
 
-The full reference is three documents in the fastworkflow repository (not in the wheel):
-`docs/skill_file_layout.md` (layout and the preview), `docs/skill_phases.md` (phases, facts,
-code-run steps, answers) and `docs/skill_phases_code_run_steps.md` (the design of code-run
-steps). The module documentation of `fastworkflow.skill_commands` and
-`fastworkflow.skill_phases` ships with the package and is the format's source of truth.
+The one-page guide is `docs/skill_file_layout.md` in the fastworkflow repository (not in the
+wheel), with the preview; `docs/skill_phases.md` covers phases, facts, code-run steps and
+answers. The module documentation of `fastworkflow.skill` (the form),
+`fastworkflow.skill_commands` and `fastworkflow.skill_phases` (the runtime) ships with the
+package and is the source of truth.
 
 Code references below name a module of the `fastworkflow` package and a symbol in it.
 
@@ -34,11 +36,11 @@ Code references below name a module of the `fastworkflow` package and a symbol i
 |---|---|
 | it is one action on the application (wraps code, returns an `Output`) | a family of requests is answered by the same several commands in a known order (find, open, read, answer) |
 | the agent should choose it by intent | the agent keeps getting the order, a value or the answer wrong for that family |
-| it needs to read state or call a backend | the job only needs text: `steps()` and `plan()` build text and must not call a backend or read state (`skill_commands` module doc) |
+| it needs to read state or call a backend | the job only needs text: `PlanGenerator` methods build text and must not call a backend or read state (`skill_commands` module doc) |
 
-A skill adds no capability: every step it writes runs an existing command. A one-command
-skill is a command with a worse name. Fixed steps with no parameters are allowed
-(`steps()` with no argument): the text planner adapts them as a template.
+A skill adds no capability: every step it writes runs an existing command (checked at load).
+A one-command skill is a command with a worse name. Fixed steps with no parameters are
+allowed (a `PlanGenerator` with one method taking no `input`): the text planner adapts them.
 
 ## The file
 
@@ -46,12 +48,9 @@ skill is a command with a worse name. Fixed steps with no parameters are allowed
   `workflow_agent.py` `_read_skill_file`). `_<name>.py` is a helper module skill files
   import (shared lookup tables and phrases, never code that chooses steps); `_split.py` is
   the split settings; subfolders are skipped (`workflow_agent.py` `_skill_files`).
-- Order (`docs/skill_file_layout.md`): module docstring, imports, `Signature`, fact models,
-  `plan()` or `steps()`, then the step functions in the order they are called.
-- A phased file has `plan()` and no `steps()`: the loader gives it
-  `concatenated_steps(plan(input))` (`skill_commands.py` `command_from_module`,
-  `_concatenated_steps_fn`). Write `steps()` only for a flat skill, or when `plan()` returns
-  `None` for some inputs.
+- Order (`docs/skill_file_layout.md`): module docstring, imports, `Signature`, shared facts
+  models, `PlanGenerator` (`__call__` first, then the phases in run order, then `_helpers`),
+  module-level tables and shared functions.
 - A file that fails to import or is malformed is logged and skipped at run time (the other
   skills still load); `fastworkflow skill preview` fails naming it
   (`workflow_agent.py` `_load_skill_file`, `skill_preview.py` `render_previews`).
@@ -67,11 +66,9 @@ Finds the item by name, opens the match and reads every part. When the request a
 about checks (`input.checks`), a phase counts them. The last phase writes the answer
 from the facts the earlier phases filled.
 """
-from typing import Optional
-
 from pydantic import BaseModel, Field
 
-from fastworkflow.skill_phases import Phase, fact_from
+from fastworkflow.skill import fact_from, pick
 
 
 class Signature:
@@ -86,60 +83,54 @@ class Signature:
                              json_schema_extra={"verify": True})
 
 
-class ItemMatch(BaseModel):
-    item_uids: list[str] = fact_from("find_item.item_uids", min_length=1)
+class PlanGenerator:
+    """find -> item -> checks (when asked) -> report."""
 
+    def __call__(self, input):
+        checks = [self.checks] if input.checks else []
+        return [self.find, self.item, *checks, self.report]
 
-class ItemFacts(BaseModel):
-    uid: str = fact_from("open_item_by_uid.item_uid")
-    label: str = fact_from("open_item_by_uid.label")
-    part_labels: list[str] = fact_from("list_parts.labels")
+    class ItemMatch(BaseModel):
+        uids: list[str] = fact_from("find_item.item_uids", min_length=1)
+        labels: list[str] = fact_from("find_item.labels")
 
+    def find(self, input) -> ItemMatch:
+        return [f"find_item query={input.name}"]
 
-class CheckFacts(BaseModel):
-    total: int = fact_from("count_checks.total")
+    class ItemFacts(BaseModel):
+        uid: str = fact_from("open_item_by_uid.item_uid")
+        label: str = fact_from("open_item_by_uid.label")
+        part_labels: list[str] = fact_from("list_parts.labels")
 
+    def item(self, input, find) -> ItemFacts:
+        return [pick("open_item_by_uid", item_uid=find.uids[0], named=input.name),
+                "list_parts (full list)"]
 
-def plan(input: Signature.Input) -> list[Phase]:
-    phases = [
-        Phase("find", lambda: find_steps(input.name), output=ItemMatch),
-        Phase("item", lambda find: item_steps(input.name, find), output=ItemFacts),
-    ]
-    if input.checks:
-        phases += [Phase("checks", lambda: ["count_checks"], output=CheckFacts),
-                   Phase("report", lambda item, checks: report_steps(item, checks))]
-    else:
-        phases.append(Phase("report", lambda item: report_steps(item)))
-    return phases
+    class CheckFacts(BaseModel):
+        total: int = fact_from("count_checks.total")
 
+    def checks(self) -> CheckFacts:
+        return ["count_checks"]
 
-def find_steps(name):
-    return [f"find_item query={name}"]
+    def report(self, item, checks=None):
+        lines = [f"say that {item.label} has the parts: {self._parts(item)}"]
+        if checks is not None:
+            lines.append(f"say that {item.label} has {checks.total} open checks")
+        return lines
 
-
-def item_steps(name, find: Optional[ItemMatch] = None):
-    if find is None:
-        return [f"open_item_by_uid with the uid of the {name} match", "list_parts (full list)"]
-    return [f"open_item_by_uid item_uid={find.item_uids[0]}", "list_parts (full list)"]
-
-
-def report_steps(item: Optional[ItemFacts] = None, checks: Optional[CheckFacts] = None):
-    if item is None:
-        return ["say which parts the item has, and how many open checks when they were counted"]
-    lines = [f"say that {item.label} has the parts: {', '.join(item.part_labels) or 'none'}"]
-    if checks is not None:
-        lines.append(f"say that {item.label} has {checks.total} open checks")
-    return lines
+    def _parts(self, item):
+        return ", ".join(item.part_labels) or "none"
 ```
 
 The same job as a flat skill (one executor run; the pick wording lets code open the match):
 
 ```python
-def steps(input: Signature.Input) -> list[str]:
-    return [f"find_item query={input.name}",
-            f"open_item_by_uid with the uid of the {input.name} match",
-            "list_parts (full list)",
-            "say which parts the item has"]
+class PlanGenerator:
+    def item(self, input):
+        return [f"find_item query={input.name}",
+                f"open_item_by_uid with the uid of the {input.name} match",
+                "list_parts (full list)",
+                "say which parts the item has"]
 ```
 
 ## `Input` rules
@@ -160,45 +151,48 @@ check on a live call.
 
 ## Phases, facts and `fact_from`
 
-- `Phase(name, steps_fn, output=None, when=True, over=None, item="item", max_items=None,
-  bind=True, until=None, noun=None, optional=False)` (`skill_phases.py` `Phase`). Each phase
-  is a fresh executor run with its own step budget (`FW_SKILL_PHASE_MAX_STEPS`, default
-  15), except an answer-only phase (one model call, or none). The last phase writes the
-  answer.
-- `output` is a facts model; each field is `fact_from("<command>.<field>", **Field_kwargs)`
-  (`skill_phases.py` `fact_from`): a field of that command's `Output`, else its `Input`. It is
-  filled in code from the runs of that phase only. A required fact no run holds fails the
-  phase, and the job stops with the facts found so far.
-- `steps_fn`'s parameters bind by name to earlier phases' outputs
-  (`skill_phases.py` `bound_arguments`). Unbound: the default; no default: the phase
-  fails.
-  - A phase the input leaves out (`when=False`, or not listed) is known in `plan()`: build
-    the later phase with or without that parameter, under the same `if` (the example's
-    `report`).
-  - A phase skipped at run time (a callable `when` that is false, a failed
-    `optional=True` phase) is read through a parameter defaulting to `None`
-    (`lambda item, extra=None: ...`).
-  - A `None`-defaulted parameter must name an earlier phase with an output in at least one
-    plan the inputs give, or the load fails (`skill_phases.py` `check_bindings`,
-    `skill_commands.py` `_checked_plan`), so a misspelling is caught.
-- Phase functions take each fact as `Optional[...] = None` and write the generic wording
-  first when it is `None`: the flat steps and the template are built with `None` for
-  every parameter without a default (`skill_phases.py` `concatenated_steps`).
-- `over="<phase>.<list field>"` (or a list) fans a phase out, one sub-plan per item;
-  `until`, `max_items`, `noun`, `bind` tune it (`docs/skill_phases.md`, "Fan-out phases").
-- `plan()` returning `None` or `[]` runs that call flat, from `steps()`
-  (`skill_phases.py` `is_flat_plan`); such a file must define `steps()`, since
-  `concatenated_steps` raises on a flat result. A plan whose phases are all `when=False` is
-  an error, not a flat run.
-- At load, `plan()` runs on placeholder inputs (`skill_commands.py` `_checked_plan`):
-  not a list of `Phase`, a repeated or invalid name, a parameter that cannot bind, or a
-  malformed `"from"` fails the load. A `"from"` naming a command or field the workflow
-  lacks is only a warning at load (`skill_commands.py` `check_phase_sources`) and fails
-  `skill preview --check`.
-- A skill imports from `fastworkflow.skill_phases` only what it writes: `Phase`,
-  `fact_from`, `facts_text`, and rarely `concatenated_steps` or `PhaseError`
-  (`skill_phases.py` `__all__`, which also lists helpers workflow tests use).
-  `facts_text(model)` renders facts as `field: value; ...` text for an answer step.
+- Each public method of `PlanGenerator` is a phase (`skill.py` `planned`, building the
+  runtime's `skill_phases.Phase`), in the order written; `_name` methods are helpers. Each
+  phase is a fresh executor run with its own step budget (`FW_SKILL_PHASE_MAX_STEPS`,
+  default 15), except an answer-only phase (one model call, or none). The last phase writes
+  the answer.
+- Its return annotation is its facts model; each field is `fact_from("<command>.<field>",
+  **Field_kwargs)` (`skill_phases.py` `fact_from`): a field of that command's `Output`, else
+  its `Input`. It is filled in code from the runs of that phase only. A required fact no run
+  holds fails the phase, and the job stops with the facts found so far. A model only one
+  phase fills is nested right above the method; one that depends on the input is
+  `@phase(output=lambda input: ...)`.
+- Its parameters bind by name: `input`, and earlier phases' facts (`skill_phases.py`
+  `bound_arguments`). A phase that may have been skipped is read through `=None`. A
+  parameter must name an earlier phase with facts in at least one call the inputs give, or
+  the load fails (`skill_phases.py` `check_bindings`), so a misspelling is caught.
+- `return []` skips the phase. It is always decided when the phase is reached: the runtime
+  calls the method once with the real facts (`skill.py` `_phase_functions`: it is the
+  phase's `when`, and its steps are kept for the run). A skipped phase passes nothing on.
+- The shape of a call: `__call__(self, input)` returns the phase methods it runs, in order
+  (default: all). A call of one phase that reads and fills no facts runs flat, as one plan
+  (`skill.py` `_runs_flat`). A phase repeated for several cases is one method each, calling
+  one shared module function (a `self._helper` called with a fact is not run in the
+  template, it reads as its name).
+- `@phase(over="<phase>.<list field>")` (or a function of `input` giving the items) fans a
+  phase out, one sub-plan per item; its one parameter that is neither `input` nor a phase
+  gets the item; `until`, `max_items`, `noun`, `bind` tune it (`docs/skill_phases.md`,
+  "Fan-out phases"). `@phase(optional=True)`: the job goes on when it fails.
+- The template (what the planner sees; `skill_commands.py` `placeholder_template`) calls
+  each method once per input with `skill_phases.Placeholder` facts: `<find.total>`,
+  `<find.uids[0]>`, `<find.labels[*]>`; a `self._helper` called on one reads `<helper in
+  words>`; every test on one (`bool`, `len`, `==`, `<`, `in`) reads as true and is noted,
+  and the phase's lines end `(only when find.uids)`. `x is None` is not seen. Write wording
+  that tests facts (`a or b`) in a helper.
+- At load (`skill_commands.py` `_checked_plan`, `placeholder_template`,
+  `check_step_commands`; `workflow_agent.py` `step_command_problems`): a method without
+  `self`, a bad annotation, a parameter that cannot bind, a malformed `"from"`, a method
+  that fails on placeholder facts or writes `None` into a step, and a step naming a command
+  the workflow lacks or a parameter its `Signature.Input` lacks fail the load. A `"from"`
+  naming a command or field the workflow lacks is only a warning at load
+  (`check_phase_sources`) and fails `skill preview --check`.
+- A skill imports from `fastworkflow.skill` what it writes: `fact_from`, `pick`, `phase`,
+  `num`, `count`, `listed`.
 
 ## The preview loop
 
@@ -220,11 +214,9 @@ fastworkflow skill preview <workflow_folder> --check    # writes nothing; exit 1
 4. Check each step against the grammar table below: is it run by code, held by the finish
    check, written into the answer as intended?
 5. Commit the previews and run `--check` in CI (`skill_preview.py` `check_previews`):
-   it fails on a stale, missing or extra preview, a skill file that does not load, a
-   fact source the workflow does not have, and a phase whose planner template (built with
-   None facts) reads as if an earlier phase that may not run (a `when`, `optional`) had
-   not run: test the facts that are always there for None first
-   (`skill_preview.not_run_wording_problems`).
+   it fails on a stale, missing or extra preview, a skill file that does not load (a step
+   naming an unknown command or parameter included), a fact source the workflow does not
+   have.
 
 ## Step grammar
 
@@ -267,6 +259,7 @@ condition word in its chain also makes it conditional).
 | a list fact of more than `FW_SKILL_FACTS_MAX_LIST_ITEMS` (100) items joined by `", "`, `"; "`, `" \| "`, `","` or `";"` in a step with no naming word | Cut in the prompt to its first items and "(and K more; M in all)" | `skill_phases.py` `_LIST_SEPARATORS`, `capped_steps` |
 | 4 or more items in a `", "` run of a code-written answer, each exactly an output value | Laid out as sub-bullets | `skill_phases.py` `MIN_BULLETED_ITEMS`, `bulleted_answer` |
 | an empty string | Dropped | `skill_phases.py` `_checked_steps`; `skill_commands.py` `_call_steps` |
+| a step whose first word is snake_case (or a known command): its command and the `key=` of its chain (before `(`, `;` or `,`) | Checked at load against the workflow's commands and their `Signature.Input`; an unknown one fails the load | `skill_commands.py` `step_commands`, `check_step_commands` |
 
 Consequences worth designing for:
 
@@ -288,11 +281,11 @@ Consequences worth designing for:
 - [ ] The job needs several existing commands in a known order (else: a command)
 - [ ] File stem is the skill name; Signature docstring says the job; plain_utterances are generic
 - [ ] Input types are str / bool / int / Literal / Optional[str] = None; bools default false
-- [ ] A phased file has plan() and no steps() unless plan() can return None
+- [ ] Signature + PlanGenerator; each phase a method with self, in run order; helpers _named
 - [ ] Every fact field uses fact_from with a real "<command>.<field>"
-- [ ] Phases left out by the input: both Phase(...) shapes in plan(); skipped at run time: =None
-- [ ] Every phase function handles None facts with the generic wording first (`--check` flags
-  a template that reads as "did not run")
+- [ ] Input-dependent shape in __call__; a skip is `if not <what it needs>: return []`;
+  a phase that may be skipped is read through =None
+- [ ] The template (preview) reads well: wording that tests facts lives in helpers
 - [ ] Each step checked against the grammar table (code-run, held, answered as intended)
 - [ ] skill preview written and committed; --check passes in CI
 ```

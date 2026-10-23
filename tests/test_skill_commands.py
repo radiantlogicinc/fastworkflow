@@ -45,23 +45,25 @@ class Signature:
         return True, ""
 
 
-def steps(input):
-    out = ["open_directory", f"{FIND[input.kind]} query={input.name}"]
-    out.append(f"{listing(input)} filter={input.person}" if input.person else listing(input))
-    if input.include_risk:
-        out.append(f"assess_risk{{owner={input.owner}}}")
-    if input.kind == "group" and not (input.person or input.include_risk):
-        out.append(f"open_group_by_uid with the uid of the {input.name} match")
-    for n in range(2, input.count + 1):
-        out.append(f"open member {n}")
-    out.append(f"stop after the first {COUNT_WORD.get(input.count, input.count)} members")
-    return out
+class PlanGenerator:
+    def steps(self, input):
+        out = ["open_directory", f"{FIND[input.kind]} query={input.name}"]
+        out.append(f"{listing(input)} filter={input.person}" if input.person else listing(input))
+        if input.include_risk:
+            out.append(f"assess_risk{{owner={input.owner}}}")
+        if input.kind == "group" and not (input.person or input.include_risk):
+            out.append(f"open_group_by_uid with the uid of the {input.name} match")
+        for n in range(2, input.count + 1):
+            out.append(f"open member {n}")
+        out.append(f"stop after the first {COUNT_WORD.get(input.count, input.count)} members")
+        return out
 '''
 
 
 def _plain(description: str, steps: list[str]) -> str:
     """The skill file of a skill without params."""
-    return f"class Signature:\n    __doc__ = {description!r}\n\n\ndef steps():\n    return {steps!r}\n"
+    return (f"class Signature:\n    __doc__ = {description!r}\n\n\nclass PlanGenerator:\n"
+            f"    def steps(self):\n        return {steps!r}\n")
 
 
 def _write(tmp_path, skills: dict[str, str]) -> str:
@@ -489,8 +491,9 @@ class Signature:
         {field}
 
 
-def steps(input):
-    return ["step"]
+class PlanGenerator:
+    def steps(self, input):
+        return ["step"]
 '''
 
 
@@ -622,11 +625,12 @@ class Signature:
         note: str = Field(default="", description="free text")
 
 
-def steps(input):
-    out = [f"find_right query={input.right}"]
-    if input.person:
-        out.append(f"find_person query={input.person}")
-    return out
+class PlanGenerator:
+    def steps(self, input):
+        out = [f"find_right query={input.right}"]
+        if input.person:
+            out.append(f"find_person query={input.person}")
+        return out
 '''
 
 
@@ -869,18 +873,28 @@ def test_command_utterances_never_raises_on_an_unreadable_workflow(tmp_path):
 
 PHASED_LOOKUP = LOOKUP + '''
 
-from fastworkflow.skill_phases import Phase
+from fastworkflow.skill import fact_from
+
+FLAT = PlanGenerator().steps
 
 
-class Found(BaseModel):
-    uids: list[str] = Field(json_schema_extra={"from": "find_group.uids"})
+class PlanGenerator:
+    """The same steps as two phases: find (fills Found), then the rest (reads find)."""
 
+    class Found(BaseModel):
+        uids: list[str] = fact_from("find_group.uids")
 
-def plan(input):
-    flat = steps(input)
-    return [Phase("find", lambda: flat[:2], output=Found),
-            Phase("rest", lambda find: flat[2:])]
+    def find(self, input) -> Found:
+        return FLAT(input)[:2]
+
+    def rest(self, input, find):
+        return FLAT(input)[2:]
 '''
+
+#: LOOKUP whose __call__ gives one phase that reads no facts: every call runs flat.
+ONE_PHASE_LOOKUP = LOOKUP.replace(
+    "class PlanGenerator:\n", "class PlanGenerator:\n    def __call__(self, input):\n"
+    "        return [self.steps]\n\n")
 
 
 def test_a_skill_file_with_plan_loads_and_keeps_its_flat_steps(tmp_path, caplog):
@@ -931,8 +945,10 @@ def test_call_phases_gives_plan_phases_or_one_phase_of_the_flat_steps(tmp_path):
     flat = _command(tmp_path / "flat", LOOKUP)
     (one,) = sc.call_phases(flat, args)
     assert one.name == "lookup" and one.output is None and one.steps_fn() == sc.expand(flat, args)
-    # plan() returning None: phases_for still says "flat", call_phases gives the one phase.
-    none_plan = _command(tmp_path / "none", LOOKUP + "\n\ndef plan(input):\n    return None\n")
+    # __call__ giving one phase that reads no facts: phases_for says "flat", call_phases gives
+    # the one phase.
+    none_plan = _command(tmp_path / "none", ONE_PHASE_LOOKUP)
+    assert none_plan.plan_fn is not None
     assert sc.phases_for(none_plan, args) is None
     assert [p.name for p in sc.call_phases(none_plan, args)] == ["lookup"]
     assert sc.call_phases(none_plan, args)[0].steps_fn() == sc.expand(none_plan, args)
@@ -963,8 +979,9 @@ class Signature:
             return self
 
 
-def steps(input):
-    return [f"open {input.kind} {input.first}", f"open {input.kind} {input.second}", "say which is riskier"]
+class PlanGenerator:
+    def steps(self, input):
+        return [f"open {input.kind} {input.first}", f"open {input.kind} {input.second}", "say which is riskier"]
 '''
 
 PAIR_REQUEST = "Which of Payroll and Billing is riskier?"
@@ -1103,8 +1120,6 @@ def test_a_one_element_list_argument_stands_for_its_element(tmp_path, workflow_e
 WIDE = '''
 from pydantic import BaseModel, Field
 
-from fastworkflow.skill_phases import Phase
-
 FLAGS = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa", "lambda_",
          "mu", "nu"]
 
@@ -1129,13 +1144,61 @@ class Signature:
         nu: bool = Field(default=False, description="asks for section nu")
 
 
-def plan(input):
-    phases = [Phase("find", lambda: [f"find_shelf query={input.name}"])]
-    for flag in FLAGS:
-        phases.append(Phase(flag, lambda flag=flag: [f"show_{flag}"], when=getattr(input, flag)))
-    phases.append(Phase("pair", lambda: ["compare_alpha_beta"], when=input.alpha and input.beta))
-    phases.append(Phase("report", lambda: ["say what the shelf holds"]))
-    return phases
+class PlanGenerator:
+    """find, a section phase per flag the request asks for, pair (alpha and beta), report."""
+
+    def __call__(self, input):
+        sections = [getattr(self, flag) for flag in FLAGS if getattr(input, flag)]
+        pair = [self.pair] if input.alpha and input.beta else []
+        return [self.find, *sections, *pair, self.report]
+
+    def find(self, input):
+        return [f"find_shelf query={input.name}"]
+
+    def alpha(self):
+        return ["show_alpha"]
+
+    def beta(self):
+        return ["show_beta"]
+
+    def gamma(self):
+        return ["show_gamma"]
+
+    def delta(self):
+        return ["show_delta"]
+
+    def epsilon(self):
+        return ["show_epsilon"]
+
+    def zeta(self):
+        return ["show_zeta"]
+
+    def eta(self):
+        return ["show_eta"]
+
+    def theta(self):
+        return ["show_theta"]
+
+    def iota(self):
+        return ["show_iota"]
+
+    def kappa(self):
+        return ["show_kappa"]
+
+    def lambda_(self):
+        return ["show_lambda_"]
+
+    def mu(self):
+        return ["show_mu"]
+
+    def nu(self):
+        return ["show_nu"]
+
+    def pair(self):
+        return ["compare_alpha_beta"]
+
+    def report(self):
+        return ["say what the shelf holds"]
 '''
 
 
@@ -1164,7 +1227,7 @@ def test_a_skill_past_max_grid_loads_quickly_warns_once_and_its_template_uses_th
     start = time.perf_counter()
     command = _command(tmp_path, WIDE, "survey_shelf")
     assert time.perf_counter() - start < 10
-    assert len([w for w in warnings if "survey_shelf" in w]) == 1
+    assert len([w for w in warnings if "survey_shelf" in w and "combinations" in w]) == 1
     assert "8192 combinations" in warnings[0] and f"past {sc.MAX_GRID}" in warnings[0]
     template = list(command.template)
     assert template[0] == "find_shelf query=<name>" and template[-1] == "say what the shelf holds"
@@ -1173,7 +1236,7 @@ def test_a_skill_past_max_grid_loads_quickly_warns_once_and_its_template_uses_th
         assert f"show_{flag} (only when {flag})" in template
     assert "compare_alpha_beta (only when alpha and beta)" in template   # two inputs: reached
     sc.placeholder_template(command)   # a second render in this process: no second warning
-    assert len([w for w in warnings if "survey_shelf" in w]) == 1
+    assert len([w for w in warnings if "survey_shelf" in w and "combinations" in w]) == 1
 
 
 #: An enum of forty values: its conditions are made from the values each line sees (fix-ajir.2).
@@ -1195,20 +1258,21 @@ class Signature:
         deep: bool = Field(default=False, description="the request asks for a deep survey")
 
 
-def steps(input):
-    out = [f"find_shelf query={input.name}"]
-    if input.kind in KINDS[:3]:
-        out.append("check_a")
-    if input.kind in KINDS[:20] and input.deep:
-        out.append("deep_scan")
-    if input.kind == KINDS[0] or input.deep:
-        out.append("extra")
-    if input.kind not in KINDS[:2] and input.person:
-        out.append(f"compare with {input.person}")
-    if input.kind != KINDS[-1]:
-        out.append("not_last")
-    out.append("say what the shelf holds")
-    return out
+class PlanGenerator:
+    def steps(self, input):
+        out = [f"find_shelf query={input.name}"]
+        if input.kind in KINDS[:3]:
+            out.append("check_a")
+        if input.kind in KINDS[:20] and input.deep:
+            out.append("deep_scan")
+        if input.kind == KINDS[0] or input.deep:
+            out.append("extra")
+        if input.kind not in KINDS[:2] and input.person:
+            out.append(f"compare with {input.person}")
+        if input.kind != KINDS[-1]:
+            out.append("not_last")
+        out.append("say what the shelf holds")
+        return out
 """.replace("KINDS_LITERAL", ", ".join(repr(f"k{i}") for i in range(40)))
 
 
@@ -1272,12 +1336,13 @@ class Signature:
         kind: Literal["k0", "k1", "k2", "k3", "k4"] = Field(description="the kind")
 
 
-def steps(input):
-    out = ["open_directory", f"find_{input.kind} query={input.name}"]
-    if input.kind in ("k0", "k1", "k2"):
-        out.append("check_a")
-    out.append("say done")
-    return out
+class PlanGenerator:
+    def steps(self, input):
+        out = ["open_directory", f"find_{input.kind} query={input.name}"]
+        if input.kind in ("k0", "k1", "k2"):
+            out.append("check_a")
+        out.append("say done")
+        return out
 '''
 
 

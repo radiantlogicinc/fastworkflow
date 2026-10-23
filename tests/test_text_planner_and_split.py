@@ -432,7 +432,8 @@ def skill_file(text: str) -> str:
     """The skill file (``_skills/<name>.py``) of a skill without params: ``text``'s first line is its description,
     every other non-empty line one step."""
     description, *steps = [line.strip() for line in text.splitlines() if line.strip()]
-    return f"class Signature:\n    __doc__ = {description!r}\n\n\ndef steps():\n    return {steps!r}\n"
+    return (f"class Signature:\n    __doc__ = {description!r}\n\n\nclass PlanGenerator:\n"
+            f"    def steps(self):\n        return {steps!r}\n")
 
 
 def test_skills_without_params_give_their_steps_and_all_are_shown(tmp_path):

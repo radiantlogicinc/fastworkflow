@@ -21,10 +21,10 @@ from fastworkflow.skill_commands import (
     SkillCallPlan,
     SkillFormatError,
     check_phase_sources,
-    command_from_module,
     call_phases,
     phases_for,
 )
+
 from fastworkflow.skill_phases import (
     PHASE_MAX_STEPS_ENV,
     Phase,
@@ -52,6 +52,17 @@ from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures
     initialized_fastworkflow,
     todo_workflow_path,
 )
+
+
+def command_from_module(name, module, path):
+    """The skill a module of runtime parts gives (``plan(input) -> list[Phase]`` and/or
+    ``steps(input)``), through ``skill_commands.skill_from_parts``, as the loader builds it
+    from a ``PlanGenerator``: these runtime tests hand-build their ``Phase`` lists."""
+    from fastworkflow import skill_commands
+    return skill_commands.skill_from_parts(name, module.Signature, path,
+                                           steps_fn=getattr(module, "steps", None),
+                                           plan_fn=getattr(module, "plan", None))
+
 
 LIBRARY = "Library"
 BOOK = "Book b1 Dune"
@@ -141,10 +152,12 @@ def _flat_command():
 def test_a_skill_with_plan_and_no_steps_gets_the_concatenation_as_its_steps():
     command = _phased_command()
     instance = LibrarySignature.Input(name="Dune", notes=True)
+    # The template is built with placeholder facts (skill_phases.Placeholder), never None.
     assert command.steps_fn(instance) == [
         "open_library", "find_book query=Dune",
-        "open_book_by_uid book_uid=<the uid of the match>", "list_loans (full list)",
-        "count_notes on the book", "say who has the book on loan",
+        "open_book_by_uid book_uid=<find.book_uids[0]>", "list_loans (full list)",
+        "count_notes on <book.uid>",
+        "say that <book.uid> has loans <book.loan_uids[*]> and <notes.total> notes",
     ]
     assert command.steps_fn(instance) == concatenated_steps(plan(instance))
     assert command.phase_outputs == (Found, BookFacts, NoteFacts)
@@ -1465,7 +1478,7 @@ def test_a_callable_when_binds_earlier_outputs_by_name():
     command = _phased_command(plan=has_loans_plan)
     assert [p.name for p in phases_for(command, {"name": "Dune"})] == [
         "find", "book", "notes", "report"]
-    assert "count_notes on the book" in command.steps_fn(LibrarySignature.Input(name="Dune"))
+    assert "count_notes on <book.uid>" in command.steps_fn(LibrarySignature.Input(name="Dune"))
 
 
 def test_a_callable_when_whose_parameter_nothing_provides_fails_the_load():
@@ -2110,7 +2123,6 @@ from fastworkflow.skill_phases import (  # noqa: E402
     phase_query,
     steps_before_phase,
 )
-
 
 def test_clean_answer_strips_echoed_framing_and_template_leftovers():
     # 4.01 R3: the reply copied its framing; 4.03 R2: a template placeholder line;

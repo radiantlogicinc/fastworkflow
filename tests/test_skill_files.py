@@ -25,8 +25,9 @@ class Signature:
     """Close out a record: note what was done."""
 
 
-def steps():
-    return ["write a short summary", "say what is left open"]
+class PlanGenerator:
+    def steps(self):
+        return ["write a short summary", "say what is left open"]
 '''
 
 
@@ -145,17 +146,18 @@ class Signature:
             return True, ""
 
 
-def steps(input):
-    out = [f"open {input.name}"]
-    if input.action == "add":
-        out.append("add_label (change nothing else; the label must exist already)")
-    else:
-        out.append("remove_label (change nothing else)")
-    if input.detail or not input.list_all:
-        out.append("show_labels")
-    if input.list_all:
-        out.append("list_labels")
-    return out
+class PlanGenerator:
+    def steps(self, input):
+        out = [f"open {input.name}"]
+        if input.action == "add":
+            out.append("add_label (change nothing else; the label must exist already)")
+        else:
+            out.append("remove_label (change nothing else)")
+        if input.detail or not input.list_all:
+            out.append("show_labels")
+        if input.list_all:
+            out.append("list_labels")
+        return out
 '''
 
 
@@ -189,7 +191,8 @@ def test_the_template_leaves_out_what_the_validation_hook_changes_or_refuses(tmp
 
 
 def test_a_skill_file_without_input_may_take_the_empty_input(tmp_path):
-    text = '"""x"""\nclass Signature:\n    """Plain."""\n\n\ndef steps(input):\n    return ["one", "two"]\n'
+    text = ('"""x"""\nclass Signature:\n    """Plain."""\n\n\nclass PlanGenerator:\n'
+            '    def steps(self, input):\n        return ["one", "two"]\n')
     folder = _write(tmp_path, {"plain": text})
     assert ("plain", "Plain.", ("one", "two")) in \
         workflow_agent.load_skills(folder)
@@ -219,7 +222,7 @@ def test_a_skill_file_that_cannot_be_imported_is_logged_and_skipped(tmp_path, ca
 
 
 def test_a_malformed_skill_file_is_logged_skipped_and_not_read_again(tmp_path, caplog, monkeypatch):
-    folder = _write(tmp_path, {"bad": "def steps():\n    return ['a']\n", "close_out": CLOSE_OUT})
+    folder = _write(tmp_path, {"bad": NO_SIGNATURE, "close_out": CLOSE_OUT})
     with caplog.at_level(logging.ERROR):
         assert [s[0] for s in workflow_agent.load_skills(folder)] == ["close_out"]
     assert "skipping skill 'bad'" in caplog.text and "needs a class Signature" in caplog.text
@@ -229,13 +232,23 @@ def test_a_malformed_skill_file_is_logged_skipped_and_not_read_again(tmp_path, c
     assert workflow_agent.skill_utterances(folder) == {"close_out": ()}
 
 
+#: A skill file without a Signature.
+NO_SIGNATURE = "class PlanGenerator:\n    def steps(self):\n        return ['a']\n"
+
+
+def _generator(body: str) -> str:
+    return 'class Signature:\n    """D."""\n\n\nclass PlanGenerator:\n' + body
+
+
 @pytest.mark.parametrize("text, message", [
-    ("def steps():\n    return ['a']\n", "needs a class Signature"),
-    ("class Signature:\n    pass\n\ndef steps():\n    return ['a']\n", "needs a docstring"),
-    ('class Signature:\n    """D."""\n', "needs a function steps"),
-    ('class Signature:\n    """D."""\n\ndef steps(a, b):\n    return []\n', "takes one argument"),
-    ('class Signature:\n    """D."""\n\ndef steps():\n    return "a step"\n', "must return a list of str"),
-    ('class Signature:\n    """D."""\n\ndef steps():\n    return []\n', "returns no steps"),
+    (NO_SIGNATURE, "needs a class Signature"),
+    ("class Signature:\n    pass\n\n\n" + NO_SIGNATURE, "needs a docstring"),
+    ('class Signature:\n    """D."""\n', "needs a class PlanGenerator"),
+    # the old forms no longer load: a module-level steps() is not a PlanGenerator
+    ('class Signature:\n    """D."""\n\ndef steps():\n    return ["a"]\n', "needs a class PlanGenerator"),
+    (_generator("    def steps():\n        return ['a']\n"), "takes self first"),
+    (_generator("    def steps(self):\n        return 'a step'\n"), "must return a list of str"),
+    (_generator("    def steps(self):\n        return []\n"), "returns no steps"),
 ])
 def test_a_malformed_skill_file_fails_the_load(tmp_path, text, message):
     assert re.search(message, _load_error(_write(tmp_path, {"bad": text})))
@@ -252,8 +265,9 @@ class Signature:
         {field}
 
 
-def steps(input):
-    return ["step"]
+class PlanGenerator:
+    def steps(self, input):
+        return ["step"]
 '''
 
 
@@ -304,8 +318,9 @@ class Signature:
 SEEN = []
 
 
-def steps(input):
-    return [f"open {input.name}", "say who owns it" if input.owner is None else f"check owner {input.owner}"]
+class PlanGenerator:
+    def steps(self, input):
+        return [f"open {input.name}", "say who owns it" if input.owner is None else f"check owner {input.owner}"]
 '''
 
 

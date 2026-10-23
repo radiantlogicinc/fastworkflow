@@ -1,107 +1,94 @@
 # Skill file layout
 
-A skill command file (`_skills/<name>.py`; format: the `fastworkflow.skill_commands` module
-documentation; phases: [skill_phases.md](skill_phases.md)) is read far more often than it is
-written: by the developer who changes it, by a reviewer, and by whoever debugs a turn that
-ran it. This convention fixes where each part of the file goes and how it is written, so
-that any skill file reads top to bottom in the same order. `fastworkflow skill preview`
-(below) renders each skill in the same order, from the code.
+A skill file (`_skills/<name>.py`; reference: the `fastworkflow.skill` module documentation;
+the runtime: [skill_phases.md](skill_phases.md)) is a command file for a whole job. It is read
+far more often than it is written, so every skill file has one form, the same few idioms as a
+command file, read top to bottom in the same order. `fastworkflow skill preview` (below)
+renders what each call of it runs.
 
-The convention is about layout only. It changes nothing the loader reads: a file laid out
-this way loads and expands exactly as before.
+## How to write a skill (one page)
+
+```python
+from fastworkflow.skill import fact_from, phase, pick
+
+class Signature:                      # exactly a command's Signature
+    """What the skill does (the planner chooses skills by this)."""
+    plain_utterances = ["what parts does the Alpha item have"]
+    class Input(BaseModel):
+        name: str = Field(description="the item's name exactly as the request writes it")
+
+class PlanGenerator:                  # a command generates a response; a skill, a plan
+    def find(self, input) -> Match:                       # phase 1; it fills a Match
+        return ["open_catalog",
+                f"find_item query={input.name}"]
+
+    class Item(BaseModel):                                # its facts, like an Output
+        uid: str = fact_from("open_item_by_uid.item_uid")
+        parts: list[str] = fact_from("list_parts.labels")
+
+    def item(self, input, find) -> Item:                  # phase 2 reads find's facts
+        if not find.uids:
+            return []                                     # skipped, decided when reached
+        return [pick("open_item_by_uid", item_uid=find.only_uid(input.name),
+                     named=input.name),
+                "list_parts (full list)"]
+
+    def answer(self, input, item=None):                   # None: item was skipped
+        if item is None:
+            return [f"say that no item named {input.name} was found", "apply no change"]
+        return [f"say that {item.uid} has parts {self._parts(item)}", "apply no change"]
+
+    def _parts(self, item):                               # _name: a helper, not a phase
+        return ", ".join(item.parts) or "none"
+```
+
+**The rules.** (1) Each public method of `PlanGenerator` is a phase (one executor run), in
+the order written. (2) Its parameters name what it reads: `input`, and earlier phases by name
+(their facts; `=None` when that phase may have been skipped). (3) Its return annotation is the
+facts model it fills: each field says its source, `fact_from("command.field")`. (4) It
+returns its steps, exactly the lines the agent reads. `return []` skips it: decided when the
+phase is reached, on the real facts.
+
+**Steps.** `command k=v (note)` runs a command: code runs it when every value is written, the
+note is never sent, a listing read whole says `full list`. `pick(command, x_uid=uid,
+named=name)` opens the row a find listed. `say that ...` is an answer line code copies word
+for word; `apply no change` and `do not run X` are guards; any other line is the agent's. A
+last phase of only `say that` lines and guards is answered by code. Text helpers: `num(x)`,
+`count(n, "login")`, `listed(names, total, "group")`.
+
+**The shape of a call.** By default a call runs every phase. When the input changes it, write
+`def __call__(self, input)` returning the phases, in order: `return [self.find, self.answer]`
+or `[self.quick]`. A call of one phase that reads and fills no facts runs flat, as one plan.
+A phase repeated for several cases is one method each, calling one shared module function.
+
+**Options** (`@phase`, the one decorator): `over="find.uids"` runs the phase once per item
+(its one parameter that is neither `input` nor a phase gets the item), with `max_items=`,
+`until=`, `noun=`; `optional=True`: the job goes on when it fails; `output=` a facts model
+that depends on the input. An option written `lambda input: ...` is decided per call.
+
+**What the planner sees.** Each phase written once per input with every fact unknown:
+`<find.total>`, `<find.uids[0]>`, `<find.labels[*]>`; a helper called on facts reads as its
+name (`<parts>`); `pick` reads `... with the uid of the NAME match`. Every test on a fact
+reads as true and is noted: the phase's lines end `(only when find.uids)`. So write a skip
+as `if not <what the phase needs>: return []`, and put wording that tests facts in helpers.
+
+**Checked at load** (else the skill is not loaded): a method without `self`, a parameter
+that names no earlier phase, an annotation that is not a model, a method that fails on
+unknown facts or writes `None` into a step, a step naming a command the workflow lacks or a
+parameter its `Signature.Input` lacks. `fastworkflow skill preview <workflow>` shows every
+call's phases, facts, steps and who writes the answer; `--check` fails when one is stale.
 
 ## The order
 
-Every skill file has these parts, in this order:
-
-1. **Module docstring.** What the skill does, in two to five sentences: the job, what it
-   reads, what it answers, and the conditions that change it. Not the history of the file.
-2. **Imports.**
-3. **`Signature`.** The description (its docstring, which the matcher and the planner read),
-   `plain_utterances`, `Input` with its fields (and its validators, below the fields), and
-   `validate_extracted_parameters` when there is one.
-4. **Fact models** (a phased skill only). The `output` models of the phases, in the order
-   of the phases that fill them, each field written `fact_from("<command>.<field>")`.
-5. **`plan(input)` or `steps(input)`.** The table of contents. A phased skill has
-   `plan()`, listing the phases, and no `steps()`: the loader gives it
-   `concatenated_steps(plan(input))` (`skill_commands.command_from_module`). It writes
-   `steps()` only when `plan()` returns `None` for some inputs (the flat steps of those
-   calls), right after `plan()`. A flat skill has only `steps()`, written as a list of
-   calls to its step functions.
-6. **The step functions** (or phase functions), in the order `plan()` / `steps()` calls
-   them. Each returns its steps.
-
-Why this order: a reader meets the file in the order of the questions they ask. What does
-it do (docstring)? What does it take (`Signature`)? What passes from one part to the next
-(fact models: the data contract between phases, and the types the step functions are
-annotated with)? In what order, and under which conditions, does it run (`plan()`)? Only
-then the wording of each part. The table of contents sits above the functions it names
-because a reader wants the outline before the detail; Python resolves those names when
-`plan()` is called, not when it is defined, so this order costs nothing. The fact models
-sit above `plan()` and the functions because both refer to them, so a reader never meets a
-type before its definition.
-
-## Naming
-
-- **Phases**: short snake_case names that say what the phase yields or does: `find`,
-  `item`, `check`, `report`. A later phase receives an earlier phase's output through a
-  parameter of the same name, so name a phase for the fact it hands on (`item` hands on
-  `ItemFacts`, read as `item.uid`). Phases that repeat a job for several inputs share a
-  stem and add a suffix: `find_a`, `find_b`.
-- **Phase functions**: `<phase>_steps` (`find_steps`, `item_steps`). One function shared
-  by several phases is named for their stem (`find_steps` for `find_a` and `find_b`).
-- **Step functions of a flat skill**: `<part>_steps`, one per part of the job
-  (`lookup_steps`, `detail_steps`, `close_steps`).
-- **Fact models**: CamelCase nouns ending in what they hold: `ItemMatch` (a search's hits),
-  `ItemFacts` (a record as read).
-- **Parameters of a phase function**: the input values it prints (`name`), then the
-  earlier phases it reads, by their phase names, each `Optional[...] = None`: the
-  function gets `None` when the flat steps and the template are built
-  (`concatenated_steps` passes `None` for every parameter without a default) and when a
-  phase it reads was skipped at run time. Which earlier phases a phase reads in a given
-  plan is decided in `plan()` (below), not by these defaults.
-
-## Writing the steps
-
-- Each step function returns a **list literal of plain strings or f-strings**, one step
-  per line, so the steps read as they will be numbered. Build a step in one place: not by
-  concatenating fragments returned by other functions.
-- A phrase several steps share may be a module-level `UPPER_CASE` constant, placed directly
-  above the first function that uses it. A lookup table (`FIND = {"group": "find_group",
-  ...}`) is a module-level dict placed the same way.
-- A phase function called with no facts (every fact parameter `None`) returns the generic
-  wording: that is what the flat steps and the template show, and what the planner sees. With
-  facts it names the real values. Write both branches next to each other, the no-facts
-  branch first.
-
-## No hidden logic
-
-- Everything that decides which steps a skill writes is in the skill file. A reader must
-  never need to open another module to know what a step says or when it is written.
-- A helper module (`_skills/_<name>.py`) holds data shared by several skills (lookup
-  tables, shared phrases), never code that builds or chooses steps.
-- A computation on facts (which of two items scores higher, what two lists share) is
-  either written in the phase function that uses it, or is a short method of the fact model
-  it reads. Name it for its result (`riskier`, `shared_labels`) and give it a one-line
-  docstring.
-
-## Conditions visible in `plan()`
-
-- A condition on an input is written in `plan()` (or in a flat skill's `steps()`), not
-  inside a step function: `Phase("check", ..., when=input.check)`, or an `if input.check:`
-  block in `plan()`. A step function takes the values it prints, not the flags that decide
-  whether it runs.
-- When a later phase is built with or without the output of a phase the input leaves
-  out, write both `Phase(...)` calls in `plan()`, under the same `if` as that phase, so
-  the reader sees both shapes of the plan. Only a phase skipped at run time (a callable
-  `when`, an `optional` phase) is read through a `None` default in the `steps_fn`
-  (`lambda item, checks=None: ...`).
-- A branch on facts, which exist only at run time (a search with no single match, two
-  values that tie), lives in the phase function, at its top, with a comment saying what
-  case it handles.
-- Any other setting of a phase is given at the `Phase(...)` call in `plan()`, never
-  computed in a function elsewhere, so the table of contents shows how every phase runs.
-  This holds for settings that later versions of `Phase` add.
+Every skill file has these parts, in this order: the module docstring (the job, what it
+reads, what it answers, the conditions that change it, in two to five sentences); the
+imports; `Signature`; the facts models shared by several phases (a model one phase fills is
+nested right above that method); `PlanGenerator`, its `__call__` first when it has one, then
+the phases in run order, then its `_helpers`; then module-level tables and shared functions.
+A reader meets what the skill does, what it takes, how a call is shaped, then each phase with
+its facts, then the wording. Lookup tables and phrases shared by several skills go in a helper
+module (`_skills/_<name>.py`, data only); everything that decides which steps a skill writes
+stays in the skill file.
 
 ## Rules on the arguments
 
@@ -132,93 +119,6 @@ class Input(BaseModel):
         return self
 ```
 
-## Example
-
-A phased skill with a conditional phase:
-
-```python
-"""show_item: one named item, its parts and, when asked, its open checks.
-
-Finds the item by name, opens the first match and reads its parts. When the request asks
-about checks (`input.checks`), a phase counts them. The last phase writes the answer from
-the facts the earlier phases filled.
-"""
-from typing import Optional
-
-from pydantic import BaseModel, Field
-
-from fastworkflow.skill_phases import Phase, fact_from
-
-
-class Signature:
-    """Show one named item and its parts, and its open checks when asked. One job per item."""
-
-    plain_utterances = ["what parts does the Alpha item have", "show item Beta and its checks"]
-
-    class Input(BaseModel):
-        name: str = Field(description="the item's name exactly as the request writes it",
-                          json_schema_extra={"subject": True})
-        checks: bool = Field(default=False, description="the request asks about its open checks",
-                             json_schema_extra={"verify": True})
-
-
-class ItemMatch(BaseModel):
-    item_uids: list[str] = fact_from("find_item.item_uids", min_length=1)
-
-
-class ItemFacts(BaseModel):
-    uid: str = fact_from("open_item_by_uid.item_uid")
-    part_labels: list[str] = fact_from("list_parts.labels")
-
-
-class CheckFacts(BaseModel):
-    total: int = fact_from("count_checks.total")
-
-
-def plan(input: Signature.Input) -> list[Phase]:
-    phases = [
-        Phase("find", lambda: find_steps(input.name), output=ItemMatch),
-        Phase("item", lambda find: item_steps(input.name, find), output=ItemFacts),
-        Phase("checks", lambda item: checks_steps(item), output=CheckFacts, when=input.checks),
-    ]
-    if input.checks:
-        phases.append(Phase("report", lambda item, checks: report_steps(item, checks)))
-    else:
-        phases.append(Phase("report", lambda item: report_steps(item)))
-    return phases
-
-
-def find_steps(name):
-    return ["open_catalog", f"find_item query={name}"]
-
-
-def item_steps(name, find: Optional[ItemMatch] = None):
-    uid = find.item_uids[0] if find else f"<the uid of the {name} match>"
-    return [f"open_item_by_uid item_uid={uid}", "list_parts (full list)"]
-
-
-def checks_steps(item: Optional[ItemFacts] = None):
-    return [f"count_checks on {item.uid if item else 'the item'}"]
-
-
-def report_steps(item: Optional[ItemFacts] = None, checks: Optional[CheckFacts] = None):
-    if item is None:
-        return ["say which parts the item has, and how many open checks when they were counted"]
-    counted = f"; open checks: {checks.total}" if checks else ""
-    return [f"say that {item.uid} has the parts {', '.join(item.part_labels) or 'none'}{counted}"]
-```
-
-A flat skill follows the same order without fact models and `plan()`: docstring,
-`Signature`, `steps()` as the list of parts with its conditions, then the step functions:
-
-```python
-def steps(input: Signature.Input) -> list[str]:
-    out = lookup_steps(input.name)
-    if input.detail:
-        out += detail_steps()
-    return out + close_steps(input.name)
-```
-
 ## Previews
 
 `fastworkflow skill preview <workflow_folder> [--out <dir>] [--check]` writes one markdown
@@ -237,11 +137,9 @@ A preview follows the order above:
 3. the example requests (`plain_utterances`);
 4. for a phased skill, the phases (output model, when each runs, and how it fans out)
    and the facts each output model holds, with their `"from"` sources. When some inputs
-   make `plan()` return no phases, one line above the table says when it returns phases,
-   and the table is about the phased calls. A callable `when` reads "only when <its
-   source>": a lambda's own text, on one line, with the closure variables, `input.<field>`
-   reads and parameter defaults it uses written as their values when they are short and
-   plain (`find.pick('<right>')`, not `find.pick(right_name)`), else the function's name;
+   make a call run flat, one line above the table says when it runs as phases, and the
+   table is about the phased calls. A phase's condition reads "only when <the tests its
+   method made on the facts>" (`find.uids`); a callable option (`until`) reads as its source;
    the "fans out" column gives `over`, `item`, `max_items`, `until` (by its source) and
    `bind=False`. A cell that differs by input (the output model, the `when`, the fan-out)
    lists each value with the inputs that give it ("when kind = crate: `CrateMatch`");
@@ -286,7 +184,7 @@ different plans, the preview renders those that a pairwise cover of the inputs r
 (every two inputs' values together at least once) and one plan for each other phase
 layout, so a plan that needs two inputs changed is still shown; the phases table still
 covers every plan. A combination that `validate_extracted_parameters` changes or refuses
-never reaches `steps()`, so it is listed, not rendered ("every other combination" when all
+never reaches the `PlanGenerator`, so it is listed, not rendered ("every other combination" when all
 of them have one reason). In a phased plan, a phase that reads the same as in the first
 plan shown is one line ("As in the plan when ...").
 
@@ -304,14 +202,13 @@ rendered per item: over a list of items, each item (an empty list says the phase
 nothing); over an earlier phase's list, the first item and one later item (that list's
 model holds two placeholder entries), and each item's output takes the item as its uid
 and the list's parallel entries (its label). A branch on facts is still rendered along one
-path only, which is one more reason to keep conditions on inputs in `plan()`. A phase whose
+path only, which is one more reason to keep conditions on inputs in `__call__`. A phase whose
 function reads earlier facts is marked "Steps below are rendered with placeholder facts:
 ...; values computed from facts (counts, comparisons, matches) are not real." A fan-out
 phase's output reaches later phases as a list of one placeholder per item rendered
-(`<items[0].uid>`). When a phase function fails on placeholders, the phase is rendered
-with no earlier facts (its generic wording) and the preview says so. For inputs `plan()`
-returns no phases for, the flat `steps()` are rendered under a line saying the call runs
-flat. Any `Phase` setting other than `name`, `steps_fn`, `output` and `when` that is not
+(`<items[0].uid>`). When a phase method fails on these sample facts, or writes no steps
+with them, the phase is rendered as the template has it (every fact unknown) and the preview
+says so. A call that runs flat is rendered as one list of steps under a line saying so. Any `Phase` setting other than `name`, `steps_fn`, `output` and `when` that is not
 its default is listed with the phase, and so is a callable `when`; a callable setting is
 shown by its source.
 
@@ -320,11 +217,7 @@ come in declaration order and combinations in a fixed order, so the same files r
 same bytes. `--check` writes nothing and exits 1 when a preview in `<dir>` differs from a
 fresh render, is missing, or is an extra `.md` file no skill renders, or when a phase
 output's `"from"` names a command or field the workflow does not have (at load only a
-warning; `skill_preview.check_previews`), or when a phase's planner template (its steps
-with None facts) is its wording for an earlier phase that did not run (a callable `when`
-or `optional` phase), while its wording when that phase ran differs: the template would
-read as if it had not run (`skill_preview.not_run_wording_problems`; test the facts that
-are always there for None first). Run it in a test or in CI to keep committed
+warning; `skill_preview.check_previews`). Run it in a test or in CI to keep committed
 previews current. Both writing and `--check` fail, naming the file and its error, when a
 skill file does not load (the loader logs and skips it at run time;
 `skill_preview.render_previews`). Writing removes a stale preview (an `.md` file
