@@ -156,8 +156,11 @@ check on a live call.
 - Each public method of `PlanGenerator` is a phase (`skill.py` `planned`, building the
   runtime's `skill_phases.Phase`), in the order written; `_name` methods are helpers. A
   `PlanGenerator` that subclasses another skill's (`from .other_skill import
-  PlanGenerator as Base`) inherits its phases first, in their order; a same-named method
-  overrides one in its place; new phases follow (`skill.py` `phase_methods`). Each
+  PlanGenerator as Base`) reaches the base's phases through `self`; a same-named method
+  overrides one and may extend its steps with `super().<phase>(...)` (its own parameters
+  are what it reads). Only overrides: the base's plan stands. New phases (or several
+  bases): write `__call__` returning every phase in order, the base's anywhere, else the
+  load fails (`skill.py` `_order_problem`). Each
   phase is a fresh executor run with its own step budget (`FW_SKILL_PHASE_MAX_STEPS`,
   default 15), except an answer-only phase (one model call, or none). The last phase writes
   the answer.

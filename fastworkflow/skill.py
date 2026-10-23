@@ -50,10 +50,13 @@ Optional: ``PlanGenerator.__call__(self, input)`` returns the phases a call runs
 plan. ``@phase(over=..., max_items=..., until=..., noun=..., optional=...)`` makes a phase a
 fan-out (once per item) or optional.
 
-Reuse: a ``PlanGenerator`` may subclass another skill's (``class PlanGenerator(BookLookup)``)
-and inherits its phases as Python inherits methods: the base's come first, in their order; a
-method of the same name overrides a base phase in its place; the new phases follow. Its
-``__call__``, helpers and nested facts models are inherited too.
+Reuse: a ``PlanGenerator`` may subclass another skill's (``class PlanGenerator(BookLookup)``):
+``self`` reaches the base's phases, helpers and facts models as Python resolves methods, and a
+method of the same name overrides a base phase (its own parameters are what it reads; it may
+extend the base's steps: ``return [*super().answer(input, find), "say that ..."]``). The order
+stays explicit: a subclass that only overrides keeps its base's plan; one that adds phases (or
+has phases from several bases) writes ``__call__``, placing the base's anywhere:
+``return [self.find, self.book, self.loans, self.answer]`` (else a load error).
 
 No ``Input`` fields: a skill may still have phases (methods without ``input``); every call
 then has the one plan, and the planner's skill call has no arguments.
@@ -198,15 +201,35 @@ def phase(**options: Any) -> Callable:
 # --------------------------------------------------------------------------- loading
 
 def phase_methods(cls: type) -> list[tuple[str, Callable]]:
-    """The phase methods of a ``PlanGenerator`` class, in definition order (``_name`` are
-    helpers). A class inherits its bases' phases, as Python inherits methods: the bases'
-    come first, in their order; a method of the same name overrides a base's phase in its
-    place, and the class's new phases follow."""
+    """The phase methods of a ``PlanGenerator`` class (``_name`` are helpers): every public
+    function ``self.<name>`` reaches, as Python resolves it (an override replaces the base's
+    method), listed in definition order, the bases' first. That order is the plan only when
+    one class decides it (``_order_problem``)."""
     order: dict[str, None] = {}
     for klass in reversed(cls.__mro__):
         order.update(dict.fromkeys(vars(klass)))
     return [(name, value) for name in order if not name.startswith("_")
             and inspect.isfunction(value := inspect.getattr_static(cls, name))]
+
+
+def _order_problem(cls: type) -> Optional[str]:
+    """Why *cls* must write its own ``__call__``, or None. A subclass without one keeps the
+    plan of its base (its ``__call__``, or its phases in order), its overrides in their
+    place; when it adds phases, or has phases from several bases, only the author knows
+    where they go, so the order is written, never guessed."""
+    if "__call__" in vars(cls):
+        return None
+    bases = [b for b in cls.__bases__ if b is not object and phase_methods(b)]
+    inherited = {name for b in bases for name, _ in phase_methods(b)}
+    new = [name for name, _ in phase_methods(cls) if name not in inherited]
+    if not bases or (len(bases) == 1 and not new):
+        return None
+    every = ", ".join(f"self.{name}" for name, _ in phase_methods(cls))
+    named = [f"{b.__module__.rsplit('.', 1)[-1]}.{b.__qualname__}" for b in bases]
+    what = (f"adds the phase(s) {', '.join(new)} to those of {named[0]}" if new
+            and len(bases) == 1 else f"has phases from {', '.join(named)}")
+    return (f"{cls.__qualname__} {what}: write __call__(self, input) returning the phases a "
+            f"call runs, in order (from: {every})")
 
 
 def _custom_call(cls: type) -> Optional[Callable]:
@@ -273,15 +296,19 @@ def _with_input(fn: Callable, input: Any) -> Callable:
 _NONE = re.compile(r"(?<![\w<])None(?![\w>])")
 
 
-class _TemplateSelf:
-    """``self`` while the template is built: a helper method (``self._name(...)``) called
-    with an unknown fact is not run; it reads ``<name in words>``."""
+def _template_self(plan: Any) -> Any:
+    """``self`` while the template is built: *plan* as an instance of a subclass of its own
+    class (so ``super()`` works in a method) in which a helper method (``self._name(...)``)
+    called with an unknown fact is not run; it reads ``<name in words>``."""
+    template = object.__new__(_template_class(type(plan)))
+    template.__dict__.update(getattr(plan, "__dict__", {}))
+    return template
 
-    def __init__(self, plan: Any):
-        self._plan = plan
 
-    def __getattr__(self, name):
-        value = getattr(self._plan, name)
+@functools.lru_cache(maxsize=None)
+def _template_class(cls: type) -> type:
+    def __getattribute__(self, name):
+        value = super(template, self).__getattribute__(name)
         if not name.startswith("_") or name.startswith("__") or not callable(value):
             return value
 
@@ -292,6 +319,11 @@ class _TemplateSelf:
             return value(*args, **kwargs)
 
         return helper
+
+    template = type(cls.__name__, (cls,), {"__getattribute__": __getattribute__,
+                                           "__module__": cls.__module__,
+                                           "__qualname__": cls.__qualname__})
+    return template
 
 
 def _unknown(value: Any) -> bool:
@@ -324,7 +356,7 @@ def _phase_functions(plan: Any, fn: Callable, input: Any) -> tuple[Callable, Cal
     def template(facts: dict) -> list[str]:
         with tests_noted() as tests:
             try:
-                lines = call(_TemplateSelf(plan), facts)
+                lines = call(_template_self(plan), facts)
             except Exception as error:  # noqa: BLE001 - reported as a load error
                 raise TemplateError(f"phase {name!r} fails while its template is built (every "
                                     f"fact unknown): {type(error).__name__}: {error}") from None
@@ -360,7 +392,7 @@ def _phase_functions(plan: Any, fn: Callable, input: Any) -> tuple[Callable, Cal
         """The tests the template's call made on the facts (the preview's condition)."""
         with tests_noted() as tests:
             with contextlib.suppress(Exception):
-                call(_TemplateSelf(plan), {p: Placeholder(p) for p in public.parameters})
+                call(_template_self(plan), {p: Placeholder(p) for p in public.parameters})
         return tests
 
     public = sig.replace(parameters=[p for n, p in sig.parameters.items()
@@ -383,6 +415,9 @@ def planned(cls: type) -> Callable[[Any], list[Phase]]:
             raise PhaseError(f"PlanGenerator.{name}: a phase method takes self first, as a "
                              "ResponseGenerator's methods do")
     order = list(methods)
+    problem = _order_problem(cls)
+    if problem:
+        raise PhaseError(problem)
     custom = _custom_call(cls)
     instance = cls()
 
@@ -395,6 +430,10 @@ def planned(cls: type) -> Callable[[Any], list[Phase]]:
             if getattr(method, "__self__", None) is not instance or name not in methods:
                 raise PhaseError(f"{cls.__qualname__}.__call__ must return the plan's own "
                                  f"phase methods (self.find, ...), got {method!r}")
+            if getattr(method, "__func__", None) is not methods[name]:
+                raise PhaseError(f"{cls.__qualname__}.__call__ returns a base's {name} that "
+                                 f"the class overrides: return self.{name}, and call the "
+                                 f"base's from it with super().{name}(...)")
             names.append(name)
         return names
 

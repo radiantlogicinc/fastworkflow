@@ -2,6 +2,7 @@
 how the planner's template renders unknown facts (and the tests made on them), the load-time
 step check, fastworkflow.Refused and the default generate_utterances. Offline,
 workflow-neutral."""
+import inspect
 import types
 
 import pytest
@@ -425,7 +426,7 @@ class Lookup:
         return item.uid if item is not None else "not found"
 
 
-def test_a_subclass_inherits_the_base_phases_first_in_their_order():
+def test_a_subclass_that_adds_phases_writes_call_with_the_order():
     class Parts(Lookup):
         class PartFacts(BaseModel):
             labels: list[str] = fact_from("list_parts.labels")
@@ -435,17 +436,23 @@ def test_a_subclass_inherits_the_base_phases_first_in_their_order():
                 return []
             return ["list_parts (full list)"]
 
-    phases = planned(Parts)(_input())
-    assert [p.name for p in phases] == ["find", "item", "answer", "parts"]
-    assert phases[1].output is Lookup.Item and phases[3].output is Parts.PartFacts
-    loaded = skill_commands.command_from_module("parts", _module(plan=Parts), "_skills/parts.py")
-    assert list(loaded.steps) == [
-        "find_item query=<name>",
-        "open_item_by_uid with the uid of the <name> match (only when find.uids)",
-        "say that <name> is <uid>", "list_parts (full list)"]   # `is None` is not seen
+    from fastworkflow.skill_phases import PhaseError
+
+    with pytest.raises(PhaseError, match=r"Parts adds the phase\(s\) parts to those of "
+                       r"test_skill_plan.Lookup: write __call__\(self, input\) returning the phases a call "
+                       r"runs, in order \(from: self.find, self.item, self.answer, self.parts\)"):
+        planned(Parts)
+    with pytest.raises(skill_commands.SkillFormatError, match="write __call__"):
+        skill_commands.command_from_module("parts", _module(plan=Parts), "_skills/parts.py")
+
+    class Ordered(Parts):                                   # base phases placed anywhere
+        def __call__(self, input):
+            return [self.find, self.parts, self.item, self.answer]
+
+    assert [p.name for p in planned(Ordered)(_input())] == ["find", "parts", "item", "answer"]
 
 
-def test_an_override_keeps_the_base_phase_place_and_call_orders_new_phases():
+def test_call_places_base_phases_and_an_override_reads_by_its_own_signature():
     class Parts(Lookup):
         def __call__(self, input):
             return [self.find, self.item, self.parts, self.answer]
@@ -463,12 +470,9 @@ def test_an_override_keeps_the_base_phase_place_and_call_orders_new_phases():
                 return [f"say that no item named {input.name} was found"]
             return [f"say that {input.name} has parts {', '.join(parts.labels)}"]
 
-    from fastworkflow.skill import phase_methods
-
-    assert [n for n, _ in phase_methods(Parts)] == ["find", "item", "answer", "parts"]
-    assert phase_methods(Parts)[2][1] is Parts.answer
     phases = planned(Parts)(_input())
     assert [p.name for p in phases] == ["find", "item", "parts", "answer"]
+    assert list(inspect.signature(phases[3].steps_fn).parameters) == ["item", "parts"]
     facts = {"find": Found(uids=["u1"], labels=["Dune"])}
     assert phase_steps(phases[1], facts) == ["open_item_by_uid item_uid=u1"]
     facts["item"] = Lookup.Item(uid="u1")
@@ -477,9 +481,66 @@ def test_an_override_keeps_the_base_phase_place_and_call_orders_new_phases():
     assert not runs_now(phases[1], {"find": Found(uids=[], labels=[])})
 
 
-def test_a_subclass_with_no_phases_of_its_own_runs_the_base_plan_and_inherits_call():
+class Parts(Lookup):
+    """Extends Lookup.answer's steps with super(), in run and in template mode."""
+
+    def __call__(self, input):
+        return [self.find, self.item, self.parts, self.answer]
+
+    class PartFacts(BaseModel):
+        labels: list[str] = fact_from("list_parts.labels")
+        total: int = fact_from("list_parts.total")
+
+    def parts(self, item=None) -> PartFacts:
+        if item is None:
+            return []
+        return ["list_parts (full list)"]
+
+    def answer(self, input, item=None, parts=None):
+        steps = super().answer(input, item)
+        if parts is None:
+            return steps
+        return [*steps, f"say that it has {self._parts(parts)}"]
+
+    def _parts(self, parts):
+        return f"{parts.total} parts: {', '.join(parts.labels)}"
+
+
+def test_an_override_extends_the_base_steps_with_super_at_run_time_and_in_the_template():
+    phases = planned(Parts)(_input())
+    facts = {"find": Found(uids=["u1"], labels=["Dune"]), "item": Lookup.Item(uid="u1"),
+             "parts": Parts.PartFacts(labels=["gear", "axle"], total=2)}
+    assert phase_steps(phases[3], facts) == ["say that Dune is u1",
+                                             "say that it has 2 parts: gear, axle"]
+    assert phase_steps(phases[3], {"find": facts["find"]}) == ["say that Dune is not found"]
+    loaded = skill_commands.command_from_module("parts", _module(plan=Parts), "_skills/parts.py")
+    # template mode: super() reaches Lookup.answer, whose helper reads as its name
+    assert list(loaded.steps) == [
+        "find_item query=<name>",
+        "open_item_by_uid with the uid of the <name> match (only when find.uids)",
+        "list_parts (full list)",
+        "say that <name> is <uid>", "say that it has <parts>"]
+
+
+def test_call_cannot_return_a_base_method_the_class_overrides():
+    class Wrong(Parts):
+        def __call__(self, input):
+            return [self.find, super().answer]
+
+        def answer(self, input, item=None):
+            return ["say that it is done"]
+
+    from fastworkflow.skill_phases import PhaseError
+
+    with pytest.raises(PhaseError, match=r"returns a base's answer that the class overrides: "
+                                         r"return self.answer"):
+        planned(Wrong)(_input())
+
+
+def test_a_subclass_that_only_overrides_keeps_the_base_plan_and_inherits_call():
     class Same(Lookup):
-        pass
+        def answer(self, input, item=None):
+            return [*super().answer(input, item), "apply no change"]
 
     class Chosen(Lookup):
         def __call__(self, input):
@@ -490,7 +551,22 @@ def test_a_subclass_with_no_phases_of_its_own_runs_the_base_plan_and_inherits_ca
 
     assert [p.name for p in planned(Same)(_input())] == ["find", "item", "answer"]
     assert [p.name for p in planned(Inherits)(_input())] == ["find", "answer"]
-    assert skill_commands.command_from_module("same", _module(plan=Same), "_skills/same.py")
+    loaded = skill_commands.command_from_module("same", _module(plan=Same), "_skills/same.py")
+    assert loaded.steps[-2:] == ("say that <name> is <uid>", "apply no change")
+
+
+def test_phases_from_several_bases_need_call():
+    class Other:
+        def notes(self, input):
+            return [f"list_notes (on {input.name})"]
+
+    class Both(Lookup, Other):
+        pass
+
+    from fastworkflow.skill_phases import PhaseError
+
+    with pytest.raises(PhaseError, match=r"Both has phases from test_skill_plan.Lookup, test_skill_plan.*Other: write __call__"):
+        planned(Both)
 
 
 def test_a_name_a_subclass_sets_to_a_non_function_is_not_a_phase():

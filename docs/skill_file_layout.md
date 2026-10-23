@@ -49,9 +49,12 @@ the order written. (2) Its parameters name what it reads: `input`, and earlier p
 facts model it fills: each field says its source, `fact_from("command.field")`. (4) It
 returns its steps, exactly the lines the agent reads. `return []` skips it: decided when the
 phase is reached, on the real facts. A skill with no `Input` fields may have phases too
-(methods without `input`; every call has the one plan). A `PlanGenerator` that subclasses another skill's
-inherits its phases, first and in their order; a method of the same name overrides one in
-its place, and its new phases follow.
+(methods without `input`; every call has the one plan). A `PlanGenerator` that subclasses
+another skill's reaches the base's phases through `self`; a method of the same name overrides
+one and may extend its steps with `super()` (`return [*super().answer(input, find), "say
+that ..."]`). A subclass that only overrides keeps the base's plan; one that adds phases
+writes `__call__` with the order, the base's placed anywhere: `return [self.find, self.book,
+self.loans, self.answer]`.
 
 **Steps.** `command k=v (note)` runs a command: code runs it when every value is written, the
 note is never sent, a listing read whole says `full list`. `pick(command, x_uid=uid,
