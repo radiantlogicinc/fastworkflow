@@ -113,6 +113,15 @@ def test_a_placeholder_reads_as_where_the_fact_comes_from_and_every_test_on_it_i
                      "find.kind != 'b'", "find.total < 3", "find.total > 1", "'x' in find.labels"]
 
 
+def test_a_fact_named_like_a_str_method_still_reads_as_the_fact():
+    # title, count, format, split... read as the fact itself, not the str method of the
+    # same name; index keeps its own meaning (the one item's place, not str.index).
+    p = Placeholder("book")
+    assert str(p.title) == "<book.title>" and str(p.count) == "<book.count>"
+    assert str(p.format) == "<book.format>" and str(p.split) == "<book.split>"
+    assert p.index() == 0
+
+
 def test_each_method_is_a_phase_in_order_and_call_gives_the_shape():
     phases = planned(PlanGenerator)(_input())
     assert [p.name for p in phases] == ["find", "item", "answer"]          # __call__: no notes
