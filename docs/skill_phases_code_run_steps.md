@@ -75,7 +75,8 @@ A step is mechanical when all of these hold:
    it also counts (`parse_plan` marks it `KIND_SKIPPED`, since the finish check does
    not hold the agent to it).
 2. The command is the step's first word.
-3. The **chain** is the text after the command, cut at the first `(` or `;`. Text in
+3. The **chain** is the text after the command, cut at the first `(` or `;` that is not
+   inside a value quoted right after its `=` (`query="Acme (EU)"`, `finish_check.step_chain`). Text in
    parentheses after the chain is a note for the reader. It is never sent.
 4. Either the chain is empty and every field of the parameters class has a default
    (a bare command; a command with no parameters class also counts), or:

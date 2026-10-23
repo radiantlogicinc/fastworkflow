@@ -74,6 +74,13 @@ def _read(text):
      "find_book query=Dune Messiah"),
     ("find_book query=Dune start=20", "find_book query=Dune start=20"),
     ("list_loans filter=rare first editions; for its shelf", "list_loans filter=rare first editions"),
+    # a quoted value keeps its "(" and ";"; a note after it is still a note (fix-ajir.40)
+    ('find_book query="Dune (1965)"', 'find_book query="Dune (1965)"'),
+    ('find_book query="Dune (1965)" (the novel)', 'find_book query="Dune (1965)"'),
+    ("list_loans filter='rare; first' (full list)", "list_loans filter='rare; first'"),
+    ('find_book query="Herbert, Frank"', 'find_book query="Herbert, Frank"'),
+    # unquoted, the value still ends at the first "(" (its note), as before
+    ("find_book query=Dune (1965)", "find_book query=Dune"),
 ])
 def test_a_mechanical_step_runs_its_chain_and_never_its_note(text, command):
     assert code_step(_step(text), CLASSES[command.split()[0]]) == command
@@ -94,6 +101,7 @@ def test_a_mechanical_step_runs_its_chain_and_never_its_note(text, command):
     "open_book_by_uid with the uid of the Dune match if there is one",
     "then find_book query=Dune",                            # command not the first word
     "find_book query=Dune tags=[a]",                        # a word= that is no field
+    'find_book query="Dune" the novel',                     # prose after a quoted value
 ])
 def test_an_open_step_is_left_to_the_agent(text):
     step = _step(text)

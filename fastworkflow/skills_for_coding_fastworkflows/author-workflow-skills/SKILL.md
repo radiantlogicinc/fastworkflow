@@ -241,6 +241,7 @@ condition word in its chain also makes it conditional).
 | `cmd k=v (note)`, `cmd k=v; note` | The chain ends at the first `(` or `;`; the note is never sent and never changes what runs | `skill_phases.py` `_code_step`; `finish_check.py` `step_arguments` |
 | a concrete value `k=Alpha` | In a phase, the finish check and the fact fill accept only a run with that value (spacing, outer quotes, case ignored) | `finish_check.py` `step_arguments`; `skill_phases.md` "Facts" |
 | `k=<the uid>`, `k={x}`, `k=[..]`, `k=...` | A placeholder, not a value: the step is open (the agent fills it); any run of the command with arguments satisfies it | `finish_check.py` `_PLACEHOLDER_RE` |
+| `k="Acme (EU)"`, `k='Sales; West'` | A value in quotes right after `=` is kept whole: its `(`, `;` and `, ` do not end it (unquoted, `k=Acme (EU)` sends `k=Acme`) | `finish_check.py` `step_chain`, `_value_text` |
 | `k=Ann Lee, no filter` | A value ends at `", "`; prose swallowed into it leaves the step open | `finish_check.py` `_value_text`; `skill_phases.py` `_code_step` ("prose in value") |
 | a value whose first token is an id (16+ letters, digits, `_`, `-`; 3+ digits) | The value is that token alone, cut at the first space or comma | `finish_check.py` `_UID_TOKEN_RE` |
 | `cmd` then prose not in parentheses (`go_up back to the list`), or the command not the first word (`then cmd k=v`) | Open: the agent runs it | `skill_phases.py` `_code_step` |
