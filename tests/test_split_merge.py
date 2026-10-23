@@ -455,3 +455,19 @@ def test_a_list_of_quoted_names_is_cut_too():
     assert merge_subtasks(q, split) == ["Explain the controls 'Stale badges': why each was flagged.",
                                         "Explain the controls 'Shared logins': why each was flagged.",
                                         "Walk Field Sales."]
+
+
+def test_a_long_name_dense_request_merges_in_well_under_a_second_per_thousand_words():
+    """fix-ajir.7: every request subject is tested against the same text; without the caches of
+    ``_norm`` and the word patterns that was quadratic (about 5 s at 2,000 words, 24 s at 8,000)."""
+    import random
+    import time
+
+    rng = random.Random(1)
+    words = ("Ann Lee and Bob Ray then the group Payroll, its members; each of them 'Ops Team' "
+             "\"North\" also so but (x) [y] - Finance_Admin RL-1234 it they").split()
+    q = " ".join(rng.choice(words) for _ in range(2000))
+    split = [q[i:i + len(q) // 5] for i in range(0, len(q), len(q) // 5)][:5]
+    start = time.perf_counter()
+    merge_subtasks(q, split)
+    assert time.perf_counter() - start < 2.5

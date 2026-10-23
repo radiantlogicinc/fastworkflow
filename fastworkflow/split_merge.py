@@ -63,6 +63,7 @@ Ltd"). Names a sub-task holds that the request does not are subjects too.
 """
 from __future__ import annotations
 
+import functools
 import re
 import unicodedata
 
@@ -82,6 +83,13 @@ def _typographic(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+#: ``_norm`` and the word-boundary patterns are cached: ``subjects_in`` tests every request
+#: subject against the same text, so without the caches a long, name-dense request is
+#: normalised and a pattern compiled once per subject (quadratic; fix-ajir.7).
+_CACHE_SIZE = 4096
+
+
+@functools.lru_cache(maxsize=_CACHE_SIZE)
 def _norm(text: str) -> str:
     """Lowercase, punctuation (but ``-`` and ``_``) to spaces, whitespace collapsed."""
     text = _typographic(text).lower()
@@ -95,7 +103,13 @@ def _contains(haystack: str, needle: str) -> bool:
     n = _norm(needle)
     if not n:
         return False
-    return re.search(r"(?<![\w-])" + re.escape(n) + r"(?![\w-])", _norm(haystack)) is not None
+    return _word(n).search(_norm(haystack)) is not None
+
+
+@functools.lru_cache(maxsize=_CACHE_SIZE)
+def _word(text: str) -> re.Pattern:
+    """``text`` as a whole word (``-`` and ``_`` are word characters)."""
+    return re.compile(r"(?<![\w-])" + re.escape(text) + r"(?![\w-])")
 
 
 _STOP = frozenset("""a an and are as at be by did do does for from give has have how i in is it its
@@ -246,6 +260,11 @@ def _partial_runs(subject: str) -> list[str]:
     """Parts of a name that stand for it: its tail after the first word ("Ledger" of a
     sentence-opening "Treat Ledger", "Pike" of "Owen Pike"), and for a name of three or
     more words, runs of two or more words holding at least two capitalised words."""
+    return list(_cached_partial_runs(subject))
+
+
+@functools.lru_cache(maxsize=_CACHE_SIZE)
+def _cached_partial_runs(subject: str) -> tuple[str, ...]:
     words = subject.split()
     runs = []
     tail = [w for w in words[1:]]
@@ -253,7 +272,7 @@ def _partial_runs(subject: str) -> list[str]:
             and not (len(tail) == 1 and tail[0].lower() in _NOT_NAMES):
         runs.append(" ".join(tail))
     if len(words) < 3:
-        return runs
+        return tuple(runs)
     for a in range(len(words)):
         for b in range(a + 2, len(words) + 1):
             run = words[a:b]
@@ -263,12 +282,11 @@ def _partial_runs(subject: str) -> list[str]:
             if len(caps) >= 2 and not all(w.lower() in _COMPANY_SUFFIX for w in caps) \
                     and _is_cap(run[0]) and _is_cap(run[-1]):
                 runs.append(" ".join(run))
-    return sorted(set(runs), key=lambda r: -len(r))
+    return tuple(sorted(set(runs), key=lambda r: -len(r)))
 
 
 def _blank(text: str, name: str) -> str:
-    n = re.escape(_norm(name))
-    return re.sub(r"(?<![\w-])" + n + r"(?![\w-])", " ", _norm(text))
+    return _word(_norm(name)).sub(" ", _norm(text))
 
 
 def subjects_in(text: str, request_subjects_: list[str],
