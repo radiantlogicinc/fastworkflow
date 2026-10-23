@@ -386,6 +386,13 @@ def test_a_step_value_ends_at_comma_prose_and_an_identifier_at_its_token():
     assert args(" query=Acme (EU)") == {"query": "acme"}
     assert args(' query="Acme (EU)') == {"query": "acme"}
     assert args(" query=O'Brien (only when needed)") == {"query": "o'brien"}
+    # A condition word inside a quoted value is the value. After the quotes, it is prose.
+    quoted = fc.parse_plan(
+        '1. find_book query="only when needed"\n'
+        '2. find_book query="Dune" only when needed\n'
+        '3. find_book query="if needed"', COMMANDS, CORE)
+    assert [s.kind for s in quoted] == ["command", "conditional", "command"]
+    assert quoted[0].arguments["query"] == "only when needed"
     run = {"command": "list_loans", "success": True,
            "input": {"scope": "shelf", "scope_uid": uid, "filter": None}}
     step = fc.parse_plan(f"1. list_loans scope=shelf scope_uid={uid}, no filter, no start",

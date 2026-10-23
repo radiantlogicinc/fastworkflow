@@ -79,10 +79,13 @@ _ANYWHERE_CONDITION_RE = re.compile(
 _STEP_ARGUMENT_RE = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_]*\s*=")
 #: An argument name and its ``=`` in a step: where one argument's value ends.
 _ARGUMENT_KEY_RE = re.compile(r"(?:^|(?<=\s))([A-Za-z_][A-Za-z0-9_]*)\s*=\s*")
+#: A value quoted right after its ``=`` (``query="Acme (EU)"``). An unclosed quote
+#: is an ordinary character. ``_CHAIN_RE`` and ``_outside_quoted_values`` share it.
+_QUOTED_VALUE = r"""=\s*"[^"\n]*"|=\s*'[^'\n]*'"""
+_QUOTED_VALUE_RE = re.compile(_QUOTED_VALUE)
 #: A step's chain: its text up to the first ``(`` or ``;`` that is not inside a value
-#: written in quotes right after its ``=`` (``query="Acme (EU)"``). An unclosed quote
-#: is an ordinary character.
-_CHAIN_RE = re.compile(r"""(?:=\s*"[^"\n]*"|=\s*'[^'\n]*'|[^(;])*""")
+#: written in quotes right after its ``=``.
+_CHAIN_RE = re.compile(rf"(?:{_QUOTED_VALUE}|[^(;])*")
 #: A value that is a placeholder, not a value: ``<...>``, ``{...}``, ``[...]``, an ellipsis.
 _PLACEHOLDER_RE = re.compile(r"[<>{}\[\]]|\.\.\.|\u2026")
 #: A value's first token that is an identifier, not a word of a name: at least
@@ -219,10 +222,11 @@ def _classify(number: int, text: str, names: set, core: set) -> PlanStep:
     arguments = step_arguments(rest)
     # A condition word in the command's chain (up to the first "(" or ";") makes the
     # step conditional too, so "find_x query=A only when needed" is not run with that
-    # prose as its value; a note in parentheses never changes what runs.
+    # prose as its value; a note in parentheses never changes what runs. A word inside
+    # a quoted value is the value, not prose (_outside_quoted_values).
     chain = step_chain(rest)
-    if (_CONDITION_RE.search(before) or _CONDITION_RE.search(chain)
-            or _ANYWHERE_CONDITION_RE.search(clean)):
+    if (_CONDITION_RE.search(before) or _CONDITION_RE.search(_outside_quoted_values(chain))
+            or _ANYWHERE_CONDITION_RE.search(_outside_quoted_values(clean))):
         return PlanStep(number, text, KIND_CONDITIONAL, command, wants_arguments, arguments)
     return PlanStep(number, text, KIND_COMMAND, command, wants_arguments, arguments)
 
@@ -240,6 +244,28 @@ def step_chain(rest: str) -> str:
     """The chain of a step whose text after its command is *rest*: up to the first ``(``
     or ``;`` (a note about the step), except inside a quoted value (``_CHAIN_RE``)."""
     return _CHAIN_RE.match(rest or "").group(0)
+
+
+def _outside_quoted_values(text: str) -> str:
+    """*text* with each quoted step value blanked, so a word inside one is not prose."""
+    return _QUOTED_VALUE_RE.sub("=", text or "")
+
+
+def quote_step_value(value: Any) -> str:
+    """*value* as a builder writes it into a step.
+
+    Quoted when it contains ``(`` or ``;``, which end a step's chain
+    (``step_chain``) and which a trailing ``(note)`` or ``;`` loses in the
+    key=value parser. A value that holds both ``"`` and ``'`` cannot be quoted
+    and is written as it is. Any other value is written unchanged.
+    """
+    text = str(value)
+    if "(" not in text and ";" not in text:
+        return text
+    quote = '"' if '"' not in text else "'"
+    if quote in text:
+        return text
+    return f"{quote}{text}{quote}"
 
 
 def step_arguments(rest: str) -> dict[str, str]:

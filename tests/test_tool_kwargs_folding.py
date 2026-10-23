@@ -89,6 +89,9 @@ def test_xml_command_text_gets_xml_tags():
 def test_a_value_the_parser_would_cut_is_quoted():
     assert fold_tool_kwargs("note", {"text": "a, b,"})[0] == 'note text="a, b,"'
     assert fold_tool_kwargs("note", {"text": "call (twice)"})[0] == 'note text="call (twice)"'
+    # A "(" or ";" anywhere in the value ends a code-run step's chain (fix-ajir.40).
+    assert fold_tool_kwargs("note", {"text": "Sales; West"})[0] == 'note text="Sales; West"'
+    assert fold_tool_kwargs("note", {"text": "Acme (EU) Ltd"})[0] == 'note text="Acme (EU) Ltd"'
     # A comma or ``=`` inside a value does not need quotes.
     assert fold_tool_kwargs("note", {"text": "a, b"})[0] == "note text=a, b"
     assert fold_tool_kwargs("note", {"text": "x=y"})[0] == "note text=x=y"

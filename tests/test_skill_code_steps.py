@@ -942,6 +942,18 @@ def test_a_pick_opens_the_one_exact_match_or_the_only_row(output, uid):
     assert command == (f"open_book_by_uid book_uid={uid}" if uid else None)
 
 
+def test_a_pick_quotes_a_uid_containing_a_parenthesis_or_semicolon():
+    # The command parser strips a trailing "(note)"; quoting keeps the uid (fix-ajir.40).
+    assert _pick("open_book_by_uid with the uid of the Dune match",
+                 {"labels": ["Dune"], "book_uids": ["b1(eu)"]}) == (
+        'open_book_by_uid book_uid="b1(eu)"', "only row")
+    assert _pick("open_book_by_uid with the uid of the Dune match",
+                 {"labels": ["Dune"], "book_uids": ["west;1"]}) == (
+        'open_book_by_uid book_uid="west;1"', "only row")
+    assert code_step(_step('open_book_by_uid book_uid="b1(eu)"'), OpenParams) == \
+        'open_book_by_uid book_uid="b1(eu)"'
+
+
 def test_a_pick_names_the_lookup_value_and_has_one_required_uid():
     output = {"labels": ["Dune"], "book_uids": ["b1"]}
     assert _pick("open_book_by_uid with the uid of the match", output)[1] == \

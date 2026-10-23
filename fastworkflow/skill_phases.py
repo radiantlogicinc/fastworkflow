@@ -1644,7 +1644,8 @@ def pick_step(step: Any, lookup: Any, output: Any,
     rows = (narrowed_output(output, values) or output)[uids[0]]
     if len(rows) != 1 or rows[0] is None or isinstance(rows[0], (Mapping, list, tuple, bool)):
         return None, "no single match"
-    command = f"{step.command} {fields[0]}={rows[0]}" + (f" {rest}" if rest else "")
+    command = (f"{step.command} {fields[0]}={finish_check.quote_step_value(rows[0])}"
+               + (f" {rest}" if rest else ""))
     for cls in parameters_classes:
         bound = ParameterExtraction._extract_parameters_from_key_values(command, cls, step.command)
         if bound is None or finish_check.plain_value(getattr(bound, fields[0], None)) != \

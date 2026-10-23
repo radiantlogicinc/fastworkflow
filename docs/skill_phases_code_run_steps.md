@@ -77,7 +77,9 @@ A step is mechanical when all of these hold:
 2. The command is the step's first word.
 3. The **chain** is the text after the command, cut at the first `(` or `;` that is not
    inside a value quoted right after its `=` (`query="Acme (EU)"`, `finish_check.step_chain`). Text in
-   parentheses after the chain is a note for the reader. It is never sent.
+   parentheses after the chain is a note for the reader. It is never sent. A builder that
+   writes the value (`skill.pick`, `pick_step`, `workflow_agent._key_value_text`) quotes it
+   when it contains `(` or `;` (`finish_check.quote_step_value`).
 4. Either the chain is empty and every field of the parameters class has a default
    (a bare command; a command with no parameters class also counts), or:
    - the key=value extractor binds the chain (it already declines placeholders `<...>`,

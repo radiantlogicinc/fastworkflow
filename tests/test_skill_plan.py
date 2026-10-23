@@ -76,6 +76,13 @@ def _module(signature=Signature, plan=PlanGenerator):
 
 def test_pick_writes_the_uid_or_the_match_wording():
     assert pick("open_item_by_uid", item_uid="u1", named="Dune") == "open_item_by_uid item_uid=u1"
+    # A uid containing "(" or ";" is quoted, so the chain keeps it (fix-ajir.40).
+    assert pick("open_item_by_uid", item_uid="b1(eu)", named="Acme") == \
+        'open_item_by_uid item_uid="b1(eu)"'
+    assert pick("open_item_by_uid", item_uid="west;1", named="Sales") == \
+        'open_item_by_uid item_uid="west;1"'
+    assert pick("open_item_by_uid", item_uid='say "hi";', named="Note") == \
+        """open_item_by_uid item_uid='say "hi";'"""
     assert pick("open_item_by_uid", item_uid=None, named="Dune") == \
         "open_item_by_uid with the uid of the Dune match"
     assert pick("open_item_by_uid", item_uid=Placeholder("find.only_uid()"), named="Dune") == \
