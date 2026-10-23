@@ -4,7 +4,7 @@ Status: **DECIDED — Phase-0 gate for epic `fix-bn1`, revision 2 (post adversar
 review).** Implementation of `fix-bn1.2`…`fix-bn1.8` may begin against the rulings
 in §11. §13 is the review record.
 Author: Claude (with Dhar Rawal), 2026-08-29.
-Baseline verified against: `ido-complex-tasks-project` @ `89ba8ba` (post-`fix-sb8`
+Baseline verified against: fastworkflow @ `89ba8ba` (post-`fix-sb8`
 merge `7a0340e`). Every file:line citation below was read against that tree.
 Parent platform design: `docs/fastworkflow_observability_studio_design.md`
 (rulings `[R1]`–`[R28]`). Sibling Phase-0 gate: `docs/distillation_observability_design.md`
@@ -32,7 +32,7 @@ it now is. Everything §7.3 says about **terminal `invalid`** stands unchanged;
 only the pre-registration half was removed.
 
 `SCHEMA_VERSION` was deliberately **not** bumped, on the owner's instruction.
-The one live store (`~/.local/state/fastworkflow/workflows/ido_workflow/
+The one live store (`~/.local/state/fastworkflow/workflows/<workflow>/
 observability.sqlite3`) was rewritten in place on 2026-09-08: `label`
 became `description` and `hypothesis` was dropped; later the same day
 `analysis_json` was dropped too, leaving `notes` as the one post-run

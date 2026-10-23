@@ -96,12 +96,12 @@ datasets = {version = "^5.0.1", optional = true}  # CVE-2026-66007 / PYSEC-2026-
 # server), so there is nothing to patch and no CVE regression.
 orjson = ">=3.11.6"      # CVE-2024-27454 (loads recursion) + CVE-2025-67221 (dumps recursion DoS, fixed in 3.11.6)
 urllib3 = ">=2.8.0"      # CVE-2025-66418, CVE-2025-66471 (decompression chain) + PYSEC-2026-141/142 + GHSA-8988-9cw3-xx77 (HTTPS proxy TLS config), GHSA-vxq7-64xx-v4gw (unbounded chunk-size line), GHSA-gh4c-6fx4-qh6g (chunked deflate loop)
-aiohttp = ">=3.14.3"     # CVE-2026-69244 (OOB heap read) + CVE-2026-69243 (WS upgrade smuggling) + CVE-2026-59881 (RSV1 deflate); prior floors covered 3.14.1-era DoS set
+aiohttp = ">=3.14.4"     # 3.14.4: GHSA-9xw5-w5jj-pvcg (multipart fd exhaustion), GHSA-2g87-pp6c-29x5 (unbounded memory/CPU), GHSA-5wr8-gcqf-gqf3 (no initial request timeout), GHSA-pqxq-w44r-73xw (pure-Python parser smuggling), GHSA-6cjc-53gc-5rqm (Max-Age pool exhaustion), GHSA-f9xw-jh8m-3mwq (scheme spoof), GHSA-gx76-c99x-2c96 + GHSA-494j-54xm-rwp3 (cookies); prior: CVE-2026-69244/69243/59881
 pyasn1 = ">=0.6.4"       # CVE-2026-59884/59885/59886 (BER tag/OID/REAL DoS) + prior CVE-2026-23490/30922
 filelock = ">=3.20.1"    # CVE-2025-68146 (TOCTOU symlink)
 cryptography = ">=50.0.0"  # CVE-2026-69247 (PKCS7 decrypt Bleichenbacher oracle); prior CVE-2026-26007 + PYSEC-2026-35/36
 json-repair = ">=0.60.1" # GHSA-xf7x-x43h-rpqh (circular JSON Schema $ref CPU DoS); transitive via dspy
-mcp = {version = ">=1.28.1,<2", optional = true}  # CVE-2026-59950 (deprecated websocket Host/Origin); pulled by fastapi-mcp in server extra
+mcp = {version = ">=1.30.0,<2", optional = true}  # CVE-2026-59951 / GHSA-84m7-p3x7-pcfv (StreamableHTTP session accumulation DoS) + CVE-2026-59950 (deprecated websocket Host/Origin); pulled by fastapi-mcp in server extra
 setuptools = ">=83.0.0"  # CVE-2026-59890 (MANIFEST.in exclude Unicode); pulled by torch
 requests = ">=2.33.0"    # CVE-2026-25645 (extract_zipped_paths temp reuse)
 idna = ">=3.15"          # CVE-2026-45409
@@ -109,6 +109,7 @@ pygments = ">=2.20.0"    # CVE-2026-4539 (ReDoS in AdlLexer)
 pyarrow = ">=23.0.1"     # PYSEC-2026-113 (use-after-free; only via datasets/training extra)
 fsspec = ">=2026.6.0"    # CVE-2026-104851 / GHSA-27vj-qcqg-25rc (ReferenceFileSystem template injection -> RCE); via torch/huggingface_hub/datasets
 multidict = ">=6.9.1"    # CVE-2026-104874 / GHSA-54p9-h82j-f925 (items-view union/subtraction reference leak); via aiohttp/yarl
+certifi = ">=2026.10.19"  # GHSA-6q48-6c7w-9gw2 (emSign root with compromised intermediate keys -> TLS MITM); via requests/httpx
 anyio = ">=4.14.2"       # CVE-2026-63374 / GHSA-82r6-8w77-94w6 (IDNA 2003 hostname -> TLS cert spoofing) + CVE-2026-64847 / GHSA-5p39-cfhj-2xmp (process-pool stderr hang); via httpx/openai/starlette
 
 [tool.poetry.group.dev.dependencies]

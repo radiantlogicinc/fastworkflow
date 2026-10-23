@@ -67,6 +67,17 @@ def _opened_part(trajectory: dict[str, Any]) -> str:
     return "Opened in this sub-task:\n" + "\n".join(lines)
 
 
+def _join_parts(parts: list[str]) -> str:
+    """One sub-task's answers, one per run in hand-off order; a lone answer is unlabelled.
+
+    A run that repeats the previous run's answer word for word adds nothing, so it is dropped.
+    """
+    parts = [part for i, part in enumerate(parts) if i == 0 or part != parts[i - 1]]
+    if len(parts) == 1:
+        return parts[0]
+    return "\n\n".join(f"Part {i} of {len(parts)}:\n{part}" for i, part in enumerate(parts, 1))
+
+
 def _agent_result_attributes(result: Any, attempts: int) -> dict[str, Any]:
     """Close-out attributes for fw.agent.execute — what the executor returned.
 
@@ -190,6 +201,15 @@ class WorkflowExecutionContext:
         # Set when a sub-task hit the step cap with no hand-off left: the turn is then exhausted.
         self._subtask_exhausted = False
         self._next_step = 0
+        # Finish check (fix-3xts): the first step each sub-task origin's outputs count from,
+        # and the run's initial plan as the planner wrote it.
+        self._evidence_floors: dict[int, int] = {}
+        self._initial_plan_text = ""
+        # A phased skill call in progress (skill_phases; see _run_skill_phases): JSON
+        # state that rides the suspension blob, and the live (command, phases) for it.
+        self._phase_run: Optional[dict[str, Any]] = None
+        self._phase_live: Optional[tuple[Any, list[Any]]] = None
+        self._phased_skill_call = None
 
         # Insights-distillation (teacher/student) state — CLI/Topology-A only.
         self._generate_insights = generate_insights
@@ -239,6 +259,9 @@ class WorkflowExecutionContext:
         self._suspend_began_at: Optional[datetime] = None
         self._turn_entry_workflow_name: str = ""
         self._turn_entry_context: str = ""
+        # Unattended turn: nobody is there to answer, so the agent has no
+        # ask_user for the whole logical turn. Set when the turn begins.
+        self._turn_unattended: bool = False
         self._turn_agent_result: Any = None
         self._turn_history_baseline: int = 0
         # turn_key of the newest turn that both completed and contributed a
@@ -544,7 +567,7 @@ class WorkflowExecutionContext:
     # Turn accumulator (v2.21: capture + TurnResult return type only)
     # ------------------------------------------------------------------
 
-    def _begin_turn(self, user_message: str) -> None:
+    def _begin_turn(self, user_message: str, unattended: bool = False) -> None:
         """Atomic turn start: reset accumulator, mint key, stamp started_at.
 
         Never called while awaiting_user — a message during suspension is the
@@ -556,6 +579,7 @@ class WorkflowExecutionContext:
         self._turn_key = mint_turn_key()
         self._turn_started_at = datetime.now(timezone.utc)
         self._turn_user_message = user_message
+        self._turn_unattended = bool(unattended)
         self._turn_refined_message = None
         self._turn_suspended_ms = 0
         self._suspend_began_at = None
@@ -604,6 +628,7 @@ class WorkflowExecutionContext:
                 "channel_id": self._channel_id,
                 "conversation_id": self._conversation_id,
                 "user_message": user_message,
+                "unattended": self._turn_unattended,
             },
             context=self._turn_entry_context or None,
             use_stack=False,
@@ -991,6 +1016,7 @@ class WorkflowExecutionContext:
             "subtask_answers": list(self._subtask_answers),
             "subtask_exhausted": self._subtask_exhausted,
             "next_step": self._next_step,
+            "skill_phase_run": self._phase_run,
             "react": react_blob,
             "nlu_stage": nlu_stage,
             "turn": self._serialize_turn_accumulator(),
@@ -1053,6 +1079,9 @@ class WorkflowExecutionContext:
         self._subtask_answers = list(state.get("subtask_answers") or [])
         self._subtask_exhausted = bool(state.get("subtask_exhausted"))
         self._next_step = int(state.get("next_step") or 0)
+        # Absent before skill phases: no phased skill call in progress.
+        self._phase_run = state.get("skill_phase_run") or None
+        self._phase_live = None
 
         self._action_log = list(state.get("action_log") or [])
         # Absent from blobs written before ruling I3 landed; a missing key just
@@ -1351,9 +1380,16 @@ class WorkflowExecutionContext:
     # Public execution API
     # ------------------------------------------------------------------
 
-    def process_turn(self, message: str) -> "fastworkflow.TurnOutput":
+    def process_turn(
+        self, message: str, *, unattended: bool = False
+    ) -> "fastworkflow.TurnOutput":
         """
         Execute one user message synchronously and return the public TurnOutput.
+
+        ``unattended=True`` runs the turn with no one to answer: the agent's
+        ask_user tool is removed for the whole logical turn. It applies to the
+        turn this message begins; a message answering a suspended turn
+        continues that turn as it began.
 
         Shares dispatch with _execute_message(); additionally captures every
         command execution of the logical turn (including ask_user exchanges). The
@@ -1361,7 +1397,7 @@ class WorkflowExecutionContext:
         TurnOutput (see docs/turn_result_design_final.md section 1a).
         """
         try:
-            command_output = self._execute_message(message)
+            command_output = self._execute_message(message, unattended=unattended)
         except Exception as exc:
             # A turn that raised is still a turn: record it as failed, with its
             # spans closed under it, before the error propagates. Without this
@@ -1377,7 +1413,9 @@ class WorkflowExecutionContext:
         return turn_result.turn_output
 
     @dspy_logger.observe_dspy_calls
-    def _execute_message(self, message: str) -> fastworkflow.CommandOutput:
+    def _execute_message(
+        self, message: str, unattended: bool = False
+    ) -> fastworkflow.CommandOutput:
         """Shared message dispatch for _execute_message()/process_turn()."""
         self.assert_experiment_claim_current()
         if self._app_workflow is None:
@@ -1387,7 +1425,7 @@ class WorkflowExecutionContext:
 
         if not self._awaiting_user:
             # A message during suspension is the resume answer — never a reset.
-            self._begin_turn(message)
+            self._begin_turn(message, unattended=unattended)
 
         self.push_active_workflow(self._app_workflow)
         try:
@@ -1800,12 +1838,20 @@ class WorkflowExecutionContext:
         self._subtask_answers = []
         self._subtask_exhausted = False
         self._next_step = 0
+        self._evidence_floors = {}
+        self._phase_run = None
+        self._phase_live = None
         self._enable_all_tools()
 
     def _enable_all_tools(self) -> None:
-        """Lift any tool restriction a reply left on the agent (see _apply_reply_intent)."""
+        """Lift any tool restriction a reply left on the agent (see _apply_reply_intent).
+
+        An unattended turn keeps ask_user off: its baseline has no one to ask.
+        """
         if self._workflow_tool_agent is not None:
-            self._workflow_tool_agent.disabled_tools = frozenset()
+            self._workflow_tool_agent.disabled_tools = (
+                frozenset({"ask_user"}) if self._turn_unattended else frozenset()
+            )
 
     def _agent_dspy_context(self):
         """Return (lm, adapter) for agent-mode dspy.context blocks."""
@@ -1893,23 +1939,30 @@ class WorkflowExecutionContext:
         self._turn_refined_message = refined_user_query
         self._clear_subtask_state()
 
-        if fastworkflow.get_env_var("FW_SPLIT_REQUESTS", default="1") != "0":
-            from fastworkflow.workflow_agent import split_into_subtasks
+        # A workflow with skills answers a plain "what can you do?" in code, with no model call.
+        from fastworkflow.capability_answer import capability_answer
 
-            subtasks = split_into_subtasks(
-                refined_user_query,
-                planner_lm=getattr(self, "_current_planner_lm", None),
-                workflow_folderpath=self._app_workflow.folderpath if self._app_workflow else None,
-            )
-            if len(subtasks) > 1:
-                self._subtasks = subtasks
-                self._origins = list(range(len(subtasks)))
-                return self._run_subtasks_from(0)
+        if self._app_workflow and (answer := capability_answer(
+                message, self._app_workflow, self._cme_workflow.folderpath)) is not None:
+            return dspy.Prediction(final_answer=answer, exhausted=False)
+
+        from fastworkflow.workflow_agent import split_into_subtasks
+
+        subtasks = split_into_subtasks(
+            refined_user_query,
+            planner_lm=getattr(self, "_current_planner_lm", None),
+            workflow_folderpath=self._app_workflow.folderpath if self._app_workflow else None,
+        )
+        if len(subtasks) > 1:
+            self._subtasks = subtasks
+            self._origins = list(range(len(subtasks)))
+            return self._run_subtasks_from(0)
 
         # An unsplit request is one sub-task, so a run that hits the step cap is handed off the same way.
         self._subtasks = [refined_user_query]
         self._origins = [0]
-        result = self._call_agent_for_query(refined_user_query, message)
+        self._evidence_floors = {0: 0}
+        result = self._call_agent_for_query(refined_user_query, message, evidence_floor=0)
         if getattr(result, "exhausted", None) is not True:
             return result
         self._record_subtask_answer(result)
@@ -1918,16 +1971,26 @@ class WorkflowExecutionContext:
 
     def _call_agent_for_query(self, query: str, planner_user_query: str, *,
                               first_step: int | None = None,
-                              template_text: str | None = None):
+                              template_text: str | None = None,
+                              evidence_floor: int | None = None):
         """Plan one query with the planner, then run the ReAct agent on it.
 
         ``template_text`` picks the skill template; it defaults to the query itself.
+        ``evidence_floor`` is the first step index whose archived outputs count as
+        this run's for the finish check (a hand-off continuation counts the runs
+        of its sub-task before it); it defaults to ``first_step``.
         """
         from fastworkflow.workflow_agent import (
-            build_query_with_next_steps, _what_can_i_do, plan_template_for)
+            build_query_with_next_steps, _what_can_i_do, planner_skill_for)
 
-        plan_template = (plan_template_for(template_text or query, self._app_workflow.folderpath)
-                         if self._app_workflow is not None else "")
+        # One skill match gives both the template and, for a skill with params or phases, its parsed
+        # form; a hand-off continuation (query differs from its original text) plans from
+        # the template only, since the skill call would plan the whole job again.
+        plan_template, skill_command = (
+            planner_skill_for(template_text or query, self._app_workflow.folderpath)
+            if self._app_workflow is not None else ("", None))
+        if template_text is not None and template_text != query:
+            skill_command = None
         # Initial turn planning uses every prior turn summary, not the previous
         # turn's full agent trajectory (mid-turn replans still use trajectory).
         command_info_and_refined_message_with_todolist = build_query_with_next_steps(
@@ -1937,9 +2000,16 @@ class WorkflowExecutionContext:
             planner_lm=getattr(self, "_current_planner_lm", None),
             planner_user_query=planner_user_query,
             plan_template=plan_template or None,
+            skill_command=skill_command,
         )
+        phased, self._phased_skill_call = getattr(self, "_phased_skill_call", None), None
+        if phased is not None:
+            # A phased skill call: its phases run as sub-plans, with no hand-off.
+            return self._start_skill_phases(query, *phased, first_step=first_step or 0)
         available_commands = _what_can_i_do(self)
         step_kwargs = {} if first_step is None else {"first_step": first_step}
+        self._attach_finish_check(
+            evidence_floor if evidence_floor is not None else (first_step or 0))
 
         return self._call_agent_with_retry(
             lambda: self._workflow_tool_agent(
@@ -1949,6 +2019,594 @@ class WorkflowExecutionContext:
             ),
             trace_input=command_info_and_refined_message_with_todolist,
         )
+
+    def _attach_finish_check(self, floor: int, *, values: bool = False,
+                             item_binding: Optional[tuple[Any, list, list]] = None) -> None:
+        """Give the agent this run's finish check, or none when the run has no plan.
+
+        The plan is the one ``build_query_with_next_steps`` just made for this
+        run. Set before every run, so a check never outlives the run it was made for.
+        *values*: a step's concrete argument values must match (a skill phase's run).
+        *item_binding* ``(item, other items, the phase's planned command names)``: the
+        run is one item of a fan-out phase,
+        bound to its record; the check also flags a run on another item's record and
+        an item never opened (``skill_phases.item_record_issues``).
+        """
+        agent = self._workflow_tool_agent
+        if agent is None:
+            return
+        agent.finish_reviewer = None
+        from fastworkflow.observation_offloading import finish_check
+
+        plan_text = str(getattr(self, "_initial_plan_text", "") or "")
+        if not plan_text.strip() or self._app_workflow is None:
+            return
+        folderpath = self._app_workflow.folderpath
+
+        def review(trajectory, iters_left: int):
+            from fastworkflow.workflow_agent import core_command_names
+
+            routing = fastworkflow.RoutingRegistry.get_definition(folderpath)
+            # The archive keeps the command text as sent; the action log says
+            # which command each text resolved to (an alias, a misspelling).
+            note = finish_check.review_finish(
+                plan_text=plan_text, floor=floor, iters_left=iters_left,
+                commands=list(routing.routing_definition_map),
+                core_commands=core_command_names(),
+                resolved=finish_check.resolved_command_names(
+                    getattr(self, "_action_log", None) or ()),
+                values=values)
+            if item_binding is None or iters_left < finish_check.MIN_ITERS_LEFT:
+                return note
+            from fastworkflow import skill_phases
+
+            try:
+                runs = self._archived_command_runs(from_step=int(floor or 0))
+                item, others, planned = item_binding
+                binding = skill_phases.item_record_note(item, skill_phases.item_record_issues(
+                    runs, item, others, self._current_record()[0], planned))
+            except Exception as error:  # noqa: BLE001 - the check never fails a turn
+                logger.warning("item record check skipped: %s: %s", type(error).__name__, error)
+                return note
+            return "\n".join(part for part in (note, binding) if part) or None
+
+        agent.finish_reviewer = review
+
+    # ------------------------------------------------------------------
+    # Phased skill calls (fastworkflow.skill_phases)
+    # ------------------------------------------------------------------
+
+    def _start_skill_phases(self, query: str, command, call, *, first_step: int):
+        """Run a phased skill call's phases, in order; the sub-task's result.
+
+        ``call`` is the skill call (``skill_commands.SkillCallPlan``) whose ``phases``
+        run. See ``fastworkflow.skill_phases`` for what the runner does and decides.
+        Extra command steps after the skill's own that would land in an answer-only last
+        phase run in a phase of their own just before it (``skill_phases.extra_steps_phase``).
+        The extra steps before the skill's own run first, in a phase of their own
+        (``skill_phases.steps_before_phase``).
+        """
+        from fastworkflow import skill_phases
+        from fastworkflow.observation_offloading.facts import fact_sources
+
+        names = self._phase_command_names()
+        names["commands"] = names["commands"] + [
+            source.command for phase in call.phases if phase.output is not None
+            for source in fact_sources(phase.output)]
+        extra, steps_after = skill_phases.extra_steps_phase(call.phases, call.steps_after, **names)
+        phases = skill_phases.with_phase_before(call.phases, extra)
+        before = skill_phases.steps_before_phase(phases, call.steps_before)
+        phases = skill_phases.with_phase_before(phases, before, 0)
+        self._phase_live = (command, phases)
+        self._phase_run = {
+            "skill": command.name,
+            "args": json.loads(json.dumps(call.args, default=str)),
+            "query": query,
+            "phases": [phase.name for phase in phases],
+            # A flat skill call (call_phases: one phase named after the skill, no output): its
+            # run gets the executor's own step cap, not FW_SKILL_PHASE_MAX_STEPS.
+            "flat": [(p.name, p.output) for p in call.phases] == [(command.name, None)],
+            "steps_before": list(call.steps_before),
+            "steps_after": steps_after,
+            # The phase the extra command steps run in (None when there is none), its steps
+            # (to rebuild it after a restore) and its answer (added to the job's answer).
+            "extra_phase": extra.name if extra is not None else None,
+            "extra_steps": extra.steps_fn() if extra is not None else [],
+            "extra_answer": "",
+            # The phase the extra steps before the skill's own run in (None when there
+            # are none; its steps are steps_before) and its answer (added to the job's).
+            "before_phase": before.name if before is not None else None,
+            "before_answer": "",
+            "index": 0,
+            "outputs": {},
+            "answers": [],
+            "phase_answers": [],
+            # A fan-out phase in progress: its items (capped), how many there were, and
+            # the item now running. None outside a fan-out phase.
+            "items": None,
+            "items_total": 0,
+            "item_index": 0,
+            # A fan-out phase's `until` condition was met: its remaining items do not run.
+            "until_met": False,
+            "notes": [],
+            "first_step": first_step,
+            "plan": "",
+        }
+        return self._run_skill_phases(first_step)
+
+    def _live_skill_phases(self):
+        """``(command, phases)`` of the call in progress; rebuilt from the skill after a restore."""
+        if self._phase_live is not None:
+            return self._phase_live
+        from fastworkflow.skill_commands import call_phases
+        from fastworkflow.skill_phases import PhaseError
+        from fastworkflow.workflow_agent import load_skill_commands
+
+        state = self._phase_run
+        command = load_skill_commands(self._app_workflow.folderpath).get(state["skill"])
+        if command is None:
+            raise PhaseError(f"skill {state['skill']!r} is no longer defined")
+        # A flat call (no plan(), or no phases for these arguments) is one phase.
+        phases = call_phases(command, state["args"])
+        if state.get("extra_phase"):
+            from fastworkflow.skill_phases import Phase, with_phase_before
+
+            moved = list(state.get("extra_steps") or [])
+            phases = with_phase_before(phases, Phase(state["extra_phase"], lambda: list(moved)))
+        if state.get("before_phase"):
+            from fastworkflow.skill_phases import Phase, with_phase_before
+
+            first = list(state.get("steps_before") or [])
+            phases = with_phase_before(phases, Phase(state["before_phase"], lambda: list(first)), 0)
+        if [phase.name for phase in phases] != state["phases"]:
+            raise PhaseError(f"skill {state['skill']!r} now plans other phases")
+        self._phase_live = (command, phases)
+        return self._phase_live
+
+    def _phase_outputs(self, phases, index: int) -> dict[str, Any]:
+        """The typed outputs of the phases before *index* that filled one (a fan-out
+        phase's: the list of its per-item outputs)."""
+        state = self._phase_run
+        outputs: dict[str, Any] = {}
+        for p in phases[:index]:
+            if p.output is None or p.name not in state["outputs"]:
+                continue
+            value = state["outputs"][p.name]
+            outputs[p.name] = ([p.output.model_validate(v) for v in value] if p.fans_out
+                               else p.output.model_validate(value))
+        return outputs
+
+    def _run_skill_phases(self, first_step: Optional[int] = None, *,
+                          resume_observation: Optional[str] = None):
+        """Run the phases from the current one; a suspension, or the sub-task's result.
+
+        With ``resume_observation`` the current phase's executor run, suspended on
+        ask_user, is resumed first. The result never reports ``exhausted``: a phased
+        skill is not handed off. A fan-out phase runs one sub-plan per item, until its
+        items are done or its ``until`` condition is met. A phase with a callable
+        ``when`` is decided when it is reached (``skill_phases.runs_now``); a skipped one
+        runs nothing and keeps the answers of the phase before it.
+        """
+        from fastworkflow import skill_phases
+
+        state = self._phase_run
+        try:
+            command, phases = self._live_skill_phases()
+        except Exception as error:  # noqa: BLE001 - the call stops, saying why
+            return self._skill_phases_failed(state["phases"][state["index"]], f"{error}")
+        while state["index"] < len(phases):
+            phase = phases[state["index"]]
+            starting = resume_observation is None and (
+                not phase.fans_out or state.get("items") is None)
+            if starting:
+                # What an optional phase that fails gives back (_phase_failure).
+                state["phase_start"] = {"answers": len(state["answers"]),
+                                        "phase_answers": list(state.get("phase_answers") or []),
+                                        "notes": len(state.get("notes") or [])}
+            if starting and phase.has_condition:
+                try:
+                    runs, why = skill_phases.runs_now(
+                        phase, self._phase_outputs(phases, state["index"])), None
+                except skill_phases.PhaseError as error:
+                    runs, why = False, str(error)
+                if not runs:
+                    # Skipped: counts as not run (no output, later parameters keep their
+                    # defaults). The phase's span says so; no executor runs.
+                    outcome, value = self._run_skill_phase(command, phases, first_step,
+                                                           skip=True, skip_error=why)
+                    if outcome == "failed":
+                        failed = self._phase_failure(phase, value)
+                        if failed is not None:
+                            return failed
+                        continue
+                    state["index"] += 1
+                    continue
+            if starting:
+                state["phase_answers"] = []
+            if phase.fans_out and state.get("items") is None:
+                try:
+                    items, total = skill_phases.fan_out_items(
+                        phase, self._phase_outputs(phases, state["index"]))
+                except skill_phases.PhaseError as error:
+                    failed = self._phase_failure(phase, str(error))
+                    if failed is not None:
+                        return failed
+                    continue
+                state.update(items=json.loads(json.dumps(items, default=str)),
+                             items_total=total, item_index=0, until_met=False)
+                state["outputs"][phase.name] = []
+                if total > len(items) and phase.until is None:
+                    note = skill_phases.cap_note(phase.name, len(items), total, phase.noun)
+                    # Two fan-outs over the same items with one noun say it once.
+                    if note not in state["notes"]:
+                        state["notes"].append(note)
+            if not phase.fans_out or (state["item_index"] < len(state["items"])
+                                      and not state.get("until_met")):
+                outcome, value = self._run_skill_phase(
+                    command, phases,
+                    state["first_step"] if resume_observation is not None else first_step,
+                    resume_observation=resume_observation)
+                resume_observation = None
+                if outcome == "suspended":
+                    return value
+                if outcome == "failed":
+                    first_step = self._next_step
+                    failed = self._phase_failure(phase, value)
+                    if failed is not None:
+                        return failed
+                    continue
+                first_step = self._next_step
+                if phase.fans_out:
+                    state["item_index"] += 1
+                    continue
+            if phase.fans_out and phase.until is not None:
+                # Said at the end: stopped on its condition, or capped.
+                note = skill_phases.fan_out_note(phase.name, state["item_index"],
+                                                 state["items_total"], bool(state.get("until_met")),
+                                                 phase.noun)
+                if note and note not in state["notes"]:
+                    state["notes"].append(note)
+            state.update(items=None, items_total=0, item_index=0, until_met=False)
+            state["index"] += 1
+        answers = state["answers"]
+        # The last phase writes the answer, from the facts its steps carry (a fan-out
+        # last phase: its items' answers, in item order).
+        last = [a for a in state.get("phase_answers") or [] if a]
+        answer = "\n\n".join(last) if last else "\n\n".join(a for a in answers if a)
+        if state.get("extra_answer") and last:
+            # The extra command steps' own report (their phase is not the last).
+            answer = f"{answer}\n\n{state['extra_answer']}"
+        if state.get("before_answer") and last:
+            # The report of the extra steps before the skill's own (their phase is first).
+            answer = f"{state['before_answer']}\n\n{answer}"
+        notes = list(state.get("notes") or [])
+        if notes:
+            answer = "\n\n".join(part for part in (answer, " ".join(notes)) if part)
+        self._phase_run = self._phase_live = None
+        return dspy.Prediction(final_answer=answer, exhausted=False)
+
+    def _phase_failure(self, phase, error: str):
+        """Phase *phase* failed: the sub-task's result (``_skill_phases_failed``), or None
+        when the phase is ``optional``. An optional phase then counts as not run: its
+        output, the answers its runs wrote and the notes it added are dropped, and the
+        runner goes on with the next phase."""
+        if not getattr(phase, "optional", False):
+            return self._skill_phases_failed(phase.name, error)
+        state = self._phase_run
+        start = state.get("phase_start") or {}
+        del state["answers"][start.get("answers", len(state["answers"])):]
+        state["phase_answers"] = list(start.get("phase_answers") or [])
+        del state["notes"][start.get("notes", len(state["notes"])):]
+        state["outputs"].pop(phase.name, None)
+        state.update(items=None, items_total=0, item_index=0, until_met=False)
+        state["index"] += 1
+        logger.info("skill %s: optional phase %s failed and is left out: %s",
+                    state["skill"], phase.name, error)
+        return None
+
+    def _skill_phases_failed(self, name: str, error: str):
+        """The sub-task's result when phase ``name`` failed: the facts found, and what failed.
+
+        Only facts filled in code are shown (``skill_phases.found_facts``), never text a
+        phase's run wrote: the failed phase's own answer may report what it never read."""
+        from fastworkflow.skill_phases import failure_text, found_facts
+
+        state = self._phase_run
+        names = state["phases"]
+        not_run = names[names.index(name) + 1:] if name in names else []
+        logger.info("skill %s: phase %s failed: %s", state["skill"], name, error)
+        self._phase_run = self._phase_live = None
+        return dspy.Prediction(
+            final_answer=failure_text(found_facts(state.get("outputs") or {}), name, error,
+                                      not_run, notes=state.get("notes") or ()),
+            exhausted=False, phase_failed=name)
+
+    def _archived_command_runs(self, *, from_step: Optional[int] = None,
+                               to_step: Optional[int] = None) -> list[dict[str, Any]]:
+        """The command runs archived for this turn, in run order (``offload_command_runs``);
+        only steps ``from_step``..``to_step`` (inclusive) when given, filtered in SQL."""
+        from fastworkflow.observation_offloading.state import (
+            archive_for_path, observability_db_path, scope_for_host)
+
+        return archive_for_path(observability_db_path(self)).command_runs(
+            scope_for_host(self), from_step=from_step, to_step=to_step)
+
+    def _phase_command_names(self) -> dict[str, list[str]]:
+        """``commands`` / ``core_commands`` a phase's steps are read with, as the finish check
+        reads them. Without the routing definition only the runs' and the facts' commands
+        are known (``skill_phases.fill_output`` adds those)."""
+        from fastworkflow.workflow_agent import core_command_names
+
+        commands: list[str] = []
+        try:
+            if self._app_workflow is not None:
+                routing = fastworkflow.RoutingRegistry.get_definition(self._app_workflow.folderpath)
+                commands = list(routing.routing_definition_map)
+        except Exception:  # noqa: BLE001 - read the steps with what is known
+            commands = []
+        return {"commands": commands, "core_commands": list(core_command_names())}
+
+    def _current_record(self) -> tuple[str, str]:
+        """``(clause, context name)`` of the record the workflow is on now (``""`` at the root)."""
+        from fastworkflow.context_identity import context_clause_for, context_identity
+
+        active = self.get_active_workflow() or self._app_workflow
+        if active is None:
+            return "", ""
+        return context_clause_for(active), context_identity(active)[0]
+
+    def _run_skill_phase(self, command, phases, first_step: int, *,
+                         resume_observation: Optional[str] = None,
+                         skip: bool = False, skip_error: Optional[str] = None):
+        """Run the current phase (of a fan-out phase: its current item) as one sub-plan
+        and fill its output.
+
+        Returns ``("done", None)``, ``("suspended", result)`` or ``("failed", message)``.
+        With *skip* the phase's callable ``when`` was false (or, with *skip_error*, could
+        not be decided): only its span is written (``skipped``), nothing runs, and the
+        result is ``("done", None)`` (``("failed", skip_error)``).
+        One ``fw.skill.phase`` span per run (a resumed run opens a new one). An
+        answer-only phase (``skill_phases.is_answer_only``) is not an executor run: one
+        model call with no tools writes its answer (``skill_phases.write_answer``).
+        """
+        from fastworkflow import skill_phases
+        from fastworkflow.skill_commands import number
+        from fastworkflow.observation_offloading.facts import FactsError, fact_sources
+        from fastworkflow.workflow_agent import _what_can_i_do
+
+        state = self._phase_run
+        index = state["index"]
+        phase = phases[index]
+        last = index == len(phases) - 1
+        budget = (getattr(self._workflow_tool_agent, "max_iters", None)
+                  if state.get("flat") else None) or skill_phases.phase_step_budget()
+        resumed = resume_observation is not None
+        attributes = {
+            "skill": state["skill"],
+            "phase": phase.name,
+            "phase_index": index,
+            "phase_count": len(phases),
+            "step_budget": budget,
+            "first_step": first_step,
+            "resumed": resumed,
+        }
+        item = None
+        others: list[Any] = []
+        if phase.fans_out and not skip:
+            items = state["items"]
+            k = state["item_index"]
+            item, others = items[k], items[:k] + items[k + 1:]
+            attributes.update({"item": item, "item_index": k, "item_count": len(items),
+                               "items_total": state["items_total"]})
+            last_item = k == len(items) - 1
+        else:
+            last_item = True
+        span = tracing.start_span(self, tracing.SPAN_SKILL_PHASE, attributes=attributes)
+        if skip:
+            if skip_error is not None:
+                tracing.end_span(self, span, status=tracing.STATUS_ERROR,
+                                 attributes={"skipped": False, "facts_error": skip_error})
+                return "failed", skip_error
+            tracing.end_span(self, span, attributes={"skipped": True})
+            return "done", None
+        names = self._phase_command_names()
+        if phase.output is not None:
+            names["commands"] = names["commands"] + [
+                source.command for source in fact_sources(phase.output)]
+        if not resumed:
+            outputs = self._phase_outputs(phases, index)
+            try:
+                steps = (skill_phases.phase_steps(phase, outputs, item) if phase.fans_out
+                         else skill_phases.phase_steps(phase, outputs))
+            except skill_phases.PhaseError as error:
+                tracing.end_span(self, span, status=tracing.STATUS_ERROR,
+                                 attributes={"steps": "", "facts_error": str(error)})
+                return "failed", str(error)
+            # Code may run the phase's own steps only: never the planner's steps_before
+            # (their phase has none of its own) or steps_after (after them).
+            own_steps = 0 if phase.name == state.get("before_phase") else len(steps)
+            steps = steps + (state["steps_after"] if last and last_item else [])
+            state["first_step"] = first_step
+            state["plan"] = number(steps)
+        plan_text = state["plan"]
+        answer_only = not resumed and skill_phases.is_answer_only(plan_text, **names)
+        planned = sorted(skill_phases.planned_steps(plan_text, **names))
+        item_frame = (state["item_index"], len(state["items"]), item) if phase.fans_out else None
+        try:
+            if answer_only:
+                # Steps that name no command: one model call, with no tools, writes the
+                # answer from the facts the steps carry (none when every step is verbatim
+                # or a guard: code writes it, skill_phases.answer_by_code). Nothing can run a command.
+                # A long list the steps do not tell the answer to name is cut short in the
+                # prompt (skill_phases.capped_steps); a list to name is given whole.
+                earlier_outputs = self._phase_outputs(phases, index)
+                prompt_steps = skill_phases.capped_steps(plan_text, earlier_outputs)
+                user_query = skill_phases.phase_query(
+                    state["query"], prompt_steps, index=index, count=len(phases),
+                    name=phase.name, answer_only=True, item=item_frame)
+                result = self._call_agent_with_retry(
+                    lambda: dspy.Prediction(
+                        final_answer=skill_phases.answer_only_answer(
+                            user_query, prompt_steps, earlier_outputs),
+                        suspended=False, exhausted=False),
+                    trace_input=user_query,
+                )
+            else:
+                # The finish check reads this phase's steps against what this phase ran.
+                self._initial_plan_text = plan_text
+                self._attach_finish_check(
+                    state["first_step"], values=True,
+                    item_binding=(item, others, planned) if phase.fans_out and phase.bind
+                    else None)
+                if resumed:
+                    result = self._call_agent_resume(resume_observation)
+                else:
+                    # Code runs the leading mechanical steps first (skill_phases.CodeSteps).
+                    code = self._phase_code_steps(
+                        plan_text, own_steps, names,
+                        answers=last or phase.name == state.get("extra_phase"))
+                    # A phase other than the last sees only its own steps, never the request.
+                    user_query = skill_phases.phase_query(
+                        state["query"], plan_text, index=index, count=len(phases),
+                        name=phase.name, item=item_frame,
+                        code_steps=code is not None and code.runs_any)
+                    if code is not None and last:
+                        # Code may run every step: the agent then answers from their outputs.
+                        code.done_inputs = {"user_query": skill_phases.phase_query(
+                            state["query"], plan_text, index=index, count=len(phases),
+                            name=phase.name, item=item_frame, code_ran_all=True)}
+                    available_commands = _what_can_i_do(self)
+
+                    def run_phase():
+                        self._workflow_tool_agent.code_steps = code
+                        return self._workflow_tool_agent(
+                            user_query=user_query,
+                            available_commands=available_commands,
+                            first_step=first_step,
+                            max_iters=budget,
+                        )
+
+                    result = self._call_agent_with_retry(run_phase, trace_input=user_query)
+        except BaseException as exc:
+            tracing.end_span(self, span, status=tracing.status_for_dispatch_exception(exc),
+                             attributes={"steps": plan_text, "answer_only": answer_only,
+                                         "error_type": type(exc).__name__})
+            raise
+        by_code = {}
+        if not answer_only and not resumed:
+            by_code = {"steps_by_code": code.count if code is not None else 0,
+                       "code_stop": (code.stop if code is not None else None) or "off"}
+        if answer_only:
+            steps_used = 0
+            # Whether code wrote the answer from the steps, with no model call (fix-hia1.30).
+            by_code = {"answer_by_code": skill_phases.answer_by_code(prompt_steps)}
+        else:
+            trajectory = getattr(self._workflow_tool_agent, "trajectory", None) or {}
+            indices = [int(key.rsplit("_", 1)[1]) for key in trajectory
+                       if key.rsplit("_", 1)[-1].isdigit()]
+            steps_used = len({key for key in trajectory if key.startswith("thought_")
+                              and int(key.rsplit("_", 1)[1]) >= state["first_step"]})
+            if getattr(result, "suspended", None) is True:
+                tracing.end_span(self, span, status=tracing.STATUS_CANCELLED,
+                                 attributes={"steps": plan_text, "steps_used": steps_used,
+                                             "answer_only": False, "suspended": True,
+                                             **by_code})
+                return "suspended", result
+            if indices:
+                self._next_step = max(indices) + 1
+        answer = skill_phases.clean_answer(getattr(result, "final_answer", "") or "")
+        if phase.name == state.get("extra_phase"):
+            state["extra_answer"] = answer
+        if phase.name == state.get("before_phase"):
+            state["before_answer"] = answer
+        state["answers"].append(answer)
+        state.setdefault("phase_answers", []).append(answer)
+        exhausted = getattr(result, "exhausted", None) is True
+        closing = {"steps": plan_text, "steps_used": steps_used, "exhausted": exhausted,
+                   "suspended": False, "answer_only": answer_only, **by_code}
+        record = None
+        facts = None
+        issues = None
+        need_runs = phase.output is not None or (phase.fans_out and phase.bind)
+        try:
+            ended_on, record_context = self._current_record() if need_runs else (None, None)
+            record = ended_on
+            runs = (self._archived_command_runs(from_step=state["first_step"])
+                    if need_runs else [])
+            earlier = (self._archived_command_runs(to_step=state["first_step"] - 1)
+                       if phase.output is not None else [])
+            if phase.fans_out and phase.bind:
+                # The item is bound to the record that names it, wherever the run ended.
+                issues = skill_phases.item_record_issues(runs, item, others, ended_on, planned)
+                record = skill_phases.item_record(runs, item, ended_on)
+                if record != ended_on:
+                    record_context = None
+            elif phase.output is not None and not phase.fans_out:
+                # The phase did its steps on one record, then moved off it: fill on
+                # that record (fix-hia1.10), not on the clause the run ended on.
+                rebound = skill_phases.planned_record(
+                    runs, plan_text, ended_on=ended_on, **names)
+                if rebound is not None:
+                    record, record_context = rebound, None
+            if phase.output is not None:
+                if phase.fans_out and phase.bind and record is None:
+                    raise FactsError(f"item {item} was never opened: no command ran on a "
+                                     "record that names it")
+                # Only runs that do one of the phase's own steps count; an opening step
+                # the workflow was already on is done by the run that entered the record.
+                filled = skill_phases.fill_output(
+                    phase.output, runs, record=record, record_context=record_context,
+                    plan_text=plan_text, earlier_runs=earlier, ended_on=ended_on, **names)
+                facts = filled.model_dump(mode="json")
+        except Exception as error:  # noqa: BLE001 - the phase fails, saying why
+            message = (str(error) if isinstance(error, FactsError) else
+                       f"its command runs could not be read ({type(error).__name__}: {error})")
+            if phase.fans_out:
+                message = f"item {item}: {message}"
+            tracing.end_span(self, span, status=tracing.STATUS_ERROR, attributes={
+                **closing, "record": record, "record_issues": issues, "facts_error": message})
+            return "failed", message
+        if phase.output is not None:
+            if phase.fans_out:
+                state["outputs"][phase.name].append(facts)
+            else:
+                state["outputs"][phase.name] = facts
+        if phase.fans_out and phase.until is not None:
+            # The stop condition reads the items' outputs so far (typed) and earlier outputs.
+            so_far = ([phase.output.model_validate(v) for v in state["outputs"][phase.name]]
+                      if phase.output is not None else [])
+            try:
+                state["until_met"] = skill_phases.stops_after(
+                    phase, so_far, self._phase_outputs(phases, index))
+            except skill_phases.PhaseError as error:
+                message = f"item {item}: {error}"
+                tracing.end_span(self, span, status=tracing.STATUS_ERROR, attributes={
+                    **closing, "record": record, "record_issues": issues, "facts": facts,
+                    "facts_error": message})
+                return "failed", message
+            closing["stop_condition_met"] = state["until_met"]
+        tracing.end_span(self, span, attributes={
+            **closing, "record": record, "record_issues": issues, "facts": facts})
+        return "done", None
+
+    def _phase_code_steps(self, plan_text: str, own_steps: int, names: dict, *,
+                          answers: bool):
+        """The steps code runs at the start of this phase run (``skill_phases.CodeSteps``),
+        or None: the run has no steps of its own (planner-written steps only), or nothing
+        could be read (never a reason to fail the phase; the agent then runs every step)."""
+        from fastworkflow import skill_phases
+
+        if not own_steps or self._app_workflow is None:
+            return None
+        try:
+            return skill_phases.CodeSteps(
+                plan_text, workflow=lambda: self.get_active_workflow() or self._app_workflow,
+                runs=lambda index: self._archived_command_runs(from_step=index,
+                                                                to_step=index),
+                own_steps=own_steps, answers=answers, **names)
+        except Exception as error:  # noqa: BLE001 - the agent runs the steps instead
+            logger.warning("code-run steps skipped: %s: %s", type(error).__name__, error)
+            return None
 
     def _run_subtasks_from(self, start: int):
         """Run sub-tasks start.. one after another; the combined answer, or a suspension.
@@ -1966,9 +2624,14 @@ class WorkflowExecutionContext:
             if k == 0 or self._origins[k - 1] != origin:
                 self._enable_all_tools()
             query = self._subtasks[k]
+            floors = getattr(self, "_evidence_floors", None)
+            if not isinstance(floors, dict):
+                floors = self._evidence_floors = {}
+            floors.setdefault(origin, self._next_step)
             result = self._call_agent_for_query(
                 query, query, first_step=self._next_step,
                 template_text=self._original_text(origin),
+                evidence_floor=floors[origin],
             )
             if getattr(result, "suspended", None) is True:
                 return result
@@ -2007,20 +2670,23 @@ class WorkflowExecutionContext:
             f"{done}"
             + (f"\n\n{opened}" if opened else "")))
         self._origins.insert(k + 1, origin)
-        # The continuation replaces this capped run's answer, which was written without finishing.
-        self._subtask_answers[k] = ""
+        # This capped run's answer is kept: _combined_answer joins it with the continuation's.
 
     def _combined_answer(self) -> str:
-        """Answers grouped under their original sub-task; a single-origin turn is its answers with no heading."""
+        """Answers grouped under their original sub-task; a single-origin turn is its answers with no heading.
+
+        A sub-task that was handed off has one answer per run, kept in order and labelled as parts.
+        """
         answers: dict[int, list[str]] = {}
         for origin, answer in zip(self._origins, self._subtask_answers):
             if answer:
                 answers.setdefault(origin, []).append(answer)
-        if len(answers) == 1:
-            return "\n\n".join(next(iter(answers.values())))
+        joined = {origin: _join_parts(parts) for origin, parts in answers.items()}
+        if len(joined) == 1:
+            return next(iter(joined.values()))
         return "\n\n".join(
-            f"### {origin + 1}. {self._original_text(origin)}\n" + "\n\n".join(parts)
-            for origin, parts in answers.items()
+            f"### {origin + 1}. {self._original_text(origin)}\n{text}"
+            for origin, text in joined.items()
         )
 
     def _record_subtask_answer(self, result) -> None:
@@ -2058,6 +2724,10 @@ class WorkflowExecutionContext:
             if hasattr(agent_result, "final_answer")
             else str(agent_result)
         )
+        if "[[" in result_text:
+            # A DSPy field marker ("[[ ## completed ## ]]") a reply carried into its text.
+            from fastworkflow.skill_phases import clean_answer
+            result_text = clean_answer(result_text)
 
         command_response = fastworkflow.CommandResponse(response=result_text)
 
@@ -2137,7 +2807,11 @@ class WorkflowExecutionContext:
             user_answer,
             self,
         )
-        agent_result = self._call_agent_resume(observation)
+        if self._phase_run is not None:
+            # A phase of a phased skill call was suspended: resume it, then run the rest.
+            agent_result = self._run_skill_phases(resume_observation=observation)
+        else:
+            agent_result = self._call_agent_resume(observation)
         if self._subtasks and getattr(agent_result, "suspended", None) is not True:
             self._record_subtask_answer(agent_result)
             if getattr(agent_result, "exhausted", None) is True:

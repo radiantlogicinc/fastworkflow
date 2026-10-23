@@ -90,14 +90,6 @@ function apiPost(path, body) { return mutationRequest(path, "POST", body); }
 function apiPatch(path, body, successMessage) {
   return mutationRequest(path, "PATCH", body, successMessage);
 }
-function apiPut(path, body) { return mutationRequest(path, "PUT", body); }
-
-function analysisText(value) {
-  if (value === null || value === undefined) { return ""; }
-  if (typeof value === "string") { return value; }
-  if (typeof value === "object" && !Array.isArray(value) && !Object.keys(value).length) { return ""; }
-  return JSON.stringify(value, null, 2);
-}
 
 /* -- tiny DOM helpers (text always via textContent) -------------------- */
 function el(tag, cls, text) {
@@ -205,7 +197,6 @@ function showNotice(message, kind, detail) {
 function actionSuccess(path, method) {
   if (method === "DELETE") { return "Empty experiment deleted"; }
   if (path.indexOf("/post_feedback") >= 0) { return "Feedback saved"; }
-  if (path.indexOf("/analysis") >= 0) { return "Analysis saved"; }
   if (path === "/api/benchmark-setup") { return "Benchmark version saved"; }
   if (/\/benchmarks\/.*\/experiments$/.test(path)) { return "Experiment created"; }
   if (path === "/api/select_workflow") { return "Workflow selected"; }

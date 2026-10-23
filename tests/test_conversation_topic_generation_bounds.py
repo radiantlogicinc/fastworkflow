@@ -245,9 +245,9 @@ def test_the_process_environment_outranks_the_workflow_env_file(
 
     On a server this knob is tuned on the deployment — against a slow provider,
     or under a tighter termination grace period — not by editing a workflow's
-    env file inside the image. ``fastworkflow.get_env_var`` returns a supplied
-    default BEFORE consulting ``os.environ``, so resolving through it with a
-    default would have made the container variable silently unreachable. That is
+    env file inside the image. ``fastworkflow.get_env_var`` reads the env file
+    BEFORE ``os.environ``, so resolving through it alone would have let the file
+    silently outrank the container variable. That is
     the same trap ``resolve_max_live_sessions`` was written to avoid, and this is
     the assertion that keeps this knob out of it.
     """

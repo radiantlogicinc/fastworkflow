@@ -47,7 +47,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Optional
+from typing import Any, Callable, Iterable, Iterator, Mapping, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -82,8 +82,10 @@ from fastworkflow.utils.logging import logger
 # lose capture_profile / capture_policy_version. The workspace viewer is gone
 # too, and with it the `sealed_turn_comments` control table.
 # v9 (fix-cws4.8): offload rows lose scope_id and offload_order; offload_subjects is gone and the context an observation ran in is a column of offload_evidence.
+# v10 (fix-va9v): experiments.user_simulator -- the experiment's runs were
+# driven by a user simulator, so their first message is not the task prompt.
 # Fresh schema only, with no migration of previously recorded evidence.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 TERMINAL_TURN_STATUSES = frozenset({"completed", "failed", "cancelled", "abandoned"})
 
@@ -109,7 +111,23 @@ _DEFAULT_SYNC_BREAKER_COOLDOWN_S = 60
 _PENDING_RETRY_MAX = 64
 
 _PRUNE_BATCH_ROWS = 5_000
-_PRUNE_MAX_BATCHES = 20
+# A bound, not a loop until under the cap: the size counts the -wal file, which
+# a long reader can pin, and an unbounded pass would then evict everything
+# unbound. 200 batches keep up with about 2,500 turns an hour (fix-ajir.27).
+_PRUNE_MAX_BATCHES = 200
+# Prune chooses its victims with a plain read, which in WAL blocks no writer,
+# and deletes them by key in write transactions this small, each re-checking
+# the victim's predicate. It pauses between them because SQLite's busy handler
+# polls and is not fair: without the pause a waiting turn write starves. The
+# vacuum frees pages the same way, a step at a time (fix-ajir.25).
+_PRUNE_TXN_ROWS = 200
+_PRUNE_TXN_TURNS = 2
+_PRUNE_PAUSE_S = 0.02
+_PRUNE_VACUUM_PAGES = 256
+# Prune's checkpoints wait this long, not the connection's busy timeout: a
+# TRUNCATE checkpoint holds the write lock while it waits for a reader on an
+# old snapshot, so every writer waits with it (fix-ajir.39).
+_PRUNE_CHECKPOINT_TIMEOUT_MS = 100
 # The writer re-runs the startup prune this often, so a long-lived server stays
 # inside the horizon and the cap, and a backlog larger than one bounded pass
 # drains over successive passes (fix-nczr.1). Not a knob: the horizon and the
@@ -322,6 +340,11 @@ FEATURE_OFFLOAD_EVIDENCE_V1 = "offload_evidence_v1"
 # archived, offloaded, searched and rehydrated, keyed by turn like the evidence
 # and erased and aged with it.
 FEATURE_OFFLOAD_EVENTS_V1 = "offload_events_v1"
+# The commands each archived execute step ran (`offload_command_runs`): name,
+# success, the context it ran in, its parameters and its `Signature.Output`
+# as JSON. Keyed by turn and alias like the evidence and erased and aged with
+# it. Additive: a store created before it gains it on its next open.
+FEATURE_OFFLOAD_COMMAND_RUNS_V1 = "offload_command_runs_v1"
 # The prompt-slot table (`prompt_slots`): the pieces an over-cap fw.llm.call
 # prompt was split into (`observability.prompt_slots`), keyed by turn and
 # digest, and aged and erased with the turn like `artifacts`.
@@ -668,6 +691,14 @@ class WriterStillOpen(RuntimeError):
     """A seal was attempted while this process still owned a live writer."""
 
 
+class ExperimentNotSealed(LookupError):
+    """The experiment has no readable sealed archive, so its live rows are its only copy."""
+
+
+class SealedExperimentSelected(RuntimeError):
+    """A sealed experiment is still a contest's winner or a task's best run."""
+
+
 class PartialBenchmarkPin(ValueError):
     """A benchmark pin requires id, version, and digest together."""
 
@@ -677,6 +708,23 @@ class PartialBenchmarkPin(ValueError):
             f"experiment {experiment_id!r} benchmark pin requires "
             "benchmark_id, benchmark_version, and benchmark_digest_sha256 "
             "together; partial pins are refused"
+        )
+
+
+class MissingBenchmarkPin(ValueError):
+    """Every experiment is a run of one benchmark version (`fix-ujat`).
+
+    Ad-hoc work is plain conversations, which need no experiment. An
+    experiment without a benchmark would show beside the benchmarks with task
+    ids nobody wrote down, which is the back door this closes.
+    """
+
+    def __init__(self, experiment_id: str) -> None:
+        self.experiment_id = experiment_id
+        super().__init__(
+            f"experiment {experiment_id!r} names no benchmark version: every "
+            "experiment pins benchmark_id, benchmark_version and "
+            "benchmark_digest_sha256. Ad-hoc chat needs no experiment."
         )
 
 
@@ -726,6 +774,11 @@ def _utcnow_iso() -> str:
 def _chunked(values: list[Any], size: int = 400) -> Iterable[list[Any]]:
     for start in range(0, len(values), size):
         yield values[start:start + size]
+
+
+def _marks(values: list[Any]) -> str:
+    """One ``?`` placeholder per value, for an ``IN (...)`` list."""
+    return ",".join("?" for _ in values)
 
 
 def _iso_to_ms(value: Optional[str]) -> int:
@@ -1067,6 +1120,7 @@ _SCHEMA_STATEMENTS = [
         benchmark_version TEXT,
         benchmark_digest_sha256 TEXT,
         workflow_name TEXT,
+        user_simulator INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         completed_at TEXT)""",
     """CREATE TABLE IF NOT EXISTS experiment_attempts (
@@ -1179,6 +1233,32 @@ _SCHEMA_STATEMENTS = [
         recorded_at TEXT NOT NULL)""",
     "CREATE INDEX IF NOT EXISTS idx_offload_events_turn ON offload_events(turn_key, event_id)",
     "CREATE INDEX IF NOT EXISTS idx_offload_events_channel ON offload_events(channel_id)",
+    # Command runs (FEATURE_OFFLOAD_COMMAND_RUNS_V1), additive like the tables
+    # above: a store created before it gains it on its next open, and an older
+    # build ignores it. One row per command an archived execute step ran, in
+    # the order it ran (`ordinal`), beside that step's `offload_evidence` row
+    # (same `turn_key`, `alias`). `input_json` is the command's parameters and
+    # `output_json` its `Signature.Output`, each NULL when there was none; both
+    # are written through the same protection as evidence text (`redaction`
+    # says which mode produced them). `context_clause` is the record the
+    # command ran on ("" at the root) and `context_name` that context's name.
+    """CREATE TABLE IF NOT EXISTS offload_command_runs (
+        turn_key TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        alias TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        step_index INTEGER NOT NULL,
+        command_name TEXT NOT NULL,
+        success INTEGER NOT NULL,
+        context_clause TEXT,
+        context_name TEXT,
+        input_json TEXT,
+        output_json TEXT,
+        redaction TEXT NOT NULL,
+        redacted INTEGER NOT NULL,
+        persisted_at TEXT NOT NULL,
+        PRIMARY KEY (turn_key, alias, ordinal))""",
+    "CREATE INDEX IF NOT EXISTS idx_offload_command_runs_channel ON offload_command_runs(channel_id)",
     # Prompt slots (FEATURE_PROMPT_SLOTS_V1), additive like the offload tables:
     # a store created before it gains it on its next open, and an older build
     # ignores it. One row per distinct piece of the prompts one turn's LLM
@@ -1203,10 +1283,11 @@ _SCHEMA_STATEMENTS = [
 
 # The offload tables above, named once for the erasure and retention paths,
 # each with the column that dates its rows.
-_OFFLOAD_EVIDENCE_TABLES = ("offload_evidence", "offload_events")
+_OFFLOAD_EVIDENCE_TABLES = ("offload_evidence", "offload_events", "offload_command_runs")
 _OFFLOAD_TABLE_TIMESTAMPS = {
     "offload_evidence": "persisted_at",
     "offload_events": "recorded_at",
+    "offload_command_runs": "persisted_at",
 }
 # How many turns one retention batch drops from the offload evidence tables.
 _OFFLOAD_PRUNE_BATCH_TURNS = 25
@@ -1446,6 +1527,7 @@ class ObservabilityStore:
                     FEATURE_EXPERIMENT_SEALING_V1,
                     FEATURE_OFFLOAD_EVIDENCE_V1,
                     FEATURE_OFFLOAD_EVENTS_V1,
+                    FEATURE_OFFLOAD_COMMAND_RUNS_V1,
                     FEATURE_PROMPT_SLOTS_V1,
                 ],
             )
@@ -3024,10 +3106,16 @@ class ObservabilityStore:
         benchmark_id: Optional[str] = None,
         benchmark_version: Optional[str] = None,
         benchmark_digest_sha256: Optional[str] = None,
-        initialize_winner: bool = True,
+        join_comparison_group: bool = True,
         declarations: Optional[Iterable[tuple[str, int, str]]] = None,
+        user_simulator: bool = False,
     ) -> None:
         """Pre-register an experiment. Written BEFORE any task runs.
+
+        `user_simulator` records that a user simulator drives every run: it
+        turns the task prompt into its own utterances, so a run's first message
+        is not the prompt (`fix-va9v`). Set at creation and write-once: a
+        resume that disagrees with the stored value is refused.
 
         `declarations`, when given, is the exact attempt plan
         (`declare_experiment_attempts`), written in the same transaction so a
@@ -3043,14 +3131,12 @@ class ObservabilityStore:
         `invalid_detail`: a resume must not be able to launder an `invalid`
         verdict back to `running`.
 
-        `initialize_winner` (`fix-9eg.17.1`) records the experiment in its
-        comparison group in the same transaction, where the FIRST experiment
-        of a group becomes its current winner automatically. That write lands
-        in this DB's control tables (`control.py`), which sealed copies never
-        carry: evidence is what happened, a winner is a judgement about it, and
-        sealed evidence must stay byte-identical while judgements about it keep
-        being made. Registration is idempotent, so the resume path above
-        re-registers without disturbing a winner that has since moved.
+        `join_comparison_group` records the experiment in its comparison group
+        (one per benchmark version, `fix-873a`) in the same transaction. Joining
+        sets no winner. That write lands in this DB's control tables
+        (`control.py`), which sealed copies never carry: evidence is what
+        happened, a winner is a judgement about it. Joining is idempotent, so
+        the resume path above re-joins without disturbing anything.
         """
         if not experiment_id:
             raise ValueError("experiment_id is required")
@@ -3077,18 +3163,27 @@ class ObservabilityStore:
             )
         except ValueError as exc:
             raise PartialBenchmarkPin(experiment_id) from exc
-        if benchmark_id is not None:
-            benchmark_id = self._scrub(benchmark_id)
-            benchmark_version = self._scrub(benchmark_version)
-            benchmark_digest_sha256 = self._scrub(benchmark_digest_sha256)
+        if benchmark_id is None:
+            raise MissingBenchmarkPin(experiment_id)
+        benchmark_id = self._scrub(benchmark_id)
+        benchmark_version = self._scrub(benchmark_version)
+        benchmark_digest_sha256 = self._scrub(benchmark_digest_sha256)
+        user_simulator = bool(user_simulator)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 """SELECT status, benchmark_id, benchmark_version,
-                          benchmark_digest_sha256
+                          benchmark_digest_sha256, user_simulator
                      FROM experiments WHERE experiment_id=?""",
                 (experiment_id,),
             ).fetchone()
+            if existing is not None and bool(existing["user_simulator"]) != user_simulator:
+                conn.rollback()
+                raise ValueError(
+                    f"experiment {experiment_id!r} was created with "
+                    f"user_simulator={bool(existing['user_simulator'])}; it is "
+                    "set once, at creation"
+                )
             if existing is not None and benchmark_id is not None:
                 stored_pin = (
                     existing["benchmark_id"],
@@ -3110,10 +3205,10 @@ class ObservabilityStore:
                     baseline_experiment_id, status, invalid_reason,
                     invalid_detail, declared_tasks, declared_attempts,
                     required_evidence_segments, benchmark_id, benchmark_version,
-                    benchmark_digest_sha256, workflow_name,
+                    benchmark_digest_sha256, workflow_name, user_simulator,
                     created_at, completed_at)
                    VALUES (?, ?, NULL, ?, ?, 'running', NULL, NULL,
-                           ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                    ON CONFLICT(experiment_id) DO UPDATE SET
                      description=excluded.description,
                      arm=excluded.arm,
@@ -3156,12 +3251,13 @@ class ObservabilityStore:
                     benchmark_version,
                     benchmark_digest_sha256,
                     self._scrub(workflow_name),
+                    int(user_simulator),
                     _utcnow_iso(),
                 ),
             )
             if declarations is not None:
                 self._declare_attempts_in_txn(conn, experiment_id, declarations)
-            if initialize_winner:
+            if join_comparison_group:
                 # Inline: `selection` imports this module.
                 from fastworkflow.observability import selection as selection_module
 
@@ -3913,6 +4009,156 @@ class ObservabilityStore:
                 (experiment_id, _utcnow_iso(), actor, reason),
             )
 
+    def sealed_archive(self, experiment_id: str) -> Optional[dict[str, Any]]:
+        """The `sealed_archives` row of one experiment, with `readable` added.
+
+        `readable` is the test `selection.store_for` applies: the file is there
+        at its recorded size. None when the experiment was never sealed.
+        """
+        found = control.rows(
+            self, "SELECT * FROM sealed_archives WHERE experiment_id=?", (experiment_id,)
+        )
+        if not found:
+            return None
+        row = found[0]
+        row["readable"] = os.path.isfile(row["path"]) and (
+            os.path.getsize(row["path"]) == int(row["size_bytes"])
+        )
+        return row
+
+    def _delete_experiment_evidence_in_txn(
+        self, conn: sqlite3.Connection, experiment_id: str
+    ) -> dict[str, int]:
+        """Delete one experiment's turns and everything recorded under them.
+
+        Its spans and artifacts (by label or by turn), then its turns whole as
+        prune deletes them (prompt slots, offload evidence, and review notes by
+        trigger), then any prompt slot labelled with it outside its turns, then
+        its conversations. The experiment-level rows stay.
+        """
+        deleted: dict[str, int] = {"prompt_slots": 0}
+        has_prompt_slots = _has_prompt_slots(conn)
+        turns = "SELECT turn_key FROM turns WHERE experiment_id=?"
+        params = (experiment_id, experiment_id)
+        deleted["spans"] = conn.execute(
+            f"DELETE FROM spans WHERE experiment_id=? OR trace_id IN ({turns})", params
+        ).rowcount
+        deleted["artifacts"] = conn.execute(
+            f"DELETE FROM artifacts WHERE experiment_id=? OR turn_key IN ({turns})", params
+        ).rowcount
+        keys = [
+            str(row[0]) for row in conn.execute(turns, (experiment_id,)).fetchall()
+        ]
+        self._delete_turn_records_in_txn(conn, keys, deleted, has_prompt_slots)
+        deleted["turns"] = len(keys)
+        deleted["conversations"] = conn.execute(
+            "DELETE FROM conversations WHERE experiment_id=?", (experiment_id,)
+        ).rowcount
+        if has_prompt_slots:
+            deleted["prompt_slots"] += conn.execute(
+                "DELETE FROM prompt_slots WHERE experiment_id=?", (experiment_id,)
+            ).rowcount
+        return deleted
+
+    def _reclaim_free_pages(self, conn: sqlite3.Connection) -> None:
+        """Return deleted pages to the filesystem, as `prune` does."""
+        conn.execute("PRAGMA incremental_vacuum").fetchall()
+        conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    def drop_sealed_live_evidence(self, experiment_id: str) -> dict[str, int]:
+        """Free a sealed experiment's turn-level evidence from the live DB.
+
+        Once sealed, the archive is the record: `selection.store_for` and the
+        chatbot read a sealed experiment's turns and spans from it. So its
+        turns, spans, artifacts, prompt slots, offload evidence, review notes
+        and conversations leave the live DB here rather than waiting for prune
+        to reach them. Its experiment-level rows (the experiment, attempts,
+        declarations, claims and evidence runs) stay: benchmark listings,
+        registrations, contests and scores read them, and they are small.
+
+        Refused unless the archive is readable: until then the live rows are
+        the only copy.
+        """
+        archive = self.sealed_archive(experiment_id)
+        if archive is None or not archive["readable"]:
+            raise ExperimentNotSealed(
+                f"experiment {experiment_id!r} has no readable sealed archive; "
+                "its live evidence is the only copy"
+            )
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            deleted = self._delete_experiment_evidence_in_txn(conn, experiment_id)
+            conn.commit()
+            self._reclaim_free_pages(conn)
+        return deleted
+
+    def delete_sealed_experiment(self, experiment_id: str) -> dict[str, Any]:
+        """Delete a sealed experiment: its archive file and every row naming it.
+
+        Refused while a contest names it as winner or a task names one of its
+        runs as best run (`SealedExperimentSelected`): those are judgements a
+        person made, withdrawn first. Otherwise, in one transaction: its live
+        evidence and experiment-level rows, its contest membership, its
+        registration (tombstoned, as `delete_empty_experiment` does), its
+        release and its `sealed_archives` row. The decision history is
+        append-only and keeps naming it. The archive file is removed after the
+        commit; `file_removed` says whether it was there to remove.
+        """
+        archive = self.sealed_archive(experiment_id)
+        if archive is None:
+            raise ExperimentNotSealed(f"experiment {experiment_id!r} is not sealed")
+        experiment_tables = (
+            "experiment_evidence_runs", "experiment_attempt_claims",
+            "experiment_attempt_declarations", "experiment_attempts", "experiments",
+        )
+        with control.write(self) as conn:
+            selected = conn.execute(
+                "SELECT scope_kind FROM selection_pointers WHERE experiment_id=? LIMIT 1",
+                (experiment_id,),
+            ).fetchone()
+            if selected is not None:
+                raise SealedExperimentSelected(
+                    f"experiment {experiment_id!r} is the "
+                    + ("winner of its contest" if selected[0] == "experiment"
+                       else "best run of one of its tasks")
+                    + "; withdraw that choice before deleting it"
+                )
+            deleted = self._delete_experiment_evidence_in_txn(conn, experiment_id)
+            present = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            for table in experiment_tables:
+                if table in present:
+                    deleted[table] = conn.execute(
+                        f"DELETE FROM {table} WHERE experiment_id=?", (experiment_id,)
+                    ).rowcount
+            # Inline: `selection` imports this module.
+            from fastworkflow.observability import selection as selection_module
+
+            selection_module.SelectionControlStore(self).leave_in_txn(conn, experiment_id)
+            conn.execute(
+                "UPDATE experiment_registrations SET state='deleted', deleted_at=? "
+                "WHERE experiment_id=? AND state<>'deleted'",
+                (_utcnow_iso(), experiment_id),
+            )
+            conn.execute("DELETE FROM evidence_releases WHERE experiment_id=?", (experiment_id,))
+            conn.execute("DELETE FROM sealed_archives WHERE experiment_id=?", (experiment_id,))
+        with self._connect() as conn:
+            self._reclaim_free_pages(conn)
+        file_removed = False
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(archive["path"])
+            file_removed = True
+        return {
+            "experiment_id": experiment_id,
+            "path": archive["path"],
+            "file_removed": file_removed,
+            "deleted": deleted,
+        }
+
     def start_attempt(
         self,
         experiment_id: str,
@@ -4236,7 +4482,8 @@ class ObservabilityStore:
     def restart_attempt(self, experiment_id: str, task_id: str, attempt: int) -> int:
         """Clear a crashed attempt so it can be re-run under the same labels.
 
-        Deletes that attempt's conversations and turns in ONE transaction and
+        Deletes that attempt's conversations and turns (with their spans,
+        artifacts, prompt slots and offload rows) in ONE transaction and
         bumps `restarts`. The deletion is deliberate (`[XR18]`): the abandoned
         partial trajectory is evidence of nothing, `idx_conv_experiment_attempt`
         is UNIQUE so a second conversation under the same three labels is
@@ -4287,6 +4534,9 @@ class ObservabilityStore:
                     conn.execute(
                         f"DELETE FROM spans WHERE trace_id IN ({marks})", chunk
                     )
+                # The turns' offload rows go with them, by the same turn key
+                # retention and erasure delete them by.
+                self._delete_offload_turns_in_txn(conn, turn_keys, {})
             deleted = conn.execute(
                 """DELETE FROM turns
                     WHERE experiment_id=? AND task_id=? AND attempt=?""",
@@ -4587,6 +4837,7 @@ class ObservabilityStore:
                 return None
             experiment = dict(row)
             experiment["archived"] = bool(experiment["archived"])
+            experiment["user_simulator"] = bool(experiment["user_simulator"])
             segments = []
             for seg in conn.execute(
                 """SELECT * FROM experiment_evidence_runs
@@ -4626,7 +4877,7 @@ class ObservabilityStore:
             "e.baseline_experiment_id, e.declared_tasks, e.declared_attempts, "
             "e.invalid_reason, e.workflow_name, "
             "e.benchmark_id, e.benchmark_version, e.benchmark_digest_sha256, "
-            "e.archived, e.created_at, e.completed_at, "
+            "e.archived, e.user_simulator, e.created_at, e.completed_at, "
             "(SELECT COUNT(*) FROM experiment_attempts a "
             "  WHERE a.experiment_id=e.experiment_id) AS attempts_started, "
             "(SELECT COUNT(*) FROM experiment_attempts a "
@@ -4639,6 +4890,7 @@ class ObservabilityStore:
             rows = [dict(r) for r in conn.execute(query, params).fetchall()]
         for row in rows:
             row["archived"] = bool(row["archived"])
+            row["user_simulator"] = bool(row["user_simulator"])
         return rows
 
     def experiment_attempt_rows(
@@ -4660,6 +4912,28 @@ class ObservabilityStore:
                 params,
             ).fetchall()
             return [_decode_attempt_row(r) for r in rows]
+
+    def experiment_first_messages(self, experiment_id: str) -> dict[tuple[str, int], str]:
+        """The first user message each (task, attempt) of an experiment sent.
+
+        Read from the recorded turns, so it is what the run actually sent —
+        whichever runner drove it — not what it was configured to send. An
+        attempt whose turns were never recorded is absent.
+        """
+        if not self.has_feature(FEATURE_EXPERIMENTS_V1):
+            return {}
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT task_id, attempt, user_message FROM turns
+                    WHERE experiment_id=? AND task_id IS NOT NULL
+                      AND attempt IS NOT NULL AND continuation_of IS NULL
+                    ORDER BY task_id, attempt, started_at, ordinal""",
+                (experiment_id,),
+            ).fetchall()
+        first: dict[tuple[str, int], str] = {}
+        for row in rows:
+            first.setdefault((str(row["task_id"]), int(row["attempt"])), row["user_message"])
+        return first
 
     def experiment_attempt_declarations(
         self, experiment_id: str
@@ -5265,13 +5539,18 @@ class ObservabilityStore:
 
         Conversations and turn records are exempt from the horizon (config §5)
         but not from the cap: once nothing else unbound is left to evict, the
-        oldest finished turn records outside any experiment go, whole, so
+        oldest finished turn records outside any bound experiment go, whole, so
         ``FW_OBS_DB_MAX_BYTES`` bounds the file (fix-nczr.2).
 
         Evidence of a bound experiment (`_BOUND_EXPERIMENTS_SQL`) is exempt
         from both the horizon and the cap. When it alone keeps the DB over the
         cap, the bytes it holds are recorded under
         `PRUNE_OVER_CAP_BOUND_DIAGNOSTIC`; nothing bound is deleted.
+
+        Offload evidence of a turn with no finished turn record -- one that
+        may still be running -- is exempt from the cap but not the horizon,
+        which is what removes a crashed turn's orphans. Its bytes are reported
+        beside the bound ones as ``in_flight_bytes`` (fix-q2fy).
 
         ``include_conversationless_turns`` (operator opt-in) also
         deletes conversation-less turn records (e.g. per-invocation CLI
@@ -5305,37 +5584,95 @@ class ObservabilityStore:
         )
         unbound = f"(experiment_id IS NULL OR experiment_id NOT IN ({bound}))"
         bound_turns = f"SELECT turn_key FROM turns WHERE experiment_id IN ({bound})"
+        # A turn's record is written when it ends, and offload evidence carries
+        # no experiment id, so evidence with no finished turn record may belong
+        # to a turn still running: the cap never evicts it, only the horizon
+        # does (which is also what clears a crashed turn's orphans) (fix-q2fy).
+        terminal = ",".join(f"'{status}'" for status in sorted(TERMINAL_TURN_STATUSES))
+        finished_turns = f"SELECT turn_key FROM turns WHERE status IN ({terminal})"
+        # The same two conditions on one turn record, re-checked by key just
+        # before its turn's evidence or record is deleted (fix-ajir.25).
+        finished_unbound = f"status IN ({terminal}) AND {unbound}"
 
         with self._connect() as conn:
             # As in `forget_channel`: retention deletes evidence text, and a
             # deleted cell must not survive in a page that still holds others.
             conn.execute("PRAGMA secure_delete=ON")
             has_prompt_slots = _has_prompt_slots(conn)
+
+            def offload_unbound(chunk: list[str]) -> int:
+                exempt = set(self._turn_keys_where(conn, chunk, f"experiment_id IN ({bound})"))
+                keys = [key for key in chunk if key not in exempt]
+                self._delete_offload_turns_in_txn(conn, keys, deleted)
+                return len(keys)
+
+            def offload_finished(chunk: list[str]) -> int:
+                keys = self._turn_keys_where(conn, chunk, finished_unbound)
+                self._delete_offload_turns_in_txn(conn, keys, deleted)
+                return len(keys)
+
+            def turn_records(chunk: list[str]) -> int:
+                keys = self._turn_keys_where(conn, chunk, finished_unbound)
+                self._delete_turn_records_in_txn(conn, keys, deleted, has_prompt_slots)
+                return len(keys)
+
+            # Each batch's victims are read outside any write transaction and
+            # deleted by key in short ones, each delete re-checking the
+            # condition that chose them (fix-ajir.25).
             for _ in range(_PRUNE_MAX_BATCHES):
-                conn.execute("BEGIN IMMEDIATE")
-                spans_cur = conn.execute(
-                    "DELETE FROM spans WHERE span_id IN "
-                    f"(SELECT span_id FROM spans WHERE start_ns < ? AND {unbound} "
-                    "LIMIT ?)",
-                    (horizon_ns, _PRUNE_BATCH_ROWS),
+                span_ids = [
+                    str(row[0])
+                    for row in conn.execute(
+                        f"SELECT span_id FROM spans WHERE start_ns < ? AND {unbound} "
+                        "LIMIT ?",
+                        (horizon_ns, _PRUNE_BATCH_ROWS),
+                    ).fetchall()
+                ]
+                deleted["spans"] += self._in_short_txns(
+                    conn, span_ids, _PRUNE_TXN_ROWS,
+                    lambda chunk: conn.execute(
+                        f"DELETE FROM spans WHERE span_id IN ({_marks(chunk)}) "
+                        f"AND start_ns < ? AND {unbound}",
+                        (*chunk, horizon_ns),
+                    ).rowcount,
                 )
-                deleted["spans"] += spans_cur.rowcount
-                artifacts_cur = conn.execute(
-                    "DELETE FROM artifacts WHERE artifact_id IN "
-                    "(SELECT artifact_id FROM artifacts WHERE turn_key < ? "
-                    f"AND {unbound} LIMIT ?)",
-                    (horizon_key, _PRUNE_BATCH_ROWS),
-                )
-                deleted["artifacts"] += artifacts_cur.rowcount
-                slots_deleted = 0
-                if has_prompt_slots:
-                    slots_deleted = conn.execute(
-                        "DELETE FROM prompt_slots WHERE rowid IN "
-                        "(SELECT rowid FROM prompt_slots WHERE turn_key < ? "
-                        f"AND {unbound} LIMIT ?)",
+                artifact_ids = [
+                    str(row[0])
+                    for row in conn.execute(
+                        "SELECT artifact_id FROM artifacts WHERE turn_key < ? "
+                        f"AND {unbound} LIMIT ?",
                         (horizon_key, _PRUNE_BATCH_ROWS),
-                    ).rowcount
-                    deleted["prompt_slots"] += slots_deleted
+                    ).fetchall()
+                ]
+                deleted["artifacts"] += self._in_short_txns(
+                    conn, artifact_ids, _PRUNE_TXN_ROWS,
+                    lambda chunk: conn.execute(
+                        f"DELETE FROM artifacts WHERE artifact_id IN ({_marks(chunk)}) "
+                        f"AND turn_key < ? AND {unbound}",
+                        (*chunk, horizon_key),
+                    ).rowcount,
+                )
+                slot_keys: list[tuple[str, str]] = []
+                if has_prompt_slots:
+                    slot_keys = [
+                        (str(row[0]), str(row[1]))
+                        for row in conn.execute(
+                            "SELECT turn_key, sha256 FROM prompt_slots WHERE turn_key < ? "
+                            f"AND {unbound} LIMIT ?",
+                            (horizon_key, _PRUNE_BATCH_ROWS),
+                        ).fetchall()
+                    ]
+                    deleted["prompt_slots"] += self._in_short_txns(
+                        conn, slot_keys, _PRUNE_TXN_ROWS,
+                        lambda chunk: sum(
+                            conn.execute(
+                                "DELETE FROM prompt_slots WHERE turn_key=? AND sha256=? "
+                                f"AND turn_key < ? AND {unbound}",
+                                (*key, horizon_key),
+                            ).rowcount
+                            for key in chunk
+                        ),
+                    )
                 # Offload evidence is aged by its TURN, like artifacts, so a
                 # turn's observations go whole. A turn's age is its earliest
                 # evidence write rather than its key, because a turn with no
@@ -5345,14 +5682,11 @@ class ObservabilityStore:
                     conn, before=horizon_evidence, limit=_OFFLOAD_PRUNE_BATCH_TURNS,
                     exempt=bound_turns,
                 )
-                self._delete_offload_turns_in_txn(
-                    conn, aged_turns, deleted
-                )
-                conn.commit()
+                self._in_short_txns(conn, aged_turns, _PRUNE_TXN_TURNS, offload_unbound)
                 if (
-                    spans_cur.rowcount < _PRUNE_BATCH_ROWS
-                    and artifacts_cur.rowcount < _PRUNE_BATCH_ROWS
-                    and slots_deleted < _PRUNE_BATCH_ROWS
+                    len(span_ids) < _PRUNE_BATCH_ROWS
+                    and len(artifact_ids) < _PRUNE_BATCH_ROWS
+                    and len(slot_keys) < _PRUNE_BATCH_ROWS
                     and len(aged_turns) < _OFFLOAD_PRUNE_BATCH_TURNS
                 ):
                     break
@@ -5385,20 +5719,27 @@ class ObservabilityStore:
             for _ in range(_PRUNE_MAX_BATCHES):
                 if self.db_size_bytes() <= max_bytes:
                     break
-                conn.execute("BEGIN IMMEDIATE")
-                cur = conn.execute(
-                    "DELETE FROM spans WHERE span_id IN "
-                    f"(SELECT span_id FROM spans WHERE {unbound} "
-                    "ORDER BY start_ns LIMIT ?)",
-                    (_PRUNE_BATCH_ROWS,),
+                span_ids = [
+                    str(row[0])
+                    for row in conn.execute(
+                        f"SELECT span_id FROM spans WHERE {unbound} "
+                        "ORDER BY start_ns LIMIT ?",
+                        (_PRUNE_BATCH_ROWS,),
+                    ).fetchall()
+                ]
+                deleted["spans"] += self._in_short_txns(
+                    conn, span_ids, _PRUNE_TXN_ROWS,
+                    lambda chunk: conn.execute(
+                        f"DELETE FROM spans WHERE span_id IN ({_marks(chunk)}) "
+                        f"AND {unbound}",
+                        chunk,
+                    ).rowcount,
                 )
                 oldest_turns = self._offload_turns_in_txn(
                     conn, before=None, limit=_OFFLOAD_PRUNE_BATCH_TURNS,
-                    exempt=bound_turns,
+                    exempt=bound_turns, only=finished_turns,
                 )
-                self._delete_offload_turns_in_txn(
-                    conn, oldest_turns, deleted
-                )
+                self._in_short_txns(conn, oldest_turns, _PRUNE_TXN_TURNS, offload_finished)
                 # A prompt's pieces are evicted a whole turn at a time, oldest
                 # turn first, beside the spans that referenced them.
                 slot_turns: list[str] = []
@@ -5411,56 +5752,68 @@ class ObservabilityStore:
                             (_OFFLOAD_PRUNE_BATCH_TURNS,),
                         ).fetchall()
                     ]
-                    for chunk in _chunked(slot_turns):
-                        marks = ",".join("?" for _ in chunk)
-                        deleted["prompt_slots"] += conn.execute(
-                            f"DELETE FROM prompt_slots WHERE turn_key IN ({marks})",
+                    deleted["prompt_slots"] += self._in_short_txns(
+                        conn, slot_turns, _PRUNE_TXN_TURNS,
+                        lambda chunk: conn.execute(
+                            f"DELETE FROM prompt_slots WHERE turn_key IN ({_marks(chunk)}) "
+                            f"AND {unbound}",
                             chunk,
-                        ).rowcount
-                conn.commit()
-                if cur.rowcount == 0 and not oldest_turns and not slot_turns:
+                        ).rowcount,
+                    )
+                if not span_ids and not oldest_turns and not slot_turns:
                     # Nothing but turn records is left to evict, so they go
                     # too, oldest first and whole, or the cap is no bound
-                    # (fix-nczr.2). Only finished turns outside any
-                    # experiment: an experiment's turns are its denominator
-                    # and go by seal or release, never by eviction [DR44].
+                    # (fix-nczr.2). Only finished turns outside any bound
+                    # experiment: a bound experiment's turns are its
+                    # denominator and never go by eviction [DR44]; a sealed
+                    # or released one's go like any other (fix-ajir.24).
                     marks = ",".join("?" for _ in TERMINAL_TURN_STATUSES)
-                    conn.execute("BEGIN IMMEDIATE")
                     keys = [
                         str(row[0])
                         for row in conn.execute(
-                            "SELECT turn_key FROM turns WHERE experiment_id IS NULL "
+                            f"SELECT turn_key FROM turns WHERE {unbound} "
                             f"AND status IN ({marks}) ORDER BY turn_key LIMIT ?",
                             (*sorted(TERMINAL_TURN_STATUSES),
                              _OFFLOAD_PRUNE_BATCH_TURNS),
                         ).fetchall()
                     ]
-                    self._delete_turn_records_in_txn(
-                        conn, keys, deleted, has_prompt_slots
+                    deleted["turns"] = deleted.get("turns", 0) + self._in_short_txns(
+                        conn, keys, _PRUNE_TXN_TURNS, turn_records
                     )
-                    conn.commit()
-                    deleted["turns"] = deleted.get("turns", 0) + len(keys)
                     if not keys:
                         only_bound_left = True
                         break
-                # Fetched to completion: each step of this pragma frees one page.
-                conn.execute("PRAGMA incremental_vacuum").fetchall()
-                conn.commit()
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                self._vacuum_in_steps(conn)
+                if self._checkpoint_briefly(conn):
+                    # A reader pins the WAL, so the size cannot drop in this
+                    # pass, and each further batch would evict for nothing and
+                    # block writers for another busy timeout here. The next
+                    # pass carries on (fix-ajir.27).
+                    break
 
             bound_bytes = (
                 self._bound_evidence_bytes_in_txn(conn, bound, bound_turns)
                 if only_bound_left else 0
             )
-            if bound_bytes:
+            in_flight_bytes = (
+                self._in_flight_offload_bytes_in_txn(
+                    conn, bound_turns, finished_turns
+                )
+                if only_bound_left else 0
+            )
+            if bound_bytes or in_flight_bytes:
                 logger.warning(
                     f"Observability DB {self.db_path} is over FW_OBS_DB_MAX_BYTES "
                     f"({max_bytes}) and {bound_bytes} bytes of it belong to "
                     "unsealed experiments, which prune never evicts; seal them "
-                    "or call release_experiment_evidence (fix-nczr.3)"
+                    "or call release_experiment_evidence (fix-nczr.3); "
+                    f"{in_flight_bytes} bytes are offload evidence of turns "
+                    "with no finished record, which only the horizon evicts "
+                    "(fix-q2fy)"
                 )
                 self.set_diagnostic(conn, PRUNE_OVER_CAP_BOUND_DIAGNOSTIC, {
                     "bound_bytes": bound_bytes,
+                    "in_flight_bytes": in_flight_bytes,
                     "db_size_bytes": self.db_size_bytes(),
                     "max_bytes": max_bytes,
                 })
@@ -5480,9 +5833,68 @@ class ObservabilityStore:
             conn.commit()
             # Fold the deletes back into the main file now, so the evidence
             # they removed does not wait there for the next checkpoint.
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self._checkpoint_briefly(conn)
 
         return deleted
+
+    @staticmethod
+    def _in_short_txns(
+        conn: sqlite3.Connection,
+        keys: list[Any],
+        size: int,
+        delete: Callable[[list[Any]], int],
+    ) -> int:
+        """Call *delete* on *keys*, *size* at a time, each chunk in its own short
+        write transaction followed by a pause, so a waiting writer gets in
+        between (fix-ajir.25). *delete* re-checks by key the condition that
+        chose the keys, since they were read outside the lock. Returns the sum
+        of what *delete* returned."""
+        total = 0
+        for chunk in _chunked(list(keys), size):
+            conn.execute("BEGIN IMMEDIATE")
+            total += delete(chunk)
+            conn.commit()
+            time.sleep(_PRUNE_PAUSE_S)
+        return total
+
+    @staticmethod
+    def _turn_keys_where(
+        conn: sqlite3.Connection, keys: list[str], where: str
+    ) -> list[str]:
+        """Those of *keys* whose turn record *where* selects, looked up by key."""
+        return [
+            str(row[0])
+            for row in conn.execute(
+                f"SELECT turn_key FROM turns WHERE turn_key IN ({_marks(keys)}) "
+                f"AND {where}",
+                keys,
+            ).fetchall()
+        ]
+
+    @staticmethod
+    def _checkpoint_briefly(conn: sqlite3.Connection) -> bool:
+        """Truncate the WAL, waiting at most `_PRUNE_CHECKPOINT_TIMEOUT_MS` for
+        readers and writers (fix-ajir.39). True when it was busy, so the WAL
+        could not be truncated in full."""
+        timeout_ms = conn.execute("PRAGMA busy_timeout").fetchall()[0][0]
+        conn.execute(f"PRAGMA busy_timeout={_PRUNE_CHECKPOINT_TIMEOUT_MS}")
+        try:
+            return bool(
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()[0][0]
+            )
+        finally:
+            conn.execute(f"PRAGMA busy_timeout={int(timeout_ms)}")
+
+    @staticmethod
+    def _vacuum_in_steps(conn: sqlite3.Connection) -> None:
+        """Return the free pages to the filesystem `_PRUNE_VACUUM_PAGES` at a
+        time, each step its own transaction followed by a pause (fix-ajir.25).
+        Bounded by the free pages counted first."""
+        free = conn.execute("PRAGMA freelist_count").fetchall()[0][0]
+        for _ in range(-(-free // _PRUNE_VACUUM_PAGES)):
+            conn.execute(f"PRAGMA incremental_vacuum({_PRUNE_VACUUM_PAGES})").fetchall()
+            conn.commit()
+            time.sleep(_PRUNE_PAUSE_S)
 
     def _delete_turn_records_in_txn(
         self,
@@ -5528,14 +5940,34 @@ class ObservabilityStore:
         ).fetchone()[0])
 
     @staticmethod
+    def _in_flight_offload_bytes_in_txn(
+        conn: sqlite3.Connection, bound_turns: str, finished_turns: str
+    ) -> int:
+        """Offload evidence text held by unbound turns with no finished record,
+        which the cap leaves to the horizon (fix-q2fy)."""
+        if "offload_evidence" not in _present_offload_tables(conn):
+            return 0
+        return int(conn.execute(
+            "SELECT COALESCE(SUM(length(text_utf8)), 0) FROM offload_evidence "
+            f"WHERE turn_key NOT IN ({finished_turns}) "
+            f"AND turn_key NOT IN ({bound_turns})"
+        ).fetchone()[0])
+
+    @staticmethod
     def _offload_turns_in_txn(
-        conn: sqlite3.Connection, *, before: Optional[str], limit: int, exempt: str
+        conn: sqlite3.Connection,
+        *,
+        before: Optional[str],
+        limit: int,
+        exempt: str,
+        only: Optional[str] = None,
     ) -> list[str]:
         """The oldest offload-evidence turns, optionally only those begun before *before*.
 
         A turn's age is the earliest timestamp on any of its evidence,
         or event rows -- when the turn began -- so a turn is always dropped
         whole and never leaves an event whose evidence is gone. Turns *exempt* selects are never returned.
+        When *only* is given, only turns it selects are returned.
         """
         tables = _present_offload_tables(conn)
         if not tables:
@@ -5551,7 +5983,8 @@ class ObservabilityStore:
             str(row[0])
             for row in conn.execute(
                 f"SELECT turn_key FROM ({dated}) WHERE turn_key NOT IN ({exempt}) "
-                f"GROUP BY turn_key {having} "
+                + (f"AND turn_key IN ({only}) " if only is not None else "")
+                + f"GROUP BY turn_key {having} "
                 "ORDER BY MIN(at), turn_key LIMIT ?",
                 params,
             ).fetchall()
@@ -5817,6 +6250,18 @@ def open_live_store(db_path: str, *, write: bool = False) -> Optional[Observabil
     if write:
         return ObservabilityStore.open_for_annotation(db_path)
     return ReadOnlyObservabilityStore(db_path)
+
+
+def open_live_store_for_write(db_path: str) -> ObservabilityStore:
+    """The live DB for a control write that may create it.
+
+    Creating an experiment or saving a benchmark version is a POST, and a
+    workflow nobody has chatted with yet has no DB to record it in, so this is
+    the one open that creates the file. Reads still use `open_live_store`.
+    """
+    if os.path.isfile(db_path):
+        return open_live_store(db_path, write=True)
+    return ObservabilityStore(db_path)
 
 
 # ----------------------------------------------------------------------

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tests.benchmark_pins import create_pinned
 import json
 import sqlite3
 import threading
@@ -45,7 +46,7 @@ def _create(
     task_ids=None,
 ) -> None:
     task_ids = task_ids or [f"t{index}" for index in range(tasks)]
-    controller.create_experiment(
+    create_pinned(controller,
         experiment_id,
         "label",
         declared_tasks=tasks,

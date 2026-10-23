@@ -1,4 +1,4 @@
-"""UI tier 2 (bead fix-aou; ido-01b.15): the execution ledger, decision-signal
+"""UI tier 2 (bead fix-aou): the execution ledger, decision-signal
 chips and low-confidence filter, provenance and comparability, and cost
 roll-ups, all inside `#detail` and all derived in the read layer from store
 reads only.
@@ -24,6 +24,8 @@ self-contained file, so its render functions are pinned by presence.
 
 from __future__ import annotations
 
+from tests.benchmark_pins import create_pinned
+from tests.benchmark_pins import pin_for
 import json
 import os
 import subprocess
@@ -620,7 +622,7 @@ def seeded_db(workflow_path) -> str:
         workflow_path, store.store_identity(), migrate=False, external=True
     )
 
-    controller.create_experiment(
+    create_pinned(controller,
         EXP, "ui tier 2", declared_tasks=1, declared_attempts=2,
         declarations=[(TASK, 1, "job-1"), (TASK, 2, "job-2")],
     )
@@ -646,6 +648,7 @@ def seeded_db(workflow_path) -> str:
     ):
         store.create_experiment(
             experiment_id, experiment_id, declared_tasks=1, declared_attempts=attempts,
+            **pin_for(workflow_path, [TASK]),
         )
         for attempt in range(1, attempts + 1):
             store.start_attempt(experiment_id, TASK, attempt, f"{experiment_id}:{attempt}")

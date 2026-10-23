@@ -55,6 +55,14 @@ So this hook may assume every field is **present and of the declared type**. Do 
 required-ness or regex here — declare those on the field and let stage 1 do it. What is left is
 exactly what the field declarations cannot express.
 
+Before validation, in agent mode, the values are bound in code when the call's form allows it: XML
+tags, `name=value` pairs, or `command_name value` (positional). The positional form binds to the
+field declared `json_schema_extra={'positional': True}` (several words allowed), or else to the
+class's only `str` field (one token only); it declines on anything doubtful and the LLM extracts
+instead. Mark at most one field, and not a free-text field of a command that changes state. A lone
+`command_name value` that binds to no field is refused with a message naming the parameters, so the
+command never runs on its defaults instead. Whatever bound the values, the sequence above still runs.
+
 ## It is a correction hook, not just a check
 
 The `cmd_parameters` object it receives is the one the command body will read, so writing to it is

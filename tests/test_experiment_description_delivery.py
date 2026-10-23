@@ -20,14 +20,14 @@ where each one actually lives:
   registration, read-only afterwards, in the UI as well as at the route;
 * the ABSENCE of the obsolete surfaces. Absence is the part no behavioural
   test covers by accident: a reinstated hypothesis field or a revived
-  per-experiment analysis endpoint would break nothing that exists, so the
-  only thing that catches it is looking for it. `analysis.json` on a
-  BENCHMARK is a different, still-supported feature and is checked to be
-  still there, so this file cannot pass by deleting both.
+  analysis endpoint would break nothing that exists, so the only thing that
+  catches it is looking for it. That covers the experiment analysis route and
+  the benchmark analysis route alike (`analysis.json` is obsolete, not moved).
 """
 
 from __future__ import annotations
 
+from tests.benchmark_pins import STORE_PIN
 import json
 import threading
 
@@ -55,6 +55,7 @@ def recorded_server(workflow_dir, tmp_path, monkeypatch):
         "",
         declared_tasks=1,
         declared_attempts=1,
+        **STORE_PIN,
     )
     server = run_chatbot_server.ChatbotServer(
         db_path=db_path,
@@ -232,23 +233,12 @@ class TestTheObsoleteSurfacesAreGone:
         )
         assert status in (400, 404, 405)
 
-    def test_benchmark_analysis_is_a_different_feature_and_still_works(
-        self, live_server
-    ):
-        """The guard that stops this file passing by deleting everything.
-
-        `analysis.json` on a BENCHMARK was never in scope for the removal.
-        """
-        status, data = _request(
+    def test_the_benchmark_analysis_surface_is_gone(self, live_server):
+        status, _data = _request(
             live_server,
             "/api/benchmarks/smoke/analysis",
             "PUT",
-            {"analysis": "what this benchmark is for"},
+            {"analysis": "reinstated"},
         )
-
-        assert status in (200, 201), data
-        assert (
-            _request(live_server, "/api/benchmarks/smoke/analysis")[1]["analysis"]
-            == "what this benchmark is for"
-        )
-        assert b'"Analysis (optional)"' in run_chatbot_server.load_index_html()
+        assert status in (404, 405)
+        assert b'"Analysis (optional)"' not in run_chatbot_server.load_index_html()

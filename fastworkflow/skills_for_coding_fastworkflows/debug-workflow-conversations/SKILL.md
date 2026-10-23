@@ -89,6 +89,8 @@ attribute catalogs in [reference.md](reference.md)):
 fw.turn                          the whole logical turn (+ context_mutations diff)
 ├── fw.planner.plan/.replan      the agent's plan; replans carry their trigger
 │   └── fw.llm.call              the planner's LM call
+├── fw.skill.phase               one phase of a phased skill call (one per phase run;
+│   └── fw.agent.execute         its budget, steps used, facts filled or facts_error)
 └── fw.agent.execute             the ReAct loop as a whole (attempts, final answer)
     └── fw.agent.step            one reasoning step: thought, tool choice, observation
         ├── fw.llm.call          the step's reasoning LM call (cache_hit exposes
@@ -171,6 +173,7 @@ name the feature, and load the companion skill before writing the change:
 | `available_from` producer hints | `declare-parameter-producers` |
 | `db_lookup` value resolution | `resolve-parameter-values` |
 | `validate_extracted_parameters` | `validate-command-parameters` |
+| Skill files (`_skills/<name>.py`): phases, facts, step wording (`fw.skill.phase` failures) | [author-workflow-skills](../author-workflow-skills/SKILL.md) |
 | Training utterance realism | `supply-training-personas` |
 | Retraining mechanics after any of the above | `train-and-publish-models` |
 | Publishing a regression task and creating a comparison experiment | [create-workflow-benchmarks](../create-workflow-benchmarks/SKILL.md) |

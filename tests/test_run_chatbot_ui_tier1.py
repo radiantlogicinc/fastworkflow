@@ -19,6 +19,8 @@ a single self-contained file, so its render functions are pinned by presence.
 
 from __future__ import annotations
 
+from tests.benchmark_pins import create_pinned
+from tests.benchmark_pins import STORE_PIN
 import json
 import threading
 import time
@@ -282,7 +284,7 @@ def seeded_db(workflow_path) -> str:
 
     # -- (d) one attempt bound by a server that stamped its snapshot, one by a
     #    server that had none ------------------------------------------------
-    controller.create_experiment(
+    create_pinned(controller,
         EXP, "ui tier 1", declared_tasks=1, declared_attempts=2,
         declarations=[(TASK, 1, "job-1"), (TASK, 2, "job-2")],
     )
@@ -316,7 +318,7 @@ def seeded_db(workflow_path) -> str:
     )
 
     # An experiment with no evidence run and an attempt no server stamped.
-    store.create_experiment(BARE_EXP, "bare", declared_tasks=1, declared_attempts=1)
+    store.create_experiment(BARE_EXP, "bare", declared_tasks=1, declared_attempts=1, **STORE_PIN)
     store.start_attempt(BARE_EXP, "t0", 1, "chan-bare")
     store.finish_attempt(BARE_EXP, "t0", 1, outcome="pass", outcome_source="grader")
 

@@ -28,6 +28,7 @@ of the same thing.
 
 from __future__ import annotations
 
+from tests.benchmark_pins import create_pinned
 import json
 import os
 import subprocess
@@ -40,7 +41,7 @@ import pytest
 from fastworkflow import state_paths
 from fastworkflow.benchmark import setup
 from fastworkflow.experiment.runner import ExperimentController
-from fastworkflow.observability import control, selection
+from fastworkflow.observability import best_run, control
 from fastworkflow.observability import store as obs
 from fastworkflow.run_chatbot import server as run_chatbot_server
 from tests.test_chatbot_benchmarks import _request
@@ -180,7 +181,7 @@ class TestRunsView:
         runs = _request(server, _tasks(world, "/runs"))[1]
         assert runs["best_run"] is None, "undecided records a look, not a pick"
         history = _request(server, _tasks(world, "/runs/history"))[1]["history"]
-        assert [row["decision"] for row in history] == [selection.DECISION_UNDECIDED]
+        assert [row["decision"] for row in history] == [best_run.DECISION_UNDECIDED]
         assert history[0]["candidate_attempt"] == 2
         assert history[0]["actor"] == HUMAN["actor"]
         assert history[0]["rationale"] == "both are defensible"
@@ -214,26 +215,23 @@ class TestRunsView:
 
 
 class TestWinnerPanel:
-    def test_the_first_experiment_holds_the_contest_before_anything_ran(
+    def test_a_contest_starts_with_no_winner_and_the_panel_can_say_so(
         self, server, world
     ):
-        """What the registration page has to be able to show.
+        """What the registration page shows before anybody has decided.
 
-        The winner panel is rendered on the pre-run handoff page too, because
-        the first experiment of a contest wins at creation. Nothing declared a
-        target for that to be true, and the badge carries the experiment's own
-        recorded status rather than implying one.
+        The winner panel is rendered on the pre-run handoff page too. Nothing is
+        elected by being created, so the first read names nobody.
         """
         status, payload = _request(server, _experiments(world, "/winner"))
 
         assert status == 200
-        assert payload["is_winner"] is True
-        assert payload["automatic"] is True
-        assert payload["winner"]["decision"] == selection.DECISION_INITIAL
-        assert payload["winner"]["experiment"]["status"]
+        assert payload["is_winner"] is False
+        assert payload["winner"] is None
         assert payload["runs_per_task"] == 4
 
     def test_choosing_a_best_run_never_moves_the_winner(self, server, world):
+        _request(server, _experiments(world, "/winner"), "POST", HUMAN)
         before = _request(server, _experiments(world, "/winner"))[1]
         expected = _request(server, _tasks(world, "/runs"))[1]["expected_selection_id"]
 
@@ -241,79 +239,37 @@ class TestWinnerPanel:
 
         after = _request(server, _experiments(world, "/winner"))[1]
         assert after["winner"]["selection_id"] == before["winner"]["selection_id"]
-        assert after["winner"]["decision"] == selection.DECISION_INITIAL
+        assert after["is_winner"] is True
         assert _request(server, _tasks(world, "/runs"))[1]["best_run"]["attempt"] == 2
 
-    def test_promoting_the_candidate_moves_the_winner_and_not_the_best_run(
+    def test_making_the_candidate_the_winner_moves_it_and_not_the_best_run(
         self, server, world
     ):
         expected = _request(server, _tasks(world, "/runs"))[1]["expected_selection_id"]
         _decide_best(server, world, 1, expected)
-        contest = _request(server, _experiments(world, "/winner"))[1]
+        _request(server, _experiments(world, "/winner"), "POST", HUMAN)
 
         status, _ = _request(
             server,
-            f"/api/experiments/{world['candidate_id']}/winner/decisions",
+            f"/api/experiments/{world['candidate_id']}/winner",
             "POST",
-            dict(HUMAN, decision=selection.DECISION_PROMOTE,
-                 expected_selection_id=contest["expected_selection_id"],
-                 candidate_experiment_id=world["candidate_id"],
-                 rationale="it sorts the list the task asked for"),
+            dict(HUMAN, rationale="it sorts the list the task asked for"),
         )
 
-        assert status == 201
+        assert status == 200
         moved = _request(server, _experiments(world, "/winner"))[1]
         assert moved["winner"]["experiment_id"] == world["candidate_id"]
         assert moved["is_winner"] is False, "this page is no longer the winner"
         # The task's best run is untouched: it was never the same decision.
         assert _request(server, _tasks(world, "/runs"))[1]["best_run"]["attempt"] == 1
 
-    def test_a_decision_that_lost_a_race_is_refused_with_the_new_state(
-        self, server, world
-    ):
-        """The stale explanation the page renders, on the wire.
+    def test_remove_as_winner_leaves_the_version_with_none(self, server, world):
+        _request(server, _experiments(world, "/winner"), "POST", HUMAN)
 
-        Somebody read the panel, somebody else promoted meanwhile, and the
-        first person clicked Keep. Nothing may be overwritten, and the refusal
-        has to name what is current or "try again" is not actionable.
-        """
-        read = _request(server, _experiments(world, "/winner"))[1]
-        stale_token = read["expected_selection_id"]
-        _request(
-            server,
-            f"/api/experiments/{world['candidate_id']}/winner/decisions",
-            "POST",
-            dict(HUMAN, decision=selection.DECISION_PROMOTE,
-                 expected_selection_id=stale_token,
-                 candidate_experiment_id=world["candidate_id"]),
-        )
+        status, payload = _request(server, _experiments(world, "/winner"), "DELETE", HUMAN)
 
-        status, refusal = _request(
-            server,
-            _experiments(world, "/winner/decisions"),
-            "POST",
-            dict(HUMAN, decision=selection.DECISION_KEEP,
-                 expected_selection_id=stale_token,
-                 candidate_experiment_id=world["experiment_id"]),
-        )
-
-        assert status == 409
-        assert refusal["stale"] is True
-        assert refusal["expected_selection_id"] == stale_token
-        assert refusal["current_experiment_id"] == world["candidate_id"]
-        assert refusal["current_selection_id"] != stale_token
-        # Re-reading and deciding again is a mechanical retry, which is what
-        # the panel's "Re-read and decide again" button does.
-        fresh = _request(server, _experiments(world, "/winner"))[1]
-        retry = _request(
-            server,
-            _experiments(world, "/winner/decisions"),
-            "POST",
-            dict(HUMAN, decision=selection.DECISION_KEEP,
-                 expected_selection_id=fresh["expected_selection_id"],
-                 candidate_experiment_id=world["experiment_id"]),
-        )
-        assert retry[0] == 201
+        assert status == 200
+        assert payload["winner"] is None and payload["is_winner"] is False
 
 
 # ----------------------------------------------------------------------
@@ -674,19 +630,16 @@ def test_every_judgement_over_http_lands_in_the_live_db_and_no_other_file(
 
     Judgement state used to live in sidecar SQLite files beside the evidence;
     it is all control tables in the workflow's one live DB now (§2), so after
-    a best run, a promotion, a reviewed pair and a comment, that DB is still
+    a best run, a winner, a reviewed pair and a comment, that DB is still
     the only database anywhere under the state root.
     """
     server.db_path = world["store"].db_path
     expected = _request(server, _tasks(world, "/runs"))[1]["expected_selection_id"]
     assert _decide_best(server, world, 2, expected)[0] == 201
-    winner = _request(server, _experiments(world, "/winner"))[1]
     status, promoted = _request(
-        server, _experiments(world, "/winner/decisions"), "POST",
-        {**HUMAN, "decision": "promote", "candidate_experiment_id": world["candidate_id"],
-         "expected_selection_id": winner["expected_selection_id"]},
+        server, f"/api/experiments/{world['candidate_id']}/winner", "POST", HUMAN,
     )
-    assert status == 201, promoted
+    assert status == 200, promoted
     status, reviewed = _request(
         server, _tasks(world, "/review-pairs"), "POST",
         {"reviewer": "dhar", "reviewer_kind": "human", "right_attempt": 1,
@@ -958,7 +911,7 @@ def adhoc_world(tmp_path, monkeypatch):
     controller = ExperimentController(
         str(folder), store.store_identity(), external=False,
     )
-    controller.create_experiment(
+    create_pinned(controller,
         "adhoc-exp", "typed at a prompt", declared_tasks=1, declared_attempts=2,
         declarations=[("adhoc-task", n, f"ch-adhoc-{n}") for n in (1, 2)],
         workflow_name=setup.workflow_name_for(folder),

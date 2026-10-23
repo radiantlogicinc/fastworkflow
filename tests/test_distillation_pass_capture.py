@@ -27,6 +27,7 @@ real call. So the span tree these tests read is the shape a paid run records.
 
 from __future__ import annotations
 
+from tests.benchmark_pins import create_pinned
 import json
 import os
 import subprocess
@@ -1023,7 +1024,7 @@ def test_the_selection_api_serves_each_pass_its_own_recorded_answer(
     experiment_id = f"exp-{uuid.uuid4().hex}"
     task_id = f"task_{uuid.uuid4().hex}"
     channel = f"ch-pass-{uuid.uuid4().hex[:8]}"
-    controller.create_experiment(
+    create_pinned(controller,
         experiment_id,
         "teacher/student pass capture",
         declared_tasks=1,
@@ -1138,7 +1139,7 @@ def pass_world(initialized_fastworkflow, todo_workflow_path, tmp_path, monkeypat
     experiment_id = f"exp-{uuid.uuid4().hex}"
     task_id = f"task_{uuid.uuid4().hex}"
     channels = {n: f"ch-{uuid.uuid4().hex[:8]}" for n in (1, 2)}
-    controller.create_experiment(
+    create_pinned(controller,
         experiment_id,
         "recorded passes",
         declared_tasks=1,

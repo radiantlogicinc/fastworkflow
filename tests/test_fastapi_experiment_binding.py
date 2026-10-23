@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tests.benchmark_pins import create_pinned
 import asyncio
 import importlib
 import json
@@ -81,7 +82,7 @@ def binding_harness(tmp_path, monkeypatch):
             migrate=False,
             external=True,
         )
-        controller.create_experiment(
+        create_pinned(controller,
             "exp-http",
             "HTTP binding",
             declared_tasks=1,

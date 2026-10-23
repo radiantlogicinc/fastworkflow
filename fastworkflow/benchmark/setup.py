@@ -5,12 +5,11 @@ rows of the workflow's live DB (`experiment_registrations`) and can be created
 before any evidence exists. A controller binds a registration when it declares
 the attempts, never at UI creation.
 
-An experiment enters its comparison group HERE, at creation (`fix-9eg.17.1`),
-before any evidence exists, which is what makes the first experiment of a group
-its winner at the moment somebody decides to run it rather than at the moment a
-runner happens to record it. The contest lives in the control tables of the
-workflow's live DB (`observability/control.py`), the same DB the runner later
-records the experiment into, so there is one winner per experiment.
+An experiment enters its comparison group HERE, at creation, before any
+evidence exists. There is one group per benchmark version (`fix-873a`), and a
+group has at most one winner, which somebody sets or removes. The contest lives
+in the control tables of the workflow's live DB (`observability/control.py`),
+the same DB the runner later records the experiment into.
 """
 
 from __future__ import annotations
@@ -26,6 +25,8 @@ from fastworkflow.benchmark.catalog import (
     BenchmarkAlreadyExistsError,
     list_versions,
     load_version,
+    replace_draft_version,
+    set_details,
     write_version,
     _safe_segment,
 )
@@ -33,8 +34,8 @@ from fastworkflow import state_paths
 from fastworkflow.observability import control, selection
 from fastworkflow.observability.store import (
     STORE_IDENTITY_DIAGNOSTIC,
-    ObservabilityStore,
     open_live_store,
+    open_live_store_for_write,
 )
 
 
@@ -44,27 +45,6 @@ class BenchmarkSetupConflict(ValueError):
 
 class ExperimentDeleted(BenchmarkSetupConflict):
     """A deleted registration must never fall back to an unregistered run."""
-
-
-class ExperimentSelected(BenchmarkSetupConflict):
-    """The current winner is not deleted while others remain; select one first.
-
-    Deleting an unused registration withdraws it from the contest
-    (`delete_empty_experiment`), and the one thing that cannot be withdrawn
-    while the group has other members is the experiment the contest currently
-    names. The alternatives were worse: clearing the pointer files a "nobody
-    won" nobody decided, and electing a successor decides a contest on the
-    user's behalf during an unrelated deletion. So this is refused — a 409 at
-    the HTTP edge — and the user promotes another experiment first.
-
-    It applies to the automatic first winner too. Nobody chose it, but it is
-    still the experiment every read reports right now.
-
-    The group's ONLY member is not refused (`fix-65ik`): there is nobody to
-    promote instead, so the refusal had no way out, and removing it leaves an
-    empty contest rather than an undecided one. Its next experiment is elected
-    automatically, the way the first one was.
-    """
 
 
 # Runs per task. Bounded because the only thing between this number and n real
@@ -108,7 +88,7 @@ def workflow_name_for(workflow_path):
 
     Registration and execution MUST agree on this string: it is half of the
     derived group id, so a mismatch does not raise anything — it quietly opens
-    a second contest, each with its own uncontested winner. One helper, called
+    a second contest for the same benchmark version. One helper, called
     from both sides, is the cheapest way to make that impossible.
     """
     return os.path.basename(os.path.abspath(str(workflow_path)).rstrip("/\\"))
@@ -140,52 +120,34 @@ def workflow_winner(workflow_path, experiment_id):
     return workflow_control(workflow_path).winner_for_experiment(experiment_id)
 
 
-def benchmark_winner(workflow_path, benchmark_id):
-    """The current winner of this benchmark's contest, or None.
+def benchmark_winner(workflow_path, benchmark_id, benchmark_version):
+    """The current winner of one benchmark version's contest, or None.
 
-    Read-only, like `workflow_winner`. A contest is one group per benchmark
-    lineage, across versions, so the page that lists every experiment of that
-    lineage can mark the one the pointer names without opening each experiment.
-    Inspecting a benchmark that has never entered a contest writes nothing.
+    Read-only, like `workflow_winner`. Each version is its own contest
+    (`fix-873a`), so the page listing one version's experiments can mark the
+    one its pointer names without opening each experiment.
     """
     benchmark_id = str(benchmark_id or "").strip()
-    if not benchmark_id:
+    benchmark_version = str(benchmark_version or "").strip()
+    if not benchmark_id or not benchmark_version:
         return None
-    control = workflow_control(workflow_path)
-    name = workflow_name_for(workflow_path)
-    groups = [
-        group
-        for group in control.list_groups()
-        if group.get("group_kind") == selection.GROUP_BENCHMARK
-        and group.get("benchmark_id") == benchmark_id
-    ]
-    named = [group for group in groups if group.get("workflow_name") == name]
-    # A renamed workflow folder leaves the old name on the group. One such
-    # group is still this contest; two, with neither matching, is ambiguous
-    # and marking either experiment would be a guess.
-    group = named[0] if named else (groups[0] if len(groups) == 1 else None)
-    if group is None:
-        return None
-    return control.current_winner(str(group["group_id"]))
-
-
-def is_sole_group_member(workflow_path, experiment_id):
-    """True when this experiment is the only member of its comparison group.
-
-    Read-only, like `workflow_winner`. It is the condition under which the
-    current winner may be deleted (`ExperimentSelected`), asked separately so a
-    screen can offer exactly what the deletion accepts.
-    """
-    control = workflow_control(workflow_path)
-    group = control.group_for_experiment(experiment_id)
-    if group is None:
-        return False
-    members = control.group_members(str(group["group_id"]))
-    return [str(row["experiment_id"]) for row in members] == [experiment_id]
+    group = selection.comparison_group_identity({
+        "workflow_name": workflow_name_for(workflow_path),
+        "benchmark_id": benchmark_id,
+        "benchmark_version": benchmark_version,
+    })
+    return workflow_control(workflow_path).current_winner(group["group_id"])
 
 
 def save_benchmark(workflow_path, body):
-    """Generate benchmark/version/new task identities; retain existing task IDs."""
+    """Generate benchmark/version/new task identities; retain existing task IDs.
+
+    Only tasks are frozen with a version. A save that leaves the latest
+    version's tasks as they are updates the title (one per benchmark) and that
+    version's description in place. Blank task rows are skipped. A latest
+    version with no tasks is a draft: saving rewrites it in place instead of
+    creating the next version.
+    """
     if not isinstance(body, dict):
         raise ValueError("body must be an object")
     title, description = body.get("title"), body.get("description", "")
@@ -193,9 +155,9 @@ def save_benchmark(workflow_path, body):
         raise ValueError("title is required")
     if not isinstance(description, str):
         raise ValueError("description must be text")
-    raw = body.get("tasks")
-    if not isinstance(raw, list) or not raw:
-        raise ValueError("add at least one task")
+    raw = body.get("tasks", [])
+    if not isinstance(raw, list):
+        raise ValueError("tasks must be a list")
     benchmark_id = body.get("benchmark_id") or f"benchmark-{uuid.uuid4().hex}"
     _safe_segment(benchmark_id, "benchmark_id")
     versions = list_versions(workflow_path, benchmark_id)
@@ -203,6 +165,8 @@ def save_benchmark(workflow_path, body):
     if body.get("expected_version") != latest:
         raise BenchmarkSetupConflict("benchmark changed; reopen before saving")
     prior = load_version(workflow_path, benchmark_id, latest) if latest else None
+    if "description" not in body and prior is not None:
+        description = prior["description"]
     known = {t["task_id"]: t for t in prior["tasks"]} if prior else {}
     tasks, seen = [], set()
     for item in raw:
@@ -213,11 +177,14 @@ def save_benchmark(workflow_path, body):
         task_id = item.get("task_id")
         if task_id is not None and task_id not in known:
             raise ValueError("new task IDs are assigned automatically")
+        old = known.get(task_id, {})
+        # A blank row is skipped; a payload-only task (no prompt) is kept.
+        if not item.get("prompt", "").strip() and not old.get("payload"):
+            continue
         task_id = task_id or f"task_{uuid.uuid4().hex}"
         if task_id in seen:
             raise ValueError("duplicate task ID")
         seen.add(task_id)
-        old = known.get(task_id, {})
         tasks.append(
             {
                 "task_id": task_id,
@@ -226,23 +193,54 @@ def save_benchmark(workflow_path, body):
                 "payload": old.get("payload", {}),
             }
         )
-    numbers = [int(v[1:]) for v in versions if re.fullmatch(r"v\d+", v)]
-    version = f"v{max(numbers, default=0) + 1}"
-    # `write_version` creates the file exclusively, so of two saves against the
-    # same `expected_version` exactly one writes the next version.
-    try:
-        return write_version(
-            workflow_path,
-            {
-                "benchmark_id": benchmark_id,
-                "version": version,
-                "title": title.strip(),
-                "description": description,
-                "tasks": tasks,
-            },
+    spec = {
+        "benchmark_id": benchmark_id,
+        "title": title.strip(),
+        "description": description,
+        "tasks": tasks,
+    }
+    if prior is not None and _task_key(tasks) == _task_key(prior["tasks"]):
+        return update_benchmark_details(
+            workflow_path, benchmark_id, latest, spec["title"], description
         )
+    try:
+        if prior is not None and not prior["tasks"]:
+            version = latest
+            replace_draft_version(
+                workflow_path, {**spec, "version": version}, prior["digest_sha256"]
+            )
+        else:
+            numbers = [int(v[1:]) for v in versions if re.fullmatch(r"v\d+", v)]
+            version = f"v{max(numbers, default=0) + 1}"
+            # `write_version` inserts exclusively, so of two saves against the
+            # same `expected_version` exactly one writes the next version.
+            write_version(workflow_path, {**spec, "version": version})
     except BenchmarkAlreadyExistsError as exc:
         raise BenchmarkSetupConflict("benchmark changed; reopen before saving") from exc
+    return update_benchmark_details(
+        workflow_path, benchmark_id, version, spec["title"], description
+    )
+
+
+def _task_key(tasks):
+    return [(t["task_id"], t.get("prompt", ""), t.get("description", ""),
+             t.get("payload", {})) for t in tasks]
+
+
+def update_benchmark_details(workflow_path, benchmark_id, version, title, description):
+    """Set the benchmark's title and one version's description; tasks untouched.
+
+    Any version may be described, not only the latest. Returns that version
+    as it now reads.
+    """
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError("title is required")
+    if not isinstance(description, str):
+        raise ValueError("description must be text")
+    load_version(workflow_path, benchmark_id, version)  # it must exist
+    set_details(workflow_path, benchmark_id, title=title.strip(),
+                version=version, description=description)
+    return load_version(workflow_path, benchmark_id, version)
 
 
 # ----------------------------------------------------------------------
@@ -265,6 +263,7 @@ def _record(row):
         "description": row["description"],
         "task_ids": json.loads(row["task_ids_json"]),
         "runs_per_task": row["runs_per_task"],
+        "user_simulator": bool(row["user_simulator"]),
         "created_at": row["created_at"],
         "store": {"store_id": row["store_id"]} if row["state"] == "bound" else None,
         "source_experiment_id": row["source_experiment_id"],
@@ -296,26 +295,22 @@ def _register(workflow_path, record):
     experiment is a POST, and a workflow nobody has chatted with yet has no DB
     to register it in. Reads still never create one.
     """
-    db_path = _live_db_path(workflow_path)
-    store = (
-        open_live_store(db_path, write=True)
-        if os.path.isfile(db_path)
-        else ObservabilityStore(db_path)
-    )
+    store = open_live_store_for_write(_live_db_path(workflow_path))
     with control.write(store) as conn:
         conn.execute(
             """INSERT INTO experiment_registrations
                (experiment_id, benchmark_id, benchmark_version,
                 benchmark_digest_sha256, description, task_ids_json,
                 runs_per_task, source_experiment_id, changed_fields_json,
-                created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                user_simulator, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 record["experiment_id"], record["benchmark_id"],
                 record["benchmark_version"], record["benchmark_digest_sha256"],
                 record["description"], json.dumps(record["task_ids"]),
                 record["runs_per_task"], record["source_experiment_id"],
-                json.dumps(record["changed_fields"]), record["created_at"],
+                json.dumps(record["changed_fields"]),
+                int(record["user_simulator"]), record["created_at"],
             ),
         )
         selection.SelectionControlStore(store).join_in_txn(
@@ -342,8 +337,16 @@ def _registration_write(workflow_path, experiment_id):
         yield store, conn, _live(row, experiment_id)
 
 
+def validate_user_simulator(value) -> bool:
+    """A JSON boolean; anything else is refused rather than guessed at."""
+    if not isinstance(value, bool):
+        raise ValueError("user_simulator must be true or false")
+    return value
+
+
 def create_experiment(
-    workflow_path, benchmark_id, version, description="", runs_per_task=1
+    workflow_path, benchmark_id, version, description="", runs_per_task=1,
+    user_simulator=False,
 ):
     """Mint an experiment identity; the description is the author's, optional.
 
@@ -356,14 +359,21 @@ def create_experiment(
     `n > 1` needs no target, rubric, hypothesis or review gate: it is the same
     task and the same setup run n times, which the runner already does.
 
-    The experiment enters this workflow's comparison group here — before any
-    evidence exists — so the first one becomes the group's winner the moment it
-    is created. Nothing paid or side-effecting starts; this mints an identity.
+    `user_simulator` says a user simulator will drive every run, turning each
+    task prompt into its own utterances (`fix-va9v`). It is fixed here: the
+    runner takes it from the registration.
+
+    The experiment enters its benchmark version's comparison group here, before
+    any evidence exists. Nobody becomes the winner by being created. Nothing
+    paid or side-effecting starts; this mints an identity.
     """
     manifest = load_version(workflow_path, benchmark_id, version)
+    if not manifest["tasks"]:
+        raise ValueError("add tasks to this benchmark before creating an experiment")
     if not isinstance(description, str):
         raise ValueError("description must be text")
     runs_per_task = validate_runs_per_task(runs_per_task)
+    user_simulator = validate_user_simulator(user_simulator)
     experiment_id = f"exp-{uuid.uuid4().hex}"
     record = {
         "experiment_id": experiment_id,
@@ -373,6 +383,7 @@ def create_experiment(
         "description": description.strip(),
         "task_ids": [task["task_id"] for task in manifest["tasks"]],
         "runs_per_task": runs_per_task,
+        "user_simulator": user_simulator,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "store": None,
         "source_experiment_id": None,
@@ -382,7 +393,8 @@ def create_experiment(
 
 
 def duplicate_experiment(
-    workflow_path, source_experiment_id, *, description=None, runs_per_task=None
+    workflow_path, source_experiment_id, *, description=None, runs_per_task=None,
+    user_simulator=None,
 ):
     """Run the same setup again, as a new experiment. The candidate action.
 
@@ -414,6 +426,12 @@ def duplicate_experiment(
         runs_per_task = validate_runs_per_task(runs_per_task)
         if runs_per_task != source.get("runs_per_task", 1):
             changed.append("runs_per_task")
+    if user_simulator is None:
+        user_simulator = bool(source.get("user_simulator"))
+    else:
+        user_simulator = validate_user_simulator(user_simulator)
+        if user_simulator != bool(source.get("user_simulator")):
+            changed.append("user_simulator")
     experiment_id = f"exp-{uuid.uuid4().hex}"
     # Copy the source wholesale, then overwrite exactly the fields that must
     # differ.
@@ -423,6 +441,7 @@ def duplicate_experiment(
             "experiment_id": experiment_id,
             "description": description.strip(),
             "runs_per_task": runs_per_task,
+            "user_simulator": user_simulator,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "store": None,
             "source_experiment_id": source["experiment_id"],
@@ -499,43 +518,15 @@ def delete_empty_experiment(workflow_path, experiment_id):
 
     The tombstone (`state='deleted'`) prevents delayed runners from treating a
     deleted ID as a new, unregistered experiment. No evidence or benchmark
-    version is touched.
-
-    The registration also LEAVES THE CONTEST it joined at creation (`fix-jfy5`),
-    in the same transaction: creation registers and may elect, so a deletion
-    that only tombstoned would leave a group pointing at an experiment that no
-    longer exists — reported as the winner, unresolvable, and impossible to
-    duplicate. A refused deletion — the current winner of a group with other
-    members, or a registration with evidence — leaves both the registration and
-    the contest exactly as they were. Nothing here elects anybody: the winner
-    can be the experiment being deleted only when it is the group's sole member
-    (`fix-65ik`), and then there is nobody to succeed it — the group is left
-    empty and winner-less, and its next experiment is elected on registration.
+    version is touched. The registration leaves its contest in the same
+    transaction; when it was the winner, the contest has no winner afterwards.
     """
     with _registration_write(workflow_path, experiment_id) as (store, conn, row):
         if row["state"] == "bound":
             raise BenchmarkSetupConflict(
                 "This experiment has been handed to a runner and cannot be deleted."
             )
-        try:
-            selection.SelectionControlStore(store).retire_in_txn(
-                conn,
-                experiment_id,
-                rationale="its registration was deleted",
-                allow_sole_winner=True,
-            )
-        except selection.SelectionRetirementRefused as exc:
-            if exc.reason == "is_current_winner":
-                raise ExperimentSelected(
-                    "This experiment is the current winner of its comparison "
-                    "group, and the group has other experiments in it. Deleting "
-                    "it would leave them without a winner anybody chose, so it is "
-                    "refused: promote one of the other experiments to winner "
-                    "first, then delete this one."
-                ) from exc
-            raise BenchmarkSetupConflict(
-                "This experiment is part of the recorded contest and cannot be deleted."
-            ) from exc
+        selection.SelectionControlStore(store).leave_in_txn(conn, experiment_id)
         conn.execute(
             "UPDATE experiment_registrations SET state='deleted', deleted_at=? "
             "WHERE experiment_id=?",

@@ -151,6 +151,7 @@ inferred:
 | Span name | Where emitted | Key attributes |
 |---|---|---|
 | `fw.agent.execute` | `WEC._call_agent_with_retry` — the one choke point both the fresh forward and the resume pass through | agent_input, resumed, model, attempts, final_answer, suspended, clarification, exhausted |
+| `fw.skill.phase` | `WEC._run_skill_phase` — one phase run of a phased skill call (`fastworkflow.skill_phases`); parent of that run's `fw.agent.execute`. Added in span contract v16 | skill, phase, phase_index, phase_count, step_budget, first_step, resumed, steps, steps_used, exhausted, suspended, record, facts, facts_error, error_type |
 | `fw.agent.step` | each iteration of `fastWorkflowReAct._run_loop` | step_index, thought, tool_name, tool_args, observation, clarification, tool_error; `finish_check_note` (per-span v3, aggregate contract 7; historical whitelist key, no longer set) |
 | `fw.search.route` | *(removed)* optional decision-model routing on `search_memory` over listings; span name retained for historical traces only. Kind `llm`; added in span contract v6 | model, choice, p_all_rows, for_report, latency_ms, input_tokens, output_tokens, error_type |
 | `fw.finish_check` | *(removed)* finish-time execution check; span name retained for historical traces only. Kind `llm`; added in span contract v7 | model, plan_source, steps, subjects (a count), questions, requests, splits, input_tokens, latency_ms, flagged, fired, error_type |
@@ -514,9 +515,9 @@ the `--prune`/`--forget-channel` CLI flags became chatbot-UI/store-API
 operations (§3.2 amendment); R17/R18/R19/R22/D3 carry inline amendments; the
 implemented schema additionally holds `conversation_counters`, `diagnostics`,
 and `conversations.updated_at` (Phase-7 rulings C2/R13/C7). `fw.llm.call`
-usage/cost capture reads DSPy history: `run_fastapi_mcp --keep_dspy_history`
-enables a bounded (20-entry) history for it — off by default; the chatbot's
-spawned server always passes it.
+usage/cost capture reads each LM call's own result, not DSPy history
+(fix-sgsp); DSPy history is off in every `run_fastapi_mcp` server, and the
+former `--keep_dspy_history` flag was removed (fix-50pd).
 
 | Finding | Ruling |
 |---|---|

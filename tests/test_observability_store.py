@@ -8,6 +8,7 @@ at the NLU/agent boundary).
 
 from __future__ import annotations
 
+from tests.benchmark_pins import STORE_PIN
 import json
 import os
 import inspect
@@ -877,7 +878,7 @@ class TestMaintenance:
         """fix-nczr.2: with nothing else left over the cap, the oldest finished
         non-experiment turns go; in-flight and experiment turns stay."""
         store = obs.ObservabilityStore(db_path)
-        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1)
+        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1, **STORE_PIN)
         self._turn(store, "20000101T000000-old")
         self._turn(store, "20000101T000001-running", status="running")
         self._turn(store, "20000101T000002-exp", experiment_id="exp-1")
@@ -888,6 +889,22 @@ class TestMaintenance:
         kept = {r["turn_key"] for r in _rows(db_path, "SELECT turn_key FROM turns")}
         assert kept == {"20000101T000001-running", "20000101T000002-exp"}
 
+    def test_size_cap_evicts_released_experiment_turns(self, db_path):
+        """fix-ajir.24: a released (or sealed) experiment is no longer bound, so
+        its finished turns go like any other; a bound one's stay."""
+        store = obs.ObservabilityStore(db_path)
+        for eid in ("exp-bound", "exp-released"):
+            store.create_experiment(eid, "L", declared_tasks=1, declared_attempts=1, **STORE_PIN)
+        store.release_experiment_evidence("exp-released", "tester")
+        self._turn(store, "20000101T000000-bound", experiment_id="exp-bound")
+        self._turn(store, "20000101T000001-released", experiment_id="exp-released")
+
+        deleted = store.prune(retention_days=30, max_bytes=1)
+
+        assert deleted["turns"] == 1
+        kept = {r["turn_key"] for r in _rows(db_path, "SELECT turn_key FROM turns")}
+        assert kept == {"20000101T000000-bound"}
+
     def test_under_cap_prune_keeps_turn_records(self, db_path):
         store = obs.ObservabilityStore(db_path)
         self._turn(store, "20000101T000000-old")
@@ -896,6 +913,223 @@ class TestMaintenance:
 
         assert "turns" not in deleted
         assert len(_rows(db_path, "SELECT turn_key FROM turns")) == 1
+
+    @staticmethod
+    def _span(store, span_id, trace_id, start_ns, experiment_id=None):
+        with store._connect() as conn:
+            conn.execute(
+                "INSERT INTO spans(span_id, trace_id, name, kind, start_ns, status, "
+                "attributes, experiment_id) VALUES (?,?,?,?,?,?,?,?)",
+                (span_id, trace_id, "fw.turn", "internal", start_ns, "ok",
+                 "x" * 2_000, experiment_id),
+            )
+
+    @staticmethod
+    def _tiny_prune(monkeypatch, **overrides):
+        """Batch constants small enough that a few rows take many batches."""
+        for name, value in {
+            "_PRUNE_BATCH_ROWS": 4, "_PRUNE_TXN_ROWS": 2, "_PRUNE_TXN_TURNS": 1,
+            "_PRUNE_PAUSE_S": 0.001, "_PRUNE_VACUUM_PAGES": 2,
+            "_OFFLOAD_PRUNE_BATCH_TURNS": 2, **overrides,
+        }.items():
+            monkeypatch.setattr(obs, name, value)
+
+    def _mixed_store(self, db_path):
+        """Old and new unbound spans, a bound span, finished, running and
+        bound turn records."""
+        store = obs.ObservabilityStore(db_path)
+        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1, **STORE_PIN)
+        old_ns = int((time.time() - 90 * 86_400) * 1_000_000_000)
+        new_ns = int(time.time() * 1_000_000_000)
+        for i in range(12):
+            self._span(store, f"old-{i:02d}", "20000101T000000-a", old_ns + i)
+        for i in range(3):
+            self._span(store, f"new-{i}", "20000101T000000-a", new_ns + i)
+        self._span(store, "bound", "20000101T000009-exp", old_ns, experiment_id="exp-1")
+        for i in range(5):
+            self._turn(store, f"20000101T00000{i}-done")
+        self._turn(store, "20000101T000007-running", status="running")
+        self._turn(store, "20000101T000009-exp", experiment_id="exp-1")
+        return store
+
+    def test_prune_deletes_by_key_in_short_transactions(self, db_path, monkeypatch):
+        """fix-ajir.25: victims are read outside the write lock, so no write
+        transaction holds a victim scan, and a concurrent writer is never
+        refused while prune runs. What prune deletes is unchanged."""
+        import threading
+
+        self._tiny_prune(monkeypatch)
+        store = self._mixed_store(db_path)
+        statements: list[str] = []
+        opened = obs.ObservabilityStore._open_connection
+
+        def traced(self, timeout=30.0):
+            conn = opened(self, timeout=timeout)
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        monkeypatch.setattr(obs.ObservabilityStore, "_open_connection", traced)
+        refused: list[Exception] = []
+        stop = threading.Event()
+
+        def probe():
+            conn = sqlite3.connect(db_path, timeout=0.5, isolation_level=None)
+            try:
+                while not stop.is_set():
+                    try:
+                        conn.execute("BEGIN IMMEDIATE")
+                        conn.execute(
+                            "INSERT OR REPLACE INTO diagnostics VALUES ('probe', '1', 'x')"
+                        )
+                        conn.execute("COMMIT")
+                    except sqlite3.OperationalError as exc:
+                        refused.append(exc)
+                    time.sleep(0.001)
+            finally:
+                conn.close()
+
+        thread = threading.Thread(target=probe)
+        thread.start()
+        try:
+            deleted = store.prune(retention_days=30, max_bytes=1)
+        finally:
+            stop.set()
+            thread.join()
+
+        assert refused == []
+        assert deleted["spans"] == 15 and deleted["turns"] == 5
+        assert {r["span_id"] for r in _rows(db_path, "SELECT span_id FROM spans")} == {"bound"}
+        assert {r["turn_key"] for r in _rows(db_path, "SELECT turn_key FROM turns")} == {
+            "20000101T000007-running", "20000101T000009-exp",
+        }
+        in_txn, scans, txns = False, [], 0
+        for sql in statements:
+            if sql.startswith("BEGIN IMMEDIATE"):
+                in_txn, txns = True, txns + 1
+            elif sql.startswith("COMMIT"):
+                in_txn = False
+            elif in_txn and " LIMIT " in sql:
+                scans.append(sql)
+        assert scans == []
+        # 12 old spans and 3 new ones 2 at a time, then 5 records 1 at a time.
+        assert txns == 6 + 2 + 5
+        assert sum(sql == "PRAGMA incremental_vacuum(2)" for sql in statements) > 1
+
+    def test_prune_rechecks_each_victim_by_key(self, db_path, monkeypatch):
+        """fix-ajir.25: a row bound to an experiment, or a turn that is running
+        again, between the read that chose it and its delete is kept."""
+        self._tiny_prune(monkeypatch, _PRUNE_BATCH_ROWS=100)
+        store = self._mixed_store(db_path)
+        chosen = obs.ObservabilityStore._in_short_txns
+
+        def change_then_delete(conn, keys, size, delete):
+            other = sqlite3.connect(db_path)
+            with other:
+                if "old-00" in keys:
+                    other.execute("UPDATE spans SET experiment_id='exp-1' WHERE span_id='old-00'")
+                if "20000101T000000-done" in keys:
+                    other.execute(
+                        "UPDATE turns SET experiment_id='exp-1' "
+                        "WHERE turn_key='20000101T000000-done'"
+                    )
+                    other.execute(
+                        "UPDATE turns SET status='running' WHERE turn_key='20000101T000001-done'"
+                    )
+            other.close()
+            return chosen(conn, keys, size, delete)
+
+        monkeypatch.setattr(
+            obs.ObservabilityStore, "_in_short_txns", staticmethod(change_then_delete)
+        )
+        deleted = store.prune(retention_days=30, max_bytes=1)
+
+        assert {r["span_id"] for r in _rows(db_path, "SELECT span_id FROM spans")} == {
+            "bound", "old-00",
+        }
+        assert deleted["turns"] == 3
+        assert {r["turn_key"] for r in _rows(db_path, "SELECT turn_key FROM turns")} == {
+            "20000101T000000-done", "20000101T000001-done",
+            "20000101T000007-running", "20000101T000009-exp",
+        }
+
+    def test_size_cap_pass_is_bounded_and_evicts_detail_first(self, db_path, monkeypatch):
+        """fix-ajir.27: one pass evicts at most `_PRUNE_MAX_BATCHES` batches,
+        spans before turn records (fix-nczr.2), and nothing bound; a store
+        within that bound ends with every unbound finished record gone."""
+        self._tiny_prune(monkeypatch, _PRUNE_BATCH_ROWS=100, _PRUNE_MAX_BATCHES=2)
+        store = self._mixed_store(db_path)
+
+        deleted = store.prune(retention_days=30, max_bytes=1)
+
+        # Batch 1 takes the 3 unbound spans the horizon left; batch 2, with
+        # only records left, the 2 oldest finished ones.
+        assert deleted["spans"] == 15 and deleted["turns"] == 2
+        kept = {r["turn_key"] for r in _rows(db_path, "SELECT turn_key FROM turns")}
+        assert kept == {
+            "20000101T000002-done", "20000101T000003-done", "20000101T000004-done",
+            "20000101T000007-running", "20000101T000009-exp",
+        }
+
+        monkeypatch.setattr(obs, "_PRUNE_MAX_BATCHES", 200)
+        deleted = store.prune(retention_days=30, max_bytes=1)
+        assert deleted["turns"] == 3
+        kept = {r["turn_key"] for r in _rows(db_path, "SELECT turn_key FROM turns")}
+        assert kept == {"20000101T000007-running", "20000101T000009-exp"}
+
+    def test_reader_pinned_wal_stops_the_size_cap_pass(self, db_path, monkeypatch):
+        """fix-ajir.27: while a reader pins the WAL the file cannot shrink, so
+        the cap pass stops after its first batch instead of evicting every
+        unbound record for nothing. fix-ajir.39: its checkpoints wait for the
+        reader only briefly, since a writer waits with them; without a pinned
+        reader the pass still truncates the WAL."""
+        import threading
+
+        self._tiny_prune(monkeypatch, _PRUNE_BATCH_ROWS=100)
+        store = self._mixed_store(db_path)
+        connect = obs.ObservabilityStore._connect
+        monkeypatch.setattr(
+            obs.ObservabilityStore, "_connect",
+            lambda self, timeout=30.0: connect(self, timeout=5.0),
+        )
+        waits: list[float] = []
+        done = threading.Event()
+
+        def write_meanwhile() -> None:
+            writer = sqlite3.connect(db_path, isolation_level=None, timeout=30)
+            try:
+                while not done.is_set():
+                    started = time.monotonic()
+                    writer.execute("BEGIN IMMEDIATE")
+                    writer.execute("COMMIT")
+                    waits.append(time.monotonic() - started)
+                    time.sleep(0.01)
+            finally:
+                writer.close()
+
+        reader = sqlite3.connect(db_path, isolation_level=None)
+        thread = threading.Thread(target=write_meanwhile)
+        try:
+            reader.execute("BEGIN")
+            reader.execute("SELECT COUNT(*) FROM turns").fetchall()
+            thread.start()
+            deleted = store.prune(retention_days=30, max_bytes=1)
+        finally:
+            done.set()
+            thread.join()
+            reader.close()
+
+        assert deleted["spans"] == 15 and "turns" not in deleted
+        assert len(_rows(db_path, "SELECT turn_key FROM turns")) == 7
+        assert waits and max(waits) < 1.0
+
+        # An idle connection keeps the WAL file, which the last close deletes.
+        idle = sqlite3.connect(db_path, isolation_level=None)
+        try:
+            idle.execute("SELECT COUNT(*) FROM turns").fetchall()
+            store.prune(retention_days=30, max_bytes=1)
+            assert os.path.getsize(db_path + "-wal") == 0
+        finally:
+            idle.close()
 
     def test_writer_prunes_periodically(self, db_path, monkeypatch):
         """fix-nczr.1: a long-lived sink re-runs the prune, not only at startup."""

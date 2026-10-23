@@ -25,6 +25,7 @@
         <button id="refreshBtn" style="display:none">Refresh</button>
         <button id="clearConvsBtn" style="display:none">Clear conversations</button>
         <button id="trainingHistoryBtn">Training history</button>
+        <button id="sealedExperimentsBtn">Sealed experiments</button>
         <label for="themeSelect">Appearance</label>
         <select id="themeSelect"><option value="auto">System theme</option><option value="light">Light</option><option value="dark">Dark</option></select>
       </div>
@@ -141,6 +142,7 @@
       <textarea id="chatInput" rows="1" placeholder="Message the agent…" disabled></textarea>
       <div id="composerActions">
         <label id="dspyCacheToggle" title="Reuse cached LLM responses (DSPy cache). Uncheck for fresh plans and answers."><input type="checkbox" id="useDspyCache" checked> LLM cache</label>
+        <label id="unattendedToggle" title="Run each prompt with nobody to answer: the agent gets no ask_user tool. Stays on until you uncheck it."><input type="checkbox" id="unattended"> Unattended</label>
         <button id="chatSend" class="primary" disabled>Send</button>
         <button id="composerTip" type="button" aria-label="Composer tip">Tip<div class="composerTipBubble" role="tooltip">Messages go to the agent. Start a message with "/" to run a command deterministically (no agent). Enter sends, Shift+Enter adds a line. Every turn is inspectable in the Debug tab.</div></button>
       </div>

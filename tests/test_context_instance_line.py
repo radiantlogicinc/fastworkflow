@@ -279,7 +279,7 @@ class ExecuteStepPrintsTheContextItRanIn(unittest.TestCase):
 
     def step(self, index: int, command: str) -> str:
         self.trajectory[f"tool_name_{index}"] = "execute_workflow_query"
-        response = self.execute(command)
+        response = self.execute(command=command)
         self.trajectory[f"observation_{index}"] = response
         return response
 
@@ -323,7 +323,7 @@ class ExecuteStepPrintsTheContextItRanIn(unittest.TestCase):
 
     def test_no_agent_step_in_flight_leaves_the_response_alone(self) -> None:
         self.trajectory["tool_name_0"] = "what_can_i_do"
-        self.assertEqual(self.execute("what_can_i_do"), "rows")
+        self.assertEqual(self.execute(command="what_can_i_do"), "rows")
         self.assertIsNone(self.archive.get(self.scope, "O0"))
 
     def test_the_context_is_read_back_after_the_process_state_is_reset(self) -> None:

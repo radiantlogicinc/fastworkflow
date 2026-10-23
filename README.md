@@ -113,6 +113,7 @@ fastWorkflow was benchmarked on [Tau Bench](https://github.com/sierra-research/t
 - [Quick Start: run an example in 5 minutes](#quick-start-run-an-example-in-5-minutes)
 - [AI-enable your own app (without restructuring it)](#ai-enable-your-own-app-without-restructuring-it)
 - [How complex workflows scale: context hierarchies](#how-complex-workflows-scale-context-hierarchies)
+- [Skills: multi-command jobs in code (`_skills`)](#skills-multi-command-jobs-in-code-_skills)
 - [Chat with it and debug it: `run_chatbot`](#chat-with-it-and-debug-it-run_chatbot)
 - [Production deployment](#production-deployment)
 - [Developer FAQ](#developer-faq)
@@ -296,6 +297,19 @@ Context relationships live in **one file**, `context_inheritance_model.json` —
 ```
 
 This is what lets small models stay accurate as your app grows — and what keeps frontier models from drowning in tool definitions.
+
+---
+
+## Skills: multi-command jobs in code (`_skills`)
+
+When a family of requests is answered by the same few commands in a known order (find a record, open it, read it, answer), write that job once as a **skill**: a Python file `_skills/<name>.py` next to `_commands/`. Its `Signature` describes the job and declares typed inputs; `steps(input)` builds the steps as text, or `plan(input)` splits them into phases that pass facts to each other in code. The planner fills the inputs from the request and the steps become the agent's plan; code runs the mechanical steps itself.
+
+```sh
+fastworkflow skill preview <workflow_dir>           # one markdown preview per skill
+fastworkflow skill preview <workflow_dir> --check   # CI: fails on stale previews or a broken skill
+```
+
+Coding agents: use the wheel-shipped [author-workflow-skills](fastworkflow/skills_for_coding_fastworkflows/author-workflow-skills/SKILL.md) skill (file shape, input rules, phases, and the step wording the framework reads). Full reference: [`docs/skill_file_layout.md`](docs/skill_file_layout.md) and [`docs/skill_phases.md`](docs/skill_phases.md).
 
 ---
 

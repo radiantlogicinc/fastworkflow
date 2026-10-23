@@ -7,9 +7,9 @@ identity and a declaration.
 
 What these pin, in one sentence each:
 
-- An experiment joins its contest in the workflow's live DB when it is
-  CREATED, before anything runs, so the first one is the winner from that
-  moment.
+- An experiment joins its benchmark version's contest in the workflow's live
+  DB when it is CREATED, before anything runs. Joining never makes it the
+  winner; somebody sets that (`fix-873a`).
 - A runner records into that SAME live DB, so one registered experiment never
   has two winners disagreeing about it.
 - A repeat count is a whole number somebody meant, not whatever `int()` made
@@ -18,13 +18,15 @@ What these pin, in one sentence each:
 
 from __future__ import annotations
 
+from tests.benchmark_pins import create_pinned
 import os
-from pathlib import Path
+import sqlite3
 
 import pytest
 
 from fastworkflow import state_paths
 from fastworkflow.benchmark import setup
+from fastworkflow.benchmark.catalog import BenchmarkManifestError
 from fastworkflow.experiment.runner import ExperimentController
 from fastworkflow.observability import store as obs
 
@@ -50,6 +52,21 @@ def _control(folder):
 def _winner_id(folder, experiment_id):
     winner = setup.workflow_winner(folder, experiment_id)
     return None if winner is None else winner["experiment_id"]
+
+
+def _set_winner(folder, experiment_id):
+    return setup.workflow_control(folder, write=True).set_winner(
+        experiment_id, actor="tester", actor_kind="human", provenance="human"
+    )
+
+
+def _second_version(folder, benchmark):
+    return setup.save_benchmark(folder, {
+        "benchmark_id": benchmark["benchmark_id"],
+        "expected_version": "v1",
+        "title": "Roster review",
+        "tasks": [{"prompt": "Review the roster again"}],
+    })
 
 
 # ----------------------------------------------------------------------
@@ -79,6 +96,7 @@ class TestLiveDbPathEncoding:
         wf.mkdir()
         obs.ObservabilityStore(state_paths.observability_db(str(wf)))
         record = setup.create_experiment(wf, _benchmark(wf)["benchmark_id"], "v1")
+        _set_winner(wf, record["experiment_id"])
 
         assert _winner_id(wf, record["experiment_id"]) == record["experiment_id"]
 
@@ -92,34 +110,36 @@ class TestLiveDbPathEncoding:
 
 
 # ----------------------------------------------------------------------
-# Registration: the first experiment wins before any evidence exists
+# Registration: an experiment joins its version's contest, winning nothing
 # ----------------------------------------------------------------------
 
 
-class TestRegistrationWinsAtCreation:
-    def test_the_first_experiment_is_the_winner_before_anything_runs(self, folder):
+class TestRegistrationJoinsAtCreation:
+    def test_creating_an_experiment_sets_no_winner(self, folder):
         benchmark = _benchmark(folder)
 
         record = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
 
         assert record["runs_per_task"] == 1
-        assert _winner_id(folder, record["experiment_id"]) == record["experiment_id"]
-        # No evidence was recorded to make that true.
-        assert _control(folder).store.get_experiment(record["experiment_id"]) is None
+        assert _control(folder).group_for_experiment(record["experiment_id"]) is not None
+        assert _winner_id(folder, record["experiment_id"]) is None
 
-    def test_the_winner_is_not_annotated_as_successful(self, folder):
+    def test_a_registration_can_be_the_winner_before_anything_runs(self, folder):
         benchmark = _benchmark(folder)
         record = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
 
-        winner = setup.workflow_winner(folder, record["experiment_id"])
+        _set_winner(folder, record["experiment_id"])
 
-        assert winner["automatic"] is True
+        winner = setup.workflow_winner(folder, record["experiment_id"])
+        assert winner["experiment_id"] == record["experiment_id"]
         # Nothing has run, so there is no state to report and none is invented.
         assert winner["experiment_resolved"] is False
+        assert _control(folder).store.get_experiment(record["experiment_id"]) is None
 
     def test_a_second_registration_joins_without_winning(self, folder):
         benchmark = _benchmark(folder)
         first = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
+        _set_winner(folder, first["experiment_id"])
 
         second = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
 
@@ -143,28 +163,43 @@ class TestRegistrationWinsAtCreation:
         two = _benchmark(folder, "Billing")
         first = setup.create_experiment(folder, one["benchmark_id"], "v1")
         other = setup.create_experiment(folder, two["benchmark_id"], "v1")
+        _set_winner(folder, first["experiment_id"])
 
         assert _winner_id(folder, first["experiment_id"]) == first["experiment_id"]
-        assert _winner_id(folder, other["experiment_id"]) == other["experiment_id"]
+        assert _winner_id(folder, other["experiment_id"]) is None
 
-    def test_creation_on_a_workflow_with_no_live_db_creates_it(self, tmp_path):
-        """Minting an identity must not fail because nobody has chatted yet.
+    def test_different_versions_of_one_benchmark_are_different_contests(self, folder):
+        benchmark = _benchmark(folder)
+        _second_version(folder, benchmark)
+        on_v1 = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
+        on_v2 = setup.create_experiment(folder, benchmark["benchmark_id"], "v2")
+        _set_winner(folder, on_v1["experiment_id"])
+        _set_winner(folder, on_v2["experiment_id"])
 
-        The registration lives in the live DB, so creating the first one (a
-        POST) creates that DB; reading still never does.
+        control = _control(folder)
+        assert (control.group_for_experiment(on_v1["experiment_id"])["group_id"]
+                != control.group_for_experiment(on_v2["experiment_id"])["group_id"])
+        assert _winner_id(folder, on_v1["experiment_id"]) == on_v1["experiment_id"]
+        assert _winner_id(folder, on_v2["experiment_id"]) == on_v2["experiment_id"]
+        assert setup.benchmark_winner(
+            folder, benchmark["benchmark_id"], "v1")["experiment_id"] == on_v1["experiment_id"]
+        assert setup.benchmark_winner(
+            folder, benchmark["benchmark_id"], "v2")["experiment_id"] == on_v2["experiment_id"]
+
+    def test_a_workflow_with_no_live_db_has_no_benchmark_to_register(self, tmp_path):
+        """The benchmark versions live in the live DB, so no DB means no version.
+
+        Reads answer empty and do not create the DB; creating an experiment
+        has no version to pin and is refused without creating anything.
         """
         wf = tmp_path / "unrecorded_workflow"
         wf.mkdir()
-        benchmark = _benchmark(wf)
-        assert setup.registered_experiments(wf, benchmark["benchmark_id"]) == []
+        assert setup.registered_experiments(wf, "missing") == []
         assert not os.path.exists(state_paths.observability_db(str(wf)))
 
-        record = setup.create_experiment(wf, benchmark["benchmark_id"], "v1")
-
-        assert record["experiment_id"].startswith("exp-")
-        assert setup.load_experiment(wf, record["experiment_id"]) == record
-        assert _winner_id(wf, record["experiment_id"]) == record["experiment_id"]
-        assert os.path.isfile(state_paths.observability_db(str(wf)))
+        with pytest.raises(BenchmarkManifestError, match="not found"):
+            setup.create_experiment(wf, "missing", "v1")
+        assert not os.path.exists(state_paths.observability_db(str(wf)))
 
 
 # ----------------------------------------------------------------------
@@ -258,6 +293,7 @@ class TestDuplicateExperiment:
     def test_a_candidate_does_not_outrank_the_experiment_it_copied(self, folder):
         benchmark = _benchmark(folder)
         source = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
+        _set_winner(folder, source["experiment_id"])
 
         candidate = setup.duplicate_experiment(folder, source["experiment_id"])
 
@@ -275,24 +311,28 @@ class TestDuplicateExperiment:
         assert len(setup.registered_experiments(folder, benchmark["benchmark_id"])) == 1
 
     def test_duplicating_a_changed_benchmark_is_refused(self, folder):
-        """Duplicating a setup whose pinned contents moved is not the same setup."""
+        """Duplicating a setup whose pinned contents moved is not the same setup.
+
+        Stored versions are immutable, so the drift is simulated where it could
+        actually happen: the registration's pinned digest no longer matches the
+        stored version it names.
+        """
         benchmark = _benchmark(folder)
         source = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
-        version = Path(
-            folder, "benchmarks", benchmark["benchmark_id"], "v1.json"
+        conn = sqlite3.connect(state_paths.observability_db(str(folder)))
+        conn.execute(
+            "UPDATE experiment_registrations SET benchmark_digest_sha256=?"
+            " WHERE experiment_id=?",
+            ("0" * 64, source["experiment_id"]),
         )
-        payload = version.read_text().replace("Review the roster", "Something else")
-        version.write_text(payload)
+        conn.commit()
+        conn.close()
 
         with pytest.raises(setup.BenchmarkSetupConflict):
             setup.duplicate_experiment(folder, source["experiment_id"])
 
     def test_a_deleted_experiment_cannot_be_duplicated(self, folder):
         benchmark = _benchmark(folder)
-        # The first experiment of a group is its winner, and the winner is not
-        # deletable (`fix-jfy5`); this one exists so `source` is an ordinary
-        # non-selected registration.
-        setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
         source = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
         setup.delete_empty_experiment(folder, source["experiment_id"])
 
@@ -343,6 +383,7 @@ class TestRunnerRecordsIntoTheLiveDb:
     def test_starting_a_runner_keeps_the_registration_winner(self, folder):
         benchmark = _benchmark(folder)
         record = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
+        _set_winner(folder, record["experiment_id"])
         _store, controller = _controller(folder)
 
         _declare(controller, record)
@@ -395,6 +436,7 @@ class TestRunnerRecordsIntoTheLiveDb:
     ):
         benchmark = _benchmark(folder)
         first = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
+        _set_winner(folder, first["experiment_id"])
         candidate = setup.duplicate_experiment(folder, first["experiment_id"])
         _store, controller = _controller(folder)
 
@@ -407,6 +449,7 @@ class TestRunnerRecordsIntoTheLiveDb:
     def test_two_runners_share_one_contest(self, folder):
         benchmark = _benchmark(folder)
         first = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
+        _set_winner(folder, first["experiment_id"])
         candidate = setup.duplicate_experiment(folder, first["experiment_id"])
         _store_a, controller_a = _controller(folder)
         _store_b, controller_b = _controller(folder)
@@ -430,11 +473,12 @@ class TestRunnerRecordsIntoTheLiveDb:
         """A driver that never used the UI is still part of the workflow.
 
         It has no registration to enter, so its evidence row is what registers
-        it — into the same live DB, in the same transaction.
+        it — into the same live DB, in the same transaction. Being in the
+        contest makes it eligible to be the winner, not the winner.
         """
         _store, controller = _controller(folder)
 
-        controller.create_experiment(
+        create_pinned(controller,
             "exp-adhoc",
             "driver run",
             declared_tasks=1,
@@ -443,4 +487,7 @@ class TestRunnerRecordsIntoTheLiveDb:
             workflow_name=setup.workflow_name_for(folder),
         )
 
+        assert _control(folder).group_for_experiment("exp-adhoc") is not None
+        assert _winner_id(folder, "exp-adhoc") is None
+        _set_winner(folder, "exp-adhoc")
         assert _winner_id(folder, "exp-adhoc") == "exp-adhoc"

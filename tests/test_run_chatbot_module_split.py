@@ -142,7 +142,6 @@ PRE_SPLIT_HANDLER_METHODS = (
     "_post_configure_env",
     "_post_train",
     "_post_clear_conversations",
-    "_put_benchmark_analysis",
     "_delete_selection",
     "_delete_benchmark_experiment",
     "_patch_registration",
@@ -169,8 +168,6 @@ PRE_SPLIT_HANDLER_METHODS = (
     "_benchmark_experiments",
     "_handle_benchmarks",
     "_handle_benchmark_post",
-    "_analysis_payload_from_body",
-    "_handle_benchmark_analysis_put",
     "_handle_experiments",
     "_handle_experiment_patch",
     "_serve_artifact",
@@ -181,6 +178,7 @@ PRE_SPLIT_HANDLER_METHODS = (
 # Mixin classes, in MRO order, each ahead of BaseHTTPRequestHandler.
 HANDLER_MIXIN_NAMES = (
     "_ExperimentRoutes",
+    "_SealedRoutes",
     "_BenchmarkRoutes",
     "_FeedbackRoutes",
     "_NavigationRoutes",
@@ -193,6 +191,7 @@ MIXIN_MODULES = (
     "handler_experiment.py",
     "handler_feedback.py",
     "handler_navigation.py",
+    "handler_sealed.py",
 )
 
 

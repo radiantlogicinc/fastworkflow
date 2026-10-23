@@ -140,9 +140,9 @@ function countOf(value) {
 }
 
 function spanTokens(span) {
-  /* Only fw.llm.call carries usage, and only when the server kept a DSPy
-     history entry to read it from (see server_memory inspect mode). Turns
-     recorded without one contribute nothing rather than a wrong zero.
+  /* Only fw.llm.call carries usage, read from each call's own result. Calls
+     recorded without it (older turns whose server kept no DSPy history)
+     contribute nothing rather than a wrong zero.
 
      The three counts beside the sums are what let a reader tell a level whose
      calls all reported their usage from one where some did not: a call with no

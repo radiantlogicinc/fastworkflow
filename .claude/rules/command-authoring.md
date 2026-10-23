@@ -45,18 +45,21 @@ class Signature:
     @staticmethod                          # Optional; see the section below
     def db_lookup(workflow, field_name, field_value
                   ) -> tuple[bool, str | None, list[str]]: ...
-    @staticmethod
-    def process_extracted_parameters(...): ...  # Optional post-extraction hook
+    @staticmethod                          # Optional post-extraction check, called on the class
+    def validate_extracted_parameters(workflow, command: str, cmd_parameters: "Signature.Input"
+                                      ) -> tuple[bool, str]:
+        return (True, '')                  # (False, message) refuses the call with message
 
 
 class ResponseGenerator:
-    def __call__(self, workflow_snapshot, command: str, cmd_parameters: Signature.Input) -> fastworkflow.CommandOutput:
-        return self._process_command(workflow_snapshot, command, cmd_parameters)
-
-    @staticmethod
-    def _process_command(workflow_snapshot, command, cmd_parameters) -> fastworkflow.CommandOutput:
+    def _process_command(self, workflow: fastworkflow.Workflow, input: Signature.Input) -> Signature.Output:
         # Your business logic here
         ...
+
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, command_parameters: Signature.Input) -> fastworkflow.CommandOutput:
+        output = self._process_command(workflow, command_parameters)
+        return fastworkflow.CommandOutput(
+            command_response=fastworkflow.CommandResponse(response=output.model_dump_json()))
 ```
 
 ## `plain_utterances` — the seed list is the highest-leverage thing you write
@@ -156,10 +159,41 @@ is no `json_schema_extra` key for this:
 Errors are not caught. Unlike `validate_extracted_parameters`, the `db_lookup` call is
 unguarded, so an exception propagates out of parameter validation.
 
+## `positional` — binding `command value` without the LLM
+
+In agent mode, parameters are parsed in code before the LLM is asked: XML tags, then
+`name=value` pairs, then the positional form `command_name value`. The positional form
+binds the text after the command name to one target field:
+
+- the field marked `json_schema_extra={'positional': True}`, or, with no mark,
+- the class's only `str` field (an `int` paging field does not count).
+
+An unmarked field takes a single token only (`open_by_uid 9f2c…`); a marked field also
+takes several words (`find_item Ann Lee 2`, where the trailing `2` stays in the value).
+Mark the field a bare value most naturally fills, when the class has more than one `str`
+field or the value can contain spaces:
+
+```python
+class Input(BaseModel):
+    query: Optional[str] = Field(default=None, description="Name or name fragment",
+                                 json_schema_extra={'positional': True})
+    start: Optional[int] = Field(default=None, description="Paging offset")
+```
+
+Mark at most one field per class; two marks disable the form. Do not mark a free-text
+field of a command that changes state, where prose sent by mistake would become the
+value. The form declines (and the LLM extracts as before) when the first token is not
+the command's own name, when the text holds `=` or XML, when the first word names
+another field, or when the value holds `*`, `` ` ``, `?`, `\`, ` / `, `<>{}` or no letter
+or digit. A leading word naming the target field itself (`uid 9f2c…`) is dropped, and
+matching surrounding quotes are removed. The usual validation and `db_lookup` run after.
+
+A lone value that binds to no field (`command_name value` where the LLM fills nothing)
+is refused with a message naming the parameters that could take it, instead of running
+the command with its defaults.
+
 ## Context Model (`context_inheritance_model.json`)
 
-Each context entry has exactly two possible keys:
-- `/` — list of command names available in that context
-- `base` — list of parent context names whose commands are inherited
+Each context entry has exactly one key, `base` (required): the list of parent context names whose commands are inherited. A `/` key is rejected; a context's own commands come from the filesystem (`_commands/<Context>/<command_name>.py`, or `_commands/<command_name>.py` for the global context `*`).
 
-To add a new command: update the JSON, then create `_commands/<command_name>.py`. `CommandRoutingDefinition` validates that every declared command has an implementation.
+To add a new command: create its `.py` file in the context's folder; add the context to the JSON only to give it a `base`.

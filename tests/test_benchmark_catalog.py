@@ -2,21 +2,65 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import sqlite3
 from enum import Enum
 
 import pytest
 
+from fastworkflow import state_paths
 from fastworkflow.benchmark.catalog import (
     SCHEMA,
     BenchmarkAlreadyExistsError,
     BenchmarkManifestError,
-    benchmarks_root,
     list_benchmarks,
     list_versions,
     load_version,
     write_version,
 )
+from fastworkflow.observability import control
+from fastworkflow.observability import store as obs
+
+# The canonical bytes the file-based catalog wrote for `LEGACY_SPEC`, captured
+# from the pre-DB code. Their sha256 is the digest a pinned run recorded then,
+# so the DB catalog must reproduce it exactly.
+LEGACY_SPEC = {
+    "benchmark_id": "smoke",
+    "version": "v1",
+    "title": "Smoke",
+    "description": "what this corpus claims to test",
+    "tasks": [
+        {
+            "task_id": "case-01",
+            "description": "one-liner",
+            "payload": {"nested": {"keep": "keys"}, "order": [3, 2, 1]},
+        }
+    ],
+}
+LEGACY_BYTES = (
+    '{\n  "benchmark_id": "smoke",\n  "description": "what this corpus claims to test",\n'
+    '  "schema": "fastworkflow-benchmark/1",\n  "tasks": [\n    {\n      "description": "one-liner",\n'
+    '      "payload": {\n        "nested": {\n          "keep": "keys"\n        },\n'
+    '        "order": [\n          3,\n          2,\n          1\n        ]\n      },\n'
+    '      "task_id": "case-01"\n    }\n  ],\n  "title": "Smoke",\n  "version": "v1"\n}\n'
+).encode("utf-8")
+LEGACY_DIGEST = "7442c183cdf68a943754af4bfa5bc21d26baee81241b4b7885c146d22ba442ac"
+
+
+def _live_db(workflow) -> str:
+    return state_paths.observability_db(str(workflow))
+
+
+def _stored_bytes(workflow, benchmark_id="smoke", version="v1") -> bytes:
+    store = obs.ReadOnlyObservabilityStore(_live_db(workflow))
+    row = store._open_connection().execute(
+        "SELECT manifest_bytes FROM benchmark_versions "
+        "WHERE benchmark_id=? AND version=?",
+        (benchmark_id, version),
+    ).fetchone()
+    return bytes(row[0])
 
 
 def _sample_spec(
@@ -56,10 +100,20 @@ def test_write_load_round_trip_preserves_payload_keys(tmp_path):
     assert loaded["version"] == "v1"
     assert loaded["tasks"][0]["payload"] == spec["tasks"][0]["payload"]
 
-    on_disk = json.loads(
-        (benchmarks_root(workflow) / "smoke" / "v1.json").read_text(encoding="utf-8")
-    )
-    assert on_disk["tasks"][0]["payload"] == spec["tasks"][0]["payload"]
+
+def test_round_trip_digest_matches_the_pre_db_file_digest(tmp_path):
+    """The bytes and digest the file catalog produced for the same manifest."""
+    workflow = tmp_path / "workflow"
+    workflow.mkdir()
+
+    written = write_version(workflow, LEGACY_SPEC)
+    loaded = load_version(workflow, "smoke", "v1")
+
+    assert _stored_bytes(workflow) == LEGACY_BYTES
+    assert hashlib.sha256(LEGACY_BYTES).hexdigest() == LEGACY_DIGEST
+    assert written["digest_sha256"] == LEGACY_DIGEST
+    assert loaded["digest_sha256"] == LEGACY_DIGEST
+    assert loaded["title"] == "Smoke"
 
 
 def test_digest_stability_on_repeated_load(tmp_path):
@@ -73,23 +127,96 @@ def test_digest_stability_on_repeated_load(tmp_path):
     assert first["digest_sha256"] == second["digest_sha256"]
 
 
-def test_digest_uses_actual_file_bytes_when_not_canonical(tmp_path):
+def test_stored_digest_is_sha256_of_the_stored_bytes(tmp_path):
     workflow = tmp_path / "workflow"
     workflow.mkdir()
     write_version(workflow, _sample_spec())
 
-    version_path = benchmarks_root(workflow) / "smoke" / "v1.json"
-    non_canonical = version_path.read_text(encoding="utf-8").replace(
-        '"description": "what this corpus claims to test"',
-        '"description":"what this corpus claims to test"',
-    )
-    version_path.write_text(non_canonical, encoding="utf-8")
-
+    stored = _stored_bytes(workflow)
     loaded = load_version(workflow, "smoke", "v1")
-    assert loaded["description"] == "what this corpus claims to test"
-    assert loaded["digest_sha256"] != write_version(
-        tmp_path / "other-workflow", _sample_spec()
-    )["digest_sha256"]
+
+    assert loaded["digest_sha256"] == hashlib.sha256(stored).hexdigest()
+
+
+def test_missing_version_raises_manifest_error(tmp_path):
+    workflow = tmp_path / "workflow"
+    workflow.mkdir()
+
+    assert list_benchmarks(workflow) == []
+    assert list_versions(workflow, "smoke") == []
+    with pytest.raises(BenchmarkManifestError, match="not found"):
+        load_version(workflow, "smoke", "v1")
+    assert not os.path.exists(_live_db(workflow)), "reads must not create the DB"
+
+
+def test_stored_row_is_immutable(tmp_path):
+    workflow = tmp_path / "workflow"
+    workflow.mkdir()
+    write_version(workflow, _sample_spec())
+    store = obs.ObservabilityStore(_live_db(workflow))
+
+    conn = store._open_connection()
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        conn.execute("UPDATE benchmark_versions SET title='changed'")
+    conn.close()
+    conn = store._open_connection()
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        conn.execute("DELETE FROM benchmark_versions")
+    conn.close()
+    assert load_version(workflow, "smoke", "v1")["description"] == (
+        "what this corpus claims to test"
+    )
+
+
+def test_store_without_benchmark_marker_gets_table_on_next_write(tmp_path):
+    """A store that already has `control_v1` (the owner's) gains the table."""
+    workflow = tmp_path / "workflow"
+    workflow.mkdir()
+    db = _live_db(workflow)
+    obs.ObservabilityStore(db)
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "DROP TRIGGER benchmark_versions_no_update;"
+        "DROP TRIGGER benchmark_versions_no_delete;"
+        "DROP TABLE benchmark_versions;"
+    )
+    features = [
+        f for f in json.loads(
+            conn.execute("SELECT value FROM diagnostics WHERE key='schema_features'").fetchone()[0]
+        ) if f != control.FEATURE_BENCHMARK_CATALOG_V1
+    ]
+    conn.execute(
+        "UPDATE diagnostics SET value=? WHERE key='schema_features'", (json.dumps(features),)
+    )
+    conn.commit()
+    conn.close()
+
+    assert control.FEATURE_CONTROL_V1 in features
+    assert list_benchmarks(workflow) == []
+    with pytest.raises(BenchmarkManifestError, match="not found"):
+        load_version(workflow, "smoke", "v1")
+
+    write_version(workflow, _sample_spec())
+
+    assert list_versions(workflow, "smoke") == ["v1"]
+    assert load_version(workflow, "smoke", "v1")["version"] == "v1"
+
+
+def test_prune_erase_and_seal_strip_keep_benchmark_versions(tmp_path):
+    workflow = tmp_path / "workflow"
+    workflow.mkdir()
+    write_version(workflow, _sample_spec())
+    store = obs.ObservabilityStore(_live_db(workflow))
+
+    store.prune(retention_days=0, max_bytes=1)
+    store.clear_conversations()
+    assert list_versions(workflow, "smoke") == ["v1"]
+    assert load_version(workflow, "smoke", "v1")["version"] == "v1"
+
+    conn = sqlite3.connect(_live_db(workflow))
+    control.strip(conn)
+    conn.close()
+    assert list_versions(workflow, "smoke") == ["v1"]
 
 
 def test_duplicate_task_id_refused(tmp_path):
@@ -150,39 +277,6 @@ def test_multiple_benchmarks_in_one_workflow(tmp_path):
     assert list_versions(workflow, "beta") == ["v1"]
 
 
-def test_analysis_json_is_not_listed_as_version(tmp_path):
-    workflow = tmp_path / "workflow"
-    workflow.mkdir()
-    write_version(workflow, _sample_spec())
-
-    catalog_dir = benchmarks_root(workflow) / "smoke"
-    catalog_dir.joinpath("analysis.json").write_text(
-        json.dumps({"notes": "opaque analysis"}),
-        encoding="utf-8",
-    )
-
-    assert list_versions(workflow, "smoke") == ["v1"]
-
-
-def test_reserved_analysis_version_refused(tmp_path):
-    """`analysis.json` is the mutable sidecar; a version named `analysis`
-    would be hidden by list_versions and overwritten by the next
-    write_analysis, breaking version immutability."""
-    workflow = tmp_path / "workflow"
-    workflow.mkdir()
-    write_version(workflow, _sample_spec())
-
-    with pytest.raises(BenchmarkManifestError, match="reserved"):
-        write_version(workflow, _sample_spec(version="analysis"))
-    with pytest.raises(BenchmarkManifestError, match="reserved"):
-        write_version(workflow, _sample_spec(version="Analysis"))
-    assert not (benchmarks_root(workflow) / "smoke" / "analysis.json").exists()
-    assert list_versions(workflow, "smoke") == ["v1"]
-
-    with pytest.raises(BenchmarkManifestError, match="reserved"):
-        load_version(workflow, "smoke", "analysis")
-
-
 def test_list_versions_sorts_naturally(tmp_path):
     workflow = tmp_path / "workflow"
     workflow.mkdir()
@@ -213,47 +307,18 @@ def test_slash_in_benchmark_id_refused(tmp_path):
     with pytest.raises(BenchmarkManifestError, match="single path segment"):
         write_version(workflow, _sample_spec(benchmark_id="foo/bar"))
 
-    assert not (benchmarks_root(workflow) / "foo").exists()
+    assert list_benchmarks(workflow) == []
 
 
-def test_folder_benchmark_id_mismatch_refused(tmp_path):
-    workflow = tmp_path / "workflow"
-    workflow.mkdir()
-    write_version(workflow, _sample_spec(benchmark_id="smoke", version="v1"))
-
-    wrong_dir = benchmarks_root(workflow) / "other"
-    wrong_dir.mkdir()
-    canonical = json.dumps(
-        {
-            "schema": SCHEMA,
-            "benchmark_id": "smoke",
-            "version": "v1",
-            "description": "mismatch",
-            "tasks": [
-                {
-                    "task_id": "case-01",
-                    "description": "one",
-                    "payload": {},
-                }
-            ],
-        },
-        sort_keys=True,
-        indent=2,
-    ) + "\n"
-    wrong_dir.joinpath("v1.json").write_text(canonical, encoding="utf-8")
-
-    with pytest.raises(BenchmarkManifestError, match="does not match expected"):
-        load_version(workflow, "other", "v1")
-
-
-def test_empty_task_list_refused(tmp_path):
+def test_empty_task_list_is_stored_as_a_draft(tmp_path):
     workflow = tmp_path / "workflow"
     workflow.mkdir()
     spec = _sample_spec()
     spec["tasks"] = []
 
-    with pytest.raises(BenchmarkManifestError, match="non-empty array"):
-        write_version(workflow, spec)
+    written = write_version(workflow, spec)
+    assert written["tasks"] == []
+    assert load_version(workflow, spec["benchmark_id"], spec["version"]) == written
 
 
 def test_payload_tuple_refused(tmp_path):

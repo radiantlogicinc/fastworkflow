@@ -49,7 +49,7 @@ from typing import Any, Callable, NamedTuple, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from fastworkflow import state_paths
-from fastworkflow.observability import feedback
+from fastworkflow.observability import feedback, selection
 from fastworkflow.observability.diagnosis import InvalidTurnQuery, search_turns
 from fastworkflow.observability.derived_cache import DerivedTurnCache
 from fastworkflow.observability.store import (
@@ -104,6 +104,12 @@ from fastworkflow.run_chatbot.handler_control import _ControlPlaneRoutes
 from fastworkflow.run_chatbot.handler_experiment import _ExperimentRoutes
 from fastworkflow.run_chatbot.handler_feedback import _FeedbackRoutes
 from fastworkflow.run_chatbot.handler_navigation import _NavigationRoutes
+from fastworkflow.run_chatbot.handler_sealed import (
+    RELEASES_PATH,
+    SEALED_PREFIX,
+    _SealedRoutes,
+    sealed_delete_path,
+)
 from fastworkflow.run_chatbot.http_common import (
     STORE_UNAVAILABLE,
     run_clear_conversations,
@@ -908,14 +914,17 @@ def _benchmark_version_post(path: str) -> bool:
     )
 
 
+def _benchmark_version_patch(path: str) -> bool:
+    """`/api/benchmarks/<id>/versions/<version>`: the title and description."""
+    parts = path.split("/")
+    return (len(parts) == 6 and path.startswith("/api/benchmarks/")
+            and parts[4] == "versions" and all(parts[3:]))
+
+
 def _setup_post(path: str) -> bool:
     return path == "/api/experiment-setups" or path.startswith(
         "/api/experiment-setups/"
     )
-
-
-def _benchmark_analysis_put(path: str) -> bool:
-    return path.startswith("/api/benchmarks/") and path.endswith("/analysis")
 
 
 def _selection_delete(path: str) -> bool:
@@ -953,14 +962,12 @@ _WRITE_ROUTES = _checked_write_routes((
     _WriteRoute("POST", _exact("/api/select_workflow"), "_post_select_workflow"),
     _WriteRoute("POST", _exact("/api/configure_env"), "_post_configure_env"),
     _WriteRoute("POST", _exact("/api/train"), "_post_train"),
+    # Sealing, deleting and releasing benchmark experiments (fix-ajir.24).
+    _WriteRoute("POST", _exact(SEALED_PREFIX), "_post_seal", require_object_body=True),
+    _WriteRoute("POST", _exact(RELEASES_PATH), "_post_release", require_object_body=True),
+    _WriteRoute("DELETE", sealed_delete_path, "_delete_sealed", reads_body=False),
     _WriteRoute(
         "POST", _exact("/api/clear_conversations"), "_post_clear_conversations"
-    ),
-    _WriteRoute(
-        "PUT",
-        _benchmark_analysis_put,
-        "_put_benchmark_analysis",
-        require_object_body=True,
     ),
     _WriteRoute("DELETE", _selection_delete, "_delete_selection"),
     _WriteRoute(
@@ -973,6 +980,12 @@ _WRITE_ROUTES = _checked_write_routes((
         "PATCH",
         _benchmark_registration_prefix,
         "_patch_registration",
+        require_object_body=True,
+    ),
+    _WriteRoute(
+        "PATCH",
+        _benchmark_version_patch,
+        "_patch_benchmark_version",
         require_object_body=True,
     ),
     _WriteRoute(
@@ -993,6 +1006,7 @@ def _match_write_route(method: str, path: str) -> Optional[_WriteRoute]:
 
 class _ChatbotRequestHandler(
     _ExperimentRoutes,
+    _SealedRoutes,
     _BenchmarkRoutes,
     _FeedbackRoutes,
     _NavigationRoutes,
@@ -1474,6 +1488,9 @@ class _ChatbotRequestHandler(
         if path == "/api/benchmarks" or path.startswith("/api/benchmarks/"):
             self._handle_benchmarks(path)
             return
+        if path == SEALED_PREFIX:
+            self._handle_sealed_list()
+            return
 
         # Per-request read-only store; never migrate incompatible evidence.
         try:
@@ -1532,9 +1549,13 @@ class _ChatbotRequestHandler(
             # rows from it, so a turn matching on page four was reported as no
             # match at all (fix-9eg.18.1); the filtering now happens before the
             # page is cut rather than after.
+            # A sealed experiment's turns are read from its archive.
+            if q("experiment"):
+                store = selection.SelectionControlStore(store).store_for(q("experiment"))
             self._search_turns_response(store, q)
         elif path.startswith("/api/turn/"):
             turn_key = path[len("/api/turn/") :]
+            store = selection.SelectionControlStore(store).store_for_turn(turn_key)
             turn = store.get_turn(turn_key)
             if turn is None:
                 self._error(404, "turn not found")
@@ -1567,7 +1588,9 @@ class _ChatbotRequestHandler(
             self._handle_task_feedback(store, query)
         elif path.startswith("/api/spans/"):
             trace_id = path[len("/api/spans/") :]
-            spans = store.get_spans(trace_id)
+            spans = selection.SelectionControlStore(store).store_for_turn(
+                trace_id
+            ).get_spans(trace_id)
             for span in spans:
                 try:
                     span["attributes"] = json.loads(span["attributes"])
@@ -1581,7 +1604,9 @@ class _ChatbotRequestHandler(
             if not turn_key or not span_id:
                 self._error(400, "prompt reads require a turn key and a span id")
                 return
-            prompt = store.prompt_as_sent(unquote(turn_key), unquote(span_id))
+            prompt = selection.SelectionControlStore(store).store_for_turn(
+                unquote(turn_key)
+            ).prompt_as_sent(unquote(turn_key), unquote(span_id))
             if prompt is None:
                 self._error(404, "span not found in this turn")
                 return
@@ -1613,6 +1638,7 @@ class _ChatbotRequestHandler(
         ``CSP: default-src 'none'; sandbox`` so navigating to the URL directly
         cannot run scripts either.
         """
+        store = selection.SelectionControlStore(store).store_for_artifact(artifact_id)
         artifact = store.get_artifact(artifact_id)
         if artifact is None:
             self._error(404, "artifact not found")

@@ -57,7 +57,14 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   // the result being asserted.
   assert.deepEqual(
     [...d.querySelector('#detail dl.kv').querySelectorAll('dt')].map(e=>e.textContent),
-    ['status', 'declared', 'scored attempts', 'pass@1', 'pass^1', 'verdict sources']);
+    ['status', 'benchmark tasks run', 'user simulator', 'declared', 'scored attempts', 'pass@1', 'pass^1', 'verdict sources']);
+  // The run checked against its benchmark version (fix-mgoi): two verdicts and
+  // the task coverage, beside the store's own status.
+  const pillTexts = sel => [...d.querySelectorAll(sel + ' .pill')].map(e=>e.textContent);
+  const verdictPills = pillTexts('#detail .diffToolbar');
+  assert.ok(verdictPills.some(t=>t==='complete' || t==='incomplete'), verdictPills.join('|'));
+  assert.ok(verdictPills.some(t=>t==='valid' || t==='invalid'), verdictPills.join('|'));
+  assert.ok(verdictPills.some(t=>/^\d+ of \d+ tasks$/.test(t)), verdictPills.join('|'));
   assert.equal(d.querySelector('#detail details.provenance'), null);
   assert.ok(![...d.querySelectorAll('#detail h2')].some(e=>e.textContent==='Evidence runs'));
   assert.ok(railView.includes('evidence valid \u00b7 1 segment'), railView);
@@ -71,6 +78,8 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   click('Tuning benchmark');
   const cards = () => [...d.querySelectorAll('#detail .recordCard')].filter(e=>e.textContent.includes(eid));
   await until(()=>cards().length);
+  assert.ok([...cards()[0].querySelectorAll('.pill')].some(e=>/^\d+ of \d+ tasks$/.test(e.textContent)),
+            cards()[0].textContent);
   cards()[0].click();
   await until(()=>d.getElementById('detail').textContent.includes('RECORDED EXPERIMENT'));
   await until(contestSettled);

@@ -252,13 +252,154 @@ def test_a_visibly_broken_split_is_retried_once_then_left_whole():
 def test_a_split_that_refers_back_to_the_request_is_retried_once():
     from fastworkflow.workflow_agent import split_into_subtasks
 
-    referring = {"reasoning": "r", "subtasks": "1. Audit each of them.\n2. Sweep Hubbard."}
+    referring = {"reasoning": "r", "subtasks": "1. Audit each of them in Finance.\n2. Sweep Hubbard."}
     named = {"reasoning": "r", "subtasks": "1. Audit Alice and Bob.\n2. Sweep Hubbard."}
     assert split_into_subtasks("the request", planner_lm=DummyLM([referring, named])) == [
         "Audit Alice and Bob.", "Sweep Hubbard."]
     # Not fixed by the retry: a split with a leftover reference beats no split.
     assert split_into_subtasks("the request", planner_lm=DummyLM([referring, referring])) == [
-        "Audit each of them.", "Sweep Hubbard."]
+        "Audit each of them in Finance.", "Sweep Hubbard."]
+
+
+def test_the_split_goes_through_the_merge():
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    query = "How risky is Zoe Hale, and which findings are driving that?"
+    follow_up = {"reasoning": "r", "subtasks": "1. How risky is Zoe Hale?\n2. Which findings are driving that?"}
+    assert split_into_subtasks(query, planner_lm=DummyLM([follow_up])) == [query]
+
+
+def _split_file(folder, text):
+    (folder / "_skills").mkdir(parents=True, exist_ok=True)
+    (folder / "_skills" / "_split.py").write_text(text)
+    return str(folder)
+
+
+def test_identifier_patterns_come_from_the_workflows_split_file(tmp_path):
+    from fastworkflow.workflow_agent import SplitSettings, identifier_patterns, split_settings
+
+    assert identifier_patterns(str(tmp_path / "no_file")) == ()
+    assert split_settings(str(tmp_path / "no_file")) == SplitSettings()
+    folder = _split_file(tmp_path, "import re\n\n# case numbers\n"
+                                   "identifier_patterns = [re.compile(r'\\bcase_[A-Za-z0-9]+')]\n")
+    assert [p.pattern for p in identifier_patterns(folder)] == [r"\bcase_[A-Za-z0-9]+"]
+
+
+@pytest.mark.parametrize("text, match", [
+    ("import re\nidentifier_patterns = [re.compile('[unclosed')]\n", "could not import the split settings"),
+    ("identifier_patterns = [r'\\bcase_[0-9]+']\n", "write re.compile"),
+    ("import re\nidentifier_patterns = re.compile('x')\n", "must be a list of compiled patterns"),
+    ("subject_hints = ['not', 'text']\n", "subject_hints must be a str"),
+    ("Signature = 'text'\n", "Signature must be a class"),
+])
+def test_a_malformed_split_file_fails_the_load(tmp_path, text, match):
+    from fastworkflow.skill_commands import SkillFormatError
+    from fastworkflow.workflow_agent import load_skills
+
+    folder = _split_file(tmp_path, text)
+    with pytest.raises(SkillFormatError, match=match):
+        load_skills(folder)   # the skills carry the identifier patterns, so the split file loads with them
+
+
+def test_the_merge_gets_the_workflows_identifier_patterns(tmp_path, monkeypatch):
+    import fastworkflow.workflow_agent as agent
+
+    _split_file(tmp_path, "import re\nidentifier_patterns = [re.compile(r'\\bcase_[A-Za-z0-9]+')]\n")
+    seen = {}
+
+    def merge(user_query, subtasks, identifiers=()):
+        seen["identifiers"] = [p.pattern for p in identifiers]
+        return subtasks
+
+    monkeypatch.setattr(agent, "merge_subtasks", merge)
+    agent.split_into_subtasks("the request", planner_lm=DummyLM([
+        {"reasoning": "r", "subtasks": "1. Explain case_X7kQ2Lm9.\n2. Explain case_B4nW8Rt2."}]),
+        workflow_folderpath=str(tmp_path))
+    assert seen["identifiers"] == [r"\bcase_[A-Za-z0-9]+"]
+
+
+def test_a_split_sub_task_gets_the_referent_jev_chooses_written_in(tmp_path, monkeypatch):
+    import fastworkflow.workflow_agent as agent
+
+    _split_file(tmp_path, 'subject_hints = """Tag names are not records."""\n')
+    asked = []
+
+    def choose(user_query, text, candidates, notes, jev_lm):
+        asked.append((text, candidates, notes))
+        return "Ann Lee" if "on-leave" in text else None
+
+    monkeypatch.setattr(agent, "_jev_lm", lambda: object())
+    monkeypatch.setattr(agent, "_choose_referent", choose)
+    monkeypatch.setattr(agent, "_choose_description", lambda *args: None)
+    q = "Ann Lee leaves on Friday: sweep her reach. Then tag the customer `on-leave` and show its tags."
+    assert agent.resolve_referents(q, ["Ann Lee leaves on Friday: sweep her reach.",
+                                       "Tag the customer `on-leave` and show its tags."], str(tmp_path)) == [
+        "Ann Lee leaves on Friday: sweep her reach.", "Tag the customer `on-leave` and show Ann Lee's tags."]
+    # Jev is asked about each sub-task that leaves request subjects unnamed, with the workflow's notes
+    assert asked == [("Ann Lee leaves on Friday: sweep her reach.", ["on-leave"], "Tag names are not records."),
+                     ("Tag the customer `on-leave` and show its tags.", ["Ann Lee"], "Tag names are not records.")]
+
+
+def test_a_merged_sub_task_is_never_given_the_record_listed_beside_its_own(monkeypatch):
+    import fastworkflow.workflow_agent as agent
+    from fastworkflow.split_merge import merge_subtasks
+
+    # a chooser that takes a listed sibling whenever it is offered one (the mistake seen live)
+    monkeypatch.setattr(agent, "_jev_lm", lambda: object())
+    monkeypatch.setattr(agent, "_choose_referent", lambda q, text, candidates, *a: next(
+        (c for c in ("Bob Kerr", "Ann Lee") if c in candidates), None))
+    monkeypatch.setattr(agent, "_choose_description", lambda *args: None)
+    q = ("Northwind Ltd is closing. Walk its whole roster: every person on it. Ann Lee and Bob Kerr leave at the end "
+         "of the month, so each of them down to their first login listed. And Cid Moss has asked for the right "
+         "Payroll_Admin: what it exposes and who holds it.")
+    merged = merge_subtasks(q, [
+        "Walk the whole roster of Northwind Ltd: every person on it.",
+        "Ann Lee leaves at the end of the month, so each of them down to their first login listed.",
+        "Bob Kerr leaves at the end of the month, so each of them down to their first login listed.",
+        "Cid Moss has asked for the right Payroll_Admin: what it exposes and who holds it."])
+    resolved = agent.resolve_referents(q, merged, None)
+    assert [t for t in resolved if "Ann Lee" in t] == [t for t in merged if "Ann Lee" in t]
+    assert not any("Ann Lee" in t and "Bob Kerr" in t for t in resolved)
+
+
+def test_the_record_is_written_after_the_definite_description_jev_chooses(tmp_path, monkeypatch):
+    import fastworkflow.workflow_agent as agent
+
+    asked = []
+
+    def describe(user_query, text, subject, descriptions, notes, jev_lm):
+        asked.append((text, subject, descriptions))
+        return "the customer"
+
+    monkeypatch.setattr(agent, "_jev_lm", lambda: object())
+    monkeypatch.setattr(agent, "_choose_referent", lambda q, text, *a: "Ann Lee" if "on-leave" in text else None)
+    monkeypatch.setattr(agent, "_choose_description", describe)
+    q = "Ann Lee leaves on Friday: sweep her reach. Then tag the customer `on-leave` and show its tags."
+    assert agent.resolve_referents(q, ["Ann Lee leaves on Friday: sweep her reach.",
+                                       "Tag the customer `on-leave` and show its tags."], str(tmp_path)) == [
+        "Ann Lee leaves on Friday: sweep her reach.",
+        "Tag the customer Ann Lee `on-leave` and show Ann Lee's tags."]
+    # asked only for the sub-task whose referent was chosen, with its definite descriptions
+    assert asked == [("Tag the customer `on-leave` and show its tags.", "Ann Lee", ["the customer"])]
+
+
+def test_without_jev_the_sub_tasks_are_left_as_they_are(monkeypatch):
+    import fastworkflow.workflow_agent as agent
+
+    monkeypatch.setattr(agent, "_jev_lm", lambda: None)
+    assert agent.resolve_referents("Ann Lee leaves. Tag the customer `x`.", ["Ann Lee leaves.", "Tag the customer `x`."],
+                                   None) == ["Ann Lee leaves.", "Tag the customer `x`."]
+
+
+def test_a_failing_merge_keeps_the_models_split(monkeypatch):
+    import fastworkflow.workflow_agent as agent
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("merge bug")
+
+    monkeypatch.setattr(agent, "merge_subtasks", broken)
+    assert _split({"reasoning": "r", "subtasks": "1. Audit right A.\n2. Sweep Hubbard."}) == [
+        "Audit right A.", "Sweep Hubbard."]
 
 
 def test_a_clean_split_is_not_retried():
@@ -270,39 +411,267 @@ def test_a_clean_split_is_not_retried():
         "Audit as well as sweep Alice.", "Sweep Hubbard."]
 
 
-def test_skills_are_read_as_plain_lines_and_all_are_shown(tmp_path):
+def test_the_splitter_call_is_capped_at_split_max_tokens(monkeypatch):
+    from fastworkflow import workflow_agent as agent
+
+    lm = DummyLM([{"reasoning": "r", "subtasks": "1. Part A.\n2. Part B."}])
+    copies = []
+    real_copy = lm.copy
+
+    def recording_copy(**kwargs):
+        copies.append(kwargs)
+        return real_copy(**kwargs)
+
+    monkeypatch.setattr(lm, "copy", recording_copy)
+    assert agent.split_into_subtasks("the request", planner_lm=lm) == ["Part A.", "Part B."]
+    assert copies == [{"temperature": 0.0, "max_tokens": agent.SPLIT_MAX_TOKENS}]
+    assert agent.SPLIT_MAX_TOKENS > 0
+
+
+class _ScriptedReplies(DummyLM):
+    """An LM that returns scripted raw replies ``(text, finish_reason, completion_tokens)``, in order,
+    across its copies; ``finishes`` records each call's finish reason."""
+
+    def __init__(self, script):
+        super().__init__([])
+        self.script = iter(script)
+        self.finishes = []
+        self._engine_spec = self._engine()
+
+    def _engine(self):
+        from dspy.clients.engines.dummy_engine import DummyEngine
+        from dspy.lm15 import Message, Response, TextPart, Usage
+
+        owner = self
+
+        class Engine(DummyEngine):
+            def _complete_messages(self, messages):
+                text, finish, tokens = next(owner.script)
+                owner.finishes.append(finish)
+                return Response(id=None, model="scripted", message=Message.assistant([TextPart(text)]),
+                                finish_reason=finish,
+                                usage=Usage(input_tokens=0, output_tokens=tokens, total_tokens=tokens))
+
+        return Engine(self)
+
+    def copy(self, **kwargs):
+        copied = super().copy(**kwargs)
+        copied._engine_spec = self._engine()  # the copy answers from this LM's script
+        return copied
+
+
+_SPLIT = "[[ ## reasoning ## ]]\nTwo jobs.\n\n[[ ## subtasks ## ]]\n1. Audit right A.\n2. Sweep Hubbard.\n\n[[ ## completed ## ]]"
+_GOOD = (_SPLIT, "stop", 40)
+# Cut off mid-reasoning after echoing the output template: the chat adapter parses it, as "{subtasks}".
+_ECHOED_THEN_CUT = ("[[ ## reasoning ## ]]\nThe request names two jobs. Now we must produce the output fields:\n\n"
+                    "[[ ## reasoning ## ]]\n{reasoning}\n\n[[ ## subtasks ## ]]\n{subtasks}\n\n"
+                    "[[ ## completed ## ]]\n\nNow we need to write the reasoning that walks through", "length", 4700)
+# Cut off mid-reasoning with no field header: does not parse, so DSPy retries with its JSON adapter.
+_CUT = ("[[ ## reasoning ## ]]\nRule 7 says to name it; but rule 9 says not to; so rule 7 again", "length", 4700)
+_JSON_SPLIT = ('{"reasoning": "Two jobs.", "subtasks": "1. Audit right A.\\n2. Sweep Hubbard."}', "stop", 40)
+
+
+def test_a_normal_split_reply_is_one_call():
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    lm = _ScriptedReplies([_GOOD, _GOOD])
+    assert split_into_subtasks("the request", planner_lm=lm) == ["Audit right A.", "Sweep Hubbard."]
+    assert lm.finishes == ["stop"]
+
+
+def test_a_cut_off_reply_that_parses_is_not_the_split_and_is_retried():
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    lm = _ScriptedReplies([_ECHOED_THEN_CUT, _GOOD])
+    assert split_into_subtasks("the request", planner_lm=lm) == ["Audit right A.", "Sweep Hubbard."]
+    assert lm.finishes == ["length", "stop"]
+
+
+def test_a_cut_off_reply_that_does_not_parse_uses_dspys_json_retry():
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    lm = _ScriptedReplies([_CUT, _JSON_SPLIT, _GOOD])
+    assert split_into_subtasks("the request", planner_lm=lm) == ["Audit right A.", "Sweep Hubbard."]
+    assert lm.finishes == ["length", "stop"]
+
+
+def test_a_cut_off_json_retry_still_gets_the_split_retry():
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    lm = _ScriptedReplies([_CUT, ('{"reasoning": "Rule 7 says', "length", 4700), _GOOD])
+    assert split_into_subtasks("the request", planner_lm=lm) == ["Audit right A.", "Sweep Hubbard."]
+    assert lm.finishes == ["length", "length", "stop"]
+
+
+def test_a_split_cut_off_twice_leaves_the_request_whole():
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    lm = _ScriptedReplies([_ECHOED_THEN_CUT, _ECHOED_THEN_CUT, _GOOD])
+    assert split_into_subtasks("the request", planner_lm=lm) == ["the request"]
+    assert lm.finishes == ["length", "length"]
+
+
+_TWICE_REQUEST = ("Audit the right Billing_Admin. Ann Lee, Bob Kerr and Cid Moss need the same treatment, so I want "
+                  "each of them down to their logins. Dee Ray leaves on Friday, so sweep Dee Ray's reach.")
+
+
+def _reply(*subtasks):
+    numbered = "\n".join(f"{n}. {text}" for n, text in enumerate(subtasks, 1))
+    return (f"[[ ## reasoning ## ]]\nJobs.\n\n[[ ## subtasks ## ]]\n{numbered}\n\n[[ ## completed ## ]]", "stop", 40)
+
+
+# Both replies keep "the same treatment"; the first also invents a job for Ann Lee and adds a summary sub-task
+# naming the people the others already hold (stage-17 T5 5.09 R1).
+_SUMMARY_AND_INVENTED = _reply(
+    "Audit the right Billing_Admin.",
+    "Ann Lee leaves on Friday, so sweep Ann Lee's reach.",
+    "Bob Kerr needs the same treatment, down to Bob Kerr's logins.",
+    "Cid Moss needs the same treatment, down to Cid Moss's logins.",
+    "Review the list: Ann Lee, Bob Kerr and Cid Moss, each of them down to their logins.")
+_ONE_PER_JOB = _reply(
+    "Audit the right Billing_Admin.",
+    "Ann Lee needs the same treatment, down to Ann Lee's logins.",
+    "Bob Kerr needs the same treatment, down to Bob Kerr's logins.",
+    "Cid Moss needs the same treatment, down to Cid Moss's logins.",
+    "Dee Ray leaves on Friday, so sweep Dee Ray's reach.")
+
+
+def test_of_two_broken_splits_the_one_naming_no_record_twice_is_used(monkeypatch):
+    import fastworkflow.workflow_agent as agent
+    from fastworkflow.split_merge import merge_subtasks
+
+    monkeypatch.setattr(agent, "_jev_lm", lambda: None)
+    lm = _ScriptedReplies([_SUMMARY_AND_INVENTED, _ONE_PER_JOB])
+    retry = [line.split(". ", 1)[1] for line in _ONE_PER_JOB[0].splitlines() if line[:1].isdigit()]
+    assert agent.split_into_subtasks(_TWICE_REQUEST, planner_lm=lm) == merge_subtasks(_TWICE_REQUEST, retry)
+    assert lm.finishes == ["stop", "stop"]
+    # the order of the attempts does not matter: the split naming no record twice wins either way
+    lm = _ScriptedReplies([_ONE_PER_JOB, _SUMMARY_AND_INVENTED])
+    assert agent.split_into_subtasks(_TWICE_REQUEST, planner_lm=lm) == merge_subtasks(_TWICE_REQUEST, retry)
+
+
+def test_two_equally_broken_splits_keep_the_first(monkeypatch):
+    import fastworkflow.workflow_agent as agent
+    from fastworkflow.split_merge import merge_subtasks
+
+    monkeypatch.setattr(agent, "_jev_lm", lambda: None)
+    first = [line.split(". ", 1)[1] for line in _ONE_PER_JOB[0].splitlines() if line[:1].isdigit()]
+    reworded = _reply(*[t.replace(", down to", " down to") for t in first])
+    lm = _ScriptedReplies([_ONE_PER_JOB, reworded])
+    assert agent.split_into_subtasks(_TWICE_REQUEST, planner_lm=lm) == merge_subtasks(_TWICE_REQUEST, first)
+
+
+def test_breakage_counts_records_named_twice_then_leftover_references():
+    from fastworkflow.workflow_agent import _breakage
+
+    summary = [line.split(". ", 1)[1] for line in _SUMMARY_AND_INVENTED[0].splitlines() if line[:1].isdigit()]
+    per_job = [line.split(". ", 1)[1] for line in _ONE_PER_JOB[0].splitlines() if line[:1].isdigit()]
+    # Ann Lee, Bob Kerr and Cid Moss each appear in a second sub-task; three sub-tasks keep a reference
+    assert _breakage(_TWICE_REQUEST, summary, None) == (3, 3)
+    assert _breakage(_TWICE_REQUEST, per_job, None) == (0, 3)
+
+
+def test_a_reply_is_cut_off_by_its_finish_reason_or_by_reaching_max_tokens():
+    from types import SimpleNamespace
+
+    from fastworkflow.utils.dspy_logger import reply_cut_off
+
+    lm = SimpleNamespace(kwargs={"max_tokens": 4700})
+    call = SimpleNamespace(kwargs={})
+    assert reply_cut_off(lm, call, SimpleNamespace(raw={"choices": [{"finish_reason": "length"}]}))
+    assert reply_cut_off(lm, call, SimpleNamespace(responses=(SimpleNamespace(finish_reason="length"),)))
+    assert reply_cut_off(lm, call, SimpleNamespace(usage={"completion_tokens": 4700}))
+    assert not reply_cut_off(lm, call, SimpleNamespace(usage={"completion_tokens": 4699},
+                                                       raw={"choices": [{"finish_reason": "stop"}]}))
+    assert not reply_cut_off(SimpleNamespace(kwargs={}), call, SimpleNamespace(usage={"completion_tokens": 9}))
+
+
+def skill_file(text: str) -> str:
+    """The skill file (``_skills/<name>.py``) of a skill without params: ``text``'s first line is its description,
+    every other non-empty line one step."""
+    description, *steps = [line.strip() for line in text.splitlines() if line.strip()]
+    return (f"class Signature:\n    __doc__ = {description!r}\n\n\nclass PlanGenerator:\n"
+            f"    def steps(self):\n        return {steps!r}\n")
+
+
+def test_skills_without_params_give_their_steps_and_all_are_shown(tmp_path):
     from fastworkflow.workflow_agent import _job_types_for, load_skills
 
-    for name, text in {"leaver-sweep": "One person is leaving: their reach. One job per person.\nfind them\nopen them",
-                       "unit-walk": "Walk a whole unit roster. The unit is one job.\nopen the unit"}.items():
-        (tmp_path / "_skills" / name).mkdir(parents=True)
-        (tmp_path / "_skills" / name / "SKILL.md").write_text(text + "\n\n")
+    (tmp_path / "_skills").mkdir()
+    for name, text in {"leaver_sweep": "One person is leaving: their reach. One job per person.\nfind them\nopen them",
+                       "unit_walk": "Walk a whole unit roster. The unit is one job.\nopen the unit"}.items():
+        (tmp_path / "_skills" / f"{name}.py").write_text(skill_file(text))
 
     assert load_skills(str(tmp_path))[0] == (
-        "leaver-sweep", "One person is leaving: their reach. One job per person.", ("find them", "open them"))
+        "leaver_sweep", "One person is leaving: their reach. One job per person.", ("find them", "open them"))
     assert _job_types_for(str(tmp_path)).splitlines() == [
-        "- leaver-sweep: One person is leaving: their reach. One job per person.",
-        "- unit-walk: Walk a whole unit roster. The unit is one job.",
+        "- leaver_sweep: One person is leaving: their reach. One job per person.",
+        "- unit_walk: Walk a whole unit roster. The unit is one job.",
     ]
     assert _job_types_for(str(tmp_path / "missing")) == "(none)"
 
 
-def test_a_workflow_split_instructions_file_replaces_the_default_instructions(tmp_path):
+def _write_skills(tmp_path, skills):
+    (tmp_path / "_skills").mkdir(parents=True)
+    for name, text in skills.items():
+        (tmp_path / "_skills" / f"{name}.py").write_text(skill_file(text))
+    return str(tmp_path)
+
+
+def test_the_planner_template_gets_the_skills_steps(tmp_path, monkeypatch):
+    from fastworkflow import workflow_agent
+
+    folder = _write_skills(tmp_path, {"leaver": "Someone is leaving.\nfind them\nclose it\n"})
+    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: _fake_matcher("leaver", 0.9))
+    assert workflow_agent.match_skill("Pat is leaving", folder) == ("leaver", ("find them", "close it"))
+    assert "- find them\n- close it\n" in workflow_agent.plan_template_for("Pat is leaving", folder)
+
+
+def test_the_split_files_signature_docstring_replaces_the_default_instructions(tmp_path):
     from fastworkflow.workflow_agent import SplitIntoSubtasks, _split_signature, load_skills
 
-    (tmp_path / "_skills").mkdir()
-    (tmp_path / "_skills" / "split_instructions.md").write_text("Split it my way.")
+    folder = _split_file(tmp_path, 'class Signature:\n    """Split it my way.\n\n    - one rule\n    """\n')
     other = tmp_path / "other"
     (other / "_skills").mkdir(parents=True)
 
-    assert _split_signature(str(tmp_path)).instructions == "Split it my way."
+    assert _split_signature(folder).instructions == "Split it my way.\n\n- one rule"
+    assert _split_signature(folder).fields["job_types"].json_schema_extra["desc"] == \
+        SplitIntoSubtasks.fields["job_types"].json_schema_extra["desc"]
     assert _split_signature(str(other)).instructions == SplitIntoSubtasks.instructions
-    assert load_skills(str(tmp_path)) == ()
+    assert load_skills(folder) == ()   # _split.py is not a skill
+
+
+def test_the_split_files_input_and_output_describe_the_splitter_fields(tmp_path):
+    from fastworkflow.skill_commands import SkillFormatError
+    from fastworkflow.workflow_agent import SplitIntoSubtasks, _split_signature
+
+    folder = _split_file(tmp_path / "ok", (
+        "from pydantic import BaseModel, Field\n\n"
+        "class Signature:\n"
+        "    class Input(BaseModel):\n"
+        "        job_types: str = Field(description='the kinds of job')\n"
+        "        user_query: str\n"
+        "    class Output(BaseModel):\n"
+        "        subtasks: str = Field(description='one sub-task per numbered line')\n"))
+    signature = _split_signature(folder)
+    assert signature.instructions == SplitIntoSubtasks.instructions   # no docstring: the default
+    assert signature.fields["job_types"].json_schema_extra["desc"] == "the kinds of job"
+    assert signature.fields["subtasks"].json_schema_extra["desc"] == "one sub-task per numbered line"
+    assert signature.fields["user_query"].json_schema_extra["desc"] == \
+        SplitIntoSubtasks.fields["user_query"].json_schema_extra["desc"]
+
+    bad = _split_file(tmp_path / "bad", (
+        "from pydantic import BaseModel\n\n"
+        "class Signature:\n"
+        "    class Input(BaseModel):\n"
+        "        request: str\n"))
+    with pytest.raises(SkillFormatError, match="Signature.Input.request is not a splitter input"):
+        _split_signature(bad)
 
 
 def _skill_folder(tmp_path):
-    (tmp_path / "_skills" / "leaver").mkdir(parents=True)
-    (tmp_path / "_skills" / "leaver" / "SKILL.md").write_text("Someone is leaving.\nfind them\nopen them\n")
+    (tmp_path / "_skills").mkdir(parents=True)
+    (tmp_path / "_skills" / "leaver.py").write_text(skill_file("Someone is leaving.\nfind them\nopen them\n"))
     return str(tmp_path)
 
 
@@ -367,13 +736,3 @@ def test_the_plan_template_reaches_the_planner_but_not_the_returned_query(workfl
 
     assert "TEMPLATE TEXT" in _prompt(lm, 0)
     assert "TEMPLATE TEXT" not in result
-
-
-def test_a_workflow_file_is_read_from_its_skills_folder_only(tmp_path):
-    from fastworkflow.workflow_agent import _skill_file_text
-
-    (tmp_path / "_skills").mkdir()
-    (tmp_path / "_skills" / "split_instructions.md").write_text("Split it my way.")
-
-    assert _skill_file_text(str(tmp_path), "split_instructions.md") == "Split it my way."
-    assert _skill_file_text(str(tmp_path / "missing"), "split_instructions.md") is None

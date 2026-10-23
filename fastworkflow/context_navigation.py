@@ -216,15 +216,24 @@ def render_unavailable_command(
     current: str,
     homes: list[str],
     paths: dict[str, tuple[NavStep, ...] | None],
+    edges: tuple[DescendEdge, ...] | list[DescendEdge] = (),
 ) -> str:
-    """The refusal the agent tool raises."""
+    """The refusal the agent tool raises.
+
+    When ``token`` is a command that enters some context, and a command of the
+    current context enters that same context, that command is named first. The
+    caller wanted the context, not the command: climbing out to run ``token``
+    from its home is the long way round, and a weak model told only "go_up"
+    tends to loop.
+    """
     current_label = display_context_name(current)
     home_labels = ", ".join(repr(display_context_name(home)) for home in homes)
     text = (
         f"Command {token!r} is not available in the current context "
         f"{current_label!r}. It is available in: {home_labels}."
     )
-    sentences = []
+    sentences = _in_context_entries(token, current, edges)
+    alternative = bool(sentences)
     for home in homes:
         label = display_context_name(home)
         path = paths.get(home)
@@ -238,16 +247,66 @@ def render_unavailable_command(
             )
         else:
             rendered = ", then ".join(_format_step(step) for step in path)
+            lead = "Otherwise, from here" if alternative else "From here"
             sentences.append(
-                f"From here to {label!r}: {rendered}. Then retry {token!r}."
+                f"{lead} to {label!r}: {rendered}. Then retry {token!r}."
             )
     return text + " " + " ".join(sentences)
+
+
+def _command_tail(command: str) -> str:
+    return command.split("/")[-1].lower()
+
+
+def _in_context_entries(
+    token: str,
+    current: str,
+    edges: tuple[DescendEdge, ...] | list[DescendEdge],
+) -> list[str]:
+    """One sentence per context ``token`` enters that a command here also enters."""
+    wanted = _command_tail(token.lstrip("/"))
+    targets = sorted({
+        edge.target for edge in edges
+        if _command_tail(edge.command) == wanted and edge.target != current
+    })
+    current_label = display_context_name(current)
+    sentences = []
+    for target in targets:
+        local = sorted(
+            (edge for edge in edges
+             if edge.source == current and edge.target == target
+             and _command_tail(edge.command) != wanted),
+            key=lambda edge: (
+                len(edge.needs) + len(edge.required_to_enter), edge.command),
+        )
+        if not local:
+            continue
+        label = display_context_name(target)
+        runs = " or ".join(_format_entry(edge) for edge in local)
+        sentence = (
+            f"To open {label!r} from here, run {runs} instead of {token!r}; "
+            f"that is how you enter {label!r} from {current_label!r}."
+        )
+        gated = local[0].required_to_enter if len(local) == 1 else ()
+        if gated:
+            sentence += (
+                f" Without {', '.join(gated)} it does not enter {label!r}."
+            )
+        sentences.append(sentence)
+    return sentences
+
+
+def _format_entry(edge: DescendEdge) -> str:
+    """``command name=<name> ...`` with every value the edge needs to enter."""
+    holes = _union(edge.needs, edge.required_to_enter)
+    return edge.command + "".join(f" {name}=<{name}>" for name in holes)
 
 
 def unavailable_command_message(
     workflow, token: str, current: str, homes: list[str],
 ) -> str:
     """Path from ``workflow``'s current context to each context that has ``token``."""
+    edges: tuple[DescendEdge, ...] = ()
     try:
         chain = live_context_chain(workflow)
         edges = collect_descend_edges(workflow.folderpath)
@@ -255,7 +314,44 @@ def unavailable_command_message(
     except Exception:
         logger.debug("navigation path not computed", exc_info=True)
         paths = {home: None for home in homes}
-    return render_unavailable_command(token, current, homes, paths)
+    return render_unavailable_command(token, current, homes, paths, edges)
+
+
+def home_contexts(workflow, token: str) -> list[str]:
+    """The most specific contexts that define the command ``token`` (short or qualified).
+
+    A context another home context inherits from is a base, not somewhere to
+    navigate to, so only the most specific ones are named.
+    """
+    app = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
+    wanted = token.lower()
+    homes = {context for context, names in app.contexts.items()
+             if any(wanted == (name if "/" in token else name.split("/")[-1]).lower()
+                    for name in names)}
+    inherited = set().union(*(app.context_model.inherited_base_contexts(c) for c in homes))
+    return sorted(homes - inherited)
+
+
+def code_path(workflow, command: str) -> list[str] | None:
+    """The moves code makes to reach a home of ``command``, or None when it must not.
+
+    The same planner as the refusal text (``unavailable_command_message``). Only
+    one shortest path, to one home, whose moves need no value (``go_up``,
+    ``reset_context``, an opener with no parameters): anything else is the agent's.
+    """
+    try:
+        current = workflow.current_command_context_name
+        homes = home_contexts(workflow, command)
+        paths = plan_navigation(current, homes, live_context_chain(workflow),
+                                collect_descend_edges(workflow.folderpath))
+    except Exception:
+        logger.debug("code path not computed", exc_info=True)
+        return None
+    found = [path for path in paths.values() if path]
+    shortest = [path for path in found if len(path) == min(map(len, found))] if found else []
+    if len(shortest) != 1 or any(step.needs or step.required_to_enter for step in shortest[0]):
+        return None
+    return [step.command.split("/")[-1] for step in shortest[0]]
 
 
 def enters_current_context(workflow, token: str, current: str) -> bool:
@@ -268,6 +364,10 @@ def enters_current_context(workflow, token: str, current: str) -> bool:
     return any(edge.target == current
                and edge.command.split("/")[-1].lower() == token.lower()
                for edge in edges)
+
+
+#: How the refusal for entering the context the agent is in begins: nothing ran.
+ALREADY_IN_CONTEXT = "You are already in context"
 
 
 def render_already_in_context(token: str, current: str, workflow) -> str:
@@ -287,7 +387,7 @@ def render_already_in_context(token: str, current: str, workflow) -> str:
     except Exception:
         logger.debug("commands of %r unread", current, exc_info=True)
         commands = []
-    text = f"You are already in context {label!r}" + (f" ({instance})" if instance else "")
+    text = f"{ALREADY_IN_CONTEXT} {label!r}" + (f" ({instance})" if instance else "")
     text += f": {token!r} is how you enter it."
     if commands:
         text += f" To work on it, run one of its commands: {', '.join(commands)}."

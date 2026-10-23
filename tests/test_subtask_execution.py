@@ -4,7 +4,6 @@ from unittest.mock import MagicMock
 
 import dspy
 
-import fastworkflow
 from fastworkflow.turn import TurnStatus
 from fastworkflow.utils.react import fastWorkflowReAct
 from fastworkflow.workflow_execution_context import MAX_HANDOFFS
@@ -142,7 +141,7 @@ def test_state_round_trips_the_subtask_fields(
     assert restored._subtask_exhausted is True
 
 
-def test_split_disabled_or_single_item_runs_the_old_single_call(
+def test_single_item_split_runs_the_old_single_call(
     initialized_fastworkflow, todo_workflow_path, monkeypatch
 ):
     ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
@@ -158,24 +157,6 @@ def test_split_disabled_or_single_item_runs_the_old_single_call(
         "user_query": "find X and find Y",
         "available_commands": "commands",
     }
-
-
-def test_env_switch_off_never_splits(
-    initialized_fastworkflow, todo_workflow_path, monkeypatch
-):
-    ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
-    split = MagicMock(return_value=["find X", "find Y"])
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks", split)
-    # get_env_var reads the loaded env table first, so the switch is set there
-    monkeypatch.setitem(fastworkflow._env_vars, "FW_SPLIT_REQUESTS", "0")
-    agent = _agent_with_steps(["all of it"])
-    _set_agents(ctx, agent)
-
-    result = ctx.process_turn("find X and find Y")
-
-    split.assert_not_called()
-    assert result.answer == "all of it"
-    agent.assert_called_once()
 
 
 def test_react_forward_starts_numbering_at_first_step(monkeypatch):
@@ -206,8 +187,8 @@ def test_exhausted_subtask_hands_off_to_a_continuation_matched_on_its_original_t
     triggers = _fake_progress_check(monkeypatch)
     templates = []
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.plan_template_for",
-        lambda text, folder: templates.append(text) or "",
+        "fastworkflow.workflow_agent.planner_skill_for",
+        lambda text, folder: templates.append(text) or ("", None),
     )
     _split(monkeypatch, ["find X", "find Y"])
     agent = _agent_with_steps(["x partial", "x rest", "Y is there"], exhaust=lambda n: n == 1)
@@ -243,7 +224,7 @@ def test_a_subtask_that_keeps_exhausting_gets_max_handoffs_then_the_loop_moves_o
     assert agent.calls[-1]["user_query"] == "find Y"
 
 
-def test_at_the_cap_the_last_capped_answer_is_kept(
+def test_at_the_cap_every_capped_run_answer_is_kept_in_order(
     initialized_fastworkflow, todo_workflow_path, monkeypatch
 ):
     ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
@@ -254,7 +235,9 @@ def test_at_the_cap_the_last_capped_answer_is_kept(
 
     result = ctx.process_turn("find X and find Y")
 
-    assert result.answer == "### 1. find X\nx3\n\n### 2. find Y\ny"
+    assert result.answer == (
+        "### 1. find X\nPart 1 of 3:\nx1\n\nPart 2 of 3:\nx2\n\nPart 3 of 3:\nx3"
+        "\n\n### 2. find Y\ny")
 
 
 def test_handoff_continuation_carries_only_what_is_done(
@@ -287,8 +270,8 @@ def test_answers_of_a_subtask_and_its_continuations_share_one_heading(
 
     result = ctx.process_turn("find X and find Y")
 
-    # the capped run's answer x1 is replaced by its continuation's answer x2
-    assert result.answer == "### 1. find X\nx2\n\n### 2. find Y\ny"
+    # the capped run's answer x1 is kept, followed by its continuation's answer x2
+    assert result.answer == "### 1. find X\nPart 1 of 2:\nx1\n\nPart 2 of 2:\nx2\n\n### 2. find Y\ny"
 
 
 def test_unsplit_request_that_is_exhausted_continues_and_has_no_heading(
@@ -305,7 +288,7 @@ def test_unsplit_request_that_is_exhausted_continues_and_has_no_heading(
     assert triggers == ["step_limit"]
     assert len(agent.calls) == 2
     assert agent.calls[1]["user_query"].startswith("find X and find Y\n\nAlready done")
-    assert result.answer == "part two"
+    assert result.answer == "Part 1 of 2:\npart one\n\nPart 2 of 2:\npart two"
 
 
 def test_suspension_inside_a_continuation_resumes_the_remaining_subtasks(
@@ -330,7 +313,8 @@ def test_suspension_inside_a_continuation_resumes_the_remaining_subtasks(
 
     assert second.status == TurnStatus.COMPLETED
     agent.resume.assert_called_once()
-    assert second.answer == "### 1. find X\nx done\n\n### 2. find Y\nY is there"
+    assert second.answer == (
+        "### 1. find X\nPart 1 of 2:\nx partial\n\nPart 2 of 2:\nx done\n\n### 2. find Y\nY is there")
     assert len(agent.calls) == 3
     assert agent.calls[2]["user_query"] == "find Y"
 
@@ -425,3 +409,47 @@ def test_handoff_continuation_has_no_opened_block_when_no_context_was_entered(
 
     assert "Opened in this sub-task" not in agent.calls[1]["user_query"]
 
+
+def test_a_continuation_that_only_states_next_steps_does_not_erase_earlier_findings(
+    initialized_fastworkflow, todo_workflow_path, monkeypatch
+):
+    ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
+    _fake_progress_check(monkeypatch)
+    _split(monkeypatch, ["find X"])
+    agent = _agent_with_steps(
+        ["control C1 found", "24 identities, first Scott", "The next step is to list them"],
+        exhaust=lambda n: n <= 3)
+    _set_agents(ctx, agent)
+
+    result = ctx.process_turn("find X")
+
+    assert result.status == TurnStatus.FAILED
+    assert result.answer == (
+        "Part 1 of 3:\ncontrol C1 found\n\n"
+        "Part 2 of 3:\n24 identities, first Scott\n\n"
+        "Part 3 of 3:\nThe next step is to list them")
+    # the earlier answers are combined by code, not sent to the continuation
+    assert "control C1 found" not in agent.calls[1]["user_query"]
+    assert "24 identities" not in agent.calls[2]["user_query"]
+
+
+def test_an_empty_run_answer_is_skipped_and_not_counted_as_a_part(
+    initialized_fastworkflow, todo_workflow_path, monkeypatch
+):
+    ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
+    _fake_progress_check(monkeypatch)
+    _split(monkeypatch, ["find X", "find Y"])
+    agent = _agent_with_steps(["", "x rest", "y"], exhaust=lambda n: n == 1)
+    _set_agents(ctx, agent)
+
+    result = ctx.process_turn("find X and find Y")
+
+    assert result.answer == "### 1. find X\nx rest\n\n### 2. find Y\ny"
+
+
+def test_join_parts_labels_runs_and_drops_word_for_word_repeats():
+    from fastworkflow.workflow_execution_context import _join_parts
+
+    assert _join_parts(["only"]) == "only"
+    assert _join_parts(["a", "a", "b"]) == "Part 1 of 2:\na\n\nPart 2 of 2:\nb"
+    assert _join_parts(["same", "same", "same"]) == "same"

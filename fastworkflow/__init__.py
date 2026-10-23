@@ -38,6 +38,14 @@ class CommandResponse(BaseModel):
     artifacts: dict[str, Any] = {}
     next_actions: list[Action] = []
     recommendations: list[Recommendation] = []
+    #: The command's ``Signature.Output`` instance, when the command built one.
+    #: Optional and appended (arch §12.2): a command that does not set it behaves
+    #: exactly as before. It never reaches the agent's prompt -- the agent reads
+    #: ``response`` -- but the observation archive stores it as JSON beside the
+    #: text (``RuntimeHandleArchive.command_runs``), so later code can read exact
+    #: ids, labels and counts without parsing ``response``. A pydantic model in
+    #: memory; a dict once a record has been dumped and read back.
+    output: Any = None
 
 class MCPToolCall(BaseModel):
     """MCP-compliant tool call request format"""
@@ -71,6 +79,21 @@ class CommandTraceEvent:
     # Logical-turn correlation key (additive, observability design §3.1 [X7]).
     # None only for events emitted outside any logical turn.
     turn_key: str | None = None
+
+class Refused(ValueError):
+    """The one way a command or skill hook declines: ``raise fastworkflow.Refused(message)``.
+
+    A decision, not a crash. Raised from a command's ``ResponseGenerator.__call__``, the
+    command answers ``CommandOutput(CommandResponse(response=message, success=False))``, as
+    if it had returned that. Raised from a ``validate_extracted_parameters`` hook (a
+    command's or a skill's), it is the hook's ``(False, message)``. Returning those forms
+    still works exactly as before. A ``ValueError``, so code that caught ``ValueError``
+    around a command's helpers keeps catching it.
+    """
+
+    def as_output(self) -> "CommandOutput":
+        return CommandOutput(command_response=CommandResponse(response=str(self), success=False))
+
 
 class CommandOutput(BaseModel):
     """The result of one command execution.
@@ -291,14 +314,16 @@ def init(env_vars: dict):
         import datasets  # noqa: F401 – pre-load Hugging Face datasets
 
 def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str, int, float, bool]] = None) -> Union[str, int, float, bool]:
-    """get the environment variable"""
+    """The value of *var_name*, converted to *var_type*: from the env files
+    ``fastworkflow.init`` loaded, else the process environment, else *default*
+    (returned as given)."""
     global _env_vars
 
     value = _env_vars.get(var_name)
     if value is None:
-        if default is not None:
-            return default
         value = os.getenv(var_name)
+    if value is None and default is not None:
+        return default
 
     if value is None:
         from fastworkflow.utils.logging import logger

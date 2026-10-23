@@ -392,7 +392,7 @@ probe write-up in `docs/intent_training_improvements_spec.md` §11 (M1/M2).
   (the candidate list, or this context's commands) unchanged plus the abort confirmation,
   so the agent picks the command itself. Until 2026-10-05 a separate tool-free
   intent-clarification agent tried first and, when it gave up, told the outer agent to
-  `ask_user`; in measured ido runs it resolved 0 of 9 cases.
+  `ask_user`; in measured downstream-workflow runs it resolved 0 of 9 cases.
 - Successful clarification feeds the layer-3 learning cache (§1).
 - Stale-state warning: `'command'`, `'stored_parameters'`, `'NLU_Pipeline_Stage'` in the CME
   context are reset by `Workflow.end_command_processing` (`workflow.py:291-303`); a leaked

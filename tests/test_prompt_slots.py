@@ -11,6 +11,7 @@ Real store, real tracing, real sink, real chatbot server (no mocks).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -191,6 +192,98 @@ def test_a_call_under_the_cap_keeps_its_messages_and_stores_no_pieces(db_path):
     }
 
 
+def test_a_slotted_call_keeps_only_the_envelope_of_its_messages(db_path):
+    """A registered retained representation replaces the cut prefix."""
+    turn_key = f"20260901T000000.000000Z-{uuid.uuid4().hex[:12]}"
+    messages = _messages(6)
+    wire = json.dumps(messages, ensure_ascii=False).encode("utf-8")
+
+    [span_id] = _record_calls(db_path, turn_key, [messages])
+
+    [row] = obs.ReadOnlyObservabilityStore(db_path).get_spans(turn_key)
+    envelope = json.loads(row["attributes"])["messages"]
+    assert {
+        key: value for key, value in envelope.items() if key != "replaced_by"
+    } == {
+        "truncated": True,
+        "original_length": len(wire),
+        "sha256": hashlib.sha256(wire).hexdigest(),
+        "value": "",
+    }
+    # The manifest is installed process-wide when an offloading agent was
+    # constructed before this test. The registry retains the first
+    # representation that claimed the cut envelope.
+    assert envelope["replaced_by"] in {
+        prompt_slots.REF_ATTRIBUTE, "trajectory_manifest",
+    }
+    assert len(row["attributes"].encode("utf-8")) < tracing.MAX_ATTR_BYTES
+    prompt = obs.ReadOnlyObservabilityStore(db_path).prompt_as_sent(turn_key, span_id)
+    assert prompt["verified"] is True and prompt["messages"] == messages
+
+
+def test_an_over_cap_call_without_pieces_keeps_its_prefix():
+    """No ref was recorded, so the cut prefix is all a reader has: it stays."""
+    capped = tracing._capped({"messages": "x" * (tracing.MAX_ATTR_BYTES + 10)})
+
+    assert prompt_slots.REF_ATTRIBUTE not in capped
+    assert capped["messages"]["value"] == "x" * tracing.MAX_ATTR_BYTES
+    assert "replaced_by" not in capped["messages"]
+
+
+def test_a_caller_supplied_ref_does_not_blank_the_messages():
+    """A rejected prompt-slot ref cannot blank the prefix by itself."""
+    capped = tracing._capped({
+        "messages": json.dumps(_messages(6)),
+        prompt_slots.REF_ATTRIBUTE: {"contract": "caller-value"},
+    })
+
+    assert capped[prompt_slots.REF_ATTRIBUTE] == {"contract": "caller-value"}
+    assert capped["messages"].get("replaced_by") != prompt_slots.REF_ATTRIBUTE
+    if "trajectory_manifest" in capped:
+        # The independent manifest enricher was accepted first, so it can
+        # still replace the prefix with its own complete representation.
+        assert capped["messages"]["value"] == ""
+        assert capped["messages"]["replaced_by"] == "trajectory_manifest"
+    else:
+        assert capped["messages"]["value"]
+        assert "replaced_by" not in capped["messages"]
+
+
+def test_a_manifest_can_replace_a_prefix_when_the_caller_supplied_slots_ref():
+    """A caller ref blocks slots, not another accepted enricher."""
+    from fastworkflow.observation_offloading.manifest import (
+        install_span_policy, uninstall_span_policy,
+    )
+    install_span_policy()
+    try:
+        capped = tracing._capped({
+            "messages": json.dumps(_messages(6)),
+            prompt_slots.REF_ATTRIBUTE: {"contract": "caller-value"},
+        })
+    finally:
+        uninstall_span_policy()
+
+    assert capped[prompt_slots.REF_ATTRIBUTE] == {"contract": "caller-value"}
+    assert capped["messages"]["value"] == ""
+    assert capped["messages"]["replaced_by"] == "trajectory_manifest"
+
+
+def test_the_trajectory_manifest_keeps_its_claim_on_a_slotted_call():
+    """Both enrichers blank the same envelope; the first one names it."""
+    from fastworkflow.observation_offloading.manifest import (
+        install_span_policy, uninstall_span_policy,
+    )
+    install_span_policy()
+    try:
+        capped = tracing._capped({"messages": json.dumps(_messages(6))})
+    finally:
+        uninstall_span_policy()
+
+    assert capped["messages"]["value"] == ""
+    assert capped["messages"]["replaced_by"] == "trajectory_manifest"
+    assert capped[prompt_slots.REF_ATTRIBUTE]["contract"] == prompt_slots.PROMPT_SLOTS_CONTRACT
+
+
 def test_the_piece_texts_never_travel_inside_the_attribute_bag():
     sink = _RecordingSink()
     host = _Host(sink, f"turn-{uuid.uuid4().hex}")
@@ -315,6 +408,13 @@ def test_the_chatbot_serves_the_rebuilt_prompt(tmp_path, monkeypatch):
         assert status == 200
         assert body["prompt"]["verified"] is True
         assert body["prompt"]["messages"] == messages
+        # The turn viewer's span carries no prompt text, only the ref that
+        # sends it to the route above.
+        status, body = get(f"/api/spans/{turn_key}")
+        assert status == 200
+        [span] = [sp for sp in body["spans"] if sp["span_id"] == span_id]
+        assert span["attributes"]["messages"]["value"] == ""
+        assert span["attributes"][prompt_slots.REF_ATTRIBUTE]["messages_bytes"] > 0
         assert get(f"/api/prompt/{turn_key}/not-a-span")[0] == 404
     finally:
         srv.shutdown()

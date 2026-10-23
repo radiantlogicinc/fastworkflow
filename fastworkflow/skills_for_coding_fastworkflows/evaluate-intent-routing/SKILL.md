@@ -14,7 +14,7 @@ description: >-
 
 ## Relate routing results to application outcomes
 
-`intent_benchmark.json` measures intent routing; workflow-local `benchmarks/<id>/vN.json` measures
+`intent_benchmark.json` measures intent routing; workflow-local benchmark versions (`benchmark_versions` in the live DB) measure
 application tasks through a driver. Keep both when both matter: a routing improvement does not
 prove better task completion. Use [create-workflow-benchmarks](../create-workflow-benchmarks/SKILL.md)
 for the versioned task catalog and experiment UI, and

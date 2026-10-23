@@ -232,7 +232,7 @@ def test_ui_has_pre_run_entry_and_safe_task_rendering():
             "/* -- training history [fix-9eg.2]"
         )
     ]
-    assert "Task prompt (optional)" in ui and "Description (optional)" in ui
+    assert "Task prompt (optional)" not in ui and "Task prompt" in ui and "Description (optional)" in ui
     assert "Save benchmark" in ui and "New experiment" in ui
     assert "expected_version" in ui and "Experiment ID" in ui
     assert "innerHTML" not in ui

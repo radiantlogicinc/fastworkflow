@@ -714,7 +714,7 @@ class TestCliPaths:
         deleted = run_chatbot_server.run_prune(seeded_db)
         assert set(deleted) == {
             "spans", "artifacts", "offload_evidence",
-            "offload_events", "prompt_slots",
+            "offload_events", "offload_command_runs", "prompt_slots",
         }
         # Everything seeded is recent; nothing crosses the retention horizon.
         assert deleted["spans"] == 0

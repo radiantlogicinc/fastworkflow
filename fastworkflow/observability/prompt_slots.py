@@ -15,8 +15,9 @@ not stored again.
 
 What the span keeps is ``prompt_slots_ref``: the messages with every text
 replaced by the ordered list of its piece digests, and the sha256 of the
-messages in one canonical JSON form. ``rebuild`` puts the text back and says whether the
-result hashes to that digest, so a reader is shown the prompt as sent, or is
+messages in one canonical JSON form. ``messages`` itself keeps only its cut
+envelope, with an empty ``value`` and ``replaced_by: "prompt_slots_ref"``.
+``rebuild`` puts the text back and says whether the result hashes to that digest, so a reader is shown the prompt as sent, or is
 told exactly which pieces it cannot be shown.
 """
 from __future__ import annotations
@@ -191,6 +192,9 @@ def _prompt_slot_enrichment(
     ref, texts = built
     return enrichment.AttributeEnrichment(
         additions={REF_ATTRIBUTE: ref, tracing.ATTR_PROMPT_SLOT_TEXTS: texts},
+        # The pieces hold the whole prompt, so the cut prefix of ``messages``
+        # is a second, partial copy of it: keep only the envelope.
+        replace_truncated={"messages": REF_ATTRIBUTE},
     )
 
 

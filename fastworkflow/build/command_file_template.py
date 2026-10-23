@@ -342,8 +342,9 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)\n\n"""
 
     # Add validate_extracted_parameters method
-    command_file_content += f"    def validate_extracted_parameters(self, workflow: fastworkflow.Workflow, command: str, cmd_parameters: {input_param_type}) -> None:\n"
-    command_file_content += "        pass\n\n"
+    command_file_content +=  "    @staticmethod\n"
+    command_file_content += f"    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: {input_param_type}) -> tuple[bool, str]:\n"
+    command_file_content += "        return (True, '')\n\n"
 
     # Add ResponseGenerator class
     command_file_content += "class ResponseGenerator:\n"

@@ -237,7 +237,7 @@ function hierarchyLabel(node) {
 }
 
 function visibleHierarchyChildren(node) {
-  if (node.kind !== "benchmark" || archivedExperimentsShown[node.benchmark_id]) {
+  if (node.kind !== "benchmark_version" || archivedExperimentsShown[node.benchmark_id]) {
     return node.children;
   }
   return node.children.filter(function (child) {
@@ -312,7 +312,7 @@ function renderHierarchy() {
     if (archived) {
       summary.appendChild(el("span", "pill", "Archived"));
     }
-    var archivedCount = node.kind === "benchmark" ? benchmarkArchivedCount(node) : 0;
+    var archivedCount = node.kind === "benchmark_version" ? benchmarkArchivedCount(node) : 0;
     if (archivedCount) {
       var showingArchived = !!archivedExperimentsShown[node.benchmark_id];
       var archiveToggle = el("button", "navArchiveToggle", showingArchived ? "⊘" : "◉");
@@ -325,8 +325,12 @@ function renderHierarchy() {
         archivedExperimentsShown[node.benchmark_id] = !showingArchived;
         renderHierarchy();
         var current = hierarchyPath[hierarchyPath.length - 1];
-        if (current && current.kind === "benchmark" && current.key === node.key) {
-          showBenchmark(node.benchmark_id);
+        /* The benchmark page lists one version's cards; refresh it whether
+           the reader opened the version row or the benchmark row above it. */
+        if (current && current.benchmark_id === node.benchmark_id
+            && (current.kind === "benchmark_version" || current.kind === "benchmark")) {
+          showBenchmark(node.benchmark_id,
+                        current.kind === "benchmark_version" ? current.benchmark_version : undefined);
         }
       });
       summary.appendChild(archiveToggle);
@@ -346,7 +350,8 @@ function renderHierarchy() {
       childNodes.forEach(function (child) { childrenContainer.appendChild(render(child, path)); });
       row.appendChild(childrenContainer);
     } else if (!leaf && row.open) {
-      row.appendChild(el("div", "sub", node.kind === "benchmark" && archivedCount ? "Archived experiments are hidden." :
+      row.appendChild(el("div", "sub", node.kind === "benchmark_version" && archivedCount ? "Archived experiments are hidden." :
+        node.kind === "benchmark_version" ? "No experiments on this version yet." :
         node.kind === "experiment" ? "No conversations recorded yet." :
         node.kind === "conversation" ? "No turns recorded yet." : "No child records."));
     }
@@ -426,6 +431,7 @@ function activateHierarchy(path, expanded) {
     state.turnKey = null; state.turn = null; state.path = [];
     if (node.kind === "root") { showBenchmarks(); }
     else if (node.kind === "benchmark" && node.benchmark_id) { showBenchmark(node.benchmark_id); }
+    else if (node.kind === "benchmark_version" && node.benchmark_id) { showBenchmark(node.benchmark_id, node.benchmark_version); }
     else if (node.kind === "experiment") {
       if (node.recorded) { showExperiment(node.experiment_id); }
       else if (node.registered) { showBenchmarkExperiment(node.experiment_id); }
@@ -652,7 +658,7 @@ function refreshConvs(reportFailure) {
        does, because `setNavigationTab` calls the placeholder directly, and
        clearing conversations nulls `state.turnKey` before refreshing so the
        "all cleared" state still appears. */
-    if (!hierarchyPath.length && !state.turnKey) { showNavigationTabEmpty(); }
+    if (!hierarchyPath.length && !state.turnKey && !sealedPageOwnsDetail()) { showNavigationTabEmpty(); }
   }).catch(function (error) {
     if (requestWasAborted(error) || refresh !== conversationRefresh) { return; }
     var list = document.getElementById("convList"); clear(list);

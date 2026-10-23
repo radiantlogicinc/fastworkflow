@@ -1693,8 +1693,9 @@ class LlmCallUsage:
     and what an agent quotes to point at this exact call, so a chip and a
     structured read never disagree about which call they mean.
 
-    `response_id` is the recorded `history_uuid` -- DSPy's identifier for the
-    provider response the usage and cost were copied from. It is what makes a
+    `response_id` is the recorded `history_uuid` -- the identifier of the
+    provider response the usage and cost were copied from (the LM call's
+    callback id since fix-sgsp; DSPy's history uuid on older spans). It is what makes a
     duplicate recognisable: two calls quoting one response cannot both have
     spent those tokens.
     """

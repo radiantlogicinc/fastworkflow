@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tests.benchmark_pins import create_pinned
 import hashlib
 import os
 import sqlite3
@@ -36,7 +37,7 @@ def _controller(installed_db, *, external=True):
 
 
 def _create(controller, *, required_segments=1):
-    controller.create_experiment(
+    create_pinned(controller,
         "exp-1",
         "external",
         declared_tasks=1,

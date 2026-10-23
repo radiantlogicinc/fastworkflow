@@ -128,9 +128,14 @@ including missing/incomplete attempts. Keep these dimensions separate as relevan
 - Necessary and repeated clarification; the operator policy used.
 - Latency (separating user wait), LLM calls/tokens, reported cost and output truncation.
 
+For checklist grading of benchmark runs, read
+[grade-benchmark-runs](../grade-benchmark-runs/SKILL.md). For keep-or-revert decisions over
+repeated LLM runs, read [judge-changes-against-noise](../judge-changes-against-noise/SKILL.md).
+
 Compare regressions as well as improvements. Runtime `completed` and command `success` are
-not business-success grades. Missing cost/usage is unknown, not zero. Use recorded `fw.llm.call`
-usage/cost without summing parent duration/cost rollups again. A completion equal to `max_tokens`
+not business-success grades. Missing cost/usage is unknown, not zero. Total LLM usage and cost with
+`fastworkflow.observability.comparison.usage_rollup(spans)`. It folds re-emitted and wrapper
+`fw.llm.call` records, so do not sum the rows or the parent roll-ups yourself. A completion equal to `max_tokens`
 is a cutoff clue, not by itself proof that the answer is incomplete.
 
 Write per-run conclusions in **experiment notes** and cross-run synthesis in **benchmark

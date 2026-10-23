@@ -397,11 +397,10 @@ def test_experiment_analysis_route_is_gone(experiment_server):
     assert store.get_experiment('exp-1')['notes'] == 'original notes'
 
 
-@pytest.mark.parametrize('value', ['Free-form observations\nNo JSON required.', '', ['one'], None])
-def test_freeform_benchmark_analysis(live_server, value):
+def test_benchmark_analysis_route_is_gone(live_server):
     path = '/api/benchmarks/smoke/analysis'
-    assert _request(live_server, path, 'PUT', {'analysis': value})[0] == 200
-    assert _request(live_server, path)[1]['analysis'] == value
+    assert _request(live_server, path, 'PUT', {'analysis': 'x'})[0] in (404, 405)
+    assert _request(live_server, path)[0] == 404
 
 
 def _ui_script():
@@ -409,7 +408,7 @@ def _ui_script():
     return re.search(r'<script[^>]*>(.*?)</script>', page, re.S).group(1)
 
 
-def test_ui_analysis_and_stable_component_anchors():
+def test_ui_stable_component_anchors():
     node = shutil.which('node')
     if not node:
         pytest.skip('Node is needed to execute UI helper tests')
@@ -417,15 +416,13 @@ def test_ui_analysis_and_stable_component_anchors():
     subprocess.run([node, '--check'], input=script, text=True, check=True, capture_output=True)
     funcs = '\n'.join(
         re.search(r'function ' + name + r'\(.*?\n\}', script, re.S).group(0)
-        for name in ['analysisText', 'feedbackAnchor', 'feedbackProvenanceLabel',
+        for name in ['feedbackAnchor', 'feedbackProvenanceLabel',
                      'feedbackCategory', 'feedbackSubcategory',
                      'feedbackClassification']
     )
     taxonomy = re.search(r'var FEEDBACK_TAXONOMY = \[.*?\n\];', script, re.S).group(0)
     checks = '''
 const assert = require('assert');
-assert.equal(analysisText(null), ''); assert.equal(analysisText({}), '');
-assert.equal(analysisText('free text'), 'free text');
 assert.equal(feedbackProvenanceLabel('human'), 'Human');
 assert.equal(feedbackProvenanceLabel('coding_agent'), 'Coding Agent');
 assert.equal(feedbackProvenanceLabel('distillation_agent'), 'Distillation Agent');

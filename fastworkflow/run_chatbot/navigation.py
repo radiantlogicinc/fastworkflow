@@ -50,14 +50,35 @@ def _slim_turn_info(turn):
 
 
 def build_navigation(benchmarks, registrations, store=None, warnings=()):
+    """Benchmarks -> benchmark -> version -> experiments (`fix-873a`).
+
+    Experiments hang under the version they are pinned to, never directly
+    under the benchmark, so two versions' experiments are never one list.
+    Every experiment pins a benchmark version (`fix-ujat`); a row from an
+    older store that does not is left off the rail, and its turns list with
+    the ad-hoc conversations.
+    """
     root = _node('root', 'Benchmarks', info={'warnings': list(warnings)})
-    branches = {}
+    branches, versions = {}, {}
+
+    def version_node(bid, version):
+        if (bid, version) not in versions:
+            node = _node('benchmark_version', version, bid, version,
+                         benchmark_id=bid, benchmark_version=version,
+                         info={'benchmark_id': bid, 'benchmark_version': version})
+            versions[(bid, version)] = node
+            branches[bid]['children'].append(node)
+        return versions[(bid, version)]
+
     for row in benchmarks:
         bid = row['benchmark_id']
         node = _node('benchmark', row.get('title') or bid, bid,
                      benchmark_id=bid, info=row)
         branches[bid] = node
         root['children'].append(node)
+        # Newest version first, matching the newest-first experiment order.
+        for version in reversed(row.get('versions') or []):
+            version_node(bid, version)
     adhoc = _node('adhoc', 'ad-hoc conversations', info={'dates': 'UTC'})
     experiments, dates, conversations = {}, {}, {}
 
@@ -66,16 +87,18 @@ def build_navigation(benchmarks, registrations, store=None, warnings=()):
         if eid in experiments:
             return experiments[eid]
         bid = row.get('benchmark_id')
+        version = row.get('benchmark_version')
+        if not (bid and version):
+            return None
         if bid not in branches:
-            branches[bid] = _node('benchmark', bid or 'Experiments without a benchmark', bid,
-                                  benchmark_id=row.get('benchmark_id'), info={})
+            branches[bid] = _node('benchmark', bid, bid, benchmark_id=bid, info={})
             root['children'].append(branches[bid])
         # The node's text is the author's optional description, carried for the
         # detail pane; the rail and the crumbs name an experiment by its id.
         node = _node('experiment', row.get('description') or '',
                      eid, experiment_id=eid, registered=registered,
                      recorded=row.get('status') != 'registered', info=row)
-        branches[bid]['children'].append(node)
+        version_node(bid, version)['children'].append(node)
         experiments[eid] = node
         return node
 
@@ -85,6 +108,8 @@ def build_navigation(benchmarks, registrations, store=None, warnings=()):
     if store is not None:
         for row in _pages(store.list_experiments):
             node = experiment(row)
+            if node is None:
+                continue
             node['recorded'] = True
             node['info'] = row
             node['label'] = row.get('description') or ''
@@ -95,8 +120,8 @@ def build_navigation(benchmarks, registrations, store=None, warnings=()):
 
         def parent_for(row):
             eid = row.get('experiment_id')
-            if eid:
-                return experiment(row if 'benchmark_id' in row else {'experiment_id': eid})
+            if eid and eid in experiments:
+                return experiments[eid]
             date = _date(row.get('started_at'))
             if date not in dates:
                 dates[date] = _node('date', date, date, info={'date': date, 'timezone': 'UTC'})
@@ -126,7 +151,9 @@ def build_navigation(benchmarks, registrations, store=None, warnings=()):
                 continue
             conversation(row, parent_for(row))
     adhoc['children'].sort(key=lambda n: n['label'], reverse=True)
-    for branch in branches.values():
+    for branch in [*branches.values(), *versions.values()]:
+        if any(child['kind'] != 'experiment' for child in branch['children']):
+            continue
         branch['children'] = sorted(
             branch['children'],
             key=lambda node: _experiment_sort_key(

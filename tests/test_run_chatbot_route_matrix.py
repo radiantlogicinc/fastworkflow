@@ -15,8 +15,7 @@ real token, so a 403 is the host/origin gate and not a missing token.
 
 Write bodies are the smallest JSON that stays off destructive work: clear
 sends a wrong confirm string, select/train name a path that does not exist,
-configure sends a non-string so it 400s before writing, and the analysis PUT
-sends an unexpected field so it 400s before ``write_analysis``.
+configure sends a non-string so it 400s before writing.
 """
 
 from __future__ import annotations
@@ -58,8 +57,8 @@ _LIVE_GETS = (
     "/api/benchmarks",
     "/api/benchmarks/missing",
     "/api/benchmarks/missing/experiments",
-    "/api/benchmarks/missing/analysis",
     "/api/benchmarks/missing/versions/v1",
+    "/api/benchmarks/missing/versions/v1/experiments",
     "/api/benchmarks/missing/nope",
     "/api/benchmark-experiments/missing",
     "/api/experiments/e1",
@@ -94,6 +93,7 @@ _LIVE_GETS = (
     "/api/artifact/missing",
     "/api/training-runs",
     "/api/training-run/missing",
+    "/api/sealed-experiments",
     # Removed with the agent-memory feedback table; still a 404 branch.
     "/api/feedback",
 )
@@ -111,6 +111,7 @@ _COLD_GETS = (
     "/api/task-feedback",
     "/api/artifact/missing",
     "/api/experiment/missing",
+    "/api/sealed-experiments",
 )
 
 # Every allowlisted write shape, plus unknown paths under /, /api/, and
@@ -119,7 +120,7 @@ _WRITES = (
     ("POST", "/post_feedback"),
     ("POST", "/api/benchmark-setup"),
     ("POST", "/api/benchmarks/missing/experiments"),
-    ("POST", "/api/experiments/e1/winner/decisions"),
+    ("POST", "/api/experiments/e1/winner"),
     ("POST", "/api/experiments/e1/tasks/t1/best-run"),
     ("POST", "/api/experiments/e1/tasks/t1/best-run/undecided"),
     ("POST", "/api/experiments/e1/tasks/t1/review-pairs"),
@@ -132,15 +133,18 @@ _WRITES = (
     ("POST", "/api/configure_env"),
     ("POST", "/api/train"),
     ("POST", "/api/clear_conversations"),
+    ("POST", "/api/sealed-experiments"),
+    ("POST", "/api/evidence-releases"),
     ("POST", "/not-a-page"),
     ("POST", "/api/not-a-route"),
     ("POST", "/api/experiments/e1/not-a-route"),
-    ("PUT", "/api/benchmarks/missing/analysis"),
     ("PUT", "/api/not-a-route"),
     ("PUT", "/not-a-page"),
+    ("DELETE", "/api/experiments/e1/winner"),
     ("DELETE", "/api/experiments/e1/tasks/t1/best-run"),
     ("DELETE", "/api/experiments/e1/not-a-route"),
     ("DELETE", "/api/benchmark-experiments/missing"),
+    ("DELETE", "/api/sealed-experiments/missing"),
     ("DELETE", "/api/not-a-route"),
     ("DELETE", "/not-a-page"),
     ("PATCH", "/api/experiment/missing"),
@@ -165,8 +169,6 @@ def _body(method: str, path: str):
         return {"path": "/no/such/fastworkflow-dir"}
     if path == "/api/configure_env":
         return {"env_content": 1}
-    if method == "PUT":
-        return {"analysis": 1, "extra": True}
     return {}
 
 
@@ -371,6 +373,10 @@ PINNED_ROUTE_MATRIX: dict[tuple[str, str, str, str], int] = {
     ('live', 'DELETE', '/api/experiments/e1/tasks/t1/best-run', 'bad_origin'): 403,
     ('live', 'DELETE', '/api/experiments/e1/tasks/t1/best-run', 'no_token'): 401,
     ('live', 'DELETE', '/api/experiments/e1/tasks/t1/best-run', 'valid'): 404,
+    ('live', 'DELETE', '/api/experiments/e1/winner', 'bad_host'): 403,
+    ('live', 'DELETE', '/api/experiments/e1/winner', 'bad_origin'): 403,
+    ('live', 'DELETE', '/api/experiments/e1/winner', 'no_token'): 401,
+    ('live', 'DELETE', '/api/experiments/e1/winner', 'valid'): 404,
     ('live', 'DELETE', '/api/not-a-route', 'bad_host'): 403,
     ('live', 'DELETE', '/api/not-a-route', 'bad_origin'): 403,
     ('live', 'DELETE', '/api/not-a-route', 'no_token'): 401,
@@ -399,14 +405,10 @@ PINNED_ROUTE_MATRIX: dict[tuple[str, str, str, str], int] = {
     ('live', 'GET', '/api/benchmarks/missing', 'bad_origin'): 403,
     ('live', 'GET', '/api/benchmarks/missing', 'no_token'): 401,
     ('live', 'GET', '/api/benchmarks/missing', 'valid'): 200,
-    ('live', 'GET', '/api/benchmarks/missing/analysis', 'bad_host'): 403,
-    ('live', 'GET', '/api/benchmarks/missing/analysis', 'bad_origin'): 403,
-    ('live', 'GET', '/api/benchmarks/missing/analysis', 'no_token'): 401,
-    ('live', 'GET', '/api/benchmarks/missing/analysis', 'valid'): 200,
     ('live', 'GET', '/api/benchmarks/missing/experiments', 'bad_host'): 403,
     ('live', 'GET', '/api/benchmarks/missing/experiments', 'bad_origin'): 403,
     ('live', 'GET', '/api/benchmarks/missing/experiments', 'no_token'): 401,
-    ('live', 'GET', '/api/benchmarks/missing/experiments', 'valid'): 200,
+    ('live', 'GET', '/api/benchmarks/missing/experiments', 'valid'): 404,
     ('live', 'GET', '/api/benchmarks/missing/nope', 'bad_host'): 403,
     ('live', 'GET', '/api/benchmarks/missing/nope', 'bad_origin'): 403,
     ('live', 'GET', '/api/benchmarks/missing/nope', 'no_token'): 401,
@@ -415,6 +417,10 @@ PINNED_ROUTE_MATRIX: dict[tuple[str, str, str, str], int] = {
     ('live', 'GET', '/api/benchmarks/missing/versions/v1', 'bad_origin'): 403,
     ('live', 'GET', '/api/benchmarks/missing/versions/v1', 'no_token'): 401,
     ('live', 'GET', '/api/benchmarks/missing/versions/v1', 'valid'): 404,
+    ('live', 'GET', '/api/benchmarks/missing/versions/v1/experiments', 'bad_host'): 403,
+    ('live', 'GET', '/api/benchmarks/missing/versions/v1/experiments', 'bad_origin'): 403,
+    ('live', 'GET', '/api/benchmarks/missing/versions/v1/experiments', 'no_token'): 401,
+    ('live', 'GET', '/api/benchmarks/missing/versions/v1/experiments', 'valid'): 200,
     ('live', 'GET', '/api/browse', 'bad_host'): 403,
     ('live', 'GET', '/api/browse', 'bad_origin'): 403,
     ('live', 'GET', '/api/browse', 'no_token'): 401,
@@ -687,10 +693,10 @@ PINNED_ROUTE_MATRIX: dict[tuple[str, str, str, str], int] = {
     ('live', 'POST', '/api/experiments/e1/tasks/t1/review-pairs', 'bad_origin'): 403,
     ('live', 'POST', '/api/experiments/e1/tasks/t1/review-pairs', 'no_token'): 401,
     ('live', 'POST', '/api/experiments/e1/tasks/t1/review-pairs', 'valid'): 404,
-    ('live', 'POST', '/api/experiments/e1/winner/decisions', 'bad_host'): 403,
-    ('live', 'POST', '/api/experiments/e1/winner/decisions', 'bad_origin'): 403,
-    ('live', 'POST', '/api/experiments/e1/winner/decisions', 'no_token'): 401,
-    ('live', 'POST', '/api/experiments/e1/winner/decisions', 'valid'): 404,
+    ('live', 'POST', '/api/experiments/e1/winner', 'bad_host'): 403,
+    ('live', 'POST', '/api/experiments/e1/winner', 'bad_origin'): 403,
+    ('live', 'POST', '/api/experiments/e1/winner', 'no_token'): 401,
+    ('live', 'POST', '/api/experiments/e1/winner', 'valid'): 404,
     ('live', 'POST', '/api/not-a-route', 'bad_host'): 403,
     ('live', 'POST', '/api/not-a-route', 'bad_origin'): 403,
     ('live', 'POST', '/api/not-a-route', 'no_token'): 401,
@@ -711,10 +717,6 @@ PINNED_ROUTE_MATRIX: dict[tuple[str, str, str, str], int] = {
     ('live', 'POST', '/post_feedback', 'bad_origin'): 403,
     ('live', 'POST', '/post_feedback', 'no_token'): 401,
     ('live', 'POST', '/post_feedback', 'valid'): 400,
-    ('live', 'PUT', '/api/benchmarks/missing/analysis', 'bad_host'): 403,
-    ('live', 'PUT', '/api/benchmarks/missing/analysis', 'bad_origin'): 403,
-    ('live', 'PUT', '/api/benchmarks/missing/analysis', 'no_token'): 401,
-    ('live', 'PUT', '/api/benchmarks/missing/analysis', 'valid'): 400,
     ('live', 'PUT', '/api/not-a-route', 'bad_host'): 403,
     ('live', 'PUT', '/api/not-a-route', 'bad_origin'): 403,
     ('live', 'PUT', '/api/not-a-route', 'no_token'): 401,
@@ -723,6 +725,26 @@ PINNED_ROUTE_MATRIX: dict[tuple[str, str, str, str], int] = {
     ('live', 'PUT', '/not-a-page', 'bad_origin'): 403,
     ('live', 'PUT', '/not-a-page', 'no_token'): 401,
     ('live', 'PUT', '/not-a-page', 'valid'): 405,
+    ('live', 'GET', '/api/sealed-experiments', 'bad_host'): 403,
+    ('live', 'GET', '/api/sealed-experiments', 'bad_origin'): 403,
+    ('live', 'GET', '/api/sealed-experiments', 'no_token'): 401,
+    ('live', 'GET', '/api/sealed-experiments', 'valid'): 200,
+    ('cold', 'GET', '/api/sealed-experiments', 'bad_host'): 403,
+    ('cold', 'GET', '/api/sealed-experiments', 'bad_origin'): 403,
+    ('cold', 'GET', '/api/sealed-experiments', 'no_token'): 401,
+    ('cold', 'GET', '/api/sealed-experiments', 'valid'): 200,
+    ('live', 'POST', '/api/sealed-experiments', 'bad_host'): 403,
+    ('live', 'POST', '/api/sealed-experiments', 'bad_origin'): 403,
+    ('live', 'POST', '/api/sealed-experiments', 'no_token'): 401,
+    ('live', 'POST', '/api/sealed-experiments', 'valid'): 400,
+    ('live', 'POST', '/api/evidence-releases', 'bad_host'): 403,
+    ('live', 'POST', '/api/evidence-releases', 'bad_origin'): 403,
+    ('live', 'POST', '/api/evidence-releases', 'no_token'): 401,
+    ('live', 'POST', '/api/evidence-releases', 'valid'): 400,
+    ('live', 'DELETE', '/api/sealed-experiments/missing', 'bad_host'): 403,
+    ('live', 'DELETE', '/api/sealed-experiments/missing', 'bad_origin'): 403,
+    ('live', 'DELETE', '/api/sealed-experiments/missing', 'no_token'): 401,
+    ('live', 'DELETE', '/api/sealed-experiments/missing', 'valid'): 404,
 }
 
 

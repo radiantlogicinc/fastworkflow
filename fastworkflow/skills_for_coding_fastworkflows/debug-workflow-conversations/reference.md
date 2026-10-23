@@ -1,7 +1,7 @@
 # observability.sqlite3 — the read contract
 
 Reference for `debug-workflow-conversations` (see SKILL.md for the triage
-method). The current source uses `SCHEMA_VERSION = 8` in `observability/store.py`.
+method). The current source uses `SCHEMA_VERSION = 10` in `observability/store.py`.
 Readers check compatibility; older evidence is not migrated by this version. Preserve it and
 use its writer's framework version. Inspect `PRAGMA user_version` read-only when diagnosing a
 mismatch, rather than forcing a version number or adding columns.
@@ -81,16 +81,32 @@ Sibling of `fw.planner.plan` under the turn; NOT `fw.command.execute` (that is
 one command inside a tool call — this is the whole loop). Attributes include
 `agent_input`, `resumed`, `attempts`, `suspended`, `final_answer`.
 
+### `fw.skill.phase` (kind `internal`) — one phase of a phased skill call
+Added in aggregate span contract 16. A phased skill call (its `PlanGenerator`'s
+phases) runs each phase as its own executor run, so a turn has one
+`fw.skill.phase` span per phase run, each the parent of that run's
+`fw.agent.execute`. Opened with `skill`, `phase`, `phase_index` (0-based) of
+`phase_count`, `step_budget`, `first_step` and `resumed` (a run resumed after
+ask_user opens a new span); closed with `steps` (the phase's numbered plan),
+`steps_used`, `exhausted` (reached its budget), `suspended`, `record` (the
+`"<Context> <label>"` its output was filled on) and `facts` (the filled output,
+`null` for a phase with none). A failed phase has status `error` and
+`facts_error`: its steps could not be built, or a required fact had no source
+run; no later phase of that call ran.
+
 ### `fw.agent.step` (kind `internal`) — one reasoning step
 Child of `fw.agent.execute`; the step's reasoning `fw.llm.call` and its
 `fw.agent.tool_call` nest under it. Attributes: `step_index`, `thought`,
 `tool_name`, `tool_args`, `observation`; on failures `error_type`/`tool_error`
 and `recovered`; on suspension `clarification` (status `awaiting_user`);
+`folded_command` when the model passed parameters as tool arguments beside
+`command` and the tool folded them into the command text (`tool_args` keeps
+what was sent; the observation ends with a "(Ran as: ...)" note);
 `finish_check_note` (historical whitelist key; no longer set on new spans).
 
 ### `fw.agent.tool_call` (kind `tool`)
 One per agent → workflow invocation; `raw_command` is the exact command text
-the agent sent, with `response_text`/`success` (and `error_type` on failure)
+the agent sent (after any folding of extra tool arguments, see `fw.agent.step`), with `response_text`/`success` (and `error_type` on failure)
 added at close.
 
 ### `fw.command.execute` (kind `tool`)
@@ -120,6 +136,8 @@ Wraps parameter extraction + validation for the resolved command.
 | Attribute | Meaning |
 |---|---|
 | `command_name`, `extraction_method` | `xml_regex` (agent format), `llm` (DSPy), `stored_merge` (a NOT_FOUND retry round merging user corrections) |
+| `deterministic_form` | With `xml_regex`: `key_value` (`name=value` pairs) or `positional` (`command value`) when one of those code parsers bound the parameters; absent for XML tags |
+| `unbound_value` | A lone value (`command value`) that bound to no parameter and was refused instead of running with defaults |
 | `retry_round` | true when this turn continues a parameter-correction loop |
 | `parameters_valid` | The overall verdict (span `status` stays `ok`; only exceptions mark `error`) |
 | `missing_fields` / `invalid_fields` | Structured field lists (no prose parsing needed) |
@@ -138,10 +156,10 @@ Emitted by a DSPy callback, so it appears under whichever stage made the call
 | Attribute | Meaning |
 |---|---|
 | `module`, `module_chain`, `module_input` | Which DSPy module ran and with what inputs |
-| `model`, `messages`, `prompt`, `call_kwargs` | The exact request sent to the LM |
+| `model`, `messages`, `prompt`, `call_kwargs` | The exact request sent to the LM. `messages` over 16 KB is a cut envelope (`truncated`, `original_length`, `sha256`, `value`); when the span also has `prompt_slots_ref` the envelope's `value` is empty and the whole prompt is rebuilt from `prompt_slots` by `ObservabilityStore.prompt_as_sent(turn_key, span_id)` (`/api/prompt/<turn_key>/<span_id>`) |
 | `output`, `provider_response`, `reasoning` | What came back (incl. provider-native reasoning when present) |
-| `usage`, `cost`, `cache_hit`, `response_model`, `history_uuid`, `capture_source` | Cost accounting; **`cache_hit: true` means the completion came from the DSPy cache** — the classic "stale/frozen LLM output" tell |
-| `usage_capture` | Present when usage was unavailable (DSPy history disabled in that process) |
+| `usage`, `cost`, `cache_hit`, `response_model`, `history_uuid`, `capture_source` | Cost accounting; **`cache_hit: true` means the completion came from the DSPy cache** — the classic "stale/frozen LLM output" tell; a hit records `cost` 0 and empty `usage` (nothing was billed) |
+| `usage_capture` | Present when usage was unavailable: the LM's result never reached the capture hook and DSPy history was off (spans recorded before fix-sgsp all carry it) |
 | `exception` | The LM call failed (span `status: error`) — auth errors, timeouts |
 
 Reserved, not yet emitted: `fw.train.*`.

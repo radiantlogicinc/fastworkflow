@@ -1048,15 +1048,29 @@ function showBenchmarks() {
     });
   }).catch(function (e) { if (!benchNavStale(nav)) { d.appendChild(el("p", "err fieldError", e.message)); } });
 }
-function editBenchmark(current) {
+/* Only a version's tasks are frozen. `detailsOnly` edits an older version:
+   the benchmark's title (one for all versions) and that version's
+   description, with its tasks shown but not editable. */
+function editBenchmark(current, detailsOnly) {
   var nav = benchNavToken(), d = document.getElementById("detail"); clear(d);
   expCrumbs(d, [{label: "Benchmarks", onClick: showBenchmarks}, {label: current ? "Edit benchmark" : "New benchmark"}]);
   pageHeader(d, "BENCHMARK SETUP", current ? "Refine your benchmark" : "What should your workflow do?", "Describe the work you want to test. Each task keeps its own identity across experiments.");
   var form = el("div", "card"); d.appendChild(form);
   var title = benchmarkText(form, "Title", current && (current.title || current.benchmark_id), false); title.setAttribute("data-autofocus", ""); title.placeholder = "e.g. Customer support essentials";
   var description = benchmarkText(form, "Description (optional)", current && current.description, true); description.placeholder = "What does this benchmark help you evaluate?";
-  form.appendChild(el("div", "sub", current ? "Saving creates the next version after " + current.version + ". Existing experiments keep their original tasks." : "Version v1 and task IDs are assigned when you save."));
+  form.appendChild(el("div", "sub", !current ? "Version v1 and task IDs are assigned when you save." : detailsOnly ? "The title applies to every version; the description is " + current.version + "'s own. " + current.version + "'s tasks are frozen: edit the latest version to change tasks." : !current.tasks.length ? current.version + " has no tasks yet, so saving updates it in place." : "Changing the tasks saves the next version after " + current.version + ", starting from this description. Changing only the title or description updates " + current.version + " in place. Existing experiments keep their original tasks."));
   sectionHeader(d, "Tasks");
+  if (detailsOnly) {
+    var frozen = el("div");
+    current.tasks.forEach(function (task, i) {
+      var card = el("div", "card taskCard"), body = el("div", "taskBody");
+      card.appendChild(el("span", "taskNumber", String(i + 1).padStart(2, "0"))); card.appendChild(body);
+      body.appendChild(el("div", "recordId", task.task_id)); body.appendChild(el("p", null, benchmarkPrompt(task) || "No prompt"));
+      frozen.appendChild(card);
+    });
+    if (!current.tasks.length) { frozen.appendChild(el("div", "empty", "No tasks in this version.")); }
+    d.appendChild(frozen);
+  }
   var tasks = el("div"), readers = []; d.appendChild(tasks);
   var add = el("button", null, "+ Add task");
   function addTask(task, focus) {
@@ -1064,7 +1078,7 @@ function editBenchmark(current) {
     card.appendChild(el("span", "taskNumber", String(readers.length + 1).padStart(2, "0")));
     card.appendChild(body);
     body.appendChild(el("div", "recordId", task.task_id || "New task · ID assigned on save"));
-    var prompt = benchmarkText(body, "Task prompt (optional)", benchmarkPrompt(task), true); prompt.placeholder = "Write what a user would ask your workflow…";
+    var prompt = benchmarkText(body, "Task prompt", benchmarkPrompt(task), true); prompt.placeholder = "Write what a user would ask your workflow…";
     var remove = el("button", "ghost danger", "Remove task");
     remove.addEventListener("click", function () {
       removed = true; card.remove();
@@ -1074,19 +1088,28 @@ function editBenchmark(current) {
     readers.push(function () { return removed ? null : {task_id: task.task_id, prompt: prompt.value}; });
     if (focus) { prompt.focus(); if (card.scrollIntoView) { card.scrollIntoView({block: "nearest"}); } }
   }
-  (current ? current.tasks : [{}]).forEach(function (task) { addTask(task, false); });
+  if (!detailsOnly) { (current ? current.tasks : [{}]).forEach(function (task) { addTask(task, false); }); }
   add.addEventListener("click", function () { addTask({}, true); });
   var toolbar = el("div", "formActions"), save = el("button", "primary", "Save benchmark"), msg = el("p", "err fieldError");
   msg.setAttribute("role", "alert"); d.appendChild(msg);
-  toolbar.appendChild(add);
+  if (!detailsOnly) { toolbar.appendChild(add); }
   var cancel = el("button", "ghost", "Cancel"); cancel.addEventListener("click", function () { if (current) { showBenchmark(current.benchmark_id); } else { showBenchmarks(); } }); toolbar.appendChild(cancel);
   save.addEventListener("click", function () {
     var draftTasks = readers.map(function (read) { return read(); }).filter(Boolean);
-    if (!title.value.trim() || !draftTasks.length) {
-      msg.textContent = !title.value.trim() ? "Give your benchmark a title." : "Add at least one task to save this benchmark.";
-      showNotice("Check your benchmark", "error", msg.textContent); (!title.value.trim() ? title : add).focus(); return;
+    if (!title.value.trim()) {
+      msg.textContent = "Give your benchmark a title.";
+      showNotice("Check your benchmark", "error", msg.textContent); title.focus(); return;
     }
     msg.textContent = "";
+    if (detailsOnly) {
+      apiPatch("/api/benchmarks/" + encodeURIComponent(current.benchmark_id) + "/versions/" + encodeURIComponent(current.version),
+        {title: title.value, description: description.value}, "Benchmark details saved").then(function (data) {
+        if (!benchNavStale(nav)) {
+          refreshConvs().then(function () { if (!benchNavStale(nav)) { showBenchmark(data.version.benchmark_id, data.version.version); } });
+        }
+      }).catch(function (e) { msg.textContent = e.message; });
+      return;
+    }
     apiPost("/api/benchmark-setup", {benchmark_id: current && current.benchmark_id,
       expected_version: current && current.version, title: title.value, description: description.value, tasks: draftTasks
     }).then(function (data) {
@@ -1107,11 +1130,9 @@ function benchmarkExperimentTitle(row) {
   return { shortId: shortId, described: described || "" };
 }
 
-/* Newest-first puts the winner, often the oldest registration, at the bottom
-   of a long list, and an archived winner is hidden until the rail asks for
-   it. The callout names the pointer where the list starts. It is the same
-   fact the experiment page reports, including when nobody chose and the first
-   experiment still holds the contest. */
+/* Newest-first can put the winner at the bottom of a long list, and an
+   archived winner is hidden until the rail asks for it. The callout names this
+   version's winner where the list starts; with no winner it shows nothing. */
 function renderBenchmarkWinner(host, result, benchmarkId) {
   clear(host);
   var winnerId = result.winner_experiment_id;
@@ -1125,18 +1146,15 @@ function renderBenchmarkWinner(host, result, benchmarkId) {
   var content = el("div");
   var badges = el("div", "diffToolbar");
   badges.appendChild(el("span", "pill ok", "Winner"));
-  if (result.winner_automatic) {
-    badges.appendChild(el("span", "pill", "automatic — first experiment"));
-  }
   content.appendChild(badges);
   var title = row ? benchmarkExperimentTitle(row) : { shortId: winnerId, described: "" };
   content.appendChild(el("strong", null, title.shortId));
   if (title.described) { content.appendChild(el("p", null, title.described)); }
-  var note = "This workflow's current answer for the benchmark.";
+  var note = "This workflow's current answer for this benchmark version.";
   if (hidden) {
     note += " It is archived, so the list hides it until archived experiments are shown.";
   } else if (!row) {
-    note = "Recorded as the winner, but it is not in this benchmark's experiment list.";
+    note = "Recorded as the winner, but it is not in this version's experiment list.";
   }
   content.appendChild(el("p", null, note));
   if (row) {
@@ -1168,15 +1186,22 @@ function showBenchmark(benchmarkId, selectedVersion) {
         versions.forEach(function (v) { var opt = el("option", null, v); opt.value = v; select.appendChild(opt); }); select.value = version;
         select.addEventListener("change", function () { showBenchmark(benchmarkId, select.value); }); actions.appendChild(select);
       }
-      var edit = el("button", null, "Edit benchmark"); edit.disabled = version !== versions[versions.length - 1];
-      edit.title = edit.disabled ? "Select the latest version to edit" : "Save changes as a new version";
-      edit.addEventListener("click", function () { editBenchmark(manifest); }); actions.appendChild(edit);
+      var latest = version === versions[versions.length - 1], edit = el("button", null, "Edit benchmark");
+      edit.title = !latest ? "Edit the title and " + version + "'s description; its tasks are frozen" : manifest.tasks.length ? "Edit the title and description, or change tasks to save a new version" : "Add tasks to this version";
+      edit.addEventListener("click", function () { editBenchmark(manifest, !latest); }); actions.appendChild(edit);
       var strip = el("div", "summaryStrip");
       [[manifest.tasks.length, "Tasks in this version"], [version, "Selected version"], [versions.length, "Published versions"]].forEach(function (item) {
         var stat = el("div"); stat.appendChild(el("strong", null, item[0])); stat.appendChild(el("span", null, item[1])); strip.appendChild(stat);
       }); d.appendChild(strip);
-      var experimentsHead = sectionHeader(d, "Experiments"), experimentList = el("div", "recordGrid"), msg = el("p", "err fieldError"); msg.setAttribute("role", "alert");
+      /* A version picked explicitly (its rail row, the picker, a card's crumb)
+         is the selected row; opening the benchmark itself keeps the benchmark
+         row selected while showing its latest version. */
+      if (selectedVersion) {
+        focusHierarchy(function (n) { return n.kind === "benchmark_version" && n.benchmark_id === benchmarkId && n.benchmark_version === version; });
+      }
+      var experimentsHead = sectionHeader(d, "Experiments on " + version), experimentList = el("div", "recordGrid"), msg = el("p", "err fieldError"); msg.setAttribute("role", "alert");
       var create = el("button", "primary", "New experiment");
+      if (!manifest.tasks.length) { create.disabled = true; create.title = "Add tasks to this benchmark first"; }
       create.addEventListener("click", function () {
         apiPost("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/experiments", {version: version}).then(function (result) {
           if (!benchNavStale(nav)) {
@@ -1189,7 +1214,7 @@ function showBenchmark(benchmarkId, selectedVersion) {
       d.appendChild(winnerHost);
       d.appendChild(experimentList);
       experimentList.appendChild(el("div", "empty", "Loading experiments…"));
-      api("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/experiments").then(function (result) {
+      api("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/versions/" + encodeURIComponent(version) + "/experiments").then(function (result) {
         if (benchNavStale(nav)) { return; }
         clear(experimentList);
         renderBenchmarkWinner(winnerHost, result, benchmarkId);
@@ -1202,9 +1227,9 @@ function showBenchmark(benchmarkId, selectedVersion) {
            so; repeating it over the cards told the reader nothing new. */
         if (!experiments.length) {
           if (archivedCount) {
-            emptyState(experimentList, "Archived experiments are hidden", "Use Show all experiments beside this benchmark in the left rail to include them.");
+            emptyState(experimentList, "Archived experiments are hidden", "Use Show all experiments beside this version in the left rail to include them.");
           } else {
-            emptyState(experimentList, "Ready for your first experiment", "Create an experiment to reserve the task IDs for a run. Your runner records the results here.");
+            emptyState(experimentList, "No experiments on this version yet", "Create an experiment to reserve this version's task IDs for a run. Your runner records the results here.");
           }
         }
         experiments.forEach(function (row, index) {
@@ -1221,26 +1246,19 @@ function showBenchmark(benchmarkId, selectedVersion) {
           var described = recordedNode ? recordedNode.label : row.description;
           b.appendChild(el("strong", null, "Experiment " + (index + 1)));
           if (described) { b.appendChild(el("span", "sub", described)); }
-          b.appendChild(el("span", "sub", recordedPath || !row.registered ? "Execution recorded" : row.store ? "Execution registered" : "Not yet run"));
+          if (row.conformance) {
+            var verdict = el("span", "marks");
+            conformancePills(verdict, row.conformance);
+            b.appendChild(verdict);
+          } else {
+            b.appendChild(el("span", "sub", recordedPath || !row.registered ? "Execution recorded" : row.store ? "Execution registered" : "Not yet run"));
+          }
           b.appendChild(el("span", "recordId", row.experiment_id));
           b.addEventListener("click", function () { openBenchmarkRecord(row); }); experimentList.appendChild(b);
         });
       }).catch(function (e) { if (!benchNavStale(nav)) { experimentList.appendChild(el("p", "err", e.message)); } });
       sectionHeader(d, "Tasks", manifest.tasks.length);
       manifest.tasks.forEach(function (task, index) { taskPreview(d, task, index); });
-      var analysis = el("details", "card"); analysis.appendChild(el("summary", null, "Analysis (optional)")); d.appendChild(analysis);
-      analysis.addEventListener("toggle", function () {
-        if (!analysis.open || analysis.dataset.loaded) { return; } analysis.dataset.loaded = "1";
-        api("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/analysis").then(function (value) {
-          if (benchNavStale(nav)) { return; }
-          var area = benchmarkText(analysis, "Analysis", analysisText(value.analysis), true);
-          var save = el("button", null, "Save analysis"), note = el("p", "err fieldError");
-          save.addEventListener("click", function () {
-            apiPut("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/analysis", {analysis: area.value})
-              .then(function () { note.textContent = ""; }).catch(function (e) { note.textContent = e.message; });
-          }); analysis.appendChild(save); analysis.appendChild(note);
-        }).catch(function (e) { analysis.dataset.loaded = ""; analysis.appendChild(el("p", "err", e.message)); });
-      });
     });
   }).catch(function (e) { if (!benchNavStale(nav)) { clear(d); d.appendChild(el("p", "err fieldError", e.message)); } });
 }
@@ -1320,9 +1338,9 @@ function showBenchmarkExperiment(id) {
       note.appendChild(saveNote); note.appendChild(noteMsg);
     }
     d.appendChild(note);
-    /* The contest this registration is in, on the page that exists before the
-       run does: the first experiment of a contest holds it from creation, so
-       this page has a winner to show even though nothing has executed. */
+    /* The winner of this registration's benchmark version, on the page that
+       exists before the run does: an experiment can be made the winner before
+       it has executed. */
     renderWinnerPanel(d, id, function () { showBenchmarkExperiment(id); });
     renderRepeatSetup(d, row, nav);
     var identity = el("div", "card"), idActions = sectionHeader(identity, "Runner handoff");

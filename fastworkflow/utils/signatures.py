@@ -5,6 +5,7 @@ import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_ut
 import dspy
 import os
 from contextlib import suppress
+from dataclasses import dataclass, field as dataclass_field
 from typing import Optional, Tuple, Union, Dict, Any, Type, List, get_args, get_origin
 from enum import Enum
 from datetime import date
@@ -34,6 +35,452 @@ LITELLM_API_KEY_PARAM_EXTRACTION = None
 
 INVALID_INT_VALUE = -sys.maxsize
 INVALID_FLOAT_VALUE = -sys.float_info.max
+
+
+# --- Angle-bracketed parameter values ------------------------------------------
+#
+# A command's usage text writes arguments as ``<field_name>``, and an agent copies
+# that shape: sometimes around a real value it read from an earlier output
+# (``<9a1b2c3d...>``), sometimes with no value at all (``<item_uid>``). The first
+# is the right value in the wrong wrapper and is unwrapped; the second is a
+# placeholder the agent never filled in, and running the command with it would
+# only produce a not-found or an empty result that reads like an answer.
+
+# The whole value is one bracketed token, possibly doubled (``<<x>>``). A value
+# with brackets inside it, or text outside them, is left alone.
+_BRACKETED_VALUE = re.compile(r"^\s*<+\s*([^<>]*?)\s*>+\s*$")
+
+# Lowercase words joined by ``_`` or ``-``, no digits: the shape of a variable
+# name, which is what a usage-text placeholder is.
+_IDENTIFIER_SHAPE = re.compile(r"[a-z]+(?:[_\-][a-z]+)*")
+
+# Words a placeholder is made of when it does not repeat the field's own name.
+_PLACEHOLDER_WORDS = frozenset({
+    "uid", "uuid", "id", "ids", "key", "code", "value", "values", "name",
+    "placeholder", "param", "parameter", "arg", "argument",
+})
+
+
+def _is_placeholder_text(inner: str, field_name: str) -> bool:
+    """Whether *inner* (the text between the brackets) names a value instead of
+    being one.
+
+    Placeholder: empty, punctuation only, or variable-name shaped (lowercase
+    words, no digits, all one case) and either snake_case or made of the field's
+    own words / generic placeholder words: ``repo_uid``, ``uid``,
+    ``first_order_uid``, ``&_catalog_uid_``, ``filter`` for a ``filter``
+    field. Anything carrying a digit, a space, or mixed case is a value:
+    ``9a1b2c3d...``, ``Ann Lee``, ``PayHub``.
+    """
+    core = re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9]+$", "", inner)
+    if not core:
+        return True
+    if not (core.islower() or core.isupper()):
+        return False
+    lowered = core.lower()
+    if not _IDENTIFIER_SHAPE.fullmatch(lowered):
+        return False
+    if "_" in lowered:
+        return True
+    words = set(re.split(r"[_\-]", lowered))
+    field_words = set(field_name.lower().split("_"))
+    return bool(words & (field_words | _PLACEHOLDER_WORDS))
+
+
+def classify_bracketed_value(value: Any, field_name: str) -> Tuple[str, Any]:
+    """Classify one parameter value for angle brackets around it.
+
+    Returns ``("unchanged", value)``, ``("unwrapped", inner_value)`` for a real
+    value inside brackets, or ``("placeholder", value)`` for bracketed text that
+    holds no value. Only strings are inspected; a list is checked item by item
+    and is a placeholder if any item is.
+    """
+    if isinstance(value, list):
+        changed = False
+        items = []
+        for item in value:
+            kind, new_item = classify_bracketed_value(item, field_name)
+            if kind == "placeholder":
+                return "placeholder", value
+            changed = changed or kind == "unwrapped"
+            items.append(new_item)
+        return ("unwrapped", items) if changed else ("unchanged", value)
+    if not isinstance(value, str) or isinstance(value, Enum):
+        return "unchanged", value
+    match = _BRACKETED_VALUE.match(value)
+    if not match:
+        return "unchanged", value
+    inner = match[1]
+    if _is_placeholder_text(inner, field_name):
+        return "placeholder", value
+    return "unwrapped", inner
+
+
+def placeholder_value_message(field_name: str, field_value: Any) -> str:
+    """What the caller is told when *field_name* was given a placeholder."""
+    return (
+        f"{field_name} {field_value!r} is a placeholder, not a value: pass the real "
+        f"{field_name} copied from an earlier command's output (run the command "
+        f"that lists it first if no output has shown it yet)."
+    )
+
+
+# --- Quoted parameter values -----------------------------------------------------
+#
+# A request often sets a value off in quotes (filter by "Ann Lee"), and an
+# extractor sometimes keeps them: the command then searches for the nine
+# characters ``"Ann Lee"`` and finds nothing, which reads like an answer. A value
+# that is wholly one matching quote pair is unwrapped to the text inside it. It
+# is kept when the request itself writes the quotes as part of a quoted value
+# (the quoted text appears in the request right next to another quote mark,
+# as in ``'"Ann Lee"'``), or when the inner text holds the same quote mark,
+# where the outer pair may not be a pair at all (``"a" or "b"``).
+
+_QUOTE_PAIRS = (
+    ('"', '"'), ("'", "'"), ("`", "`"),
+    ("“", "”"), ("‘", "’"), ("„", "“"),
+    ("«", "»"),
+)
+_QUOTE_CHARS = frozenset(ch for pair in _QUOTE_PAIRS for ch in pair)
+
+
+def _request_writes_quotes(quoted: str, request_text: Optional[str]) -> bool:
+    """Whether *request_text* writes *quoted* (quotes included) inside quotes."""
+    if not request_text:
+        return False
+    start = request_text.find(quoted)
+    while start != -1:
+        end = start + len(quoted)
+        before = request_text[start - 1] if start > 0 else ""
+        after = request_text[end] if end < len(request_text) else ""
+        if before in _QUOTE_CHARS or after in _QUOTE_CHARS:
+            return True
+        start = request_text.find(quoted, start + 1)
+    return False
+
+
+def unwrap_quoted_value(value: Any, request_text: Optional[str] = None) -> Tuple[bool, Any]:
+    """Strip quote pairs wrapped around a whole str value.
+
+    Returns ``(changed, value)``. Straight, typographic, guillemet and backtick
+    pairs are recognised, nested pairs are removed one layer at a time, and
+    surrounding whitespace goes with them. A list is unwrapped item by item.
+    Non-str values come back unchanged. *request_text*, when given, is the text
+    the value was taken from; a layer the request itself writes inside quotes is
+    kept (see the comment above).
+    """
+    if isinstance(value, list):
+        changed = False
+        items = []
+        for item in value:
+            item_changed, new_item = unwrap_quoted_value(item, request_text)
+            changed = changed or item_changed
+            items.append(new_item)
+        return (True, items) if changed else (False, value)
+    if not isinstance(value, str) or isinstance(value, Enum):
+        return False, value
+    current = value.strip()
+    unwrapped = False
+    while len(current) >= 2:
+        pair = next(
+            ((left, right) for left, right in _QUOTE_PAIRS
+             if current[0] == left and current[-1] == right),
+            None,
+        )
+        if pair is None:
+            break
+        inner = current[1:-1]
+        if not inner.strip() or pair[0] in inner or pair[1] in inner:
+            break
+        if _request_writes_quotes(current, request_text):
+            break
+        current = inner.strip()
+        unwrapped = True
+    return (True, current) if unwrapped else (False, value)
+
+
+# --- Placeholder-shaped values the request never writes -----------------------------
+#
+# Without brackets a placeholder still has a recognisable shape: a qualifier
+# word plus the field's own name (``desired-tag``, ``your_uid``, ``new-name``),
+# or nothing but the field's name / generic placeholder words (``uid`` for an
+# ``item_uid`` field). Such a value is a placeholder only if the request does
+# not write it: a request that says "add the tag new-name" means it.
+
+_PLACEHOLDER_QUALIFIERS = frozenset({
+    "desired", "your", "my", "new", "some", "example", "sample", "placeholder",
+    "target", "actual", "real", "specific", "chosen", "selected", "appropriate",
+    "relevant", "correct", "given", "the", "a", "an", "any",
+})
+
+
+def is_ungrounded_placeholder(value: Any, field_name: str,
+                              request_text: Optional[str]) -> bool:
+    """Whether str *value* is placeholder-shaped and *request_text* never writes it.
+
+    Placeholder-shaped: lowercase words joined by ``-`` or ``_`` (no digits, no
+    spaces), and either a qualifier word followed by words that include one of
+    the field's own words or a generic placeholder word (``desired-tag`` for
+    ``tag``, ``your_item_uid`` for ``item_uid``), or made only of such words
+    (``uid`` for ``item_uid``). The request is searched case-insensitively for
+    the value as written. With no request text there is nothing to ground
+    against and the value is left alone. A list is a placeholder if any item is.
+    """
+    if isinstance(value, list):
+        return any(is_ungrounded_placeholder(v, field_name, request_text) for v in value)
+    if not isinstance(value, str) or isinstance(value, Enum) or not request_text:
+        return False
+    text = value.strip()
+    if not text or not _IDENTIFIER_SHAPE.fullmatch(text):
+        return False
+    if text.lower() in request_text.lower():
+        return False
+    words = re.split(r"[_\-]", text)
+    known = set(field_name.lower().split("_")) | _PLACEHOLDER_WORDS
+    if len(words) >= 2 and words[0] in _PLACEHOLDER_QUALIFIERS:
+        return bool(set(words[1:]) & known)
+    return set(words) <= known
+
+
+# --- Numbers out of any sane range ---------------------------------------------------
+#
+# The extractor's own "not given" marker for an int is ``INVALID_INT_VALUE``
+# (``-sys.maxsize``), and the signature tells the model to return it for an
+# optional int the request does not mention. For a field that has a default (or
+# is Optional) that marker used to reach the command as the value; it is now
+# replaced by the field's default. A value of the same kind the model makes up
+# (int32/int64 limits, anything beyond 2**53, a non-finite float) is treated the
+# same way: absent when the field can be absent, a parameter error otherwise.
+#
+# Declared bounds (``Field(ge=..., gt=..., le=..., lt=...)``) are enforced, since
+# the parameters are built with ``model_construct`` and pydantic never checks
+# them. A field with no declared lower bound whose name says it is a position,
+# a count or a size (``start``, ``offset``, ``limit``, ``page_size``...) may not
+# be negative; a field that does take negative values declares ``ge=``.
+
+_SENTINEL_INT_MAGNITUDES = frozenset({2**31 - 1, 2**31, 2**32 - 1, 2**63 - 1, 2**63, 2**64 - 1})
+_SAFE_INT_MAGNITUDE = 2**53
+_NON_NEGATIVE_NAME_WORDS = frozenset({
+    "start", "skip", "offset", "limit", "count", "page", "size",
+})
+_INT_TEXT = re.compile(r"^\s*[+-]?\d+\s*$")
+
+
+def _numeric_kind(annotation: Any) -> Optional[Type[Any]]:
+    """``int`` or ``float`` when the field is a plain (optional) number, else None."""
+    candidates = [annotation]
+    if get_origin(annotation) is Union:
+        candidates = [t for t in get_args(annotation) if t is not type(None)]
+    if int in candidates and bool not in candidates:
+        return int
+    if float in candidates:
+        return float
+    return None
+
+
+def _numeric_view(value: Any, kind: Type[Any]) -> Optional[Union[int, float]]:
+    """*value* as a number of *kind*, or None if it is not one."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if kind is int and _INT_TEXT.match(text):
+            return int(text)
+        if kind is float:
+            with suppress(ValueError):
+                return float(text)
+    return None
+
+
+def is_sentinel_number(value: Union[int, float]) -> bool:
+    """Whether *value* is a marker or a made-up extreme rather than a real number."""
+    if isinstance(value, float):
+        return value != value or value in (float("inf"), float("-inf")) or value == INVALID_FLOAT_VALUE
+    return abs(value) in _SENTINEL_INT_MAGNITUDES or abs(value) > _SAFE_INT_MAGNITUDE
+
+
+def _declared_bounds(field_info: Any) -> Dict[str, Any]:
+    bounds: Dict[str, Any] = {}
+    for meta in getattr(field_info, "metadata", []) or []:
+        for name in ("ge", "gt", "le", "lt"):
+            bound = getattr(meta, name, None)
+            if bound is not None:
+                bounds[name] = bound
+    return bounds
+
+
+def numeric_range_problem(field_name: str, field_info: Any,
+                          value: Union[int, float]) -> Optional[str]:
+    """Why *value* is out of range for the field, or None if it is in range."""
+    bounds = _declared_bounds(field_info)
+    if "ge" in bounds and value < bounds["ge"]:
+        return f"must be at least {bounds['ge']}"
+    if "gt" in bounds and value <= bounds["gt"]:
+        return f"must be greater than {bounds['gt']}"
+    if "le" in bounds and value > bounds["le"]:
+        return f"must be at most {bounds['le']}"
+    if "lt" in bounds and value >= bounds["lt"]:
+        return f"must be less than {bounds['lt']}"
+    if (
+        value < 0
+        and "ge" not in bounds and "gt" not in bounds
+        and set(field_name.lower().split("_")) & _NON_NEGATIVE_NAME_WORDS
+    ):
+        return "must not be negative"
+    return None
+
+
+def out_of_range_value_message(field_name: str, field_value: Any, problem: str) -> str:
+    """What the caller is told when *field_name* was given an out-of-range number."""
+    return (
+        f"{field_name} {field_value} is out of range ({problem}): pass the number "
+        f"the request asks for, or leave {field_name} out if it does not give one."
+    )
+
+
+# --- "Not given" text in an Optional str ---------------------------------------------
+#
+# The extraction signature tells the model to answer ``NOT_FOUND`` (or ``None``, the
+# displayed default of an Optional field) for a value the request does not give.
+# For a required field ``NOT_FOUND`` means "ask the user", and that stays. For an
+# ``Optional[str]`` field the text used to reach the command as the value, while
+# the key=value and XML paths give the field's default; it is now replaced by the
+# default, as the "not given" int marker is (fix-3t6p, the str analogue of fix-7t0q).
+
+def is_optional_str_field(field_info: Any) -> bool:
+    """Whether the field is ``Optional[str]`` (``str`` and ``None`` only)."""
+    args = get_args(field_info.annotation)
+    return type(None) in args and [t for t in args if t is not type(None)] == [str]
+
+
+def default_unfilled_optional_strs(cmd_parameters: BaseModel, not_found: Optional[str]) -> List[str]:
+    """Give each ``Optional[str]`` field holding ``not_found`` or ``"None"`` its default.
+
+    Returns the names of the fields changed. The default is the field's declared one
+    (a factory is called), or None when it declares none. Required fields are left
+    alone, so a missing one is still reported and asked for.
+    """
+    markers = {"None"} | ({not_found} if not_found else set())
+    changed: List[str] = []
+    for field_name, field_info in type(cmd_parameters).model_fields.items():
+        value = getattr(cmd_parameters, field_name, None)
+        if not isinstance(value, str) or isinstance(value, Enum) or value.strip() not in markers:
+            continue
+        if not is_optional_str_field(field_info):
+            continue
+        default = field_info.get_default(call_default_factory=True)
+        setattr(cmd_parameters, field_name, None if default is PydanticUndefined else default)
+        changed.append(field_name)
+    return changed
+
+
+# --- One pass over a call's values, shared by commands and skill calls -----------------
+
+
+@dataclass
+class ParameterScreen:
+    """What ``screen_parameter_values`` found and changed, per field name.
+
+    ``invalid_fields`` lists ``"<field> '<value>'"`` for each refused field, in field
+    order; a refused field is a placeholder or an out-of-range number. The other dicts map
+    a field to the value it had before the change (``defaulted_fields``: a made-up number
+    replaced by the field's default; the framework's own "not given" marker is replaced
+    without being recorded).
+    """
+
+    placeholder_fields: Dict[str, Any] = dataclass_field(default_factory=dict)
+    unwrapped_fields: Dict[str, Any] = dataclass_field(default_factory=dict)
+    quoted_fields: Dict[str, Any] = dataclass_field(default_factory=dict)
+    defaulted_fields: Dict[str, Any] = dataclass_field(default_factory=dict)
+    out_of_range_fields: Dict[str, Any] = dataclass_field(default_factory=dict)
+    out_of_range_problems: Dict[str, str] = dataclass_field(default_factory=dict)
+    invalid_fields: List[str] = dataclass_field(default_factory=list)
+
+    @property
+    def refused_fields(self) -> Dict[str, Any]:
+        return {**self.placeholder_fields, **self.out_of_range_fields}
+
+
+def screen_parameter_values(cmd_parameters: BaseModel, quote_texts: Optional[str],
+                            grounding_text: Optional[str],
+                            field_names: Optional[Any] = None) -> ParameterScreen:
+    """Check each value of *cmd_parameters* for wrappers, placeholders and made-up numbers.
+
+    Writes the corrected values back onto *cmd_parameters*: a quote pair around a whole
+    str value is removed (``unwrap_quoted_value``; *quote_texts* is the text the value was
+    taken from), a real value inside angle brackets is unwrapped, and a sentinel or made-up
+    number (``is_sentinel_number``) becomes the field's default when it has one. A
+    bracketed placeholder, a placeholder-shaped value *grounding_text* does not write
+    (``is_ungrounded_placeholder``) and a number out of its declared or implied range are
+    refused (left in place, listed in ``invalid_fields``). A required number holding the
+    "not given" marker is left as it is, for the caller to report as missing.
+
+    *field_names*, when given, limits the pass to those fields. ``validate_parameters``
+    runs this before any other check of a command's parameters; a skill call runs it on its
+    ``str`` and ``int`` arguments (``fastworkflow.skill_commands.check_arguments``).
+    """
+    screen = ParameterScreen()
+    placeholder_fields = screen.placeholder_fields
+    unwrapped_fields = screen.unwrapped_fields
+    quoted_fields = screen.quoted_fields
+    defaulted_fields = screen.defaulted_fields
+    out_of_range_fields = screen.out_of_range_fields
+    out_of_range_problems = screen.out_of_range_problems
+    invalid_fields = screen.invalid_fields
+    for field_name, field_info in type(cmd_parameters).model_fields.items():
+        if field_names is not None and field_name not in field_names:
+            continue
+        field_value = getattr(cmd_parameters, field_name, None)
+        original_value = field_value
+
+        quoted, field_value = unwrap_quoted_value(field_value, quote_texts)
+        kind, new_value = classify_bracketed_value(field_value, field_name)
+        if kind == "unwrapped":
+            unwrapped_fields[field_name] = original_value
+            inner_quoted, new_value = unwrap_quoted_value(new_value, quote_texts)
+            quoted = quoted or inner_quoted
+            field_value = new_value
+        if quoted:
+            quoted_fields[field_name] = original_value
+        if field_value is not original_value:
+            setattr(cmd_parameters, field_name, field_value)
+        if kind == "placeholder" or (
+            kind == "unchanged"
+            and is_ungrounded_placeholder(field_value, field_name, grounding_text)
+        ):
+            placeholder_fields[field_name] = field_value
+            invalid_fields.append(f"{field_name} '{field_value}'")
+            continue
+
+        numeric_kind = _numeric_kind(field_info.annotation)
+        number = _numeric_view(field_value, numeric_kind) if numeric_kind else None
+        if number is None:
+            continue
+        if is_sentinel_number(number):
+            is_optional_field = type(None) in get_args(field_info.annotation)
+            default = field_info.get_default(call_default_factory=True)
+            if default is PydanticUndefined and is_optional_field:
+                default = None
+            if default is not PydanticUndefined:
+                setattr(cmd_parameters, field_name, default)
+                # The framework's own "not given" marker is routine; only a
+                # number the model made up is worth recording.
+                if number not in (INVALID_INT_VALUE, INVALID_FLOAT_VALUE):
+                    defaulted_fields[field_name] = original_value
+                continue
+            if number in (INVALID_INT_VALUE, INVALID_FLOAT_VALUE):
+                continue  # a required field not given: the caller reports it missing
+            problem = "not a real value"
+        else:
+            problem = numeric_range_problem(field_name, field_info, number)
+            if problem is None:
+                continue
+        out_of_range_fields[field_name] = field_value
+        out_of_range_problems[field_name] = problem
+        invalid_fields.append(f"{field_name} '{field_value}'")
+    return screen
 
 
 def get_trainset(subject_command_name,workflow_folderpath) -> List[Dict[str, Any]]:
@@ -380,7 +827,52 @@ Today's date is {today}.
         invalid_fields = []
         all_suggestions = {}
 
+        # Wrappers and placeholders first, before type coercion, patterns,
+        # db_lookup and the workflow's hook see the value: every extraction
+        # method (stored merge, XML regex, LLM) and the direct-action path reach
+        # the command through here, so this is where a copied usage-text
+        # wrapper, kept quotes, a placeholder or a made-up number is caught.
+        context = getattr(app_workflow, "context", None) or {}
+        user_request = context.get("raw_user_message") if isinstance(context, dict) else None
+        # A value the agent wrote is always in its own command text, so in agent
+        # mode a placeholder is grounded against the user's request instead.
+        grounding_text = (
+            user_request
+            if user_request and isinstance(context, dict) and context.get("run_as_agent")
+            else self.command
+        )
+        quote_texts = " \n ".join(t for t in (self.command, user_request) if t)
+
+        default_unfilled_optional_strs(cmd_parameters, NOT_FOUND)
+        screen = screen_parameter_values(cmd_parameters, quote_texts, grounding_text)
+        placeholder_fields = screen.placeholder_fields
+        unwrapped_fields = screen.unwrapped_fields
+        quoted_fields = screen.quoted_fields
+        defaulted_fields = screen.defaulted_fields
+        out_of_range_fields = screen.out_of_range_fields
+        out_of_range_problems = screen.out_of_range_problems
+        if screen.invalid_fields:
+            invalid_fields.extend(screen.invalid_fields)
+            is_valid = False
+
+        refused_fields = screen.refused_fields
+        if diagnostics is not None:
+            def _as_text(fields: Dict[str, Any]) -> Dict[str, str]:
+                return {name: str(value) for name, value in fields.items()}
+            if unwrapped_fields:
+                diagnostics["unwrapped_bracketed_values"] = _as_text(unwrapped_fields)
+            if quoted_fields:
+                diagnostics["unwrapped_quoted_values"] = _as_text(quoted_fields)
+            if placeholder_fields:
+                diagnostics["placeholder_values"] = _as_text(placeholder_fields)
+            if defaulted_fields:
+                diagnostics["defaulted_sentinel_values"] = _as_text(defaulted_fields)
+            if out_of_range_fields:
+                diagnostics["out_of_range_values"] = _as_text(out_of_range_fields)
+
         for field_name, field_info in type(cmd_parameters).model_fields.items():
+                if field_name in refused_fields:
+                    continue
                 field_value = getattr(cmd_parameters, field_name, None)
 
                 if field_value not in [NOT_FOUND, None, INVALID_INT_VALUE, INVALID_FLOAT_VALUE]:
@@ -663,7 +1155,7 @@ Today's date is {today}.
         for field_name, field_info in type(cmd_parameters).model_fields.items():
             field_value = getattr(cmd_parameters, field_name, None)
 
-            if field_value in [NOT_FOUND, None]:
+            if field_value in [NOT_FOUND, None] or field_name in refused_fields:
                 continue
 
             is_db_lookup = None
@@ -727,7 +1219,11 @@ Today's date is {today}.
                     if "command_text" in inspect.signature(hook).parameters
                     else {}
                 )
-                is_valid, message = hook(app_workflow, subject_command_name, cmd_parameters, **hook_kwargs)
+                try:
+                    is_valid, message = hook(app_workflow, subject_command_name, cmd_parameters,
+                                             **hook_kwargs)
+                except fastworkflow.Refused as refusal:
+                    is_valid, message = False, str(refusal)
                 if diagnostics is not None:
                     diagnostics["validation_hook"] = {
                         "ran": True,
@@ -772,6 +1268,12 @@ Today's date is {today}.
 
         if invalid_fields:
             message += f"{INVALID_INFORMATION_ERRMSG}" + ", ".join(invalid_fields) + "\n"
+
+        for field, value in placeholder_fields.items():
+            message += placeholder_value_message(field, value) + "\n"
+
+        for field, value in out_of_range_fields.items():
+            message += out_of_range_value_message(field, value, out_of_range_problems[field]) + "\n"
 
         for field, suggestions in all_suggestions.items():
             if suggestions:

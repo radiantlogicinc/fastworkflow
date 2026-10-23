@@ -13,6 +13,15 @@ from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.command_directory import CommandDirectory
 
 
+def call_response_generator(response_generator, *args):
+    """``response_generator(*args)``; a ``fastworkflow.Refused`` it raises is its answer:
+    a failed CommandOutput with the refusal's message."""
+    try:
+        return response_generator(*args)
+    except fastworkflow.Refused as refusal:
+        return refusal.as_output()
+
+
 # ------------------------------------------------------------------
 # Module-level delegation configuration and exceptions
 # ------------------------------------------------------------------
@@ -294,9 +303,9 @@ class CommandExecutor(CommandExecutorInterface):
                     command_name, ModuleType.COMMAND_PARAMETERS_CLASS
                 )
             ):
-                command_output = response_generation_object(workflow, raw_user_message, input_obj)
+                command_output = call_response_generator(response_generation_object, workflow, raw_user_message, input_obj)
             else:
-                command_output = response_generation_object(workflow, raw_user_message)
+                command_output = call_response_generator(response_generation_object, workflow, raw_user_message)
         except BaseException as exc:
             # Routing resolved this identity above; the assignments that would
             # publish it onto the CommandOutput sit below the raise, so on
@@ -365,7 +374,7 @@ class CommandExecutor(CommandExecutorInterface):
         if not command_parameters_class:
             try:
                 with tracing.call_scope(call_id, command_name=action.command_name):
-                    command_output = response_generation_object(workflow, action.command)
+                    command_output = call_response_generator(response_generation_object, workflow, action.command)
             except BaseException as exc:
                 # Same seam as `_invoke_command_impl`, for the entry point the
                 # other one never reaches: perform_action is the direct-action,
@@ -419,7 +428,7 @@ class CommandExecutor(CommandExecutorInterface):
 
         try:
             with tracing.call_scope(call_id, command_name=action.command_name):
-                command_output = response_generation_object(workflow, action.command, input_obj)
+                command_output = call_response_generator(response_generation_object, workflow, action.command, input_obj)
         except BaseException as exc:
             # Same seam as `_invoke_command_impl`, for the entry point the
             # other one never reaches: perform_action is the direct-action,

@@ -57,8 +57,64 @@ function experimentAncestorCrumbs(experimentId, exp) {
   var branch = findHierarchy(function (n) { return n.kind === "benchmark" && (n.benchmark_id || null) === benchmarkId; });
   if (branch) { crumbs.push(hierarchyCrumb(branch)); }
   else if (benchmarkId) { crumbs.push({ label: benchmarkId, onClick: function () { showBenchmark(benchmarkId); } }); }
-  else { crumbs.push({ label: "Experiments without a benchmark" }); }
   return crumbs;
+}
+
+/* A missing run is "incomplete", not "invalid" (`fix-mgoi`): the store closes
+   an experiment whose declared attempts did not all run as `invalid` with
+   reason `attempt_shortfall` (or `never_completed`), and that reads as though
+   the runs that did happen were wrong. */
+var EXP_SHORTFALL_REASONS = { attempt_shortfall: true, never_completed: true };
+function expDisplayStatus(exp) {
+  return exp.status === "invalid" && EXP_SHORTFALL_REASONS[exp.invalid_reason]
+    ? "incomplete" : exp.status;
+}
+
+/* complete | incomplete and valid | invalid, against the pinned benchmark
+   version: did every benchmark task get its runs, and did every run send the
+   task's saved prompt. An experiment driven by a user simulator is not
+   checked for prompts and reads simulated_user instead (fix-va9v). */
+function conformancePills(container, conformance) {
+  if (!conformance) { return; }
+  var complete = conformance.completeness === "complete";
+  var validityClass = conformance.validity === "valid" ? "pill ok"
+    : (conformance.validity === "invalid" ? "pill err" : "pill");
+  container.appendChild(el("span", complete ? "pill ok" : "pill wait", conformance.completeness));
+  container.appendChild(el("span", validityClass, conformance.validity));
+  container.appendChild(el("span", "pill",
+    conformance.tasks_fully_run + " of " + conformance.benchmark_tasks + " tasks"));
+}
+
+function conformanceDetail(container, conformance) {
+  if (!conformance) { return; }
+  if (conformance.validity === "invalid") {
+    var bad = el("div", "expInvalid");
+    bad.appendChild(el("strong", null,
+      "INVALID: " + conformance.prompt_mismatch_count
+      + " run(s) did not send their benchmark task's prompt."));
+    (conformance.prompt_mismatches || []).forEach(function (m) {
+      bad.appendChild(el("div", "sub", m.task_id + " #" + m.attempt
+        + " sent \u201c" + m.sent + "\u201d instead of \u201c" + m.expected + "\u201d"));
+    });
+    container.appendChild(bad);
+  }
+  if (conformance.completeness === "incomplete") {
+    var short = el("div", "nonComparable");
+    short.appendChild(el("strong", null,
+      "INCOMPLETE: " + conformance.short_tasks.length + " of "
+      + conformance.benchmark_tasks + " benchmark task(s) are missing runs."));
+    conformance.short_tasks.slice(0, 20).forEach(function (t) {
+      short.appendChild(el("div", "sub", t.task_id + ": " + t.runs + " of " + t.declared + " run(s)"));
+    });
+    container.appendChild(short);
+  }
+  if (conformance.validity === "simulated_user") {
+    container.appendChild(el("div", "sub", "A user simulator drove these runs, "
+      + "so their messages were not checked against the benchmark tasks' prompts."));
+  } else if (conformance.tasks_without_prompt) {
+    container.appendChild(el("div", "sub", conformance.tasks_without_prompt
+      + " benchmark task(s) have no saved prompt, so their runs' prompts were not checked."));
+  }
 }
 
 function expStatusPill(status) {
@@ -119,6 +175,19 @@ function showExperiment(experimentId) {
       });
       actions.appendChild(archive);
     }
+    /* Sealing (fix-ajir.24) moves a complete experiment's evidence into one
+       read-only archive; this page reads it from there afterwards. */
+    if (!exp.sealed_archive && exp.benchmark_id
+        && (exp.status === "complete" || exp.status === "capture_complete")) {
+      var seal = el("button", "ghost", "Seal experiment");
+      seal.title = "Move this experiment's evidence into a read-only archive";
+      seal.addEventListener("click", function () {
+        sealExperiment(experimentId, seal).then(function (done) {
+          if (done && !expNavStale(nav)) { showExperiment(experimentId); }
+        }).catch(function () {});
+      });
+      actions.appendChild(seal);
+    }
     /* "Where did this run go wrong" is a question about recorded turns, so
        it opens the finder already scoped rather than a second search UI. */
     turnFindEntryButton(actions, { experiment: experimentId },
@@ -131,7 +200,8 @@ function showExperiment(experimentId) {
        gets quoted. */
     if (exp.status === "invalid") {
       var bad = el("div", "expInvalid");
-      bad.appendChild(el("strong", null, "This experiment is INVALID and carries no score."));
+      bad.appendChild(el("strong", null, "This experiment is "
+        + expDisplayStatus(exp).toUpperCase() + " and carries no score."));
       bad.appendChild(el("div", null,
         "Reason: " + (exp.invalid_reason || "unknown") + ". "
         + "Its attempts can no longer be counted against the denominator it "
@@ -142,10 +212,17 @@ function showExperiment(experimentId) {
     /* The evidence-run verdict beside the status, first: whether the turns
        this experiment rests on were all written is prior to any score. */
     var verdictLine = el("div", "diffToolbar");
-    verdictLine.appendChild(expStatusPill(exp.status));
+    verdictLine.appendChild(expStatusPill(expDisplayStatus(exp)));
+    conformancePills(verdictLine, exp.benchmark_conformance);
     verdictLine.appendChild(evidenceBadge(exp.evidence));
     if (exp.archived) { verdictLine.appendChild(el("span", "pill", "Archived")); }
+    if (exp.sealed_archive) {
+      var sealedPill = el("span", "pill", "Sealed");
+      sealedPill.title = "Read from " + exp.sealed_archive.path;
+      verdictLine.appendChild(sealedPill);
+    }
     card.appendChild(verdictLine);
+    conformanceDetail(card, exp.benchmark_conformance);
 
     if (exp.status !== "running") {
       var annotations = el("details", "card");
@@ -176,7 +253,13 @@ function showExperiment(experimentId) {
       kv.appendChild(el("dt", null, k));
       kv.appendChild(el("dd", null, v === null || v === undefined ? "—" : String(v)));
     }
-    pair("status", exp.status);
+    pair("status", expDisplayStatus(exp));
+    if (exp.benchmark_conformance) {
+      var bc = exp.benchmark_conformance;
+      pair("benchmark tasks run", bc.tasks_fully_run + " of " + bc.benchmark_tasks
+        + " (" + bc.completeness + ", " + bc.validity + ")");
+    }
+    pair("user simulator", exp.user_simulator ? "yes" : "no");
     pair("declared", exp.declared_tasks + " tasks × " + exp.declared_attempts + " attempts");
     pair("scored attempts", score.scored_attempts + " of " + score.expected_attempts);
     pair("pass@1", score.reportable ? score.pass_at_1.toFixed(3) : "not reportable");

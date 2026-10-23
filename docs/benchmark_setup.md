@@ -1,10 +1,14 @@
 # Benchmark setup
 
 Select a workflow in `run_chatbot`, then open **Benchmark setup** in the header.
-Create a benchmark with a title, an optional description, and tasks with optional
-prompts. Benchmark IDs, task IDs and versions are generated automatically. Saving
-edits creates the next immutable version, retaining IDs for existing tasks. An
-experiment keeps the exact benchmark version it was created against.
+Create a benchmark with a title, an optional description, and tasks. Rows left
+without a prompt are skipped on save. Benchmark IDs, task IDs and versions are
+generated automatically. Only a version's tasks are frozen: changing the tasks
+saves the next version (retaining IDs for existing tasks, and starting from the
+prior version's description), while the title (one per benchmark) and each
+version's own description can be edited at any time. A version with no tasks yet
+is updated in place until it has tasks, and cannot have experiments. An
+experiment keeps the exact tasks of the version it was created against.
 
 Open a benchmark to see its tasks and experiments across versions. **New
 experiment** returns a unique experiment ID for the displayed version. It does
@@ -18,9 +22,9 @@ claimed the registration; a harness started through
 Once the experiment is bound to an evidence store the description belongs to the
 recorded run and the page shows it read-only.
 Recorded experiments drill down through tasks, attempts and turns. Analysis is
-optional and collapsed by default. Historical runs without a benchmark pin
-remain in the ordinary Experiments/conversation views; they are not guessed into
-a benchmark by name.
+optional and collapsed by default. Every experiment pins a benchmark version;
+one without a pin is refused when it is created. Ad-hoc work is plain
+conversations, which need no experiment.
 
 For an in-process harness (after your normal runtime initialization):
 
@@ -53,7 +57,7 @@ labels, not substitutes for attempt bootstrap credentials or execution context
 binding. Supplying an experiment ID alone to a raw conversation call does not
 perform that lifecycle.
 
-Benchmark versions remain in `<workflow>/benchmarks/<id>/vN.json`. Experiment
+Benchmark versions are rows of `benchmark_versions` in the workflow's live evidence DB; that row is the only copy. Experiment
 registrations are rows of the workflow's live evidence DB
 (`experiment_registrations`); creating the first one creates that DB if nobody
 has chatted yet. Once a controller declares execution the registration is
@@ -117,8 +121,7 @@ The conversation stays highlighted in the left tree during deeper inspection.
 
 Conversations outside experiments appear under **ad-hoc conversations**, grouped
 by UTC date. A conversation spanning dates appears under each relevant date with
-only that date's turns. Experiments without a benchmark are kept under
-**Experiments without a benchmark**. Empty registered experiments remain visible.
+only that date's turns. Empty registered experiments remain visible.
 The tree preserves source identity, including when conversation IDs repeat in
 different evidence stores. Sidebar filters and the old Experiments/Benchmarks
 buttons have been removed. Use the header's Benchmark setup action to create a

@@ -31,7 +31,7 @@ import threading
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 from fastworkflow.observability import store as observability_store
 
@@ -132,6 +132,73 @@ def capture_record_for(text: str, *, mode: Optional[str] = None) -> tuple[str, d
     return stored, record
 
 
+def _jsonable(value: Any) -> Any:
+    """*value* as plain JSON data: a pydantic model dumped, anything else round-tripped."""
+    if value is None:
+        return None
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def _redact_leaves(value: Any, mode: Optional[str]) -> Any:
+    if isinstance(value, str):
+        return capture_record_for(value, mode=mode)[0]
+    if isinstance(value, list):
+        return [_redact_leaves(item, mode) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_leaves(item, mode) for key, item in value.items()}
+    return value
+
+
+def stored_json_for(value: Any, *, mode: Optional[str] = None) -> tuple[Optional[str], bool]:
+    """The JSON text to store for *value*, and whether redaction changed it.
+
+    The text goes through ``capture_record_for`` like evidence text. A scrub
+    that leaves the text unparseable (a secret value spanning JSON syntax) is
+    redone string by string, so what is stored is always valid JSON.
+    """
+    data = _jsonable(value)
+    if data is None:
+        return None, False
+    text = json.dumps(data, ensure_ascii=False, sort_keys=True)
+    stored, capture = capture_record_for(text, mode=mode)
+    try:
+        json.loads(stored)
+    except ValueError:
+        stored = json.dumps(_redact_leaves(data, mode), ensure_ascii=False, sort_keys=True)
+    return stored, bool(capture["redacted"])
+
+
+def command_run_record(
+    *,
+    command_name: str,
+    success: bool,
+    context_clause: Optional[str] = None,
+    parameters: Any = None,
+    output: Any = None,
+    context_name: Optional[str] = None,
+) -> dict[str, Any]:
+    """One command run as ``persist(command_runs=...)`` takes it.
+
+    ``context_clause`` is the ``"<Context> <label>"`` clause of the record the
+    command ran on and ``context_name`` that context's name alone (``""`` at
+    the root), which is what a plain command name is resolved against.
+
+    ``parameters`` and ``output`` may be pydantic models or plain data; they
+    are reduced to JSON data here, so the record can wait in memory for its
+    step to be archived without holding live objects.
+    """
+    return {
+        "command": str(command_name or ""),
+        "success": bool(success),
+        "context_clause": context_clause,
+        "context_name": context_name,
+        "input": _jsonable(parameters),
+        "output": _jsonable(output),
+    }
+
+
 #: How long an event write waits for the database lock before it is dropped.
 #: Events are diagnostics: a turn must never stall behind one, so this is far
 #: shorter than the evidence writes' wait.
@@ -194,6 +261,7 @@ class RuntimeHandleArchive:
         text_sha256: str,
         context_clause: Optional[str] = None,
         context_changed: bool = False,
+        command_runs: Sequence[Mapping[str, Any]] = (),
     ) -> dict[str, Any]:
         """Store one observation and return it as this process reads it.
 
@@ -210,6 +278,12 @@ class RuntimeHandleArchive:
         was recorded, ``""`` at the root) and ``context_changed`` whether it moved
         the context.
 
+        ``command_runs`` are the commands the step ran, in order, as
+        ``command_run_record`` builds them. They are stored in
+        ``offload_command_runs`` in the same transaction, their parameters and
+        ``Signature.Output`` as JSON, through the same redaction as the text.
+        None of it is added to the text.
+
         The insert is insert-or-nothing, so a re-persist of the same alias is a
         readback. A different observation under an alias already stored is a
         collision and raises.
@@ -222,7 +296,7 @@ class RuntimeHandleArchive:
         stored_sha256 = hashlib.sha256(stored_payload).hexdigest()
         with closing(self._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
+            inserted = conn.execute(
                 """
                 INSERT INTO offload_evidence (
                     turn_key, channel_id, alias, command_name, step_index,
@@ -248,6 +322,40 @@ class RuntimeHandleArchive:
                     1 if context_changed else 0,
                 ),
             )
+            persisted_at = _utc_now()
+            # Only beside a row this call wrote: a readback stores nothing new,
+            # and a colliding alias must not gain another step's runs.
+            runs = command_runs if inserted.rowcount == 1 else ()
+            for ordinal, run in enumerate(runs or ()):
+                input_json, input_redacted = stored_json_for(run.get("input"))
+                output_json, output_redacted = stored_json_for(run.get("output"))
+                conn.execute(
+                    """
+                    INSERT INTO offload_command_runs (
+                        turn_key, channel_id, alias, ordinal, step_index,
+                        command_name, success, context_clause, context_name,
+                        input_json, output_json, redaction, redacted,
+                        persisted_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(turn_key, alias, ordinal) DO NOTHING
+                    """,
+                    (
+                        scope.turn_key,
+                        scope.channel_id,
+                        alias,
+                        ordinal,
+                        step_index,
+                        str(run.get("command") or ""),
+                        1 if run.get("success", True) else 0,
+                        run.get("context_clause"),
+                        run.get("context_name"),
+                        input_json,
+                        output_json,
+                        capture["redaction"],
+                        1 if (input_redacted or output_redacted) else 0,
+                        persisted_at,
+                    ),
+                )
             conn.commit()
         if self._stored_sha256(scope, alias) != stored_sha256:
             raise PersistenceError(ALIAS_COLLISION_MESSAGE)
@@ -295,6 +403,63 @@ class RuntimeHandleArchive:
         with closing(self._connect(timeout=timeout)) as conn:
             rows = conn.execute(query, params).fetchall()
         return [self._decode_row(row) for row in rows]
+
+    def command_runs(self, scope: RuntimeHandleScope, alias: str = "", *,
+                     from_step: Optional[int] = None, to_step: Optional[int] = None,
+                     timeout: float = 30.0) -> list[dict[str, Any]]:
+        """The commands *scope*'s archived steps ran (or just *alias*'s), in run order.
+
+        ``from_step`` / ``to_step`` keep only the steps whose ``step_index`` is in that
+        inclusive range, read in SQL: a lookup of one step or of a turn's later steps
+        decodes only those rows, not the whole turn's.
+
+        Each is ``{"alias", "step_index", "ordinal", "command", "success",
+        "context_clause", "context_name", "input", "output"}``; ``input`` and ``output`` are the
+        stored JSON decoded, ``None`` when the command had none. A step archived
+        before command runs were stored has no rows here; its evidence row reads
+        exactly as before.
+        """
+        query = """
+            SELECT alias, step_index, ordinal, command_name, success,
+                   context_clause, context_name, input_json, output_json
+            FROM offload_command_runs
+            WHERE turn_key = ? AND channel_id = ?
+        """
+        params: list[Any] = [scope.turn_key, scope.channel_id]
+        if alias:
+            query += " AND alias = ?"
+            params.append(alias)
+        if from_step is not None:
+            query += " AND step_index >= ?"
+            params.append(int(from_step))
+        if to_step is not None:
+            query += " AND step_index <= ?"
+            params.append(int(to_step))
+        query += " ORDER BY step_index, ordinal"
+        with closing(self._connect(timeout=timeout)) as conn:
+            present = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='offload_command_runs'"
+            ).fetchone()
+            rows = conn.execute(query, params).fetchall() if present else []
+        return [
+            {
+                "alias": str(row["alias"]),
+                "step_index": int(row["step_index"]),
+                "ordinal": int(row["ordinal"]),
+                "command": str(row["command_name"]),
+                "success": bool(row["success"]),
+                "context_clause": (
+                    None if row["context_clause"] is None else str(row["context_clause"])
+                ),
+                "context_name": (
+                    None if row["context_name"] is None else str(row["context_name"])
+                ),
+                "input": None if row["input_json"] is None else json.loads(row["input_json"]),
+                "output": None if row["output_json"] is None else json.loads(row["output_json"]),
+            }
+            for row in rows
+        ]
 
     # -- diagnostic events ---------------------------------------------------
 
@@ -442,6 +607,11 @@ class UnavailableHandleArchive:
 
     def list(self, scope: RuntimeHandleScope, alias: str = "", *,
              timeout: float = 30.0) -> list[dict[str, Any]]:
+        return []
+
+    def command_runs(self, scope: RuntimeHandleScope, alias: str = "", *,
+                     from_step: Optional[int] = None, to_step: Optional[int] = None,
+                     timeout: float = 30.0) -> list[dict[str, Any]]:
         return []
 
     def persist_event(self, scope: RuntimeHandleScope, event: Mapping[str, Any]) -> None:

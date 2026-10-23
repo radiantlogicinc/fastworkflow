@@ -164,7 +164,8 @@ class ExperimentTask:
 
     `messages` are fed in order through `process_turn`. `startup_action` runs
     first when present, as its own logical turn — the shape
-    `_create_user_runtime` uses.
+    `_create_user_runtime` uses. `unattended` runs every message's turn with
+    no ask_user tool (default False, as for a chat turn).
 
     `task_id` must be stable across runs and across arms: it is the join key
     every score groups by, and it is never derived from the conversation topic
@@ -175,6 +176,7 @@ class ExperimentTask:
     messages: Sequence[str] = ()
     startup_action: Optional[Any] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    unattended: bool = False
 
 
 @dataclass
@@ -451,8 +453,15 @@ class ExperimentController:
         benchmark_version: Optional[str] = None,
         benchmark_digest_sha256: Optional[str] = None,
         registered: bool = False,
+        user_simulator: Optional[bool] = None,
     ) -> None:
         """Pre-register an experiment and its exact attempt plan.
+
+        `user_simulator=True` says a user simulator drives every run, so a
+        run's first message is the simulator's, not the task prompt
+        (`fix-va9v`). A registered experiment takes it from its registration,
+        and a caller that passes a different value is refused; omitted means
+        False for an unregistered experiment.
 
         `registered=True` says the id came from a registration (the UI or
         `benchmark.setup`); one absent from this live DB raises
@@ -461,7 +470,8 @@ class ExperimentController:
         controller's own workflow folder, the one whose live DB it records into.
         """
         # A UI-created identity pins the benchmark even when a driver supplies
-        # only experiment/task IDs. Unregistered experiments keep their API.
+        # only experiment/task IDs. An unregistered one must pin it itself:
+        # every experiment is a run of one benchmark version (`fix-ujat`).
         from fastworkflow.benchmark import setup as benchmark_setup
 
         registration = None
@@ -472,10 +482,12 @@ class ExperimentController:
         except KeyError:
             if registered:
                 raise ExperimentNotRegisteredHere(experiment_id, self.db_path) from None
+            if (benchmark_id, benchmark_version, benchmark_digest_sha256) == (None, None, None):
+                raise observability_store.MissingBenchmarkPin(experiment_id) from None
             overrides = state_paths.location_overrides()
             if overrides:
                 logger.warning(
-                    f"Ad-hoc experiment {experiment_id!r} records into "
+                    f"Unregistered experiment {experiment_id!r} records into "
                     f"{self.db_path!r}, resolved under {overrides}; it is "
                     "visible only to servers and UIs resolving the same DB"
                 )
@@ -488,6 +500,10 @@ class ExperimentController:
                                   (benchmark_digest_sha256, "benchmark_digest_sha256")):
                 if supplied is not None and supplied != registration[key]:
                     raise ValueError(f"{key} differs from the registered experiment")
+            registered_simulator = bool(registration.get("user_simulator"))
+            if user_simulator is not None and bool(user_simulator) != registered_simulator:
+                raise ValueError("user_simulator differs from the registered experiment")
+            user_simulator = registered_simulator
             benchmark_id = registration["benchmark_id"]
             benchmark_version = registration["benchmark_version"]
             benchmark_digest_sha256 = registration["benchmark_digest_sha256"]
@@ -505,6 +521,17 @@ class ExperimentController:
                     benchmark_version,
                     loaded["digest_sha256"],
                     benchmark_digest_sha256,
+                )
+            # Every experiment that names a benchmark version runs exactly that
+            # version's tasks, registered in the UI or not: a run of a subset
+            # or of invented task ids would sit in the version's list as if it
+            # were a run of the benchmark.
+            declarations = list(declarations)
+            manifest_task_ids = {task["task_id"] for task in loaded["tasks"]}
+            if {item[0] for item in declarations} != manifest_task_ids:
+                raise ValueError(
+                    "declared task IDs must match the pinned benchmark version's "
+                    f"{len(manifest_task_ids)} task IDs exactly"
                 )
         # Reserve the registration before writing evidence. Deletion takes the
         # same row in its own transaction; a deleted ID is refused and a bound
@@ -527,6 +554,7 @@ class ExperimentController:
             benchmark_version=benchmark_version,
             benchmark_digest_sha256=benchmark_digest_sha256,
             declarations=declarations,
+            user_simulator=bool(user_simulator),
         )
 
     def start_attempt(
@@ -932,6 +960,17 @@ class ExperimentHarness:
                     CommandRouter(str(command_info_root / "*"))
         except Exception as exc:
             logger.debug(f"Router warm-up skipped: {exc!r}")
+        # Skills and command utterances, so N threads do not each read them on their first
+        # turn. Their cache is keyed by the path string the turn path passes, the Workflow's
+        # `folderpath`, which is the resolved path.
+        try:
+            from pathlib import Path
+
+            from fastworkflow.workflow_agent import warm_skills
+
+            warm_skills(str(Path(self.workflow_folderpath).resolve()))
+        except Exception as exc:
+            logger.debug(f"Skill warm-up skipped: {exc!r}")
 
     # -- running ----------------------------------------------------------
 
@@ -1178,7 +1217,8 @@ class ExperimentHarness:
             if task.startup_action is not None:
                 run.turn_outputs.append(ctx.process_action_turn(task.startup_action))
             for message in task.messages:
-                run.turn_outputs.append(ctx.process_turn(message))
+                run.turn_outputs.append(
+                    ctx.process_turn(message, unattended=task.unattended))
             run.conversation_id = ctx.observability_conversation_id
         except BaseException as exc:  # noqa: BLE001 - one attempt, not the run
             run.error = exc

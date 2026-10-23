@@ -713,7 +713,10 @@ class TestRefusals:
 
 class TestScopeSeparation:
     def test_choosing_a_best_run_does_not_touch_the_experiment_winner(self, world):
-        before = world["control"].winner_for_experiment(world["experiment_id"])
+        before = world["control"].set_winner(
+            world["experiment_id"], actor="reviewer", actor_kind="human",
+            provenance="human",
+        )
 
         _select(world, 2)
 
@@ -728,9 +731,8 @@ class TestScopeSeparation:
             world["experiment_id"]
         )["group_id"]
         winner_history = world["control"].decision_history(group_id)
-        assert [row["decision"] for row in winner_history] == [
-            selection.DECISION_INITIAL
-        ]
+        # Nobody set a winner, so the winner history is empty.
+        assert winner_history == []
         assert (
             len(
                 best_run.best_run_history(

@@ -138,10 +138,6 @@ def plan_server_spawn(
         # legitimately serve the chatbot page from a different local port
         # [R19 as amended alongside R18].
         "--cors_loopback_only",
-        # The chatbot exists to be inspected, and token usage / cost /
-        # cache-hit status reach the trace only via a DSPy history entry.
-        # Bounded, and only ever for this loopback single-developer server.
-        "--keep_dspy_history",
     ]
     if expect_encrypted_jwt:
         cmd.append("--expect_encrypted_jwt")

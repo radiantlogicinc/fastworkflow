@@ -23,6 +23,8 @@ those tasks: connect an application runner using the experiment and task IDs. Us
 [debug-workflow-conversations](../debug-workflow-conversations/SKILL.md) for diagnosis and
 [optimize-workflow-with-feedback](../optimize-workflow-with-feedback/SKILL.md) to verify changes
 against recorded outcomes. Human annotations do not automatically update the agent or train models.
+When a family of requests needs the same several commands in a known order, write a skill
+(`_skills/<name>.py`) with [author-workflow-skills](../author-workflow-skills/SKILL.md).
 
 ## Mission
 

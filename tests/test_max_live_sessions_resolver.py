@@ -2,8 +2,8 @@
 
 `MAX_LIVE_SESSIONS` is an operator control, and an operator control whose
 documented default outranks the container override is not one. `get_env_var`
-returns a supplied default *before* consulting `os.environ`, so a resolver that
-passed a default would make the container variable unreachable — the value would
+reads the workflow env file *before* `os.environ`, so a resolver built on it alone
+would let the env file outrank the container variable — the value would
 silently be whatever the workflow env file said.
 
 Lowering the cap is also what makes eviction routine, which is what makes
@@ -96,8 +96,8 @@ def test_the_default_is_the_lowered_cap():
 def test_the_process_environment_wins(monkeypatch):
     """The container variable must be reachable, which is the reason for the resolver.
 
-    get_env_var returns a supplied default before it ever looks at os.environ, so
-    a resolver written the obvious way would ignore this.
+    get_env_var reads the workflow env file before os.environ, so a resolver
+    written the obvious way would let the file outrank this.
     """
     monkeypatch.setenv("MAX_LIVE_SESSIONS", "137")
 

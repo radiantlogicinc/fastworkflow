@@ -152,3 +152,21 @@ def test_nonmessage_and_unparseable_attributes_are_unchanged():
             "messages": "not a trajectory"}
     finally:
         uninstall_span_policy()
+
+
+def test_a_replaced_envelope_keeps_the_first_replacement():
+    """A later enricher cannot repoint an envelope an earlier one blanked."""
+    tokens = [
+        enrichment._register("test-first", lambda raw: enrichment.AttributeEnrichment(
+            {"first": True}, {"envelope": "first"})),
+        enrichment._register("test-second", lambda raw: enrichment.AttributeEnrichment(
+            {"second": True}, {"envelope": "second"})),
+    ]
+    try:
+        capped = tracing._capped({"envelope": {"truncated": True, "value": "cut"}})
+        assert capped["envelope"] == {
+            "truncated": True, "value": "", "replaced_by": "first"}
+        assert capped["first"] is True and capped["second"] is True
+    finally:
+        for token in tokens:
+            enrichment._remove(token)

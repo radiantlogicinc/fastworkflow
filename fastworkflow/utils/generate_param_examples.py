@@ -700,8 +700,8 @@ def param_example_fingerprint(
     run is precisely the invisible cost bd fix-k0i.46 reports.
 
     The proxy base is read with a code default so an absent one does not log a warning
-    per command; `LITELLM_PROXY_API_BASE` is an env-file setting in this project, never
-    a shell export.
+    per command. `LITELLM_PROXY_API_BASE` is an env-file setting in this project;
+    `get_env_var` also reads a process value when one is set.
     """
     api_base = fastworkflow.get_env_var("LITELLM_PROXY_API_BASE", str, default="")
     if field_details is None:

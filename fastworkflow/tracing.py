@@ -244,7 +244,47 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # the planner spans are no longer written (the finish check and structured
 # planning were removed). fw.search.route is no longer declared: nothing emits
 # it, so it has no contract left to version.
-SPAN_CONTRACT_VERSION = 12
+#
+# v13: fw.turn v2 -- the turn records `unattended`: whether it ran with no
+# ask_user tool. A turn recorded before this carries no flag, which reads as
+# "not recorded", not as attended.
+#
+# v14: fw.planner.plan / fw.planner.replan v4 -- `plan_source` may be
+# "skill_call", and the spans gain `skill`, `skill_args` and `skill_fallback`
+# (skills as parameterized commands).
+#
+# v15: fw.nlu.param_extraction v4 -- `unwrapped_quoted_values`,
+# `defaulted_sentinel_values` and `out_of_range_values` (fix-7t0q).
+#
+# v16: fw.skill.phase added (fix-hia1.2) -- one span per phase run of a phased
+# skill call (`fastworkflow.skill_phases`). No existing span changed.
+#
+# v17: fw.skill.phase v2 (fix-hia1.7, fix-hia1.3) -- `answer_only` (a phase whose
+# steps name no command, answered by one model call with no tools), and for one
+# item of a fan-out phase `item`, `item_index`, `item_count`, `items_total` and
+# `record_issues` (what the item record check flagged).
+#
+# v18: fw.skill.phase v3 (fix-hia1.9) -- `skipped` (a phase whose callable `when`
+# was false when reached: no executor ran) and, for an item of a fan-out phase
+# with `until`, `stop_condition_met`.
+#
+# v19: fw.nlu.param_extraction v5 (fix-hia1.15, fix-hia1.14) --
+# `deterministic_form` and `unbound_value`.
+#
+# v20: fw.agent.step v6 (fix-5jss) -- `folded_command`: the command text the
+# command tool built from arguments the model passed beside `command`.
+#
+# v21: fw.agent.step v7 and fw.skill.phase v4 (fix-6llp) -- code runs a phase's
+# leading mechanical steps: `by_code` on a step code ran, and on the phase
+# `steps_by_code` and `code_stop`. fw.nlu.param_extraction's `deterministic_form`
+# may be "bare" (no new attribute).
+#
+# v22: fw.skill.phase v5 (fix-hia1.30) -- `answer_by_code` on an answer-only phase:
+# code wrote its answer from its steps (every step verbatim or a guard), no model call.
+#
+# v23: fw.planner.plan / fw.planner.replan v5 (fix-hia1.34) -- `skill_notes`: what
+# the argument guards and verify verdicts changed in a skill call's arguments.
+SPAN_CONTRACT_VERSION = 23
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -279,6 +319,11 @@ SPAN_AGENT_EXECUTE = "fw.agent.execute"
 SPAN_AGENT_STEP = "fw.agent.step"
 
 AGENT_LOOP_SPAN_NAMES = frozenset({SPAN_AGENT_EXECUTE, SPAN_AGENT_STEP})
+
+# One phase of a phased skill call (``fastworkflow.skill_phases``): a bounded
+# sub-plan run by a fresh executor. Its fw.agent.execute span is its child, so a
+# grader reads each phase's steps, budget and filled facts in one place.
+SPAN_SKILL_PHASE = "fw.skill.phase"
 
 # Originally reserved-for-v2 so the schema needed no migration when the deeper
 # emitters landed. They have (D3 amendment, 2026-08-26): fw.nlu.* emit inside
@@ -364,14 +409,16 @@ class SpanContract:
 
 
 SPAN_CONTRACTS: dict[str, SpanContract] = {
+    # v2: `unattended` (the turn ran with no ask_user tool).
     SPAN_TURN: SpanContract(
-        version=1,
+        version=2,
         attributes=frozenset(
             {
                 "turn_key",
                 "channel_id",
                 "conversation_id",
                 "user_message",
+                "unattended",
                 "status",
                 "success",
                 "failure_reason",
@@ -451,6 +498,65 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
             }
         ),
     ),
+    # One phase run of a phased skill call. Opened with the phase (`skill`,
+    # `phase`, `phase_index` of `phase_count`, its executor `step_budget`, the
+    # `first_step` of its run, `resumed` after an ask_user); closed with `steps`
+    # (the phase's numbered plan), `steps_used`, whether it reached its budget
+    # (`exhausted`) or `suspended`, the `record` its output was filled on and the
+    # filled `facts`, or `facts_error` when the phase failed (its steps could not
+    # be built, or a fact could not be filled); `error_type` when the run raised.
+    # v2: `answer_only` (no executor run: one model call with no tools wrote the
+    # answer; its fw.agent.execute is the child); for one item of a fan-out phase
+    # `item`, `item_index` (0-based) of `item_count` (after the cap) of
+    # `items_total`, and `record_issues` (the item record check's flags, a list;
+    # `record` is then the record bound to the item).
+    # v3: `skipped` (its callable `when` was false when the phase was reached; the
+    # span has no child and carries only the opening attributes; `skipped` false
+    # with `facts_error` when deciding it failed) and, for an item of a fan-out
+    # phase with `until`, `stop_condition_met` (the fan-out stops after this item).
+    # v4 (fix-6llp): `steps_by_code` (the steps of the run code ran, before the agent:
+    # navigation included; model steps = `steps_used - steps_by_code`) and `code_stop`
+    # (why code stopped: "done", "open step N", "step N failed", "no path for step
+    # N", "more pages at step N" (until fix-ajir.36), "stopped" when the executor's
+    # step hook ended the run, or "off" when code ran nothing for the phase: the run
+    # has no steps of its own, as the phase of the planner's steps_before, or nothing
+    # could be read).
+    # Absent on an answer-only phase and on a resumed run.
+    # v5 (fix-hia1.30): `answer_by_code` on an answer-only phase only: true when code
+    # wrote its answer from its steps with no model call (`skill_phases.answer_by_code`).
+    SPAN_SKILL_PHASE: SpanContract(
+        version=5,
+        attributes=frozenset(
+            {
+                "answer_only",
+                "answer_by_code",
+                "skipped",
+                "stop_condition_met",
+                "steps_by_code",
+                "code_stop",
+                "item",
+                "item_index",
+                "item_count",
+                "items_total",
+                "record_issues",
+                "skill",
+                "phase",
+                "phase_index",
+                "phase_count",
+                "step_budget",
+                "first_step",
+                "resumed",
+                "steps",
+                "steps_used",
+                "exhausted",
+                "suspended",
+                "record",
+                "facts",
+                "facts_error",
+                "error_type",
+            }
+        ),
+    ),
     # v2: `roster_nudge` marks the one step whose observation is
     # not a tool result at all. A finish action taken while named items of the
     # request were never the subject of a command has its "Completed."
@@ -462,8 +568,13 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # step ran instead.
     # v5: `finish_check_note` (v3's rename) is no longer written; see
     # SPAN_CONTRACT_VERSION v12.
+    # v6: `folded_command` (fix-5jss) is the command text the command tool built
+    # from parameters the model passed as tool arguments beside `command`;
+    # `tool_args` is still what the model sent.
+    # v7 (fix-6llp): `by_code` (true) on a step code ran (skill_phases.CodeSteps),
+    # not the model; `thought` then says "run by code".
     SPAN_AGENT_STEP: SpanContract(
-        version=5,
+        version=7,
         attributes=frozenset(
             {
                 "step_index",
@@ -476,6 +587,8 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "tool_error",
                 "error_type",
                 "repaired_tool_name",
+                "folded_command",
+                "by_code",
             }
         ),
     ),
@@ -493,13 +606,22 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # `plan_source` "text" or "none"; older records may still hold "structured"
     # / "text_fallback" and a `subjects` list.
     # v3: `subjects` is no longer written (see SPAN_CONTRACT_VERSION v12).
+    # v4: skills as parameterized commands. `plan_source` may be "skill_call" (the
+    # planner filled a skill's typed parameters and code expanded its steps);
+    # `skill` names the matched skill with params or phases (None otherwise, and on a replan),
+    # `skill_args` holds the arguments of a skill call, `skill_fallback` why a
+    # skill call fell back to the text planner.
+    # v5: `skill_notes`, the notes of a skill call (``SkillCallPlan.notes``: an argument
+    # a guard or a sure verify verdict replaced, dropped extra steps); None otherwise.
     SPAN_PLANNER_PLAN: SpanContract(
-        version=3,
-        attributes=frozenset({"model", "replan_trigger", "plan", "plan_source"}),
+        version=5,
+        attributes=frozenset({"model", "replan_trigger", "plan", "plan_source",
+                              "skill", "skill_args", "skill_notes", "skill_fallback"}),
     ),
     SPAN_PLANNER_REPLAN: SpanContract(
-        version=3,
-        attributes=frozenset({"model", "replan_trigger", "plan", "plan_source"}),
+        version=5,
+        attributes=frozenset({"model", "replan_trigger", "plan", "plan_source",
+                              "skill", "skill_args", "skill_notes", "skill_fallback"}),
     ),
     # One distillation pass. `fw.pass` is the membership stamp every descendant
     # inherits through ancestry; the rest is the pass's OWN content, recorded
@@ -559,12 +681,36 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         # guess by counting spans. A span carrying v1 has the flag only, and a
         # reader must keep treating its round as unrecorded rather than
         # inferring one.
-        version=2,
+        # v3 (fix-7t0q): `unwrapped_bracketed_values` and `placeholder_values`
+        # record a value sent as one bracketed token: unwrapped to the real value
+        # it held, or refused as a placeholder. Absent on earlier versions.
+        # v4 (fix-7t0q): `unwrapped_quoted_values` records a value whose
+        # surrounding quotes were removed; `defaulted_sentinel_values` a made-up
+        # extreme number (int32/int64 limit, beyond 2**53) replaced by the
+        # field's default; `out_of_range_values` a number refused as a parameter
+        # error (declared ge/le bounds, a negative position or count, an extreme
+        # for a field with no default). `placeholder_values` may now also hold a
+        # placeholder-shaped value with no brackets that the request never
+        # writes (`desired-tag`). Absent on earlier versions.
+        # v5 (fix-hia1.15, fix-hia1.14): `deterministic_form` says which code
+        # parser bound the parameters when `extraction_method` is "xml_regex"
+        # ("key_value", "positional" or, since span contract v21, "bare": nothing
+        # after the command name and every field defaulted; absent for XML tags), and
+        # `unbound_value` is a lone value that bound to no field and was
+        # refused. Absent on earlier versions.
+        version=5,
         attributes=frozenset(
             {
                 "command_name",
+                "deterministic_form",
+                "unbound_value",
                 "retry_round",
                 "retry_round_ordinal",
+                "unwrapped_bracketed_values",
+                "unwrapped_quoted_values",
+                "placeholder_values",
+                "defaulted_sentinel_values",
+                "out_of_range_values",
                 "extraction_method",
                 "missing_fields",
                 "invalid_fields",

@@ -7,7 +7,7 @@ from typing import Any, Optional
 from urllib.parse import unquote
 
 from fastworkflow.experiment.setup import ExperimentSetups, SetupConflict
-from fastworkflow.observability import training_history
+from fastworkflow.observability import selection, training_history
 from fastworkflow.observability.store import (
     FEATURE_EXPERIMENTS_V1,
     ExperimentNotFound,
@@ -42,6 +42,22 @@ class _ExperimentRoutes:
 
     def _patch_experiment(self, path: str, body: Any, query: dict[str, list[str]]) -> None:
         self._handle_experiment_patch(path, body)
+
+    def _benchmark_conformance(self, store: Any, detail: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """This experiment checked against its pinned benchmark version, if any."""
+        from fastworkflow.benchmark.catalog import BenchmarkManifestError, load_version
+        from fastworkflow.benchmark.conformance import experiment_conformance
+
+        workflow_path = (self.chatbot.workflow_path or "").strip()
+        if not (workflow_path and detail.get("benchmark_id") and detail.get("benchmark_version")):
+            return None
+        try:
+            manifest = load_version(
+                workflow_path, detail["benchmark_id"], detail["benchmark_version"]
+            )
+        except BenchmarkManifestError:
+            return None
+        return experiment_conformance(store, manifest, detail)
 
     @staticmethod
     def _training_limit(q: Any) -> int:
@@ -217,6 +233,12 @@ class _ExperimentRoutes:
             detail["provenance"] = experiment_provenance(
                 detail, store.experiment_attempt_rows(experiment_id)
             )
+            # Conformance reads the turns, which a sealed experiment keeps in
+            # its archive; the row, its digest and its notes stay live.
+            detail["benchmark_conformance"] = self._benchmark_conformance(
+                selection.SelectionControlStore(store).store_for(experiment_id), detail
+            )
+            detail["sealed_archive"] = self._sealed_archive_summary(store, experiment_id)
             self._send_json({"experiment": detail})
         elif sub == "tasks":
             if store.get_experiment(experiment_id) is None:
@@ -230,7 +252,9 @@ class _ExperimentRoutes:
                 return
             rows = store.experiment_attempt_rows(experiment_id, task_id=q("task"))
             annotate_attempt_rows(
-                store, rows, evidence_verdict(detail.get("evidence_runs"))
+                selection.SelectionControlStore(store).store_for(experiment_id),
+                rows,
+                evidence_verdict(detail.get("evidence_runs")),
             )
             self._send_json({"attempts": rows})
         elif sub == "score":

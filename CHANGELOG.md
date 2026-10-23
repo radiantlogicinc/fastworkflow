@@ -2,7 +2,571 @@
 
 ## Unreleased
 
+### Added
+
+- **Skills are written as `Signature` + `PlanGenerator`** (`fastworkflow/skill.py`,
+  `docs/skill_file_layout.md`). A skill file reads like a command file: `class
+  Signature` declares it as a command's does, and `class PlanGenerator` generates its
+  plan. Each public method is a phase in the order written (`_name` methods are
+  helpers); its parameters name `input` and earlier phases; its return annotation is
+  the facts model it fills; it returns its steps as text, and `return []` skips it
+  (decided when the phase is reached). `@phase(over=..., max_items=..., until=...,
+  noun=..., optional=...)` for fan-outs and optional phases; `pick` and the filters
+  `num`, `count`, `listed` for steps. Skills are unreleased, so the old form is gone.
+  A step naming a command or parameter the workflow lacks is a load error.
+- **`fastworkflow.Refused(message)`** (commands, backward compatible): raised from a
+  `ResponseGenerator.__call__` it is a failed `CommandOutput` with that message; from a
+  `validate_extracted_parameters` hook (a command's or a skill's) it is `(False,
+  message)`. A `Signature` without `generate_utterances` gets the standard body as a
+  default; a defined or inherited one wins.
+- **`fact_from("<command>.<field>")`** (fix-ajir.15, `docs/skill_phases.md`):
+  the field of a facts model copied from a command field,
+  `Field(json_schema_extra={"from": ...}, **kwargs)`, in place of the `_from`
+  helper each skill file wrote. `fastworkflow skill preview --check` now fails
+  on a `"from"` naming a command or field the workflow does not have (at load
+  it stays a warning, so a command's `Output` can come later).
+
+- **Phase facts: stand-in openers, re-bind to the planned record, plainer
+  step values; `name=value` parameters parsed in code** (fix-hia1.10).
+  In agent mode a command written as `cmd key=value key2=value2`, every key a
+  field of its Input, is parsed before the LLM fallback: a value runs to the
+  next ` key=` or the end, quotes and a trailing "(...)" note go, types come
+  from the Input model; any doubt falls back as before (the span records it as
+  `xml_regex`, so no contract changes). A plan step's value also ends at ", " prose, and
+  an identifier value at its first token (`step_arguments`). A planned opener
+  with concrete values (`list_x x_uid=U`) is done by a successful run of
+  another command that entered the phase's record with the same value under
+  the same name (`runs_standing_in_for_openers`); facts from the planned
+  command's Input take it. A non-fan-out phase whose step commands all ran on
+  one record, and that ended elsewhere, is filled on that record
+  (`planned_record`).
+- **A plural noun for a fan-out's items** (fix-hia1, `docs/skill_phases.md`).
+  `Phase(..., over=..., noun="people")` makes the answer's notes count in that
+  noun and leave out the internal phase name: "Note: only the first 3 of 5
+  people were covered." and "Note: the work stopped after 3 of 5 people
+  because its stop condition was met." (`cap_note` / `fan_out_note` take
+  `noun`). Without a noun the wording is unchanged. A noun on a phase that
+  does not fan out, or one that is not a non-empty str, fails the load. Skill
+  previews show it in the "fans out" column. A note already in the answer is
+  not repeated (two fan-outs over the same items with one noun say it once).
+- **Skill phases: flat for some inputs, conditions on earlier facts, fan-out
+  that stops on a condition** (fix-hia1.9, `docs/skill_phases.md`). `plan()`
+  may return `None` or `[]` to run that call flat, from the file's own
+  `steps()` (`is_flat_plan`; `phases_for` returns `None`). `Phase.when` may
+  be a callable bound by name to earlier outputs, decided when the phase is
+  reached (`runs_now`); a skipped phase counts as not run.
+  `Phase(..., over=..., until=callable)` stops a fan-out once the outputs so
+  far (its parameter named after the phase) meet a condition (`stops_after`);
+  `max_items` still caps, and `fan_out_note` says "stopped" or "capped".
+  `fw.skill.phase` v3 (span contract v18) adds `skipped` and
+  `stop_condition_met`. Skill previews show a callable `when` / `until` by its
+  source (`condition_text`), add a "fans out" column, mark phases whose steps
+  read earlier facts as rendered with placeholder facts, render a flat
+  variant's `steps()`, and pass a fan-out phase's output on as a list.
+- **Answer-only skill phases** (fix-hia1.7, `docs/skill_phases.md`). A phase
+  whose steps name no command (`skill_phases.is_answer_only`: no command,
+  conditional or navigation step as `finish_check.parse_plan` reads them) is
+  not an executor run: one model call with no tools (`write_answer`) writes its
+  answer from the request and its steps, told "Do not run any command; write
+  the answer from these facts only." It cannot call a workflow command. New
+  `facts_text(model)` (`observation_offloading.facts`, re-exported from
+  `skill_phases`) renders a facts model as `field: value` text for steps.
+  `fw.skill.phase` v2 (span contract v17) adds `answer_only`.
+- **Fan-out skill phases with record binding** (fix-hia1.3).
+  `Phase(..., over=<list> | "<phase>.<field>", item="item", max_items=None,
+  bind=True)` runs the phase once per item, each its own sub-plan; a later
+  phase gets the list of per-item outputs. At most `max_items` /
+  `FW_SKILL_FANOUT_MAX_ITEMS` (default 10) items run, and the answer says when
+  it was capped. Each item is bound to the record that names it: its output
+  is filled there, and its finish check flags a step on another item's record
+  and an item never opened (`item_record_issues`; span `record_issues`).
+  `fw.skill.phase` v2 adds `item`, `item_index`, `item_count`, `items_total`,
+  `record_issues`.
+- **Skill previews and a skill-file layout convention** (fix-553q,
+  `fastworkflow.skill_preview`, `docs/skill_file_layout.md`).
+  `fastworkflow skill preview <workflow_folder> [--out <dir>] [--check]` loads
+  every skill with the skill loader and writes `<dir>/<skill>.md` (default
+  `<workflow_folder>/../docs/skill_previews`): description, inputs (type,
+  default, sample value, `verify` / `subject` flags, description, other
+  options), `plain_utterances`, and the steps for sample inputs, rendered once
+  per combination of the inputs that change them; a phased skill also lists
+  its phases, when each runs, and the facts each output holds with their
+  `"from"` sources, with earlier facts rendered as placeholders
+  (`<find.item_uids[0]>`). Byte-stable; `--check` writes nothing and exits 1
+  when a preview is stale, missing or extra. The layout doc fixes one order
+  for a skill file (docstring, `Signature`, fact models, `plan()` / `steps()`
+  as the table of contents, then the step functions), naming, plain-string
+  steps, no step logic in helpers, and conditions in `plan()`.
+- **Skill previews that read alone** (fix-553q follow-up). Each different plan
+  is rendered once, titled by the fewest inputs that decide it ("Plan when
+  compare = true"); the "runs" column names the deciding input, and one line
+  says when `plan()` returns phases at all. Output models, `when` and fan-outs
+  that differ by input carry the inputs that give them. Past 16 plans, a
+  pairwise cover of the inputs plus one plan per phase layout is rendered.
+  Int inputs are varied (the sample and 0 or 3), and samples respect `ge` /
+  `le`. A fan-out renders each listed item (never `None`), or the first and a
+  later item of an earlier phase's list; an empty list says it runs nothing.
+  Placeholder facts are consistent (a uid fact is the entry of the earlier
+  uid list, a fan-out item's output carries its item), str placeholders
+  survive `split`, and a float fact is 999999 in arithmetic so `int()` /
+  `float()` never print a plausible 0. A callable `when` shows its closure
+  values and parameter defaults, joined without "( " gaps.
+- **Skill phases: a skill run as bounded sub-plans** (fix-hia1.2,
+  `fastworkflow.skill_phases`, `docs/skill_phases.md`). A skill file with params
+  may define `plan(input) -> list[Phase]`, with `Phase(name, steps_fn,
+  output=None, when=True)`; a skill without it is unchanged. `steps_fn`'s
+  parameters are bound by name to earlier phases' filled outputs (typed facts
+  models); `when=False` leaves a phase out; `steps(input)` stays the flat
+  concatenation (`concatenated_steps`) that matching and the template read, and
+  a file with only `plan()` gets it. The loader runs `plan()` on the placeholder
+  inputs: bad phases, unbindable parameters or a malformed `"from"` fail the
+  load; a `"from"` naming a command field the workflow lacks is a logged warning
+  (`check_phase_sources`). A skill call of a phased skill runs each phase as a
+  fresh executor run with a step budget of `FW_SKILL_PHASE_MAX_STEPS` (default
+  15), its own steps (not rewritten by the planner) and its own finish check;
+  after it, the phase's output is filled in code from the phase's own command
+  runs on the record it ended on (plus the run that entered that record). Only
+  runs that do one of the phase's own steps count (fix-hia1.5,
+  `runs_on_plan`, `finish_check.satisfies`): a step giving a concrete value
+  (`find_x query=Ann`) takes only runs carrying that value, after
+  normalisation, and each page of that query; a placeholder or prose argument
+  keeps the looser match. An off-plan lookup of another value never fills the
+  fact; with only that run, the fill fails saying the planned run was not
+  found. A planned opening step the workflow was already on (refused unrun
+  with "You are already in context ...", which archives no run; e.g. an
+  earlier phase opened the record) is done by the turn's earlier run that
+  satisfies the step, entered the phase's record, and whose parameters are
+  words of the record's clause (fix-hia1.6, `runs_that_entered_record`); the
+  opening command's Input and Output facts come from that run, and a run
+  that only read the record, or entered another one, never counts.
+  A phase's finish check applies the same value rule to its steps
+  (`values=True`); the finish check of any other run is unchanged. A
+  missing fact stops the call: no later phase runs, and the answer is what the
+  phases that ran found plus a line naming the failed phase and field. The
+  sub-task's answer is the last phase's. A phased skill is never handed off
+  (`_hand_off`); other sub-tasks keep the hand-off and the 25-step cap. A phase
+  suspended on ask_user resumes and the rest run (the call's state rides the
+  session state, `skill_phase_run`). New span `fw.skill.phase` (contract v1;
+  aggregate span contract 16) per phase run. `SkillCallPlan` gains `phases`,
+  `steps_before`, `steps_after`.
+
+- **Command outputs archived as JSON; facts filled from them** (fix-hia1.1,
+  `CommandResponse.output`, `observation_offloading.facts`). A command may
+  return its `Signature.Output` as `CommandResponse(response=..., output=...)`;
+  the field is optional and appended (default `None`), and the agent's
+  observation and prompt are unchanged. Each command an archived execute step
+  ran is stored beside the step's text in the new additive
+  `offload_command_runs` table (name, success, record context, parameters and
+  Output as JSON, redacted like the text), read with
+  `RuntimeHandleArchive.command_runs`; older stores gain the table on open and
+  their rows read as before. `facts_from_runs` / `facts_from_archive` fill a
+  pydantic model whose fields declare `json_schema_extra={"from":
+  "<command>.<field>"}` from the Output or Input of successful runs, with no
+  model call: latest run for a scalar, runs joined in order for a list, a
+  missing required field is a `MissingFactError`, an unknown or ambiguous
+  source a `FactSourceError` (`check_fact_sources`, `workflow_signatures`). A
+  plain command name resolves against the record's context; `Context/command`
+  is accepted. A scalar comes from the latest run of the broadest query (fewest
+  given parameters, page position ignored), as list pages do, so a later
+  filtered read no longer replaces the whole list's `total`.
+
+- **Finish check: every command step of the plan ran** (fix-3xts,
+  `observation_offloading.finish_check`). When the agent picks `finish`, the
+  run's initial plan is read against the outputs it archived, in code (no model
+  call): a command step whose command never ran successfully is unmet. Unmet
+  steps become one note (at most 1 KB, "Step N (cmd) was not run: run it now.")
+  that replaces the finish observation, once per agent run and only with two or
+  more iterations left (`fastWorkflowReAct.finish_reviewer`). Every checked
+  finish records a `finish_check` offload event. It fails open: no plan, no
+  archive or an error means no note.
+
+- **Split settings as one command-form file, `_skills/_split.py`**
+  (`workflow_agent.split_settings`, `SplitSettings`): the split stage's
+  per-workflow settings are one Python file written like a command file, every
+  attribute optional (absent file: the built-in defaults). `class Signature`'s
+  docstring (`inspect.cleandoc`) replaces `SplitIntoSubtasks`'s instructions;
+  optional pydantic `Signature.Input` (`job_types`, `user_query`) and
+  `Signature.Output` (`subtasks`) give a splitter field a new description (a
+  field the splitter does not have fails the load); `identifier_patterns` is a
+  list of compiled patterns (`[re.compile(r"\bacct_[0-9]+")]`) for the split
+  merge and skill-call arguments; `subject_hints` is the referent step's text.
+  The file is imported as a skill file is (package-relative imports work); the
+  leading `_` keeps it from being loaded as a skill. A file that does not
+  import (an invalid pattern raises in `re.compile`) or declares a malformed
+  attribute fails the load with a `SkillFormatError` naming it, logged; an
+  invalid pattern is no longer skipped with a warning.
+
+- **The skill matcher reads a skill's `plain_utterances` as examples**
+  (`workflow_agent._matcher_job_types`, `MATCHER_EXAMPLES = 9`): in the
+  `MatchSkill` job-type listing a skill's line is followed by
+  `e.g. "...", "..."` with its first nine `Signature.plain_utterances`
+  (whitespace collapsed); a skill that declares none keeps its plain
+  `- name: description` line, and the `job_types` field description mentions
+  examples only when some skill has them. Skills without params now carry
+  their utterances too (`SkillFile.plain_utterances`;
+  `workflow_agent.skill_utterances(folder)` gives them by name). The
+  splitter's job types (`_job_types_for`) stay description-only. No span
+  fields change. Nine, not four: measured offline on an 18-skill workflow
+  with nine utterances each, nine shown matched 0.863 of a tuning set against
+  0.834 with four (skill sub-tasks right 562 vs 552 of 567), for about 1.4k
+  more prompt tokens.
+- **Skills as Python skill files** (`fastworkflow/skill_commands.py`,
+  `workflow_agent.load_skills`): a skill is now a file `_skills/<name>.py`,
+  laid out and written like a command file at the root of `_commands`: the
+  file stem is the skill's name, so it is a Python identifier (snake_case; a
+  stem that is not one fails the load with a `SkillFormatError`), a `.py` file
+  whose name starts with `_` is a helper the skill files import
+  (`from ._kinds import ...`), not a skill, and a subfolder of `_skills` is
+  reserved for a future skill context (like `_commands/<Context>/`): it is
+  logged and skipped, its files not loaded. `class Signature` carries the description (its
+  docstring, what the skill matcher and the text planner read), a pydantic
+  `Input` (`str`, `bool`, `int`, `Literal[...]` for an enum; `Field(default=...,
+  description=...)`; the skill options `strip`, `subject`, `verify`, `means`,
+  `in_request` in `json_schema_extra`), and optionally
+  `plain_utterances`, a `template` (the text the planner falls back to) and
+  `validate_extracted_parameters(workflow, command, cmd_parameters,
+  command_text=None)`. A module-level `steps(input) -> list[str]` returns the
+  steps, written with Python f-strings, `if` and `for n in repeat(input.count)`
+  (`repeat` refuses more than `REPEAT_LIMIT`); lookup tables are plain dicts; a
+  step `@<skill>` includes a skill without params. A skill
+  without params is a file whose `steps()` returns its fixed lines. Without a
+  declared `template`, the template is `steps()` rendered on placeholder inputs
+  (`skill_commands.placeholder_template`): every combination of `<name>` for a
+  str (and "" when that is its default), true and false for a bool, an int's
+  default and each enum value, merged into one list where a step not every
+  combination writes ends with `(only when ...)` (`person is given`,
+  `kind is group`, `not flag`) and the steps of an enum's values are joined
+  (`<find_group or find_unit, by kind> query=<name>`); a repeated part shows
+  its steps for the int's default, so a skill declares `template` when the
+  planner should see how it repeats. The file is imported like a command file
+  (package-relative imports work); one that fails to import is logged and
+  skipped. The one file replaces SKILL.md (see Removed).
+- **Skill arguments go through the command parameter screen**
+  (`utils.signatures.screen_parameter_values`, factored out of
+  `InputForParamExtraction.validate_parameters`, which calls it unchanged): a
+  skill call's `str` and `int` arguments lose quotes and angle brackets around
+  the whole value, a placeholder or an out-of-range number (a negative count,
+  a declared `ge`/`le` bound) is refused (an optional argument takes its
+  default, a required one fails the call), and the extractor's "not given"
+  number or a made-up extreme counts as not given. A str argument is found in
+  the request with Unicode dashes (a non-breaking hyphen) folded to `-`. A skill
+  file's `validate_extracted_parameters` sees the checked arguments
+  (`skill_commands.validate_call`; `plan_skill_call` takes `workflow=`) and can
+  refuse the call (the planner falls back to the template) or correct a field.
+  An argument that only applies when other arguments take some value is reset
+  there (`if not cmd_parameters.include_risk: cmd_parameters.owner = ""`); skill
+  files have no condition option of their own, and a field declaring `requires`
+  in `json_schema_extra` fails the load with a `SkillFormatError` pointing to
+  the hook. The rendered template runs the hook on each placeholder combination
+  and leaves out the ones it changes, so its `(only when ...)` conditions follow
+  the hook; a combination the hook refuses is left out too.
+- **Skill-call argument checks** (`fastworkflow/skill_commands.py`), all optional
+  per parameter (in a skill file, an `Input` field's `json_schema_extra`), so a
+  skill without them plans as before:
+  - `verify: true` on a `bool` or `enum` parameter: when Jev is configured, the
+    planner path (`plan_skill_call(..., check_lm=...)`, passed by
+    `build_query_with_next_steps`) has Jev decide that argument again from the
+    request alone (one `Choice` call per verified parameter, in parallel with the
+    planner's typed call); a verdict at or above `VERIFY_THRESHOLD` (0.65)
+    replaces the planner's argument and stands in for a missing or invalid enum.
+    An enum's `means` (a dict) gives Jev each value's meaning (`"group": "a
+    group, which people are members of"`). A failed check leaves the planner's argument.
+    This targets a wrong record kind for a name ("Payroll" planned as a feed) and
+    flags set or left unset against what the request asks.
+  - `in_request: true` on an `int` parameter: when the request writes numbers
+    (digits or the words zero to twenty) outside the other arguments' text, the
+    argument must be one of them, else it takes the only one written (or its
+    default when written) and with several others the call falls back; "the
+    first two" no longer runs as the default 3.
+  - The model's `steps_before` / `steps_after` lose `<...>` placeholders (with
+    the `key=` holding one): `list_logins login_uid=<Ann Lee's uid>` becomes
+    `list_logins`, which the agent runs on the record in context instead of
+    passing the placeholder on as a value. A step holding a uid-shaped token the
+    request does not write is dropped; their descriptions now say so.
+  - `subject: true` on a `str` parameter: the argument must name a record of
+    the request: hold one of its subjects (`split_merge.request_subjects`, with
+    the workflow's identifier patterns) whole, or a name-like word, and cut no
+    subject. "I" of "Before I approve" or "Payroll" of "Payroll_Approver" is
+    refused (an optional argument takes its default, a required one falls back);
+    a name cut short mid-word or at a space at a subject's start or end
+    ("Payroll_Admin", "Ann" of "Ann Lee") becomes the whole subject. `verify: true` on a subject has Jev choose among the
+    request's subjects or "none" (a name/person swap, a right's name planned as
+    a group's).
+  - Any `str` argument inside a match of the workflow's identifier patterns
+    becomes the whole match ("4421" of "acct_4421"); commands loaded by
+    `load_skill_commands` carry the patterns (`SkillCommand.identifiers`).
+  - An extra step naming a command outside the expansion is kept only when a
+    part of the request the expansion leaves open asks for it: a word of the
+    command's name (not `open`, `list`, `find`, `uid`, ...) shares a stem with a
+    request word no word of the expansion's text shares one with. Navigation and
+    lookup steps the model adds around the expansion are dropped.
+
+- **Skills as parameterized commands** (`fastworkflow/skill_commands.py`): a
+  skill may declare typed parameters (its skill file's `Input`: `str`, `bool`,
+  `int` or an enum, with a default, a description and, for a string, `strip`
+  words) that `steps(input)` expands into its steps. The
+  description is still what the skill matcher sees; a skill without parameters
+  is read as before. An `@<skill>` include is plain text and cannot name a skill
+  with params. A malformed skill fails the load with a `SkillFormatError`
+  naming its file. On a turn's initial plan, when the sub-task's matched skill
+  has params, `build_query_with_next_steps(..., skill_command=...)` asks the
+  planner LM for the skill's typed arguments (one `ChainOfThought` over a
+  signature built from the params, plus `steps_before` / `steps_after` for parts
+  the skill does not cover; same adapter and catalog as the text planner),
+  applies the argument guards and expands the skill in code into the numbered
+  plan. Guards: a string argument loses quotes and its strip words (a kind word
+  appended to a name: "NORTHFEED feed" -> "NORTHFEED", "Ann Lee's login" ->
+  "Ann Lee") and must then be written in the request (case-insensitive; the
+  request's spelling is used) or the call falls back (an optional one takes its
+  default); an optional string repeating another argument takes its default; a
+  bool always defaults to false and the signature tells the model to set it only
+  when the request asks; an enum must be one of its values; extra steps naming no
+  available command, naming the skill, or naming only commands the expansion
+  already runs are dropped; a repeat is capped at `REPEAT_LIMIT`. Any failure
+  (bad arguments, a guard, an exception) falls back to the text planner with
+  the skill's template; replans and hand-off continuations are unchanged.
+  `_call_agent_for_query` gets the template and the command from one skill
+  match (`workflow_agent.planner_skill_for`; `plan_template_for` is its
+  template half). Whether a chosen record kind fits what the find command
+  returns is not checked at execution time.
+  Span contract: `fw.planner.plan` / `fw.planner.replan` v4 (aggregate 14) add
+  `skill`, `skill_args` and `skill_fallback`; `plan_source` may be `skill_call`.
+
+- **Deterministic split merge** (`fastworkflow/split_merge.py`): the
+  splitter's sub-tasks now go through `merge_subtasks(user_query, subtasks)`,
+  code only, after the model (and its one retry). It drops meta lines ("(No
+  tag action is requested.)") and sub-tasks contained in another, joins a
+  sub-task that names no subject, or the same subjects as the one before it,
+  to that one ("How risky is Ann Lee?" + "Which findings are driving that?"),
+  and joins per-record sub-tasks that the request asks to compare ("the
+  riskier of Billing and Shipping") into the request's own sentence. When one
+  job is left, the request itself runs, verbatim, so qualifiers the model
+  dropped ("Do not apply anything") are back. Subjects are found in the text
+  alone (names, quoted and back-ticked spans, uids, and the identifiers the
+  workflow declares in an optional `_skills/identifier_patterns.txt`, one
+  regular expression per line, since identifier formats are the workflow's
+  own; "X and Y Ltd" is one unit). A failing merge keeps the model's split.
+  Limits on the request that the model dropped ("Apply none of them.", "I do
+  not need the full population.") are appended to the sub-tasks they apply to
+  (all of them, or the ones carrying the sentence a pointing-back limit
+  qualifies), and a name extending another name of the request
+  ("Payroll_Approver" of "Payroll") joins that name's sub-task when it points
+  back ("among them", in the sub-task or in the request sentence naming it,
+  since the model may drop it). A sub-task naming part of the subjects before
+  it joins them when it checks a change ("Show me the tags on Ann Lee before
+  and after" after "Put `on-leave` on Ann Lee").
+
+- **Split merge, more clean-ups** (`split_merge.py`, code only): a sub-task
+  quoting a value the request never gives ("Apply the tag 'offboarding'") is
+  dropped; a request sentence naming a record no sub-task names (a job the
+  model dropped) is put back, verbatim, in place; a name of a sub-task that is
+  a run of words of exactly one request name ("Sons" of "Hart and Sons and
+  Sons") stands for that name.
+
+- **Referents written into sub-tasks** (`workflow_agent.resolve_referents`):
+  after the merge, a sub-task that leaves some of the request's records
+  unnamed gets one Jev call choosing which of them, if any, its "it", "its",
+  "that team" or "the customer" stands for, told what the workflow counts as a
+  record by its optional `_skills/subject_hints.md` (natural language). The
+  choice is written in (`split_merge.with_referent`): the one pointing phrase
+  is replaced ("its holders" -> "Payroll_Approver's holders"), or the record is
+  appended ("(for Ann Lee)") when there are none or several. Without a Jev key
+  nothing changes.
+
+- **Referents next to their description, and cut subjects put back**
+  (`split_merge.py`, `workflow_agent.resolve_referents`): when Jev has chosen
+  the record a sub-task points back to and the sub-task holds a description
+  of it ("the customer `on-leave`"), a second Jev call picks that phrase and
+  the record is written right after it ("Tag the customer Ann Lee
+  `on-leave`"), instead of only into "its tags". A sub-task taken from a
+  request sentence that lost one of that sentence's subjects is replaced by
+  the sentence itself, even when another sub-task names the subject.
+
+- **Placeholder arguments refused** (`utils/signatures.py`,
+  `InputForParamExtraction.validate_parameters`): a parameter value that is
+  one bracketed token is unwrapped when it holds a real value
+  (`<9a1b2c3d...>`) and refused, with an error telling the agent to pass the
+  real value from an earlier output, when it is only a placeholder
+  (`<item_uid>`, `<uid>`). Every way a command gets its parameters passes
+  through this check.
+  - A value wholly inside one quote pair (straight, typographic, guillemet or
+    backtick) loses the quotes: a filter of `"Ann Lee"` runs as `Ann Lee`.
+    Quotes the request itself writes inside quotes are kept.
+    `unwrap_quoted_value` is public for other callers.
+  - A placeholder-shaped value without brackets (`desired-tag`, `your_uid`,
+    `uid` for an `item_uid`) that the request never writes is refused the same
+    way. In agent mode it is checked against the user's message, not the
+    agent's command.
+  - The extractor's "not given" marker for an int (`-sys.maxsize`) no longer
+    reaches the command on a field with a default or an Optional one: the
+    field gets its default (`None`). The same goes for a number the model
+    made up (int32/int64 limits, beyond 2**53, inf/nan); on a field with no
+    default it is a parameter error. Declared `ge`/`gt`/`le`/`lt` bounds are
+    enforced, and a field named as a position, count or size (`start`,
+    `offset`, `limit`, `page_size`...) with no declared lower bound may not
+    be negative.
+  - `fw.nlu.param_extraction` v4 records `unwrapped_quoted_values`,
+    `defaulted_sentinel_values` and `out_of_range_values` (aggregate span
+    contract 15).
+
+- **The repeat block covers the same call only**: a command that returned
+  the same result twice in a row is refused in the next step only when it is
+  sent with the same text again; it stays in the available commands, and with
+  other arguments (`start=42`, the next page) it runs. Before, the whole
+  command was blocked for that step, so its next page could not be read.
+
+- **Composite skills**: a step that is exactly `@<other-skill>` is replaced,
+  when the skills load, by that skill's steps (recursively, in order; its
+  description is not included). The
+  splitter's job types, the skill matcher and the planner template see only
+  the expanded steps. An unknown skill or a cycle raises `ValueError` naming
+  the include chain. A skill without `@` lines loads as before.
+
+### Removed
+
+- **Skill `repeat()` / `REPEAT_LIMIT` and `@<skill>` include lines**
+  (fix-ajir.18): a skill file's `steps()` loops with `range()` (bound the int
+  field with `le`) and shares steps through a helper module
+  (`_skills/_<name>.py`). A step written `@<name>` is now plain text.
+
+- **`run_fastapi_mcp --keep_dspy_history`** (fix-50pd): the bounded-history
+  "inspect mode" of the server's DSPy memory policy is gone, with
+  `install_policy(keep_history=..., history_entries=...)`,
+  `INSPECT_POLICY_SETTINGS`, `BoundedHistory` and `SERVER_DSPY_HISTORY_ENTRIES`.
+  `fw.llm.call` usage, cost and cache status come from each call's own result
+  (fix-sgsp), so DSPy history is now off in every server, the chatbot's
+  included; the chatbot no longer passes the flag, and passing it is an error.
+
+- **`FW_SPLIT_REQUESTS`**: request splitting is always on. The switch already
+  defaulted to `1` and was on in every evaluation run; `"0"` no longer turns
+  it off (the variable is not read), and the commented line is gone from
+  `examples/fastworkflow.env`.
+
+- **The finish check's model pass and its switch** (fix-3xts follow-up,
+  fix-uyab): the one model call that judged whether each executed step's
+  output held what the step asked for is gone, with its filters, prompt and
+  "Step N asks for ..." note lines. In a live run it helped alone 3 times, was
+  ignored as a false alarm 19 times and led to 1 made-up answer. Gone with it:
+  `FW_FINISH_CHECK` (the command check is always on when a run has a plan; no
+  `commands`/`full` modes and no off switch), the `LLM_FINISH_CHECK` model
+  role and `LITELLM_API_KEY_FINISH_CHECK`, and the `context_budget.FINISH_CHECK`
+  budget (`finish_check_max_bytes`, `FW_FINISH_CHECK_MAX_BYTES`), which sized
+  only that model's prompt. `finish_check` events no longer carry
+  `unmet_by_model`, `vetoes`, `model_called`, `prompt_bytes`, `error` or
+  `usage`.
+
+- **The split stage's text files**: `_skills/split_instructions.md`,
+  `_skills/identifier_patterns.txt` and `_skills/subject_hints.md` are no
+  longer read (nor `workflow_agent._skill_file_text`); their contents go in
+  `_skills/_split.py` (`Signature` docstring, `identifier_patterns`,
+  `subject_hints`), word for word.
+
+- **SKILL.md skills**: `_skills/<name>/SKILL.md` is no longer read; a skill is
+  the file `_skills/<name>.py` only. This covers the plain form of 3.6.0 (the
+  description on the first line, one step per line), which becomes a file with
+  `class Signature` (the description as its docstring) and
+  `def steps(): return [...]` (the step lines), and the front-matter form with
+  its `{param}` / `[if]` / `[repeat]` step language, which was never released.
+  A folder under `_skills` is not a skill (see the skill-context note above).
+
 ### Changed
+
+- **A prompt stored as pieces is no longer also kept as a 16 KB prefix**
+  (fix-ajir.37): an `fw.llm.call` that records `prompt_slots_ref` keeps only
+  the cut envelope of `messages` (`value: ""`, `replaced_by:
+  "prompt_slots_ref"`; length and sha256 unchanged), as a call blanked by the
+  trajectory manifest already did. The prompt is read from the pieces
+  (`prompt_as_sent`, `/api/prompt/…`, "LLM input as sent"). About 5% of a
+  heavy store's file. When two enrichers blank one envelope, the first keeps
+  its `replaced_by`.
+
+- **Skill API surface** (fix-ajir.19): `fastworkflow.skill_phases.__all__` is
+  the author-facing API (`Phase`, `concatenated_steps`, `fact_from`,
+  `facts_text`, `PhaseError`, and the helpers a workflow's tests use to check
+  its skills without a model); the other names stay importable but are the
+  framework's. A skill `Input` field may be `Optional[str] = None`: the planner
+  sees a str that defaults to empty, and `steps()`, `plan()`, the hook and the
+  validators get None when the request leaves it out. A `str` default such as
+  `"NOT_FOUND"` is still a value written into the steps (now documented).
+
+- **The finish check runs on every run that has a plan** (fix-3xts follow-up):
+  it no longer waits for `FW_FINISH_CHECK`, and it reads plan steps against
+  their commands' runs only. A run with no durable archive gets no note
+  (`reason: "no archive"`) instead of every step reported as not run.
+
+- **Finish check: fewer false "not run" notes** (fix-uyab, part):
+  an archived run counts for the command its text resolved to, read from the
+  session's action log (`resolved_command_names`; `check`, `attribute_rows`
+  and `review_finish` take `resolved=`), so an alias satisfies its command's
+  step; a step with "(skip when ...)", "(skip if ...)" or "(skip unless ...)"
+  after its command is conditional; and a step that writes an argument right
+  after its command (`command key=<...>`) is not satisfied by a run of the
+  command with no arguments at all.
+
+- **A skill call's extra step is kept for a synonym its command uses**
+  (`fix-9x93`; `skill_commands.command_texts`, `command_descriptions`,
+  `command_utterances`): `filter_extra_steps` (`texts=`) matches the request's
+  open words against a command's name and the words that recur in at least two
+  of its texts (the first sentence of its catalog description and each of its
+  `plain_utterances`; a command with one text gives that text's words), not
+  the name alone, so "every invoice" now keeps `list_bills` whose utterances
+  say "invoices". `plan_skill_call` builds the texts from the catalog and the
+  workflow's routing definition (no model call). "please", "want", "need" and
+  "has" joined the filter's stop words.
+
+- **Every experiment pins a benchmark version** (`fix-ujat`): the store and
+  `ExperimentController.create_experiment` refuse an experiment without
+  `benchmark_id`, `benchmark_version` and `benchmark_digest_sha256`
+  (`MissingBenchmarkPin`). An unpinned experiment could carry any task ids
+  and sat in the Benchmarks tab beside the real benchmarks, with a contest
+  and a winner of its own. Ad-hoc work is plain conversations (`/initialize`
+  with no experiment bootstrap), listed under **ad-hoc conversations**.
+  Removed: the "Experiments without a benchmark" rail branch and the
+  ad-hoc comparison group (`selection.GROUP_ADHOC`);
+  `comparison_group_identity` refuses an unpinned row. An older store's
+  unpinned experiments are left off the rail and their turns list with the
+  ad-hoc conversations.
+
+- **Experiments driven by a user simulator** (`fix-va9v`): an experiment can
+  be created with `user_simulator: true` (UI registration
+  `POST /api/benchmarks/<id>/experiments`, duplicate, or
+  `ExperimentController.create_experiment(user_simulator=True)`). Its
+  simulator turns each task prompt into its own utterances, so its runs'
+  first messages are not checked against the prompts: validity reads
+  `simulated_user` instead of valid | invalid. Completeness is still checked.
+  The flag is set once, at creation; a registered experiment takes it from
+  its registration. It shows read-only on the experiment and registration
+  pages and in their API responses. **Schema v10** adds
+  `experiments.user_simulator` and `experiment_registrations.user_simulator`.
+  A v9 store is refused, as with every older schema, and is not migrated.
+
+- **Benchmark experiments are checked against their version** (`fix-mgoi`):
+  every experiment that names a benchmark version must declare exactly that
+  version's task IDs, whether or not it was registered in the UI (before, only
+  UI-registered ones were checked). Each recorded experiment now reports two
+  verdicts, derived from its attempts and recorded turns: **complete |
+  incomplete** (every benchmark task got its declared runs) and **valid |
+  invalid** (every run's first message matched its task's saved prompt; tasks
+  without a saved prompt are not checked). Both show on the benchmark page's
+  experiment cards with "N of M tasks", and on the experiment page with the
+  runs that are short or that sent another prompt. A store verdict of
+  `invalid` for missing runs (`attempt_shortfall`, `never_completed`) now
+  reads "incomplete" in the UI.
+
+- **Experiments and winners are partitioned by benchmark version**
+  (`fix-873a`): each version of a benchmark is its own contest, so the Studio
+  lists one version's experiments at a time (rail: benchmark → version →
+  experiments) and each version has its own winner. The winner is now plain:
+  `POST /api/experiments/<id>/winner` sets it, `DELETE` removes it, and having
+  no winner is normal. Removed: the automatic first-experiment winner, the
+  `keep`/`undecided` decisions and `expected_selection_id` on the winner,
+  `POST .../winner/decisions`, `GET /api/benchmarks/<id>/experiments` (now
+  `.../versions/<v>/experiments`), and the refusal to delete the current
+  winner (deleting it leaves the version with no winner). Existing live DBs
+  are not migrated: experiments already in a cross-version group stay there.
+  `create_experiment`'s
+  `initialize_winner` is renamed `join_comparison_group`. Per-task best runs
+  are unchanged.
 
 - **The observability record bounds itself in long-lived servers**
   (`fix-nczr`): the writer re-runs the retention prune hourly instead of only
@@ -11,6 +575,63 @@
   whole, so the cap is a real bound. No new settings. A malformed `FW_OBS_*`
   integer now logs a warning, and so does an unsealed experiment holding the
   file over the cap.
+
+### Fixed
+
+- **A clarification reply fills the field it was asked for** (fix-mbkw).
+  When parameter extraction asks for a missing or invalid field, the reply is
+  merged into the asked fields (stored as `NOT_FOUND`, or a required field
+  still unset) before any unset Optional field: "Ann" for a missing `name` no
+  longer lands in an Optional `filter` declared before it while `name` is
+  asked again. A comma-separated reply with one part per asked field fills
+  those fields. With no Optional field unset, the merge is unchanged.
+- **An unmentioned `Optional[str]` reaches the command as its default**
+  (fix-3t6p, the str analogue of fix-7t0q). On the LLM path an `Optional[str]`
+  field the request does not give came back as the text `NOT_FOUND` (or
+  `None`) and reached the command as that value, while the key=value and XML
+  paths gave the default. `validate_parameters` now gives such a field its
+  declared default (None when it declares none;
+  `signatures.default_unfilled_optional_strs`). Required fields are unchanged:
+  `NOT_FOUND` there is still reported missing and asked for.
+- **A misspelled phase parameter with a default fails the load** (fix-ajir.11).
+  A `steps_fn`, `when` or `until` parameter defaulting to `None` must name an
+  earlier phase with an output in at least one plan the placeholder inputs
+  give; `lambda find, recrod=None: ...` no longer loads and silently takes the
+  "not found" branch. A parameter with another default (`kind=kind`) keeps its
+  value and is not checked. `check_bindings` returns what it saw of them.
+
+- **An answer-only reply that cannot be parsed twice no longer fails the turn**
+  (fix-ajir.8): `answer_only_answer` writes the answer from the steps
+  (`answer_from_steps`), as it does for an empty reply; the list check and the
+  code-written layout (`bulleted_answer`) apply to it.
+
+- **One malformed skill file no longer fails every turn** (fix-ajir.3). A skill
+  file whose declaration is malformed (or whose name is not an identifier) is
+  logged as an error and skipped, as one that does not import already was; the
+  workflow's other skills load, and the result is kept for the process instead
+  of every skill being imported again on each turn. `fastworkflow skill preview`
+  (with or without `--check`) fails naming each skipped file and its error.
+
+- **Command modules that import other command modules load safely from
+  several threads** (fix-nhhq, `python_utils.get_module`). Loading a command
+  file by path always executed a fresh copy and swapped it into `sys.modules`
+  without Python's import lock, so a concurrent `from ..Ctx.mod import X` in
+  another command module could get the half-executed copy ("cannot import name
+  X"); and a load that failed left its broken module in `sys.modules`, so every
+  later import of it failed the same way for the rest of the process. The
+  loader now takes the module's import lock, reuses a module already imported
+  from the same file (re-executing it in place only if the file changed on
+  disk), marks a fresh module initialising while it runs, and removes it from
+  `sys.modules` if it fails.
+
+- **The size-cap prune no longer deletes a running turn's offload evidence**
+  (fix-q2fy, `ObservabilityStore.prune`). A turn's record is written when it
+  ends, so the cap now evicts offload evidence only of turns with a finished
+  turn record; evidence of a turn that may still be running (or suspended)
+  goes only by the age horizon, which also clears a crashed turn's orphans.
+  The bytes it holds while the DB stays over the cap are reported as
+  `in_flight_bytes` in the `prune_over_cap_bound_bytes` diagnostic. No schema
+  change.
 
 ## 3.6.0 — DSPy 3.4, request splitting, workflow facts on classes
 
@@ -123,6 +744,9 @@ does not backfill them.
   (`fix-u2zw`): a persisted `command_directory.json` whose recorded module
   paths no longer exist is rebuilt instead of failing with "Could not import
   module from path".
+- **`finish` called with arguments finishes** (`fix-njhf`): arguments the model
+  passes to `finish` (`analysis=...`, `command=...`) are ignored instead of
+  raising "Arg X is not in the tool's args", so the finish check runs.
 
 ## 3.5.0 — observability debug UI hardening and winner-selection fixes
 
@@ -234,7 +858,7 @@ labels themselves.
   `JEV_API_KEY` are both set (it sends the request, the plan and a redacted
   summary of every step to TypeSafe); fails open to an unchecked finish; one
   `finish_check` offload event per finish and an `fw.finish_check` span.
-  Measured offline on 82 recorded ido attempts it was not tuned on (910
+  Measured offline on 82 recorded downstream-workflow attempts it was not tuned on (910
   labelled step x subject pairs, pre-registered): precision 0.77, recall 0.89.
   Install with the `jev` extra.
 - **Structured plan** (`fastworkflow.turn_plan`): with the finish check on, the
@@ -387,7 +1011,7 @@ labels themselves.
   overrides the default of 3, clamped to `[0, 10]`; a non-integer is ignored,
   with a warning either way. `forced_replan` and `forced_replan_wall` events
   carry `reached_limit`, and `agent_installed` records the bound in force. The
-  default rests on one ido task, not on a measured tail across workflows.
+  default rests on one downstream-workflow task, not on a measured tail across workflows.
 - **Planner spans say which planner produced the plan** (fix-3x76):
   `fw.planner.plan` / `fw.planner.replan` v2 add `plan_source` (`structured`,
   `text`, `text_fallback`, `none`) and the structured plan's `subjects`,
@@ -528,8 +1152,8 @@ labels themselves.
   `finish_check` event recorded after the plan is read carries
   `unchecked_for_effect`, the steps skipped this way; when that is every
   step the check would hold the agent to, the reason is the new
-  `no read-only steps` and nothing is sent. Replayed on the 82 recorded ido
-  attempts with ido's manifest (cached answers): write-step flags 7 to 0,
+  `no read-only steps` and nothing is sent. Replayed on the 82 recorded
+  downstream attempts with that workflow's manifest (cached answers): write-step flags 7 to 0,
   precision 0.80, recall 0.88 to 0.87. No span contract changes; with
   `FW_FINISH_CHECK` unset nothing changes.
 - **The listing parser is fail-closed** (fix-zoup, fix-36gv, fix-k56c; see
@@ -571,10 +1195,10 @@ labels themselves.
 - **The finish check's identifier resolution is generic, and its calibration
   is stated** (fix-ft18): `refers_to` also resolves from aligned, markdown and
   tabbed listings (first 64 KiB of each response, block by block), parameter
-  values and clause tokens; recorded ido ledgers are unchanged. Every event
-  records `calibration` (`"ido-v7-2026-09"`), and a non-default
+  values and clause tokens; recorded downstream ledgers are unchanged. Every event
+  records `calibration` (the calibration tag), and a non-default
   `FW_FINISH_CHECK_MODEL` warns once per process. The structured planner's
-  `kind` description no longer uses ido examples.
+  `kind` description no longer uses workflow-specific examples.
 - **Decision-model features go through a provider interface** (fix-5uva,
   stages 1-2): `fastworkflow.observation_offloading.decision` (`YesNo`,
   `OneOf`, `DecisionProvider`, `ProviderFailure`, `StateTooLarge`,
@@ -621,7 +1245,7 @@ labels themselves.
 - **The decision-model wording is pinned to its measurement** (fix-8ee5):
   `tests/fixtures/decision_measurements.json` records the offline measurement
   behind the finish check's and router's published figures (calibration
-  `ido-v7-2026-09`, model, thresholds; finish check precision 0.767
+  tag, model, thresholds; finish check precision 0.767
   [0.722, 0.810], recall 0.888 [0.832, 0.936] on 910 pairs over 82 attempts;
   router all-rows precision 1.0 [0.970, 1.0] on 126, recall 0.962
   [0.914, 0.984] on 131, at threshold 0.5; each with n and 95% interval) and
@@ -764,7 +1388,7 @@ labels themselves.
 - A labelled last row -- first cell ending with `:`, or one word then `:` and a
   space (`Note:  2 items`) -- is a footer, not a row (fix-4riz): the strict
   parse refuses the listing, as for a `total`/`sum`/`count` row, and the lax
-  read drops it. Over 3,832 recorded ido texts, no accept/refuse decision
+  read drops it. Over 3,832 recorded downstream-workflow texts, no accept/refuse decision
   changed in either mode.
 - Test isolation (fix-4fw3): the SDK timeout contract asserts the private
   `_config.timeout` the pinned 0.7.2 SDK actually has, and tests that register a
@@ -902,7 +1526,7 @@ labels themselves.
   window, which gave a 262,144-byte bound; the 131,072-byte ceiling now applies,
   so observations of 128-256 KB are searched as a disclosed prefix. Set
   `FW_SEARCH_OBSERVATION_MAX_BYTES=262144` to keep the old bound. No recorded
-  ido observation is over 5.4 KB.
+  downstream observation is over 5.4 KB.
 - **`listing.served_rows` returns `Optional[tuple]`**: `None` when not one row
   fits the bound. A caller outside the framework must handle it.
   `parse_table` keeps its return shape and returns `None` more often.
@@ -927,10 +1551,9 @@ labels themselves.
   `tests/test_decision_measurements.py`** (fix-8ee5). Update the digests in
   `tests/fixtures/decision_measurements.json` only together with a new
   measurement recorded there. **The measurement evidence lives only in local
-  directories** -- `~/rl/4dsr-offline` (with the manifest-gate replay scripts
-  and the manifest generator in `~/rl/4dsr-offline/replay/`) and
-  `~/rl/ufot-offline` -- and must be archived somewhere durable; the manifest
-  holds only their sha256 and those paths.
+  directories outside this repository** (with the manifest-gate replay
+  scripts and the manifest generator) and must be archived somewhere durable;
+  the manifest holds only their sha256 and paths.
 - `fastworkflow.observation_offloading.related` is a new module (fix-vpe3);
   every moved name is still importable from `observation_offloading.search`.
 
