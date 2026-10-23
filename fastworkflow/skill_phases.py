@@ -78,6 +78,11 @@ How the runner (``WorkflowExecutionContext``) runs a phased skill call, phase by
    step itself and its OUTPUT names every value the step gives (``Ann`` among the
    matches; ``runs_finding_planned_values``). With only off-plan runs, the fill fails
    saying the planned run was not found.
+   A step that leaves an argument open (``entity_type=<the family it names>``) may be
+   run with several values: when some of those reads listed rows and others listed
+   nothing, the ones that listed nothing were probes of the wrong value and are
+   dropped (``runs_without_empty_probes``), so the facts are the read that found the
+   records, not the last read. A re-read of the same query is never a probe.
    One exception: a planned step that opens the record the workflow is already on
    cannot run (the agent is told it is already there, and nothing runs). When no run
    of the phase does such a step, the earlier run of the turn that does it, that
@@ -153,6 +158,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import inspect
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
@@ -1270,6 +1276,60 @@ def planned_record(runs: Sequence[Mapping[str, Any]], plan_text: Optional[str], 
     return None if record == ended_on else record
 
 
+def runs_without_empty_probes(runs: Sequence[Mapping[str, Any]],
+                              steps: Mapping[str, Sequence[Any]],
+                              sources: Iterable[Any] = (),
+                              names: Iterable[str] = ()) -> list[dict[str, Any]]:
+    """*runs* without the reads that probed a step's open argument and listed nothing.
+
+    A step that leaves an argument open (a placeholder or prose: ``entity_type=<the
+    family it names>``) lets the agent try more than one value. When the successful
+    runs of one command that satisfy one such step (``finish_check.satisfies``) read
+    two or more QUERIES that give the same parameters and differ only in the value of
+    a parameter the step does not fix, and some of those queries listed rows while
+    the others listed nothing (``facts._listed_nothing`` on every page), the queries
+    that listed nothing were probes of the wrong value: their runs are dropped, so
+    the facts come from the read that found the records, not from the last read.
+
+    Nothing else changes: a re-read of the same query (the same values: a listing
+    read again after a change) is never a probe, a query that gives other parameters
+    is left to the "broadest query" rule, and when every query listed nothing, or
+    every one listed rows, the runs are kept as they are (the latest still wins).
+    Queries and pages are told apart as ``facts_from_runs`` tells them (``_page_key``),
+    with the paging parameters of *sources* (the model's ``fact_sources``).
+    """
+    from fastworkflow.observation_offloading import finish_check
+    from fastworkflow.observation_offloading.facts import (
+        PAGING_PARAMETERS, _listed_nothing, _page_key)
+
+    names = {str(n).lower() for n in names}
+    paging_of: dict[str, set[str]] = {}
+    for source in sources:
+        paging_of.setdefault(_plain(source.command), set()).update(source.page_by)
+    dropped: set[int] = set()
+    for command, group in steps.items():
+        paging = set(PAGING_PARAMETERS) | paging_of.get(command, set())
+        for step in group:
+            mine = [index for index, run in enumerate(runs)
+                    if _plain(run.get("command")) == command and run.get("success")
+                    and finish_check.satisfies(step, run, names)]
+            queries: dict[str, list[int]] = {}
+            for index in mine:
+                query, _page, _size = _page_key(runs[index].get("input"), paging, None)
+                queries.setdefault(query, []).append(index)
+            if len(queries) < 2:
+                continue
+            given = [json.loads(query) for query in queries]
+            if not all(isinstance(q, dict) for q in given) or \
+                    len({frozenset(q) for q in given}) != 1:
+                continue  # other parameters: not values of one open argument
+            empty = {query for query, indexes in queries.items()
+                     if all(_listed_nothing(runs[i].get("output")) for i in indexes)}
+            if empty and len(empty) < len(queries):
+                dropped.update(i for query in empty for i in queries[query])
+    return [dict(run) for index, run in enumerate(runs) if index not in dropped]
+
+
 def _step_text(step: Any) -> str:
     return f"step {step.number} ({' '.join(str(step.text).split())})"
 
@@ -1291,7 +1351,9 @@ def fill_output(model: type[BaseModel], runs: Sequence[Mapping[str, Any]], *,
     not found; it never falls back to an off-plan run, except a planned lookup run in
     another form whose output holds every value the step gives
     (``runs_finding_planned_values``). Raises ``FactsError``
-    (``MissingFactError`` for a required field no run holds).
+    (``MissingFactError`` for a required field no run holds). Reads of a step's open
+    argument with values that listed nothing, beside one that listed rows, do not count
+    (``runs_without_empty_probes``).
 
     *earlier_runs* are the turn's runs before the phase, in run order. A planned step
     none of the phase's runs does, because the workflow was already on the record it
@@ -1332,6 +1394,8 @@ def fill_output(model: type[BaseModel], runs: Sequence[Mapping[str, Any]], *,
         found = _finding_planned_values(kept, steps, on_plan, plain_names)
         kept = ([found.get(index) or run for index, run in enumerate(kept)
                  if index in found or run in on_plan] if found else on_plan)
+        # An open argument probed with a value that listed nothing (fix-xhy3).
+        kept = runs_without_empty_probes(kept, steps, fact_sources(model), plain_names)
         if earlier_runs:
             kept = runs_that_entered_record(earlier_runs, runs, record, steps, plain_names) + kept
         kept = runs_standing_in_for_openers(

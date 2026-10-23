@@ -370,6 +370,55 @@ def test_a_command_no_step_names_keeps_the_earlier_rules():
     assert fill_output(Found, runs, record=LIBRARY, plan_text="1. say the uid").book_uids == ["b2"]
 
 
+class KindLoans(BaseModel):
+    kind: str = fact_from("list_loans.kind")
+    loan_uids: list[str] = fact_from("list_loans.loan_uids")
+    total: int = fact_from("list_loans.total")
+
+
+OPEN_KIND_PLAN = "1. list_loans kind=<the kind the book names: print or ebook>"
+
+
+def _loans(kind, uids, start=None):
+    return _cmd_run("list_loans", {"kind": kind, "start": start},
+                    {"loan_uids": uids, "total": len(uids)}, context=BOOK)
+
+
+def _kind_loans(runs, plan=OPEN_KIND_PLAN):
+    filled = fill_output(KindLoans, runs, record=BOOK, plan_text=plan)
+    return filled.kind, filled.loan_uids, filled.total
+
+
+def test_a_probe_of_an_open_argument_that_listed_nothing_does_not_replace_the_read_with_rows():
+    # fix-xhy3: the step leaves the kind open; the agent read print (rows), then ebook
+    # (none). The facts are the print read, not the last, empty one, in either order.
+    assert _kind_loans([_loans("print", ["l1", "l2"]), _loans("ebook", [])]) == (
+        "print", ["l1", "l2"], 2)
+    assert _kind_loans([_loans("ebook", []), _loans("print", ["l1"])]) == ("print", ["l1"], 1)
+    # Pages of the read with rows still join; its empty page past the end carries nothing.
+    runs = [_loans("print", ["l1", "l2"]), _loans("print", [], start=2), _loans("ebook", [])]
+    runs[0]["output"]["total"] = 2
+    assert _kind_loans(runs) == ("print", ["l1", "l2"], 2)
+    # Without a plan nothing is dropped: the latest read wins, as facts_from_runs reads it.
+    filled = fill_output(KindLoans, [_loans("print", ["l1"]), _loans("ebook", [])], record=BOOK)
+    assert (filled.kind, filled.loan_uids) == ("ebook", [])
+
+
+def test_an_empty_read_is_kept_when_it_is_no_probe_of_an_open_argument():
+    # A re-read of the same query (after a change) is the truth: the latest wins.
+    assert _kind_loans([_loans("print", ["l1"]), _loans("print", [])]) == ("print", [], 0)
+    # Every query listed nothing, or every one listed rows: the latest still wins.
+    assert _kind_loans([_loans("print", []), _loans("ebook", [])]) == ("ebook", [], 0)
+    assert _kind_loans([_loans("print", ["l1"]), _loans("ebook", ["l7"])]) == ("ebook", ["l7"], 1)
+    # A step that fixes the value takes only its own run, empty or not.
+    assert _kind_loans([_loans("print", ["l1"]), _loans("ebook", [])],
+                       plan="1. list_loans kind=ebook") == ("ebook", [], 0)
+    # Queries that give other parameters are not values of one argument: the broadest wins.
+    narrowed = _cmd_run("list_loans", {"kind": "ebook", "filter": "Ann"},
+                        {"loan_uids": ["l9"], "total": 1}, context=BOOK)
+    assert _kind_loans([_loans("print", []), narrowed]) == ("print", [], 0)
+
+
 class FoundNamed(BaseModel):
     book_uids: list[str] = fact_from("find_book.book_uids", min_length=1)
     labels: list[str] = fact_from("find_book.labels")
