@@ -54,7 +54,9 @@ def get_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):
     # lever is process-wide because nothing threads per-call kwargs down to
     # here; `**kwargs` already reaches `dspy.LM`, but no caller passes any.
     #
-    # Unset leaves today's behavior exactly as it was.
+    # Unset leaves today's behavior exactly as it was. The value is the env file
+    # ``init`` loaded, else the process environment (``get_env_var``, fix-hia1.40),
+    # so a harness can set ``FW_LM_CACHE=0`` without calling ``init``.
     if fastworkflow.get_env_var("FW_LM_CACHE", default="1") in ("0", "false", "False"):
         kwargs.setdefault("cache", False)
     # Without one, a provider request that stalls blocks the turn for minutes.

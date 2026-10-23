@@ -89,10 +89,10 @@ SERVER_INCARNATION = uuid.uuid4().hex
 def resolve_max_live_sessions() -> tuple[int, str]:
     """Resolve MAX_LIVE_SESSIONS with the process environment taking precedence.
 
-    OS first, deliberately. ``get_env_var`` returns a supplied default *before*
-    consulting ``os.environ``, so passing a default here would make the container
-    variable unreachable — and an operator control whose documented default
-    outranks the container override is not an operator control.
+    OS first, deliberately. ``get_env_var`` reads the workflow env file *before*
+    ``os.environ``, so resolving through it alone would let the env file outrank
+    the container variable — and an operator control that the image's own file
+    outranks is not an operator control.
 
     Returns the value and where it came from, because an operator has to be able
     to see whether their override actually took effect.

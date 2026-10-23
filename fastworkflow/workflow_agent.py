@@ -356,11 +356,15 @@ def _arg_text(value) -> str:
 
 
 def _key_value_text(key: str, value: str) -> str:
-    """``key=value``, quoted only where the key=value parser would otherwise cut
-    the value: it strips a trailing ``,``/``;`` and a trailing ``(note)``. A
-    `` word=`` inside a value ends it whatever the quoting, so ``=`` (or a
-    comma inside the value) is no reason to quote."""
-    if value[-1] in ",;" or re.search(r"\([^()]*\)\.?$", value):
+    """``key=value``, quoted only where a parser would otherwise cut the value.
+
+    The key=value parser strips a trailing ``,``/``;`` and a trailing ``(note)``.
+    A code-run step's chain ends at the first ``(`` or ``;`` outside quotes
+    (``finish_check.step_chain``), so a value that contains either is quoted, not
+    only one that ends with them. A `` word=`` inside a value ends it whatever
+    the quoting, so ``=`` (or a comma inside the value) is no reason to quote.
+    """
+    if "(" in value or ";" in value or value[-1] in ",":
         quote = '"' if '"' not in value else "'"
         if quote not in value:
             return f"{key}={quote}{value}{quote}"

@@ -79,6 +79,7 @@ from typing import Any, Callable, Optional
 
 from pydantic import BaseModel
 
+from fastworkflow.observation_offloading.finish_check import quote_step_value
 from fastworkflow.skill_phases import (Phase, PhaseError, Placeholder, _template_kwargs,
                                        concatenated_steps, fact_from, is_building_template,
                                        is_placeholder, tests_noted)
@@ -117,7 +118,8 @@ def picks_noted():
 def pick(command: str, *, named: str, **uid: Any) -> str:
     """Open one row the previous step listed: ``command <uid_param>=<uid>`` when the facts
     give the uid; else (None at run time, unknown in the template) ``command with the uid of
-    the NAMED match``, which code runs on the one row named exactly."""
+    the NAMED match``, which code runs on the one row named exactly. A uid containing ``(``
+    or ``;`` is quoted (``quote_step_value``), so the chain keeps it."""
     if len(uid) != 1 or not next(iter(uid)).endswith("_uid"):
         raise StepFormError(f"pick({command!r}): give exactly one uid parameter "
                             f"(..._uid=...), got {sorted(uid)}")
@@ -129,7 +131,7 @@ def pick(command: str, *, named: str, **uid: Any) -> str:
         picks.append((command, param))
     if value is None or is_placeholder(value):
         return f"{command} with the uid of the {named} match"
-    return f"{command} {param}={value}"
+    return f"{command} {param}={quote_step_value(value)}"
 
 
 # --------------------------------------------------------------------------- filters

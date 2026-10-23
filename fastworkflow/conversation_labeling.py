@@ -52,9 +52,9 @@ def resolve_topic_generation_timeout() -> tuple[float, str]:
     """Resolve the per-attempt deadline with the process environment taking precedence.
 
     OS first, for the same reason resolve_max_live_sessions does it (utils.py):
-    ``get_env_var`` returns a supplied default *before* consulting ``os.environ``,
-    so passing a default straight to it would make the container variable
-    unreachable. This is an operator control on a server — the person who needs
+    ``get_env_var`` reads the workflow env file *before* ``os.environ``, so
+    resolving through it alone would let the env file outrank the container
+    variable. This is an operator control on a server — the person who needs
     to raise it against a slow provider, or lower it under a tighter termination
     grace period, sets it on the deployment, not in the workflow's env file.
 

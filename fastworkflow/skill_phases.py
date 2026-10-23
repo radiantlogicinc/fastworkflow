@@ -1552,8 +1552,9 @@ def _code_step(step: Any, parameters_class: Any) -> tuple[Optional[str], str]:
     first = _WORD_RE.search(clean)
     if first is None or first.group(0) != step.command:
         return None, "command not first"
-    # The chain: the text after the command up to the first "(" or ";". The rest is a note.
-    chain = re.split(r"[(;]", clean[first.end():], maxsplit=1)[0].strip()
+    # The chain: the text after the command up to the first "(" or ";" outside a quoted
+    # value (finish_check.step_chain). The rest is a note.
+    chain = finish_check.step_chain(clean[first.end():]).strip()
     fields = getattr(parameters_class, "model_fields", None) or {}
     if not chain:
         if any(info.is_required() for info in fields.values()):
@@ -1583,9 +1584,10 @@ def code_step(step: Any, parameters_class: Any) -> Optional[str]:
     *step* is a ``finish_check.PlanStep``; *parameters_class* is its command's parameters
     class (None for a command with none). Mechanical, read only with the existing parsers:
     a command step (``KIND_COMMAND``) whose first word is its command, and whose CHAIN (the
-    text after the command, cut at the first ``(`` or ``;``) is empty with every field
-    defaulted, or binds with the key=value parser (which declines placeholders, examples
-    and values that do not validate), every bound value the step's own value
+    text after the command, cut at the first ``(`` or ``;`` outside a quoted value,
+    ``finish_check.step_chain``) is empty with every field defaulted, or binds with the
+    key=value parser (which declines placeholders, examples and values that do not
+    validate), every bound value the step's own value
     (``finish_check.step_arguments``, so prose swallowed into a value is caught) and every
     required field given. Code runs ``command chain``: the note after it is never sent.
     A paging value the step writes (``start=20``) is a value like any other.
@@ -1634,7 +1636,7 @@ def pick_step(step: Any, lookup: Any, output: Any,
         return None, "not one required uid"
     # Any placeholder but the uid's leaves the step to the agent. The step's other values
     # stay as written; only the uid's placeholder is filled.
-    chain = re.split(r"[(;]", clean[first.end():], maxsplit=1)[0].strip()
+    chain = finish_check.step_chain(clean[first.end():]).strip()
     keys = list(finish_check._ARGUMENT_KEY_RE.finditer(chain))
     named = [match.group(1) for match in keys]
     if set(named) - {fields[0]} != set(step.arguments) or \
@@ -1658,7 +1660,8 @@ def pick_step(step: Any, lookup: Any, output: Any,
     rows = (narrowed_output(output, values) or output)[uids[0]]
     if len(rows) != 1 or rows[0] is None or isinstance(rows[0], (Mapping, list, tuple, bool)):
         return None, "no single match"
-    command = f"{step.command} {fields[0]}={rows[0]}" + (f" {rest}" if rest else "")
+    command = (f"{step.command} {fields[0]}={finish_check.quote_step_value(rows[0])}"
+               + (f" {rest}" if rest else ""))
     for cls in parameters_classes:
         bound = ParameterExtraction._extract_parameters_from_key_values(command, cls, step.command)
         if bound is None or finish_check.plain_value(getattr(bound, fields[0], None)) != \
@@ -1734,6 +1737,7 @@ def step_paging(step: Any, parameters: Callable[[str], list]) -> tuple[list[str]
     ``CodeSteps`` and the skill preview (``code_step_pages``) both read paging here.
     """
     from fastworkflow.observation_offloading.facts import PAGING_PARAMETERS
+    from fastworkflow.observation_offloading.finish_check import step_chain
 
     fields = {name for cls in parameters(step.command) if cls is not None
               for name in cls.model_fields}
@@ -1741,8 +1745,8 @@ def step_paging(step: Any, parameters: Callable[[str], list]) -> tuple[list[str]
     if not paging or any(name in step.arguments for name in paging):
         return [], False
     text = step.text.replace("`", " ").replace("*", " ")
-    cut = re.search(r"[(;]", text[text.find(step.command) + len(step.command):])
-    note = text[text.find(step.command) + len(step.command) + cut.start():] if cut else ""
+    rest = text[text.find(step.command) + len(step.command):]
+    note = rest[len(step_chain(rest)):]
     return paging, any(phrase in note.lower() for phrase in FULL_LIST_PHRASES)
 
 

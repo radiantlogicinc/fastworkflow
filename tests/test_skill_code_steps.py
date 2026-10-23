@@ -74,6 +74,13 @@ def _read(text):
      "find_book query=Dune Messiah"),
     ("find_book query=Dune start=20", "find_book query=Dune start=20"),
     ("list_loans filter=rare first editions; for its shelf", "list_loans filter=rare first editions"),
+    # a quoted value keeps its "(" and ";"; a note after it is still a note (fix-ajir.40)
+    ('find_book query="Dune (1965)"', 'find_book query="Dune (1965)"'),
+    ('find_book query="Dune (1965)" (the novel)', 'find_book query="Dune (1965)"'),
+    ("list_loans filter='rare; first' (full list)", "list_loans filter='rare; first'"),
+    ('find_book query="Herbert, Frank"', 'find_book query="Herbert, Frank"'),
+    # unquoted, the value still ends at the first "(" (its note), as before
+    ("find_book query=Dune (1965)", "find_book query=Dune"),
 ])
 def test_a_mechanical_step_runs_its_chain_and_never_its_note(text, command):
     assert code_step(_step(text), CLASSES[command.split()[0]]) == command
@@ -94,6 +101,7 @@ def test_a_mechanical_step_runs_its_chain_and_never_its_note(text, command):
     "open_book_by_uid with the uid of the Dune match if there is one",
     "then find_book query=Dune",                            # command not the first word
     "find_book query=Dune tags=[a]",                        # a word= that is no field
+    'find_book query="Dune" the novel',                     # prose after a quoted value
 ])
 def test_an_open_step_is_left_to_the_agent(text):
     step = _step(text)
@@ -932,6 +940,18 @@ def _pick(text, output, classes=(OpenParams,), lookup="find_book query=Dune"):
 def test_a_pick_opens_the_one_exact_match_or_the_only_row(output, uid):
     command, _ = _pick("open_book_by_uid with the uid of the Dune match", output)
     assert command == (f"open_book_by_uid book_uid={uid}" if uid else None)
+
+
+def test_a_pick_quotes_a_uid_containing_a_parenthesis_or_semicolon():
+    # The command parser strips a trailing "(note)"; quoting keeps the uid (fix-ajir.40).
+    assert _pick("open_book_by_uid with the uid of the Dune match",
+                 {"labels": ["Dune"], "book_uids": ["b1(eu)"]}) == (
+        'open_book_by_uid book_uid="b1(eu)"', "only row")
+    assert _pick("open_book_by_uid with the uid of the Dune match",
+                 {"labels": ["Dune"], "book_uids": ["west;1"]}) == (
+        'open_book_by_uid book_uid="west;1"', "only row")
+    assert code_step(_step('open_book_by_uid book_uid="b1(eu)"'), OpenParams) == \
+        'open_book_by_uid book_uid="b1(eu)"'
 
 
 def test_a_pick_names_the_lookup_value_and_has_one_required_uid():

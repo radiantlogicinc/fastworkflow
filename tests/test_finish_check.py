@@ -378,6 +378,21 @@ def test_a_step_value_ends_at_comma_prose_and_an_identifier_at_its_token():
     assert args(" query=Ann Lee, the second match") == {"query": "ann lee"}
     assert args(" query=Shelf_Reading Room 2") == {"query": "shelf_reading room 2"}
     assert args(" title=Dune, author=Herbert") == {"title": "dune", "author": "herbert"}
+    # A quoted value is kept whole: its "(", ";" and ", " are the value's (fix-ajir.40).
+    assert args(' query="Acme (EU)" (all of them)') == {"query": "acme (eu)"}
+    assert args(" query='Sales; West' start=20") == {"query": "sales; west", "start": "20"}
+    assert args(' query="Lee, Ann", the second match') == {"query": "lee, ann"}
+    # Unquoted, or with an unclosed quote, a value still ends at "(" or ";".
+    assert args(" query=Acme (EU)") == {"query": "acme"}
+    assert args(' query="Acme (EU)') == {"query": "acme"}
+    assert args(" query=O'Brien (only when needed)") == {"query": "o'brien"}
+    # A condition word inside a quoted value is the value. After the quotes, it is prose.
+    quoted = fc.parse_plan(
+        '1. find_book query="only when needed"\n'
+        '2. find_book query="Dune" only when needed\n'
+        '3. find_book query="if needed"', COMMANDS, CORE)
+    assert [s.kind for s in quoted] == ["command", "conditional", "command"]
+    assert quoted[0].arguments["query"] == "only when needed"
     run = {"command": "list_loans", "success": True,
            "input": {"scope": "shelf", "scope_uid": uid, "filter": None}}
     step = fc.parse_plan(f"1. list_loans scope=shelf scope_uid={uid}, no filter, no start",

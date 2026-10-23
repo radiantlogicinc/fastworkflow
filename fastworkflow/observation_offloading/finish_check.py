@@ -79,6 +79,13 @@ _ANYWHERE_CONDITION_RE = re.compile(
 _STEP_ARGUMENT_RE = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_]*\s*=")
 #: An argument name and its ``=`` in a step: where one argument's value ends.
 _ARGUMENT_KEY_RE = re.compile(r"(?:^|(?<=\s))([A-Za-z_][A-Za-z0-9_]*)\s*=\s*")
+#: A value quoted right after its ``=`` (``query="Acme (EU)"``). An unclosed quote
+#: is an ordinary character. ``_CHAIN_RE`` and ``_outside_quoted_values`` share it.
+_QUOTED_VALUE = r"""=\s*"[^"\n]*"|=\s*'[^'\n]*'"""
+_QUOTED_VALUE_RE = re.compile(_QUOTED_VALUE)
+#: A step's chain: its text up to the first ``(`` or ``;`` that is not inside a value
+#: written in quotes right after its ``=``.
+_CHAIN_RE = re.compile(rf"(?:{_QUOTED_VALUE}|[^(;])*")
 #: A value that is a placeholder, not a value: ``<...>``, ``{...}``, ``[...]``, an ellipsis.
 _PLACEHOLDER_RE = re.compile(r"[<>{}\[\]]|\.\.\.|\u2026")
 #: A value's first token that is an identifier, not a word of a name: at least
@@ -215,10 +222,11 @@ def _classify(number: int, text: str, names: set, core: set) -> PlanStep:
     arguments = step_arguments(rest)
     # A condition word in the command's chain (up to the first "(" or ";") makes the
     # step conditional too, so "find_x query=A only when needed" is not run with that
-    # prose as its value; a note in parentheses never changes what runs.
-    chain = re.split(r"[(;]", rest, maxsplit=1)[0]
-    if (_CONDITION_RE.search(before) or _CONDITION_RE.search(chain)
-            or _ANYWHERE_CONDITION_RE.search(clean)):
+    # prose as its value; a note in parentheses never changes what runs. A word inside
+    # a quoted value is the value, not prose (_outside_quoted_values).
+    chain = step_chain(rest)
+    if (_CONDITION_RE.search(before) or _CONDITION_RE.search(_outside_quoted_values(chain))
+            or _ANYWHERE_CONDITION_RE.search(_outside_quoted_values(clean))):
         return PlanStep(number, text, KIND_CONDITIONAL, command, wants_arguments, arguments)
     return PlanStep(number, text, KIND_COMMAND, command, wants_arguments, arguments)
 
@@ -232,21 +240,51 @@ def plain_value(value: Any) -> str:
     return text.strip("\"'`").strip(" .,:").strip("\"'`").casefold()
 
 
+def step_chain(rest: str) -> str:
+    """The chain of a step whose text after its command is *rest*: up to the first ``(``
+    or ``;`` (a note about the step), except inside a quoted value (``_CHAIN_RE``)."""
+    return _CHAIN_RE.match(rest or "").group(0)
+
+
+def _outside_quoted_values(text: str) -> str:
+    """*text* with each quoted step value blanked, so a word inside one is not prose."""
+    return _QUOTED_VALUE_RE.sub("=", text or "")
+
+
+def quote_step_value(value: Any) -> str:
+    """*value* as a builder writes it into a step.
+
+    Quoted when it contains ``(`` or ``;``, which end a step's chain
+    (``step_chain``) and which a trailing ``(note)`` or ``;`` loses in the
+    key=value parser. A value that holds both ``"`` and ``'`` cannot be quoted
+    and is written as it is. Any other value is written unchanged.
+    """
+    text = str(value)
+    if "(" not in text and ";" not in text:
+        return text
+    quote = '"' if '"' not in text else "'"
+    if quote in text:
+        return text
+    return f"{quote}{text}{quote}"
+
+
 def step_arguments(rest: str) -> dict[str, str]:
     """The concrete ``key=value`` arguments written right after a step's command.
 
     *rest* is the step's text after its command. Only a chain of ``key=value``
-    that starts there counts; it ends at a ``(`` or ``;`` (prose about the step).
-    A value runs to the next ``key=``, and also ends at ``", "`` (prose after
-    it: ``scope_uid=X, no filter``). A value whose first token is an
-    identifier (``_UID_TOKEN_RE``) is that token alone: it ends at the first
-    ``,`` or whitespace. A name of several words (``query=Ann Lee``) is kept whole. A placeholder (``<...>``, ``{...}``, an
+    that starts there counts; it ends at a ``(`` or ``;`` (prose about the step)
+    that is not inside a quoted value (``step_chain``). A value runs to the next
+    ``key=``, and also ends at ``", "`` (prose after it: ``scope_uid=X, no
+    filter``). A quoted value (``query="Acme (EU)"``) is kept whole. A value
+    whose first token is an identifier (``_UID_TOKEN_RE``) is that token alone:
+    it ends at the first ``,`` or whitespace. A name of several words
+    (``query=Ann Lee``) is kept whole. A placeholder (``<...>``, ``{...}``, an
     ellipsis) or an empty value is not a value and is left out. Values are
     normalised with ``plain_value``.
     """
     if not _STEP_ARGUMENT_RE.match(rest or ""):
         return {}
-    chain = re.split(r"[(;]", rest, maxsplit=1)[0]
+    chain = step_chain(rest)
     keys = list(_ARGUMENT_KEY_RE.finditer(chain))
     out: dict[str, str] = {}
     for i, match in enumerate(keys):
@@ -259,9 +297,12 @@ def step_arguments(rest: str) -> dict[str, str]:
 
 
 def _value_text(raw: str) -> str:
-    """The text of one step value: up to ``", "``, or its first token when that
-    token is an identifier (see ``step_arguments``)."""
+    """The text of one step value: a quoted value whole, else up to ``", "``, or its
+    first token when that token is an identifier (see ``step_arguments``)."""
     text = raw.strip()
+    quoted = re.match(r"""("[^"]*"|'[^']*')(?:[\s,]|$)""", text)
+    if quoted:
+        return quoted.group(1)
     first = re.split(r"[\s,]", text, maxsplit=1)[0]
     if _UID_TOKEN_RE.match(first.strip("\"'`")):
         return first
