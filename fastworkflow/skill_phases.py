@@ -1425,13 +1425,16 @@ def is_answer_only(plan_text: str, commands: Iterable[str] = (),
     answer step). *commands* are the workflow's command names (and the phase output's
     source commands); with none known nothing is answer-only, so a phase is never
     kept from its commands because their names could not be read. An empty plan is
-    not answer-only.
+    not answer-only. A step's closing ``(only when ...)`` note (a template line written
+    only under a condition) is not read: it does not make the step conditional.
     """
     from fastworkflow.observation_offloading import finish_check
+    from fastworkflow.skill_commands import without_condition_note
 
     commands, core_commands = list(commands), list(core_commands)
     if not commands or not str(plan_text or "").strip():
         return False
+    plan_text = "\n".join(without_condition_note(line) for line in str(plan_text).splitlines())
     steps = finish_check.parse_plan(plan_text, commands, core_commands)
     if not steps:
         return False

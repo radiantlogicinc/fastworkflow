@@ -1143,6 +1143,15 @@ def test_a_phase_whose_steps_name_no_command_is_answer_only():
     assert not is_answer_only("", COMMANDS, CORE)
 
 
+def test_a_template_condition_note_does_not_make_a_step_conditional():
+    # Template lines end with the tests their phase made, "(only when ...)": the note
+    # neither makes an answer step conditional nor hides a command step.
+    assert is_answer_only("1. apply no change (only when find.uids)\n"
+                          "2. say that b1 has no loans (only when find.uids and not loans.rows)",
+                          COMMANDS, CORE)
+    assert not is_answer_only("1. list_loans book=<uid> (only when find.uids)", COMMANDS, CORE)
+
+
 def test_an_answer_only_query_says_to_run_no_command():
     last = phase_query("show the book Dune", "1. say that b1 has loans l1", index=2, count=3,
                        name="report", answer_only=True)

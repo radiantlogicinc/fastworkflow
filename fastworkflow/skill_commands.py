@@ -1185,6 +1185,14 @@ def check_phase_sources(command: SkillCommand, signatures: dict) -> list[str]:
 #: (``go_up, then ...`` is prose after the command).
 _STEP_COMMAND = re.compile(r"^([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+|[A-Z]\w*/\w+)\b([^(;,]*)")
 _STEP_ARG = re.compile(r"(?<![\w<])([A-Za-z_]\w*)=")
+#: The note a template line ends with when it is written only under a condition
+#: (``find_item query=<q> (only when find.uids)``).
+_CONDITION_NOTE = re.compile(r"\s*\(only when .*\)$")
+
+
+def without_condition_note(line) -> str:
+    """*line* without its closing ``(only when ...)`` note."""
+    return _CONDITION_NOTE.sub("", str(line).rstrip())
 
 
 def step_commands(lines, known: set[str]) -> list[tuple[str, tuple[str, ...]]]:
@@ -1194,7 +1202,7 @@ def step_commands(lines, known: set[str]) -> list[tuple[str, tuple[str, ...]]]:
     the first ``(``, ``;`` or ``,``, as code reads them (``skill_phases.code_step``)."""
     out = []
     for line in lines:
-        text = re.sub(r"\s*\(only when .*\)$", "", str(line).strip())
+        text = without_condition_note(str(line).strip())
         first = re.match(r"[\w/]+", text)
         match = _STEP_COMMAND.match(text)
         if match is None and not (first and first.group(0) in known):
