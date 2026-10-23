@@ -771,20 +771,39 @@ def test_a_paging_placeholder_stops_code_and_the_agent_pages(paged, steps):
     assert _phases(paged.sink)[0].attributes["code_stop"] == f"open step {len(steps)}"
 
 
-def test_a_paging_request_in_a_note_runs_page_1_and_hands_over_when_more_remain(paged):
+def test_a_paging_request_in_a_note_reads_every_page_by_code(paged):
     paged.plan = _plan(Phase("report", lambda: [
         "list_items (full list: next page with start=<n> until complete)", "list_todo_lists"]))
-    paged.model.run("list_items start=10")
-    paged.model.run("list_todo_lists")
-    paged.model.finish()
     paged.turn()
 
-    # Code read page 1 only, and computed no next page: the agent paged.
-    assert paged.workflow.sent[0] == "list_items"
+    # Code read page 1, then each page the observation named next (fix-ajir.36): no model step.
+    assert paged.model.asked == []
+    assert paged.workflow.sent == ["list_items", "list_items start=10", "list_items start=20",
+                                   "list_todo_lists"]
     assert paged.agent.trajectory["thought_0"] == "Step 1 of the plan, run by code (its first page)."
-    assert _phases(paged.sink)[0].attributes["code_stop"] == "more pages at step 1"
-    assert len(paged.model.asked) == 3
+    assert paged.agent.trajectory["thought_1"] == (
+        "Step 1 of the plan, run by code (its page at start=10).")
+    assert _phases(paged.sink)[0].attributes["code_stop"] == "done"
+
+
+def test_code_reads_at_most_code_max_pages_then_goes_on(paged, monkeypatch):
+    monkeypatch.setattr(skill_phases, "CODE_MAX_PAGES", 2)
+    paged.plan = _plan(Phase("report", lambda: [
+        "list_items (full list: next page with start=<n> until complete)", "list_todo_lists"]))
+    paged.turn()
+    assert paged.model.asked == []
     assert paged.workflow.sent == ["list_items", "list_items start=10", "list_todo_lists"]
+
+
+@pytest.mark.parametrize("observation, start, later", [
+    ("12 loans; showing 1-10. Next page: start=10, same arguments.", 0, ("start", 10)),
+    ("477 holder(s); start=60, shown=60. Next page: start=120, same arguments.", 60,
+     ("start", 120)),
+    ("477 holder(s); start=420, shown=57, remaining=0.", 420, None),   # the last page
+    ("3 loans.", 0, None),
+])
+def test_next_page_is_the_later_page_the_observation_names(observation, start, later):
+    assert skill_phases._next_page(observation, ["start"], start) == later
 
 
 def test_a_note_list_that_fits_one_page_goes_on(paged):
@@ -848,12 +867,12 @@ def test_page_1_is_enough_unless_the_note_asks_for_the_full_list(paged, step):
 
 @pytest.mark.parametrize("note", ["(every page)", "(All pages of it)", "(page through it)",
                                   "(read until complete)"])
-def test_each_full_list_phrase_hands_over_when_more_pages_remain(paged, note):
+def test_each_full_list_phrase_reads_every_page(paged, note):
     paged.plan = _plan(Phase("report", lambda: [f"list_items {note}"]))
     paged.model.finish()
     paged.turn()
-    assert _phases(paged.sink)[0].attributes["code_stop"] == "more pages at step 1"
-    assert paged.workflow.sent == ["list_items"]
+    assert _phases(paged.sink)[0].attributes["code_stop"] == "done"
+    assert paged.workflow.sent == ["list_items", "list_items start=10", "list_items start=20"]
 
 
 def test_a_planner_command_step_after_the_last_phase_is_left_to_the_agent(todo):

@@ -517,9 +517,10 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # v4 (fix-6llp): `steps_by_code` (the steps of the run code ran, before the agent:
     # navigation included; model steps = `steps_used - steps_by_code`) and `code_stop`
     # (why code stopped: "done", "open step N", "step N failed", "no path for step
-    # N", "more pages at step N", "stopped" when the executor's step hook ended the
-    # run, or "off" when code ran nothing for the phase: the run has no steps of its
-    # own, as the phase of the planner's steps_before, or nothing could be read).
+    # N", "more pages at step N" (until fix-ajir.36), "stopped" when the executor's
+    # step hook ended the run, or "off" when code ran nothing for the phase: the run
+    # has no steps of its own, as the phase of the planner's steps_before, or nothing
+    # could be read).
     # Absent on an answer-only phase and on a resumed run.
     # v5 (fix-hia1.30): `answer_by_code` on an answer-only phase only: true when code
     # wrote its answer from its steps with no model call (`skill_phases.answer_by_code`).

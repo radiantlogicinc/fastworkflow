@@ -46,6 +46,8 @@ tool uses, and give the agent only what is left.
 6. Paging stays literal: code sends only the paging value a step writes itself. A step
    that writes it as a placeholder (`start=<n>`) goes to the agent. A step that asks for
    more pages only in a note runs page 1; when more pages remain, code hands over.
+   (Superseded by fix-ajir.36: a full-list note is paged by code, up to
+   `CODE_MAX_PAGES`; see "Paging is literal" in `docs/skill_phases.md`.)
 7. A failed code step hands over to the agent with the failure in its trajectory. Code
    never fails a phase by itself.
 8. One temporary switch, on by default, for the stage-12 A/B run; removed after stage 12
@@ -502,7 +504,11 @@ The build follows the design except for these points (the code is the reference)
    and the observation names a later page. "More pages" (`_more_pages`) is the
    observation naming one of the command's own paging parameters with a positive value
    (`start=10`), as a paged command tells its reader; there is no other more-pages
-   signal. Such a step's thought says "(its first page)".
+   signal. Such a step's thought says "(its first page)". Superseded by fix-ajir.36
+   (owner-approved): code now reads each later page the observation names
+   (`_next_page`), up to `CODE_MAX_PAGES` (20), and no longer stops with `more pages at
+   step N`; the agent spent a model step per page and long lists ran out the phase
+   budget.
 5. **`code_stop` values.** Besides `done`, `open step N`, `step N failed`, `no path for
    step N` and `off`: `more pages at step N` (the paging rule) and `stopped` (the
    executor's `on_step_complete` hook ended the run; no agent loop follows). `no path

@@ -792,10 +792,10 @@ def _paging_names(**extra):
 
 @pytest.mark.parametrize("steps, line", [
     (["find_item query=Alpha", "list_parts (full list)"],
-     "Pages: step 1 reads page 1 only; step 2 reads every page."),
+     "Pages: step 1 reads page 1 only; step 2 reads up to 20 pages."),
     (["open_catalog", "list_parts (full list: next page with start=<n> until complete)",
       "find_item query=a", "find_item query=b (all of them)"],
-     "Pages: step 2 reads every page; steps 3 and 4 read page 1 only."),
+     "Pages: step 2 reads up to 20 pages; steps 3 and 4 read page 1 only."),
     (["find_item query=Alpha start=10", "list_parts"], "Pages: step 2 reads page 1 only."),
 ])
 def test_pages_line_names_the_steps_that_read_every_page_and_page_1(steps, line):
@@ -822,10 +822,10 @@ def test_a_phase_on_a_paged_command_shows_its_pages_line(workflow):
                                         "_skills/show_item.py", _paging_names(parameters=None))
     named = skill_preview.render_preview(name, description, steps, commands[name], (),
                                          "_skills/show_item.py", _paging_names())
-    # Only the Pages lines are new: find reads page 1 of its search, item every page of
+    # Only the Pages lines are new: find reads page 1 of its search, item up to 20 pages of
     # its parts (the second plan shows them "as in the plan"); the others page nothing.
     added = [line for line in named.splitlines() if line not in bare.splitlines()]
-    assert added == ["Pages: step 2 reads page 1 only.", "Pages: step 2 reads every page."]
+    assert added == ["Pages: step 2 reads page 1 only.", "Pages: step 2 reads up to 20 pages."]
     kept = [line for line in named.splitlines() if line and not line.startswith("Pages: ")]
     assert kept == [line for line in bare.splitlines() if line]
 

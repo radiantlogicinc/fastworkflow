@@ -619,19 +619,26 @@ record check still runs.
 
 **Paging is literal.** Code sends only a paging value (`facts.PAGING_PARAMETERS`) the
 step writes: `list_loans start=20` runs that page, a step with none runs page 1. Code
-never computes a next page. A step that writes the paging value as a placeholder
-(`start=<n>`), in its chain or as a step of its own with no command (`next page with
-start=<n> until the list is read`), is open: the agent pages. One exception: when a step
-on a paged command writes no paging value, its note holds one of
+computes a next page only for a full-list note (below). A step that writes the paging
+value as a placeholder (`start=<n>`), in its chain or as a step of its own with no
+command (`next page with start=<n> until the list is read`), is open: the agent pages.
+Full-list notes (fix-ajir.36, replacing fix-6llp.4's hand-over after page 1): when a step
+on a paged command writes no paging value and its note holds one of
 `skill_phases.FULL_LIST_PHRASES` ("full list", "every page", "all pages", "until
-complete", "page through"; any case), and page 1's observation names a later page (a
-paging parameter with a positive value, `start=10`), code stops after that step and the
-agent reads the rest. Its thought then says "(its first page)". Any other note, or none:
-page 1 is what the step wants, and code goes on. The rule is `skill_phases.step_paging`;
-the skill preview reads each step with it and says, under the steps, which read every page
-and which page 1 only ("Pages: step 2 reads every page; step 3 reads page 1 only.",
-`skill_phases.code_step_pages`), so a note such as "(all of them)" that reads page 1
-shows there.
+complete", "page through"; any case), code reads page 1 (thought "(its first page)") and
+then, while the observation names a later page (the largest value of one of the
+command's paging parameters above the page just read, as in `Next page: start=60`;
+`skill_phases._next_page`), runs the same command with that value as another step run
+by code (thought "(its page at start=60)"). It stops at the last page or after
+`skill_phases.CODE_MAX_PAGES` (20) pages, page 1 included, and goes on with the pages
+read; the facts join them and give the list's total. Each page is a step of the
+trajectory but not of the agent's step budget. Before, code stopped after page 1 and the
+agent spent one model step per page, which ran long lists out of the phase budget. Any
+other note, or none: page 1 is what the step wants, and code goes on. The rule is
+`skill_phases.step_paging`; the skill preview reads each step with it and says, under the
+steps, which read up to 20 pages and which page 1 only ("Pages: step 2 reads up to 20
+pages; step 3 reads page 1 only.", `skill_phases.code_step_pages`), so a note such as
+"(all of them)" that reads page 1 shows there.
 
 **Always on.** Code-run steps are always on (the temporary switch,
 `FW_SKILL_CODE_STEPS`, was removed after stages 12 and 13 confirmed the gain).
@@ -655,9 +662,10 @@ rebuilt from the skill and resumes. Nothing changes for the app developer.
 - A note never changes what runs: write a filter as an argument
   (`list_loans status=overdue`), not as a note (`list_loans (only overdue ones)`).
 - For every page, say so in the note with one of the `FULL_LIST_PHRASES`
-  (`list_loans (full list)`), or write the paging as a step of its own with `start=`
-  (`next page with start=<n> until the list is read`), which the agent pages. A note
-  that asks for more pages in other words gets page 1.
+  (`list_loans (full list)`), which code pages (up to `CODE_MAX_PAGES` pages), or write
+  the paging as a step of its own with `start=` (`next page with start=<n> until the
+  list is read`), which the agent pages. A note that asks for more pages in other words
+  gets page 1.
 - A step the agent must decide is written as conditional: a condition word before the
   command ("only when it is overdue, renew_loan ..."; `finish_check._CONDITION_RE`) or
   in its chain ("renew_loan loan_uid=l1 only when overdue": after the command, up to the
@@ -688,7 +696,7 @@ contract v22, `fw.skill.phase` v5), the parent of that run's `fw.agent.execute`:
 | `steps` | the phase's numbered plan |
 | `steps_used`, `exhausted`, `suspended` | executor steps the run took (code steps included); whether it reached its budget or suspended |
 | `steps_by_code` | steps code ran before the agent, moves included; model steps = `steps_used - steps_by_code` |
-| `code_stop` | why code stopped: `done` (every step), `open step N`, `step N failed`, `no path for step N` (refused, no no-value path), `more pages at step N`, `stopped` (the executor's step hook ended the run), `off` (no code: the phase of the planner's `steps_before`, or its steps could not be read) |
+| `code_stop` | why code stopped: `done` (every step), `open step N`, `step N failed`, `no path for step N` (refused, no no-value path), `more pages at step N` (no longer written since fix-ajir.36: code reads the pages), `stopped` (the executor's step hook ended the run), `off` (no code: the phase of the planner's `steps_before`, or its steps could not be read) |
 | `record`, `facts` | the record its output was filled on, and the filled output (`null` for no output) |
 | `facts_error` | why the phase failed (status `error`) |
 | `error_type` | the exception that ended the run, when one did |
