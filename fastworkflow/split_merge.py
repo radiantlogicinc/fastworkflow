@@ -10,7 +10,10 @@ A split is meant to be one sub-task per subject (a person, a unit, a right, a
 feed, a control, a tag). The rules, applied in order:
 
 1. **Meta lines are dropped**: a sub-task wholly inside parentheses or square
-   brackets ("(No tag action is requested.)") is commentary, not a job.
+   brackets ("(No tag action is requested.)") is commentary, not a job. So is
+   a sub-task quoting a value the request does not give (``_invents_value``)
+   or naming none of the request's subjects but a record the request never
+   writes, copied from an example of the prompt (``_invents_record``).
 2. **Contained duplicates are dropped**: a sub-task whose content words and
    subjects all occur in another sub-task repeats part of it.
 3. **No new subject, no new sub-task**: a sub-task that names no subject, or
@@ -233,11 +236,8 @@ def _name_spans(text: str) -> list[str]:
     return out
 
 
-def request_subjects(text: str, identifiers: tuple[re.Pattern, ...] = ()) -> list[str]:
-    """The subjects ``text`` names, longest first, without duplicates.
-
-    ``identifiers`` are the workflow's identifier patterns: each match is a subject.
-    """
+def _values(text: str, identifiers: tuple[re.Pattern, ...] = ()) -> tuple[list[str], str]:
+    """The ticked, quoted, identifier and uid values of ``text``, and ``text`` with them blanked."""
     t = _typographic(text)
     found = [m for m in _TICKED.findall(t)]
     found += [a or b for a, b in _QUOTED.findall(t)]
@@ -248,6 +248,15 @@ def request_subjects(text: str, identifiers: tuple[re.Pattern, ...] = ()) -> lis
         blank = pattern.sub(" ", blank)
     found += _UID.findall(blank)
     blank = _UID.sub(" ", blank)
+    return found, blank
+
+
+def request_subjects(text: str, identifiers: tuple[re.Pattern, ...] = ()) -> list[str]:
+    """The subjects ``text`` names, longest first, without duplicates.
+
+    ``identifiers`` are the workflow's identifier patterns: each match is a subject.
+    """
+    found, blank = _values(text, identifiers)
     found += _name_spans(blank)
     out: dict[str, str] = {}
     for name in found:
@@ -375,6 +384,61 @@ def _invents_value(text: str, user_query: str, known: list[str]) -> bool:
         if len(v.split()) > 1 and _contains(user_query, value):
             continue
         return True
+    return False
+
+
+def _name_words(text: str) -> set[str]:
+    """The words of ``text`` for telling whether a name is the request's: lower case, accents off, split at
+    ``_`` and ``-``; numbers, single letters and stop words left out."""
+    folded = "".join(c for c in unicodedata.normalize("NFKD", _norm(text)) if not unicodedata.combining(c))
+    return {w for w in re.split(r"[\s_-]+", folded) if len(w) > 1 and not w.isdigit() and w not in _STOP}
+
+
+#: What stands before a name span that opens a sentence, or that follows an article ("the Quarter-End Review").
+_OPENS_SENTENCE = re.compile(r"(?:^|[.;:!?()\[\]\"])\s*$")
+_AFTER_ARTICLE = re.compile(r"\b(?:the|a|an)\s+$", re.IGNORECASE)
+
+
+def _built(word: str) -> bool:
+    """A word with an underscore or inner capitals ("Billing_Admin", "PayPal"); an acronym ("HR") is not."""
+    return not word.isupper() and ("_" in word or any(c.isupper() for c in word[1:]))
+
+
+def _clearly_a_name(words: list[str]) -> bool:
+    """Two or more capitalised words ("Mateo Rossi"), a capitalised word with a number ("Moore 2"), or a built
+    word (``_built``). Acronyms, weekdays, months and common words count as no capitalised word."""
+    capitalised = [w for w in words if _is_cap(w) and not w.isupper() and w.lower() not in _NOT_NAMES]
+    return len(capitalised) >= 2 or any(_built(w) for w in words) or (
+        bool(capitalised) and any(w.isdigit() for w in words))
+
+
+def _invents_record(text: str, user_query: str, known: list[str],
+                    identifiers: tuple[re.Pattern, ...] = ()) -> bool:
+    """A sub-task naming none of the request's subjects but a record the request never writes is the model's
+    invention (names copied from an example of its prompt).
+
+    Only a name that is clearly one counts (``_clearly_a_name``), and only when none of its words occurs in
+    the request, in any case, so a part, a misspelt case or a re-hyphenation of a request name is the
+    request's. The word opening a sentence is left out of the test ("Remediation Options for ...",
+    "Holder 1: ..."), and a span after an article is a term ("the Quarter-End Review"), unless built.
+    """
+    known_norm = {_norm(k) for k in known}
+    if subjects_in(text, known, identifiers) & known_norm:
+        return False
+    request_words = _name_words(user_query)
+    blank = _values(text, identifiers)[1]
+    for name in _name_spans(blank):
+        if _name_words(name) & request_words:
+            continue
+        for m in re.finditer(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])", blank):
+            words = name.split()
+            before = blank[:m.start()]
+            if _OPENS_SENTENCE.search(before) and not _built(words[0]):
+                words = words[1:]
+            if _AFTER_ARTICLE.search(before) and not any(_built(w) for w in words):
+                continue
+            if words and _name_words(" ".join(words)) and _clearly_a_name(words):
+                return True
     return False
 
 
@@ -878,7 +942,8 @@ def merge_subtasks(user_query: str, subtasks: list[str],
     if len(items) < 2:
         return list(subtasks)
     known = request_subjects(user_query, identifiers)
-    items = [t for t in items if not _is_meta(t) and not _invents_value(t, user_query, known)]
+    items = [t for t in items if not _is_meta(t) and not _invents_value(t, user_query, known)
+             and not _invents_record(t, user_query, known, identifiers)]
     items = _drop_contained(items, known, identifiers)
     if len(items) < 2:
         return [user_query]

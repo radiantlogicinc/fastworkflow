@@ -1,6 +1,8 @@
 """split_merge.merge_subtasks: the deterministic clean-up after the splitter's model."""
 import re
 
+import pytest
+
 from fastworkflow.split_merge import merge_subtasks, request_subjects, subjects_in
 
 
@@ -112,6 +114,38 @@ def test_meta_lines_and_contained_duplicates_are_dropped():
     q = "Leo Grant leaves on Friday: what he can reach and the corrections on offer. Apply none."
     assert merge_subtasks(q, ["What Leo Grant can reach and the corrections on offer, applying none.",
                               "What Leo Grant can reach and the corrections on offer."]) == [q]
+
+
+def test_a_subtask_naming_records_the_request_never_writes_is_dropped():
+    q = ("Leo Grant leaves at the end of the week: what Leo Grant can reach and the corrections on offer. "
+         "Then tag the identity `leaver-pending`.")
+    split = ["Leo Grant leaves at the end of the week: what Leo Grant can reach and the corrections on offer.",
+             "Tag the identity `leaver-pending`."]
+    copied = ["Quarterly review of Pine and Rowe 3: the unit and three of its people down to logins.",
+              "Mira Solberg leaves on Friday: what Mira Solberg can reach and the fixes available.",
+              "Audit Ledger_Change Approver across the systems it appears in."]
+    assert merge_subtasks(q, split[:1] + copied + split[1:]) == split
+
+
+def test_a_partial_or_recased_request_name_is_not_an_invented_record():
+    q = "Zoë Hale-Ward leaves on Friday. Then sweep the Northwind Traders unit."
+    split = ["Zoe Hale leaves on Friday: what she can reach.", "Sweep Northwind."]
+    merged = merge_subtasks(q, split)
+    assert merged[0] == split[0] and merged[1].endswith("Sweep Northwind.")
+
+
+@pytest.mark.parametrize("ordinary", [
+    "Quarter-end picture of the sweep for the auditors.",
+    "Quarter-End Summary of the sweep for the auditors.",
+    "Remediation Options for the sweep, none applied.",
+    "Write the Access Review Summary of the sweep.",
+    "Send the SOX evidence of the sweep to HR.",
+    "Holder 1: the sweep down to logins.",
+])
+def test_capitalised_ordinary_words_are_not_invented_records(ordinary):
+    q = "Sweep Ivan Moss and Ella Nolan, and give the auditors a quarter-end picture of it."
+    merged = merge_subtasks(q, ["Sweep Ivan Moss.", ordinary, "Sweep Ella Nolan."])
+    assert any(ordinary in t for t in merged) and merged[-1] == "Sweep Ella Nolan."
 
 
 # ------------------------------------------------------------------ rule 4: comparisons
