@@ -140,10 +140,10 @@ def observability_db(workflow_path: str) -> str:
 
 
 def archives_dir(workflow_path: str) -> str:
-    """Where this workflow's sealed experiment archives are written (created).
+    """Where this workflow's evidence archives are written (created).
 
-    Each is one read-only SQLite file; the live DB's `sealed_archives` table
-    records its path, size and digest.
+    Each is one read-only SQLite file. Archived experiments and conversations
+    are found by opening the files in this folder.
     """
     path = os.path.join(workflow_state_dir(workflow_path), _ARCHIVES_DIRNAME)
     os.makedirs(path, exist_ok=True)

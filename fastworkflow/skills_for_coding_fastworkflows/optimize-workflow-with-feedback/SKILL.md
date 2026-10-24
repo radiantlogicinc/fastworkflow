@@ -63,7 +63,7 @@ Keep three mechanisms distinct:
 | `human_feedback` | Developer/operator annotations attached to recorded evidence; no automatic retraining, prompt injection or score change |
 | The agent-memory `feedback` table | Removed with its `dspy.History` injection (fix-9eg.16). Recorded comments are never replayed into a prompt |
 
-Comments are recorded in the workflow's live database. Never modify a sealed archive to insert
+Comments are recorded in the workflow's live database. Never modify an archived experiment to insert
 feedback.
 
 ## Diagnose and choose the smallest useful change

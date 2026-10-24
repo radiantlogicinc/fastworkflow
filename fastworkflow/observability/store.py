@@ -53,6 +53,11 @@ from pydantic import BaseModel, ConfigDict
 
 import fastworkflow
 from fastworkflow.observability import control
+from fastworkflow.observability.archive_files import (
+    archive_file_for,
+    archived_conversation_file_for,
+    max_archived_conversation_id,
+)
 from fastworkflow.observability import prompt_slots
 from fastworkflow.observability.feedback import human_feedback_row
 from fastworkflow import state_paths, tracing
@@ -174,6 +179,17 @@ _HEALTH_DELTA_COUNTERS: tuple[str, ...] = (
     "sync_fallbacks",
 )
 
+# The banner's note: these counts, plus `last_error`. Dismiss records them in
+# `acknowledged_warning` and clears `last_error`. The raw counts stay, because
+# an evidence run's delta is a floor that must not fall. A later persist of the
+# same counts and the same error text does not write the note again.
+_WARNING_COUNTERS: tuple[str, ...] = (
+    "records_dropped",
+    "spans_dropped",
+    "write_errors",
+)
+_ACKNOWLEDGED_WARNING = "acknowledged_warning"
+
 # ----------------------------------------------------------------------
 # The writer-health row is shared property, not one writer's scratchpad (fix-dnb)
 # ----------------------------------------------------------------------
@@ -256,6 +272,13 @@ def _writer_holds(stamp: Any) -> bool:
     return True
 
 
+def _writer_health_is_clean(value: Mapping[str, Any]) -> bool:
+    """Whether a closed writer left no warning worth retaining."""
+    return not value.get("last_error") and not any(
+        int(value.get(counter) or 0) for counter in _WARNING_COUNTERS
+    )
+
+
 def merge_writer_health(
     stored: Optional[Mapping[str, Any]], incoming: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -309,7 +332,62 @@ def merge_writer_health(
     merged["dropped_turn_keys_elided"] = (
         int(merged.get("dropped_turn_keys_elided") or 0) + elided
     )
+    # Dismiss cleared this note. The incoming snapshot is the writer's
+    # cumulative total, so a heartbeat would otherwise save the same
+    # `last_error` again. The acknowledgement is the max across both sides:
+    # a row that has not been dismissed must not wipe the one that has.
+    # A count that has grown past that acknowledgement is a new warning and
+    # keeps its text.
+    acknowledged = _merged_acknowledgement(stored, incoming)
+    if acknowledged:
+        merged[_ACKNOWLEDGED_WARNING] = acknowledged
+        if not any(
+            int(merged.get(name) or 0) > int(acknowledged.get(name) or 0)
+            for name in _WARNING_COUNTERS
+        ):
+            merged["last_error"] = None
     return merged
+
+
+def _merged_acknowledgement(
+    stored: Mapping[str, Any], incoming: Mapping[str, Any]
+) -> Optional[dict[str, Any]]:
+    """One dismiss record from two health snapshots. Absent when neither has one."""
+    left = stored.get(_ACKNOWLEDGED_WARNING)
+    right = incoming.get(_ACKNOWLEDGED_WARNING)
+    if not isinstance(left, dict):
+        left = None
+    if not isinstance(right, dict):
+        right = None
+    if left is None and right is None:
+        return None
+    left = left or {}
+    right = right or {}
+    return {
+        **{
+            name: max(int(left.get(name) or 0), int(right.get(name) or 0))
+            for name in _WARNING_COUNTERS
+        },
+        "last_error": left.get("last_error") or right.get("last_error"),
+    }
+
+
+def warning_notice(health: Optional[Mapping[str, Any]]) -> Optional[dict[str, Any]]:
+    """The writer warning the banner shows, after a dismiss.
+
+    The stored counters are the evidence floor. The acknowledgement subtracts
+    the counts the operator already cleared, and a cleared note has no
+    `last_error`.
+    """
+    if not health:
+        return None
+    view = dict(health)
+    acknowledged = dict(view.pop(_ACKNOWLEDGED_WARNING, None) or {})
+    for name in _WARNING_COUNTERS:
+        view[name] = max(0, int(view.get(name) or 0) - int(acknowledged.get(name) or 0))
+    if not any(int(view.get(name) or 0) for name in _WARNING_COUNTERS):
+        view["last_error"] = None
+    return view
 
 
 # Retention pruning must not run while an evaluation is recording (§12.4: "pruning
@@ -695,8 +773,20 @@ class ExperimentNotSealed(LookupError):
     """The experiment has no readable sealed archive, so its live rows are its only copy."""
 
 
+class ConversationNotFound(KeyError):
+    """No conversation row for this channel and id."""
+
+
+class ConversationNotArchived(LookupError):
+    """No archived conversation with this channel and id."""
+
+
+class ConversationArchiveRefused(ValueError):
+    """This conversation cannot be archived as its own record."""
+
+
 class SealedExperimentSelected(RuntimeError):
-    """A sealed experiment is still a contest's winner or a task's best run."""
+    """An experiment is still a contest's winner or a task's best run."""
 
 
 class PartialBenchmarkPin(ValueError):
@@ -1343,6 +1433,29 @@ _EXPERIMENT_SEAL_ROWS: tuple[tuple[str, str], ...] = (
     ("diagnostics", "key NOT GLOB 'writer_health*'"),
 )
 
+# A conversation archive is the same kind of copy as an experiment seal, keyed
+# by channel and conversation instead of experiment. Child rows follow the
+# turns that were copied into this file. Diagnostics keep the store identity
+# the verifier requires, and leave writer health behind with the live DB.
+_CONVERSATION_ARCHIVE_ROWS: tuple[tuple[str, str], ...] = (
+    (
+        "conversations",
+        "channel_id=:channel_id AND conversation_id=:conversation_id",
+    ),
+    (
+        "turns",
+        "channel_id=:channel_id AND conversation_id=:conversation_id",
+    ),
+    ("spans", f"trace_id IN ({_SEAL_KEPT_TURNS})"),
+    *(
+        (table, f"turn_key IN ({_SEAL_KEPT_TURNS})")
+        for table in (
+            "artifacts", "human_feedback", *_OFFLOAD_EVIDENCE_TABLES, "prompt_slots",
+        )
+    ),
+    ("diagnostics", "key NOT GLOB 'writer_health*'"),
+)
+
 
 def _remove_scratch(*paths: Path) -> None:
     """Delete an archive's scratch files and any sidecars they grew."""
@@ -1775,7 +1888,12 @@ class ObservabilityStore:
             "SELECT COALESCE(MAX(conversation_id), 0) FROM conversations WHERE channel_id=?",
             (channel_id,),
         ).fetchone()
-        floor = max(int(max_row[0]), int(legacy_floor or 0))
+        archived_floor = 0
+        if counter is None:
+            archived_floor = max_archived_conversation_id(
+                str(Path(self.db_path).parent / "archives"), channel_id
+            )
+        floor = max(int(max_row[0]), int(legacy_floor or 0), archived_floor)
         next_id = int(counter["next_id"]) if counter is not None else 1
         new_id = max(next_id, floor + 1)
         conn.execute(
@@ -2528,6 +2646,62 @@ class ObservabilityStore:
         merged = merge_writer_health(stored, incoming)
         self.set_diagnostic(conn, key, merged)
         return merged
+
+    def dismiss_writer_warnings(self) -> dict[str, Any]:
+        """Clear the banner's writer warning from every saved health row.
+
+        One acknowledgement is written onto each existing row. No new row is
+        inserted, and a second dismiss of the same warning does not add one.
+        `last_error` is removed. The counters stay, at or above the values
+        already stored, so an evidence run's floor does not fall. The banner
+        reads `warning_notice`, which subtracts this acknowledgement.
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT key, value FROM diagnostics WHERE key GLOB ?",
+                (WRITER_HEALTH_KEY_PREFIX + "*",),
+            ).fetchall()
+            parsed: list[tuple[str, dict[str, Any]]] = []
+            for row in rows:
+                try:
+                    value = json.loads(row["value"])
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(value, dict):
+                    parsed.append((str(row["key"]), value))
+            baseline = {name: 0 for name in _WARNING_COUNTERS}
+            note: Optional[str] = None
+            for _key, value in parsed:
+                for name in _WARNING_COUNTERS:
+                    baseline[name] = max(baseline[name], int(value.get(name) or 0))
+                previous = value.get(_ACKNOWLEDGED_WARNING) or {}
+                if isinstance(previous, dict):
+                    for name in _WARNING_COUNTERS:
+                        baseline[name] = max(
+                            baseline[name], int(previous.get(name) or 0)
+                        )
+                    if note is None and previous.get("last_error"):
+                        note = str(previous.get("last_error"))
+                if value.get("last_error"):
+                    note = str(value.get("last_error"))
+            folded: Optional[dict[str, Any]] = None
+            for _key, value in parsed:
+                folded = merge_writer_health(folded, value)
+            visible = warning_notice(folded)
+            # `baseline` is the fold's max, which is what the banner was showing.
+            # Acknowledge that on every row, not each row's own smaller count, or
+            # a quieter row's acknowledgement would leave the louder row visible.
+            showing = bool(
+                visible and any(int(visible.get(name) or 0) for name in _WARNING_COUNTERS)
+            )
+            acknowledgement = {**baseline, "last_error": note}
+            for key, value in parsed:
+                value[_ACKNOWLEDGED_WARNING] = acknowledgement
+                value["last_error"] = None
+                self.set_diagnostic(conn, key, value)
+            conn.commit()
+        return {"cleared": showing}
 
     # -- reads (GET /turns, run_chatbot) ---------------------------------
 
@@ -3749,18 +3923,6 @@ class ObservabilityStore:
             experiment_id,
         )
 
-    def update_experiment_archived(
-        self, experiment_id: str, archived: bool
-    ) -> None:
-        """Archive visibility is editable metadata, not recorded evidence."""
-        if not isinstance(archived, bool):
-            raise ValueError("archived must be true or false")
-        self._update_experiment(
-            "UPDATE experiments SET archived=? WHERE experiment_id=?",
-            (1 if archived else 0, experiment_id),
-            experiment_id,
-        )
-
     def _update_experiment(
         self, sql: str, params: tuple, experiment_id: str
     ) -> None:
@@ -3884,14 +4046,14 @@ class ObservabilityStore:
             if row["workspace_archive_sha256"]:
                 conn.rollback()
                 raise AttemptValueConflict(
-                    f"experiment {experiment_id!r} already names a sealed "
-                    "workspace archive"
+                    f"experiment {experiment_id!r} already names an archived "
+                    "workspace"
                 )
             if row["status"] not in {"capture_complete", "complete"}:
                 conn.rollback()
                 raise ValueError(
                     f"experiment {experiment_id!r} is {row['status']!r}; "
-                    "only capture_complete evidence can be sealed"
+                    "only capture_complete evidence can be archived"
                 )
             conn.execute(
                 """UPDATE experiments
@@ -3946,7 +4108,7 @@ class ObservabilityStore:
                 conn.rollback()
                 raise ValueError(
                     f"experiment {experiment_id!r} is {row['status']!r}; "
-                    "only capture_complete evidence can be sealed"
+                    "only capture_complete evidence can be archived"
                 )
             stored_handle = (
                 row["workspace_archive_sha256"],
@@ -4073,24 +4235,108 @@ class ObservabilityStore:
         chatbot read a sealed experiment's turns and spans from it. So its
         turns, spans, artifacts, prompt slots, offload evidence, review notes
         and conversations leave the live DB here rather than waiting for prune
-        to reach them. Its experiment-level rows (the experiment, attempts,
-        declarations, claims and evidence runs) stay: benchmark listings,
-        registrations, contests and scores read them, and they are small.
+        to reach them. Its experiment-level rows leave with them. Benchmark
+        listings and contests read an archived experiment by opening its
+        archive file.
 
         Refused unless the archive is readable: until then the live rows are
         the only copy.
+
+        The archive file is the only record afterwards. This deletes the
+        experiment row, its attempts, its registration, any selection that
+        names it, and the `sealed_archives` index. The append-only decision
+        history is the one table that keeps the id.
         """
         archive = self.sealed_archive(experiment_id)
         if archive is None or not archive["readable"]:
             raise ExperimentNotSealed(
-                f"experiment {experiment_id!r} has no readable sealed archive; "
+                f"experiment {experiment_id!r} has no readable archive; "
                 "its live evidence is the only copy"
             )
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            deleted = self._delete_experiment_evidence_in_txn(conn, experiment_id)
+            deleted = self._delete_experiment_rows_in_txn(conn, experiment_id)
+            present = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            for table in (
+                "sealed_archives", "experiment_registrations", "selection_pointers",
+            ):
+                if table in present:
+                    deleted[table] = conn.execute(
+                        f"DELETE FROM {table} WHERE experiment_id=?",
+                        (experiment_id,),
+                    ).rowcount
             conn.commit()
             self._reclaim_free_pages(conn)
+        return deleted
+
+    def _refuse_if_selected(self, conn: sqlite3.Connection, experiment_id: str) -> None:
+        """A winner or a best run is a judgement; withdraw it before deleting."""
+        selected = conn.execute(
+            "SELECT scope_kind FROM selection_pointers WHERE experiment_id=? LIMIT 1",
+            (experiment_id,),
+        ).fetchone()
+        if selected is None:
+            return
+        raise SealedExperimentSelected(
+            f"experiment {experiment_id!r} is the "
+            + ("winner of its contest" if selected[0] == "experiment"
+               else "best run of one of its tasks")
+            + "; withdraw that choice before deleting it"
+        )
+
+    def _delete_experiment_rows_in_txn(
+        self, conn: sqlite3.Connection, experiment_id: str
+    ) -> dict[str, int]:
+        """Delete every live row naming one experiment.
+
+        The caller removes an archive file when there is one. An archived file
+        is the experiment's only record, so neither a registration tombstone
+        nor a conversation-id counter may retain its id in the live database.
+        """
+        deleted = self._delete_experiment_evidence_in_txn(conn, experiment_id)
+        present = {
+            row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        for table in (
+            "experiment_evidence_runs", "experiment_attempt_claims",
+            "experiment_attempt_declarations", "experiment_attempts", "experiments",
+        ):
+            if table in present:
+                deleted[table] = conn.execute(
+                    f"DELETE FROM {table} WHERE experiment_id=?", (experiment_id,)
+                ).rowcount
+        channel_prefix = f"exp:{experiment_id}:"
+        if "conversation_counters" in present:
+            deleted["conversation_counters"] = conn.execute(
+                """DELETE FROM conversation_counters
+                   WHERE substr(channel_id, 1, ?) = ?""",
+                (len(channel_prefix), channel_prefix),
+            ).rowcount
+        for table in _present_offload_tables(conn):
+            deleted[table] = deleted.get(table, 0) + conn.execute(
+                f"""DELETE FROM {table}
+                    WHERE substr(channel_id, 1, ?) = ?""",
+                (len(channel_prefix), channel_prefix),
+            ).rowcount
+        # Inline: `selection` imports this module.
+        from fastworkflow.observability import selection as selection_module
+
+        selection_module.SelectionControlStore(self).leave_in_txn(conn, experiment_id)
+        if "experiment_registrations" in present:
+            deleted["experiment_registrations"] = conn.execute(
+                "DELETE FROM experiment_registrations WHERE experiment_id=?",
+                (experiment_id,),
+            ).rowcount
+        conn.execute(
+            "DELETE FROM evidence_releases WHERE experiment_id=?", (experiment_id,)
+        )
+        deleted.update(self._delete_comparison_groups_in_txn(conn))
         return deleted
 
     def delete_sealed_experiment(self, experiment_id: str) -> dict[str, Any]:
@@ -4100,52 +4346,26 @@ class ObservabilityStore:
         runs as best run (`SealedExperimentSelected`): those are judgements a
         person made, withdrawn first. Otherwise, in one transaction: its live
         evidence and experiment-level rows, its contest membership, its
-        registration (tombstoned, as `delete_empty_experiment` does), its
+        registration, its
         release and its `sealed_archives` row. The decision history is
         append-only and keeps naming it. The archive file is removed after the
         commit; `file_removed` says whether it was there to remove.
         """
         archive = self.sealed_archive(experiment_id)
+        scanned = None
         if archive is None:
-            raise ExperimentNotSealed(f"experiment {experiment_id!r} is not sealed")
-        experiment_tables = (
-            "experiment_evidence_runs", "experiment_attempt_claims",
-            "experiment_attempt_declarations", "experiment_attempts", "experiments",
-        )
-        with control.write(self) as conn:
-            selected = conn.execute(
-                "SELECT scope_kind FROM selection_pointers WHERE experiment_id=? LIMIT 1",
-                (experiment_id,),
-            ).fetchone()
-            if selected is not None:
-                raise SealedExperimentSelected(
-                    f"experiment {experiment_id!r} is the "
-                    + ("winner of its contest" if selected[0] == "experiment"
-                       else "best run of one of its tasks")
-                    + "; withdraw that choice before deleting it"
-                )
-            deleted = self._delete_experiment_evidence_in_txn(conn, experiment_id)
-            present = {
-                row[0] for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-            }
-            for table in experiment_tables:
-                if table in present:
-                    deleted[table] = conn.execute(
-                        f"DELETE FROM {table} WHERE experiment_id=?", (experiment_id,)
-                    ).rowcount
-            # Inline: `selection` imports this module.
-            from fastworkflow.observability import selection as selection_module
-
-            selection_module.SelectionControlStore(self).leave_in_txn(conn, experiment_id)
-            conn.execute(
-                "UPDATE experiment_registrations SET state='deleted', deleted_at=? "
-                "WHERE experiment_id=? AND state<>'deleted'",
-                (_utcnow_iso(), experiment_id),
+            scanned = archive_file_for(
+                str(Path(self.db_path).parent / "archives"), experiment_id
             )
-            conn.execute("DELETE FROM evidence_releases WHERE experiment_id=?", (experiment_id,))
-            conn.execute("DELETE FROM sealed_archives WHERE experiment_id=?", (experiment_id,))
+            if scanned is None:
+                raise ExperimentNotSealed(f"experiment {experiment_id!r} is not archived")
+            archive = {"path": scanned, "readable": True}
+        with control.write(self) as conn:
+            self._refuse_if_selected(conn, experiment_id)
+            deleted = self._delete_experiment_rows_in_txn(conn, experiment_id)
+            conn.execute(
+                "DELETE FROM sealed_archives WHERE experiment_id=?", (experiment_id,)
+            )
         with self._connect() as conn:
             self._reclaim_free_pages(conn)
         file_removed = False
@@ -4158,6 +4378,116 @@ class ObservabilityStore:
             "file_removed": file_removed,
             "deleted": deleted,
         }
+
+    def delete_released_experiment(self, experiment_id: str) -> dict[str, Any]:
+        """Delete a released experiment and every row naming it.
+
+        A release only records that the experiment will not be sealed. This
+        removes it from the live database. Refused while it is sealed, while
+        it has not been released, or while it is a contest's winner or a
+        task's best run.
+        """
+        archived = archive_file_for(
+            str(Path(self.db_path).parent / "archives"), experiment_id
+        )
+        with control.write(self) as conn:
+            indexed = conn.execute(
+                "SELECT 1 FROM sealed_archives WHERE experiment_id=?",
+                (experiment_id,),
+            ).fetchone()
+            if indexed is not None or archived is not None:
+                raise ValueError(
+                    f"experiment {experiment_id!r} is archived; "
+                    "delete the archived experiment"
+                )
+            known = conn.execute(
+                "SELECT 1 FROM experiments WHERE experiment_id=?", (experiment_id,)
+            ).fetchone()
+            if known is None:
+                raise ExperimentNotFound(experiment_id)
+            if conn.execute(
+                "SELECT 1 FROM evidence_releases WHERE experiment_id=?",
+                (experiment_id,),
+            ).fetchone() is None:
+                raise ValueError(
+                    f"experiment {experiment_id!r} has not been released"
+                )
+            self._refuse_if_selected(conn, experiment_id)
+            deleted = self._delete_experiment_rows_in_txn(conn, experiment_id)
+        with self._connect() as conn:
+            self._reclaim_free_pages(conn)
+        return {"experiment_id": experiment_id, "deleted": deleted}
+
+    @staticmethod
+    def _delete_comparison_groups_in_txn(
+        conn: sqlite3.Connection, group_ids: Optional[list[str]] = None
+    ) -> dict[str, int]:
+        """Remove empty contest groups and every judgement scoped to them."""
+        if group_ids is None:
+            group_ids = [
+                str(row[0])
+                for row in conn.execute(
+                    """SELECT group_id FROM comparison_groups
+                       WHERE group_id NOT IN (
+                           SELECT DISTINCT group_id FROM comparison_group_members
+                       )"""
+                ).fetchall()
+            ]
+        if not group_ids:
+            return {
+                "comparison_groups": 0,
+                "comparison_group_members": 0,
+                "selection_pointers": 0,
+                "selection_decisions": 0,
+            }
+        marks = ",".join("?" for _ in group_ids)
+        deleted = {
+            "comparison_group_members": conn.execute(
+                f"DELETE FROM comparison_group_members WHERE group_id IN ({marks})",
+                group_ids,
+            ).rowcount,
+            "selection_pointers": conn.execute(
+                f"DELETE FROM selection_pointers WHERE group_id IN ({marks})",
+                group_ids,
+            ).rowcount,
+        }
+        # History is append-only while its contest exists. Deleting a contest
+        # removes the scope itself, including its history.
+        conn.execute("DROP TRIGGER selection_decisions_no_delete")
+        try:
+            deleted["selection_decisions"] = conn.execute(
+                f"DELETE FROM selection_decisions WHERE group_id IN ({marks})",
+                group_ids,
+            ).rowcount
+        finally:
+            conn.execute(
+                """CREATE TRIGGER selection_decisions_no_delete
+                   BEFORE DELETE ON selection_decisions
+                   BEGIN SELECT RAISE(ABORT, 'decision history is append-only'); END"""
+            )
+        deleted["comparison_groups"] = conn.execute(
+            f"DELETE FROM comparison_groups WHERE group_id IN ({marks})",
+            group_ids,
+        ).rowcount
+        return deleted
+
+    def delete_benchmark_comparisons(self, benchmark_id: str) -> dict[str, int]:
+        """Remove inactive contest state when its benchmark is archived.
+
+        Benchmark manifests remain live so they can be listed or restored, but
+        contests are judgements about experiments. Once every experiment for a
+        benchmark has moved to its archive file, retaining an empty contest
+        would leave experiment-era state in the live database.
+        """
+        with control.write(self) as conn:
+            group_ids = [
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT group_id FROM comparison_groups WHERE benchmark_id=?",
+                    (benchmark_id,),
+                ).fetchall()
+            ]
+            return self._delete_comparison_groups_in_txn(conn, group_ids)
 
     def start_attempt(
         self,
@@ -4836,7 +5166,8 @@ class ObservabilityStore:
             if row is None:
                 return None
             experiment = dict(row)
-            experiment["archived"] = bool(experiment["archived"])
+            # The `archived` column is unused. This flag is the evidence archive.
+            experiment["archived"] = bool(experiment.get("workspace_archive_sha256"))
             experiment["user_simulator"] = bool(experiment["user_simulator"])
             segments = []
             for seg in conn.execute(
@@ -4888,8 +5219,13 @@ class ObservabilityStore:
         params.extend([limit, offset])
         with self._connect() as conn:
             rows = [dict(r) for r in conn.execute(query, params).fetchall()]
+        sealed = {
+            row["experiment_id"]
+            for row in control.rows(self, "SELECT experiment_id FROM sealed_archives")
+        }
         for row in rows:
-            row["archived"] = bool(row["archived"])
+            # The `archived` column is unused. This flag is the evidence archive.
+            row["archived"] = row["experiment_id"] in sealed
             row["user_simulator"] = bool(row["user_simulator"])
         return rows
 
@@ -5021,8 +5357,10 @@ class ObservabilityStore:
                 "reportable for a complete experiment"
             )
             return result
-        if experiment.get("evidence_sealed_at") and not experiment.get(
-            "workspace_archive_sha256"
+        if (
+            experiment.get("evidence_sealed_at")
+            and not experiment.get("workspace_archive_sha256")
+            and not getattr(self, "opened_as_archive", False)
         ):
             # A seal in two halves (fix-tcg): `begin_workspace_seal` stamped
             # `complete` so the ARCHIVE would carry it, and the archive never
@@ -5522,8 +5860,244 @@ class ObservabilityStore:
             "store_identity": str(identity_row[0]),
             "schema_version": SCHEMA_VERSION,
             "read_only": True,
-            "sealed": True,
+            "archived": True,
             "sidecar_free": True,
+        }
+
+    def archive_conversation(
+        self, channel_id: str, conversation_id: int, destination: str
+    ) -> dict[str, Any]:
+        """Copy one conversation into a read-only archive and remove its live rows.
+
+        The same shape as an experiment archive: one consistent read of the
+        live DB, a verified read-only file, then the live turns and the
+        conversation row are deleted. A conversation that belongs to an
+        experiment stays with that experiment. A conversation whose turns
+        change during the copy is left untouched and the file is removed.
+        """
+        conversation_id = int(conversation_id)
+        archive_directory = (Path(self.db_path).parent / "archives").resolve()
+        if Path(destination).resolve().parent != archive_directory:
+            raise ValueError(
+                "conversation archives must be stored in the workflow archives folder"
+            )
+        self._refuse_conversation_archive(channel_id, conversation_id)
+        target = self._prepare_archive_target(destination)
+        copied = self._archive_conversation_to(
+            target, os.path.abspath(self.db_path), channel_id, conversation_id
+        )
+        try:
+            with control.write(self) as conn:
+                self._commit_conversation_archive(conn, channel_id, conversation_id, copied)
+        except Exception:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(copied["path"])
+            raise
+        with self._connect() as conn:
+            self._reclaim_free_pages(conn)
+        return {
+            "channel_id": channel_id,
+            "conversation_id": conversation_id,
+            "topic": copied["topic"],
+            "turn_count": copied["turn_count"],
+            "path": copied["path"],
+            "size_bytes": copied["size_bytes"],
+            "archive_sha256": copied["sha256"],
+            "archived_at": copied["archived_at"],
+            "archived": True,
+        }
+
+    def _refuse_conversation_archive(self, channel_id: str, conversation_id: int) -> None:
+        """Refuse before any file is written. The write transaction checks again."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT experiment_id FROM conversations
+                    WHERE channel_id=? AND conversation_id=?""",
+                (channel_id, conversation_id),
+            ).fetchone()
+            if row is None:
+                raise ConversationNotFound(channel_id, conversation_id)
+            if row["experiment_id"]:
+                raise ConversationArchiveRefused(
+                    "this conversation belongs to an experiment; archive that experiment"
+                )
+            owned = conn.execute(
+                """SELECT 1 FROM turns
+                    WHERE channel_id=? AND conversation_id=?
+                      AND experiment_id IS NOT NULL""",
+                (channel_id, conversation_id),
+            ).fetchone()
+            if owned is not None:
+                raise ConversationArchiveRefused(
+                    "this conversation belongs to an experiment; archive that experiment"
+                )
+            if archived_conversation_file_for(
+                str(Path(self.db_path).parent / "archives"),
+                channel_id,
+                conversation_id,
+            ) is not None:
+                raise ConversationArchiveRefused("this conversation is already archived")
+
+    def _archive_conversation_to(
+        self,
+        target: Path,
+        source: str,
+        channel_id: str,
+        conversation_id: int,
+    ) -> dict[str, Any]:
+        """Copy one conversation's rows. The caller deletes them after this returns."""
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.snapshot")
+        compacted = target.with_name(f".{target.name}.{uuid.uuid4().hex}.compact")
+        params = {"channel_id": channel_id, "conversation_id": conversation_id}
+        try:
+            with contextlib.closing(
+                sqlite3.connect(str(temporary), uri=True, isolation_level=None)
+            ) as conn:
+                for statement in _SCHEMA_STATEMENTS:
+                    conn.execute(statement)
+                conn.execute(
+                    "ATTACH DATABASE ? AS live", (Path(source).as_uri() + "?mode=ro",)
+                )
+                conn.execute("BEGIN")
+                for table, where in _CONVERSATION_ARCHIVE_ROWS:
+                    columns = ", ".join(
+                        row[1] for row in conn.execute(f"PRAGMA main.table_info({table})")
+                    )
+                    copied = conn.execute(
+                        f"INSERT INTO main.{table} ({columns}) "
+                        f"SELECT {columns} FROM live.{table} WHERE {where}",
+                        params,
+                    ).rowcount
+                    if table == "conversations" and not copied:
+                        raise ConversationNotFound(channel_id, conversation_id)
+                topic_row = conn.execute(
+                    """SELECT topic FROM main.conversations
+                        WHERE channel_id=? AND conversation_id=?""",
+                    (channel_id, conversation_id),
+                ).fetchone()
+                turn_keys = [
+                    str(row[0])
+                    for row in conn.execute(
+                        """SELECT turn_key FROM main.turns
+                            WHERE channel_id=? AND conversation_id=?
+                            ORDER BY turn_key""",
+                        (channel_id, conversation_id),
+                    ).fetchall()
+                ]
+                features = json.loads(conn.execute(
+                    "SELECT value FROM main.diagnostics WHERE key='schema_features'"
+                ).fetchone()[0])
+                conn.execute(
+                    "UPDATE main.diagnostics SET value=? WHERE key='schema_features'",
+                    (json.dumps(sorted(
+                        set(features) - {
+                            control.FEATURE_CONTROL_V1,
+                            control.FEATURE_CONVERSATION_ARCHIVE_V1,
+                        }
+                    )),),
+                )
+                conn.execute(f"PRAGMA main.user_version = {SCHEMA_VERSION}")
+                conn.execute("COMMIT")
+                conn.execute("DETACH DATABASE live")
+                conn.execute("VACUUM INTO ?", (str(compacted),))
+            os.replace(compacted, target)
+            verified = self._verified_seal(target)
+            return {
+                **verified,
+                "topic": topic_row[0] if topic_row is not None else None,
+                "turn_keys": turn_keys,
+                "turn_count": len(turn_keys),
+                "archived_at": _utcnow_iso(),
+            }
+        except Exception:
+            with contextlib.suppress(FileNotFoundError):
+                target.unlink()
+            raise
+        finally:
+            _remove_scratch(temporary, compacted)
+
+    def _commit_conversation_archive(
+        self,
+        conn: sqlite3.Connection,
+        channel_id: str,
+        conversation_id: int,
+        copied: dict[str, Any],
+    ) -> None:
+        """Record the archive and delete the live rows, or refuse and leave them."""
+        row = conn.execute(
+            """SELECT experiment_id FROM conversations
+                WHERE channel_id=? AND conversation_id=?""",
+            (channel_id, conversation_id),
+        ).fetchone()
+        if row is None:
+            raise ConversationNotFound(channel_id, conversation_id)
+        if row["experiment_id"]:
+            raise ConversationArchiveRefused(
+                "this conversation belongs to an experiment; archive that experiment"
+            )
+        live_keys = [
+            str(item[0])
+            for item in conn.execute(
+                """SELECT turn_key FROM turns
+                    WHERE channel_id=? AND conversation_id=?
+                    ORDER BY turn_key""",
+                (channel_id, conversation_id),
+            ).fetchall()
+        ]
+        if live_keys != list(copied["turn_keys"]):
+            raise ConversationArchiveRefused(
+                "this conversation changed while it was being archived; archive it again"
+            )
+        if conn.execute(
+            """SELECT 1 FROM turns
+                WHERE channel_id=? AND conversation_id=?
+                  AND experiment_id IS NOT NULL""",
+            (channel_id, conversation_id),
+        ).fetchone() is not None:
+            raise ConversationArchiveRefused(
+                "this conversation belongs to an experiment; archive that experiment"
+            )
+        deleted: dict[str, int] = {"prompt_slots": 0}
+        self._delete_turn_records_in_txn(
+            conn, list(copied["turn_keys"]), deleted, _has_prompt_slots(conn)
+        )
+        conn.execute(
+            "DELETE FROM conversations WHERE channel_id=? AND conversation_id=?",
+            (channel_id, conversation_id),
+        )
+        # The archive file is the only record. Once no live conversation uses
+        # this channel, discard its counter; a later mint scans the archives
+        # to avoid reusing the archived id.
+        if conn.execute(
+            "SELECT 1 FROM conversations WHERE channel_id=? LIMIT 1",
+            (channel_id,),
+        ).fetchone() is None:
+            conn.execute(
+                "DELETE FROM conversation_counters WHERE channel_id=?",
+                (channel_id,),
+            )
+
+    def delete_archived_conversation(
+        self, channel_id: str, conversation_id: int
+    ) -> dict[str, Any]:
+        """Remove an archived conversation's file."""
+        conversation_id = int(conversation_id)
+        path = archived_conversation_file_for(
+            str(Path(self.db_path).parent / "archives"),
+            channel_id,
+            conversation_id,
+        )
+        if path is None:
+            raise ConversationNotArchived(channel_id, conversation_id)
+        file_removed = False
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
+            file_removed = True
+        return {
+            "channel_id": channel_id,
+            "conversation_id": conversation_id,
+            "path": path,
+            "file_removed": file_removed,
         }
 
     def prune(
@@ -5822,12 +6396,19 @@ class ObservabilityStore:
                     "DELETE FROM diagnostics WHERE key=?",
                     (PRUNE_OVER_CAP_BOUND_DIAGNOSTIC,),
                 )
-            # Health rows of writers that are gone, once past the horizon (§5).
-            for key, value in conn.execute(
-                "SELECT key, value FROM diagnostics WHERE key GLOB ? AND updated_at < ?",
-                (WRITER_HEALTH_KEY_PREFIX + "*", horizon_moment.isoformat()),
+            # A clean writer has no diagnostic value once it has exited. Keep
+            # a writer that recorded a warning through the normal horizon so
+            # an operator can still see and acknowledge a recent failure.
+            for key, value, updated_at in conn.execute(
+                "SELECT key, value, updated_at FROM diagnostics WHERE key GLOB ?",
+                (WRITER_HEALTH_KEY_PREFIX + "*",),
             ).fetchall():
-                if not _writer_holds(json.loads(value).get(WRITER_INCARNATION_FIELD)):
+                health = json.loads(value)
+                inactive = not _writer_holds(
+                    health.get(WRITER_INCARNATION_FIELD)
+                )
+                expired = updated_at < horizon_moment.isoformat()
+                if inactive and (_writer_health_is_clean(health) or expired):
                     conn.execute("DELETE FROM diagnostics WHERE key=?", (key,))
             conn.execute("PRAGMA incremental_vacuum")
             conn.commit()

@@ -34,7 +34,7 @@ from fastworkflow.observation_offloading.state import (
     record_event,
     reset_observation_state,
 )
-from fastworkflow.run_chatbot.server import run_clear_conversations, run_forget_channel
+from fastworkflow.run_chatbot.server import run_forget_channel
 
 #: The evidence tables and the column that dates each row.
 EVIDENCE_TABLES = {
@@ -224,7 +224,7 @@ class ChannelErasureTests(EvidenceFixture):
         self.populate(first, "confidential-one")
         self.populate(second, "confidential-two")
 
-        deleted = run_clear_conversations(self.db_path)
+        deleted = obs.ObservabilityStore(self.db_path).clear_conversations()
 
         self.assertEqual(deleted["offload_evidence"], 2)
         self.assert_erased(first, "confidential-one")

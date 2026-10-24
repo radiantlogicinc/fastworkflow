@@ -113,7 +113,7 @@ def test_the_archive_carries_the_rows_that_were_only_in_the_wal(
 
     result = archive_historical_store(str(historical_store), str(destination))
 
-    assert result["sealed"] is True
+    assert result["archived"] is True
     assert result["read_only"] is True
     assert result["sidecar_free"] is True
     assert not os.path.exists(f"{destination}-wal")

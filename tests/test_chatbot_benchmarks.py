@@ -152,13 +152,13 @@ class TestBenchmarkReadApi:
         status, data = _request(live_server, "/api/benchmarks")
         assert status == 200
         assert data["benchmarks"] == [
-            {"benchmark_id": "smoke", "versions": ["v1"]}
+            {"benchmark_id": "smoke", "versions": ["v1"], "archived": False}
         ]
 
     def test_benchmark_detail_and_version(self, live_server):
         status, data = _request(live_server, "/api/benchmarks/smoke")
         assert status == 200
-        assert data == {"benchmark_id": "smoke", "versions": ["v1"]}
+        assert data == {"benchmark_id": "smoke", "versions": ["v1"], "archived": False}
 
         status, data = _request(live_server, "/api/benchmarks/smoke/versions/v1")
         assert status == 200
@@ -325,27 +325,17 @@ class TestExperimentNotesApi:
         assert "notes" in data["error"]
         assert store.get_experiment("exp-1")["notes"] == "original notes"
 
-    def test_patch_archives_and_unarchives_an_experiment(self, experiment_server):
+    def test_patch_refuses_the_removed_archive_flag(self, experiment_server):
         server, store = experiment_server
-
         status, data = _request(
             server,
             "/api/experiment/exp-1",
             method="PATCH",
             body={"archived": True},
         )
-        assert status == 200
-        assert data["experiment"]["archived"] is True
-        assert store.get_experiment("exp-1")["archived"] is True
-
-        status, data = _request(
-            server,
-            "/api/experiment/exp-1",
-            method="PATCH",
-            body={"archived": False},
-        )
-        assert status == 200
-        assert data["experiment"]["archived"] is False
+        assert status == 400
+        assert "notes" in data["error"]
+        assert store.get_experiment("exp-1")["notes"] == "original notes"
 
 
 class TestSpaSurface:

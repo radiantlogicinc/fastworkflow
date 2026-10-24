@@ -34,6 +34,13 @@ FEATURE_BENCHMARK_CATALOG_V1 = "benchmark_catalog_v1"
 FEATURE_BENCHMARK_DRAFTS_V1 = "benchmark_drafts_v1"
 # A benchmark's title and each version's description, editable after saving.
 FEATURE_BENCHMARK_DETAILS_V1 = "benchmark_details_v1"
+# Hiding a benchmark from the working lists. A row means archived. Unarchive
+# deletes the row. Sealed experiment files do not carry it.
+FEATURE_BENCHMARK_ARCHIVE_V1 = "benchmark_archive_v1"
+# One row per conversation moved out of the live DB into a read-only archive.
+# Its own marker, like the benchmark tables, so a store that already carries
+# `control_v1` still gets the table the next time it opens.
+FEATURE_CONVERSATION_ARCHIVE_V1 = "conversation_archive_v1"
 
 CONTROL_SCHEMA = [
     """CREATE TABLE IF NOT EXISTS experiment_registrations (
@@ -187,10 +194,33 @@ BENCHMARK_DETAILS_SCHEMA = [
         PRIMARY KEY (benchmark_id, version))""",
 ]
 
+# A present row is an archived benchmark. Absence means it is in the working list.
+BENCHMARK_ARCHIVE_SCHEMA = [
+    """CREATE TABLE IF NOT EXISTS benchmark_archived (
+        benchmark_id TEXT PRIMARY KEY,
+        archived_at TEXT NOT NULL)""",
+]
+
+# Legacy schema retained for compatibility with existing live databases. New
+# conversation archives are discovered directly from their files, so this
+# table remains empty.
+CONVERSATION_ARCHIVE_SCHEMA = [
+    """CREATE TABLE IF NOT EXISTS conversation_archives (
+        channel_id TEXT NOT NULL,
+        conversation_id INTEGER NOT NULL,
+        topic TEXT,
+        turn_count INTEGER NOT NULL,
+        archive_sha256 TEXT NOT NULL UNIQUE,
+        path TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        archived_at TEXT NOT NULL,
+        PRIMARY KEY (channel_id, conversation_id))""",
+]
+
 CONTROL_TABLES = (
     "experiment_registrations", "comparison_groups", "comparison_group_members",
     "selection_pointers", "selection_decisions", "pair_reviews",
-    "pair_review_events", "sealed_archives",
+    "pair_review_events", "sealed_archives", "conversation_archives",
     "training_process", "evidence_releases",
 )
 
@@ -228,6 +258,8 @@ _FEATURE_SCHEMAS = (
     (FEATURE_BENCHMARK_CATALOG_V1, BENCHMARK_CATALOG_SCHEMA),
     (FEATURE_BENCHMARK_DRAFTS_V1, BENCHMARK_DRAFTS_SCHEMA),
     (FEATURE_BENCHMARK_DETAILS_V1, BENCHMARK_DETAILS_SCHEMA),
+    (FEATURE_BENCHMARK_ARCHIVE_V1, BENCHMARK_ARCHIVE_SCHEMA),
+    (FEATURE_CONVERSATION_ARCHIVE_V1, CONVERSATION_ARCHIVE_SCHEMA),
 )
 
 
@@ -248,7 +280,9 @@ def strip(conn: sqlite3.Connection) -> None:
     """Remove every control table and the marker from a sealed copy (§3 Rule 1)."""
     for table in CONTROL_TABLES:
         conn.execute(f"DROP TABLE IF EXISTS {table}")
-    _set_features(conn, set(_features(conn)) - {FEATURE_CONTROL_V1})
+    _set_features(conn, set(_features(conn)) - {
+        FEATURE_CONTROL_V1, FEATURE_CONVERSATION_ARCHIVE_V1,
+    })
     conn.commit()
 
 

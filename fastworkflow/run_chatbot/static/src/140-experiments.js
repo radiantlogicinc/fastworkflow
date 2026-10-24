@@ -151,35 +151,17 @@ function showExperiment(experimentId) {
        paragraph (or blank) is no longer a heading. */
     var expName = "Experiment · " + experimentId.slice(-8);
     expCrumbs(d, experimentAncestorCrumbs(experimentId, exp).concat([{ label: expName }]));
-    var actions = pageHeader(d, exp.archived ? "ARCHIVED EXPERIMENT" : "RECORDED EXPERIMENT", expName,
+    var actions = pageHeader(d, "RECORDED EXPERIMENT", expName,
       exp.description
         ? ("Description: " + exp.description)
         : "Review outcomes, follow the evidence, and capture what you learn.");
     var intro = actions.parentNode.querySelector(".intro");
     intro.insertBefore(el("div", "recordId", "ID: " + experimentId), intro.querySelector("p"));
-    if (exp.benchmark_id) {
-      var archive = el("button", "ghost", exp.archived ? "Unarchive experiment" : "Archive experiment");
-      archive.title = exp.archived
-        ? "Return this experiment to benchmark lists"
-        : "Hide this experiment from benchmark lists";
-      archive.addEventListener("click", function () {
-        apiPatch(
-          "/api/experiment/" + encodeURIComponent(experimentId),
-          {archived: !exp.archived},
-          exp.archived ? "Experiment unarchived" : "Experiment archived"
-        ).then(function () {
-          refreshConvs().then(function () {
-            showExperiment(experimentId);
-          });
-        });
-      });
-      actions.appendChild(archive);
-    }
-    /* Sealing (fix-ajir.24) moves a complete experiment's evidence into one
-       read-only archive; this page reads it from there afterwards. */
-    if (!exp.sealed_archive && exp.benchmark_id
+    /* Archiving moves a complete experiment's evidence into one
+       read-only file; this page reads it from there afterwards. */
+    if (!exp.archive && exp.benchmark_id
         && (exp.status === "complete" || exp.status === "capture_complete")) {
-      var seal = el("button", "ghost", "Seal experiment");
+      var seal = el("button", "ghost", "Archive experiment");
       seal.title = "Move this experiment's evidence into a read-only archive";
       seal.addEventListener("click", function () {
         sealExperiment(experimentId, seal).then(function (done) {
@@ -215,10 +197,9 @@ function showExperiment(experimentId) {
     verdictLine.appendChild(expStatusPill(expDisplayStatus(exp)));
     conformancePills(verdictLine, exp.benchmark_conformance);
     verdictLine.appendChild(evidenceBadge(exp.evidence));
-    if (exp.archived) { verdictLine.appendChild(el("span", "pill", "Archived")); }
-    if (exp.sealed_archive) {
-      var sealedPill = el("span", "pill", "Sealed");
-      sealedPill.title = "Read from " + exp.sealed_archive.path;
+    if (exp.archive) {
+      var sealedPill = el("span", "pill", "Archived");
+      sealedPill.title = "Read from " + exp.archive.path;
       verdictLine.appendChild(sealedPill);
     }
     card.appendChild(verdictLine);

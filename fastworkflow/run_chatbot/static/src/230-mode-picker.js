@@ -6,8 +6,6 @@ function setTopMode(mode) {
   document.getElementById("modeDebug").className = mode === "debug" ? "active" : "";
   document.getElementById("modeTest").className = mode === "test" ? "active" : "";
   document.getElementById("refreshBtn").style.display = mode === "debug" ? "" : "none";
-  document.getElementById("clearConvsBtn").style.display =
-    (mode === "debug" && session && session.workflow_path) ? "" : "none";
   document.getElementById("newConvBtn").style.display =
     (mode === "test" && tm.connected) ? "" : "none";
   document.getElementById("copyLinkBtn").style.display =

@@ -11,59 +11,6 @@ document.getElementById("refreshBtn").addEventListener("click", function () {
     .catch(function (error) { showNotice("Could not refresh", "error", error.message); })
     .finally(function () { button.disabled = false; button.removeAttribute("aria-busy"); });
 });
-function clearedSummary(data) {
-  /* The server returns clear_conversations()'s per-table delete counts under
-     `deleted`, or an empty object when there was no store to clear. */
-  var deleted = (data && data.deleted) || {};
-  var total = 0;
-  Object.keys(deleted).forEach(function (key) {
-    total += Number(deleted[key]) || 0;
-  });
-  if (!total) { return "There was nothing to clear."; }
-  var convs = Number(deleted.conversations) || 0;
-  var turns = Number(deleted.turns) || 0;
-  if (!convs && !turns) {
-    return "No conversations or turns were recorded; the remaining trace data was cleared.";
-  }
-  return "Cleared " + fmtCount(convs) + (convs === 1 ? " conversation" : " conversations") +
-    " and " + fmtCount(turns) + (turns === 1 ? " turn." : " turns.");
-}
-document.getElementById("clearConvsBtn").addEventListener("click", function () {
-  var button = this;
-  confirmDialog({
-    opener: button,
-    title: "Clear every conversation?",
-    description: "Clear every recorded conversation and turn for this workflow? This cannot be undone.",
-    confirmLabel: "Clear conversations",
-    cancelLabel: "Keep conversations"
-  }).then(function (confirmed) {
-    if (!confirmed) { return; }
-    var rotate = (tm.connected && !tm.busy)
-      ? tmFetch("/new_conversation", {}).then(function (r) {
-          if (!r.ok) {
-            throw new Error("Could not rotate the live chat conversation (" + r.status + ")");
-          }
-        })
-      : Promise.resolve();
-    return rotate.then(function () {
-      return mutationRequest("/api/clear_conversations", "POST", {
-        confirm: "clear all conversations"
-      }, clearedSummary);
-    }).then(function (data) {
-      state.turnKey = null;
-      clear(document.getElementById("detail"));
-      document.getElementById("detail").appendChild(
-        el("div", "empty", clearedSummary(data)));
-      clear(document.getElementById("chatLog"));
-      document.getElementById("chatLog").appendChild(
-        el("div", "empty", "Conversation history cleared. Start a new message."));
-      refreshAll();
-    }).catch(function (e) {
-      showNotice("Could not clear conversations", "error", e.message);
-    });
-  });
-});
-
 /* -- the source boundary [fix-9eg.7.2] ----------------------------------
    Switching evidence sources without relaunching the page is navigation, not
    federation: nothing from the source being left may appear under, or be sent
@@ -117,7 +64,6 @@ function resetSourceScopedState() {
   hierarchyPath = [];
   hierarchyExpanded = {};
   navigationSelection = {conversations: null, benchmarks: null};
-  archivedExperimentsShown = {};
   var detail = document.getElementById("detail");
   clear(detail);
   detail.appendChild(el("div", "empty", "Select a turn in this source."));
