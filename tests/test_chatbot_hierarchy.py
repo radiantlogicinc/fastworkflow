@@ -195,15 +195,185 @@ def test_hierarchy_dom_clicks(hierarchy_server):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_experiment_archive_dom(hierarchy_server):
-    dependency = os.environ.get('TEST_JSDOM_ROOT')
+def _mark_sealed(store, experiment_id):
+    """Hide the experiment from working lists and leave a real archive file.
+
+    The archived-experiments page discovers that file by opening it. The
+    index row is what the rail's archived flag still reads.
+    """
+    archives = Path(store.db_path).parent / "archives"
+    archives.mkdir(parents=True, exist_ok=True)
+    dest = archives / f"{experiment_id}-test.sqlite3"
+    with sqlite3.connect(dest) as conn:
+        conn.execute(
+            """CREATE TABLE experiments (
+                experiment_id TEXT, description TEXT, status TEXT,
+                invalid_reason TEXT, benchmark_id TEXT, benchmark_version TEXT,
+                created_at TEXT, completed_at TEXT)"""
+        )
+        conn.execute(
+            """INSERT INTO experiments
+               (experiment_id, description, status, benchmark_id, benchmark_version)
+               VALUES (?, '', 'complete', 'bench', 'v1')""",
+            (experiment_id,),
+        )
+    with store._connect() as conn:
+        conn.execute(
+            """INSERT INTO sealed_archives
+               (experiment_id, archive_sha256, path, size_bytes, sealed_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                experiment_id,
+                experiment_id.encode().hex()[:64].ljust(64, "a"),
+                str(dest),
+                dest.stat().st_size,
+                "2026-10-23T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+
+
+def test_sealed_experiments_leave_the_working_lists(hierarchy_server):
+    """A sealed experiment stays in the payload, and off the working lists' flag."""
+    server, spec, eid, _default, store = hierarchy_server
+    with store._connect() as conn:
+        conn.execute(
+            """UPDATE experiment_registrations
+               SET state='deleted', deleted_at=?
+               WHERE experiment_id<>?""",
+            ("2026-10-23T00:00:00+00:00", eid),
+        )
+        conn.commit()
+    _mark_sealed(store, eid)
+    setup.workflow_control(server.workflow_path, write=True).set_winner(
+        eid, actor="tester", actor_kind="human", provenance="human",
+    )
+
+    listed = {row["experiment_id"]: row for row in store.list_experiments()}
+    assert listed[eid]["archived"] is True
+    assert all(row["archived"] is False for key, row in listed.items() if key != eid)
+
+    status, data = _request(server, "/api/navigation")
+    assert status == 200
+    recorded = next(n for n in walk(data["root"]) if n.get("experiment_id") == eid)
+    assert recorded["info"]["archived"] is True
+
+    status, body = _request(
+        server,
+        f"/api/benchmarks/{spec['benchmark_id']}/versions/v1/experiments",
+    )
+    assert status == 200
+    assert body["winner_experiment_id"] == eid
+    rows = {row["experiment_id"]: row for row in body["experiments"]}
+    assert rows[eid]["archived"] is True
+    assert list(rows) == [eid]
+
+
+def _archive(server, benchmark_id, archived):
+    url = f"http://127.0.0.1:{server.port}/api/benchmarks/{benchmark_id}/archive"
+    req = urllib.request.Request(
+        url, method="POST", data=json.dumps({"archived": archived}).encode(),
+    )
+    req.add_header("Authorization", f"Bearer {server.token}")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return resp.status, json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as err:
+        return err.code, json.loads(err.read() or b"{}")
+
+
+def test_archiving_a_benchmark_seals_its_experiments(hierarchy_server):
+    server, spec, eid, _default, store = hierarchy_server
+    status, body = _archive(server, spec["benchmark_id"], True)
+    assert status == 200, body
+    assert body["archived"] is True
+    assert eid in body["archived_experiments"]
+    assert all(row["experiment_id"] != eid for row in store.list_experiments())
+    assert store.get_experiment(eid) is None
+    with store._connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM comparison_groups WHERE benchmark_id=?",
+            (spec["benchmark_id"],),
+        ).fetchone()[0] == 0
+    status, listed = _request(server, "/api/benchmarks")
+    row = next(item for item in listed["benchmarks"] if item["benchmark_id"] == spec["benchmark_id"])
+    assert row["archived"] is True
+    status, nav = _request(server, "/api/navigation")
+    benchmark = next(
+        node for node in nav["root"]["children"]
+        if node.get("benchmark_id") == spec["benchmark_id"]
+    )
+    assert benchmark["info"]["archived"] is True
+    status, body = _archive(server, spec["benchmark_id"], False)
+    assert status == 200 and body["archived"] is False and body["archived_experiments"] == []
+    assert store.sealed_archive(eid) is None
+    assert store.get_experiment(eid) is None
+
+
+def test_archiving_stops_when_an_experiment_cannot_be_sealed(hierarchy_server):
+    server, spec, eid, _default, store = hierarchy_server
+    recorded = store.get_experiment(eid)
+    task_id = store.experiment_attempt_rows(eid)[0]["task_id"]
+    controller = ExperimentController(
+        server.workflow_path, store.store_identity(), external=False
+    )
+    controller.create_experiment(
+        "running-exp", "still running",
+        declared_tasks=1, declared_attempts=1,
+        declarations=[(task_id, 1, "registered")],
+        benchmark_id=recorded["benchmark_id"],
+        benchmark_version=recorded["benchmark_version"],
+        benchmark_digest_sha256=recorded["benchmark_digest_sha256"],
+    )
+    status, body = _archive(server, spec["benchmark_id"], True)
+    assert status == 409
+    assert "running-exp" in body["error"]
+    assert "cannot be archived" in body["error"]
+    assert store.sealed_archive(eid) is None
+    status, listed = _request(server, "/api/benchmarks")
+    row = next(item for item in listed["benchmarks"] if item["benchmark_id"] == spec["benchmark_id"])
+    assert row["archived"] is False
+
+
+def test_benchmark_archive_dom(hierarchy_server):
+    dependency = os.environ.get("TEST_JSDOM_ROOT")
     if not dependency:
-        pytest.skip('Set TEST_JSDOM_ROOT to run DOM integration with jsdom')
-    server, _spec, eid, _default, _store = hierarchy_server
-    script = Path(__file__).with_name('chatbot_experiment_archive_dom.cjs')
-    result = subprocess.run(['node', str(script), dependency,
-        f'http://127.0.0.1:{server.port}/?token={server.token}', eid],
-        capture_output=True, text=True, timeout=40)
+        pytest.skip("Set TEST_JSDOM_ROOT to run DOM integration with jsdom")
+    server, _spec, eid, _default, store = hierarchy_server
+    _mark_sealed(store, eid)
+    script = Path(__file__).with_name("chatbot_benchmark_archive_dom.cjs")
+    result = subprocess.run(
+        ["node", str(script), dependency,
+         f"http://127.0.0.1:{server.port}/?token={server.token}"],
+        capture_output=True, text=True, timeout=40,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_sealed_experiments_dom(hierarchy_server):
+    dependency = os.environ.get("TEST_JSDOM_ROOT")
+    if not dependency:
+        pytest.skip("Set TEST_JSDOM_ROOT to run DOM integration with jsdom")
+    server, spec, eid, _default, store = hierarchy_server
+    with store._connect() as conn:
+        conn.execute(
+            """UPDATE experiment_registrations
+               SET state='deleted', deleted_at=?
+               WHERE experiment_id<>?""",
+            ("2026-10-23T00:00:00+00:00", eid),
+        )
+        conn.commit()
+    _mark_sealed(store, eid)
+    setup.workflow_control(server.workflow_path, write=True).set_winner(
+        eid, actor="tester", actor_kind="human", provenance="human",
+    )
+    script = Path(__file__).with_name("chatbot_sealed_list_dom.cjs")
+    result = subprocess.run(
+        ["node", str(script), dependency,
+         f"http://127.0.0.1:{server.port}/?token={server.token}", eid],
+        capture_output=True, text=True, timeout=40,
+    )
     assert result.returncode == 0, result.stdout + result.stderr
 
 

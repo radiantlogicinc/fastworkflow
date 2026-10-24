@@ -57,6 +57,7 @@ from fastworkflow.observability.store import (
     ObservabilityStore,
     ReadOnlyObservabilityStore,
     Redactor,
+    warning_notice,
 )
 from fastworkflow.run_chatbot import launcher
 from fastworkflow.run_chatbot import selection_api
@@ -104,16 +105,19 @@ from fastworkflow.run_chatbot.handler_control import _ControlPlaneRoutes
 from fastworkflow.run_chatbot.handler_experiment import _ExperimentRoutes
 from fastworkflow.run_chatbot.handler_feedback import _FeedbackRoutes
 from fastworkflow.run_chatbot.handler_navigation import _NavigationRoutes
+from fastworkflow.run_chatbot.handler_conversations import (
+    CONVERSATIONS_PREFIX,
+    _ConversationArchiveRoutes,
+    conversation_delete_path,
+)
 from fastworkflow.run_chatbot.handler_sealed import (
     RELEASES_PATH,
     SEALED_PREFIX,
     _SealedRoutes,
+    released_delete_path,
     sealed_delete_path,
 )
-from fastworkflow.run_chatbot.http_common import (
-    STORE_UNAVAILABLE,
-    run_clear_conversations,
-)
+from fastworkflow.run_chatbot.http_common import STORE_UNAVAILABLE
 
 logger = logging.getLogger(__name__)
 
@@ -908,6 +912,18 @@ def _benchmark_experiment_post(path: str) -> bool:
     return path.startswith("/api/benchmarks/") and path.endswith("/experiments")
 
 
+def _benchmark_archive_post(path: str) -> bool:
+    """`/api/benchmarks/<id>/archive`: hide the benchmark, sealing its experiments."""
+    parts = path.split("/")
+    return (
+        len(parts) == 5
+        and parts[1] == "api"
+        and parts[2] == "benchmarks"
+        and parts[4] == "archive"
+        and bool(parts[3])
+    )
+
+
 def _benchmark_version_post(path: str) -> bool:
     return path == "/api/benchmarks" or (
         path.startswith("/api/benchmarks/") and path.endswith("/versions")
@@ -959,6 +975,12 @@ _WRITE_ROUTES = _checked_write_routes((
     _WriteRoute("POST", selection_api.owns_write, "_post_selection"),
     _WriteRoute("POST", _setup_post, "_post_experiment_setup"),
     _WriteRoute("POST", _benchmark_version_post, "_post_benchmark_version"),
+    _WriteRoute(
+        "POST",
+        _benchmark_archive_post,
+        "_post_archive_benchmark",
+        require_object_body=True,
+    ),
     _WriteRoute("POST", _exact("/api/select_workflow"), "_post_select_workflow"),
     _WriteRoute("POST", _exact("/api/configure_env"), "_post_configure_env"),
     _WriteRoute("POST", _exact("/api/train"), "_post_train"),
@@ -967,7 +989,23 @@ _WRITE_ROUTES = _checked_write_routes((
     _WriteRoute("POST", _exact(RELEASES_PATH), "_post_release", require_object_body=True),
     _WriteRoute("DELETE", sealed_delete_path, "_delete_sealed", reads_body=False),
     _WriteRoute(
-        "POST", _exact("/api/clear_conversations"), "_post_clear_conversations"
+        "POST",
+        _exact(CONVERSATIONS_PREFIX),
+        "_post_archive_conversation",
+        require_object_body=True,
+    ),
+    _WriteRoute(
+        "DELETE",
+        conversation_delete_path,
+        "_delete_archived_conversation",
+        reads_body=False,
+    ),
+    _WriteRoute("DELETE", released_delete_path, "_delete_released", reads_body=False),
+    _WriteRoute(
+        "POST",
+        _exact("/api/writer-health/dismiss"),
+        "_post_dismiss_writer_warning",
+        require_object_body=True,
     ),
     _WriteRoute("DELETE", _selection_delete, "_delete_selection"),
     _WriteRoute(
@@ -1006,6 +1044,7 @@ def _match_write_route(method: str, path: str) -> Optional[_WriteRoute]:
 
 class _ChatbotRequestHandler(
     _ExperimentRoutes,
+    _ConversationArchiveRoutes,
     _SealedRoutes,
     _BenchmarkRoutes,
     _FeedbackRoutes,
@@ -1491,6 +1530,9 @@ class _ChatbotRequestHandler(
         if path == SEALED_PREFIX:
             self._handle_sealed_list()
             return
+        if path == CONVERSATIONS_PREFIX or path.startswith(CONVERSATIONS_PREFIX + "/"):
+            self._handle_archived_conversations(path)
+            return
 
         # Per-request read-only store; never migrate incompatible evidence.
         try:
@@ -1620,7 +1662,7 @@ class _ChatbotRequestHandler(
         elif path == "/api/health":
             self._send_json(
                 {
-                    "writer_health": store.writer_health(),
+                    "writer_health": warning_notice(store.writer_health()),
                     "db_size_bytes": store.db_size_bytes(),
                     "db_available": True,
                 }
@@ -1747,10 +1789,10 @@ def run_prune(db_path: str) -> dict[str, int]:
 def run_forget_channel(db_path: str, channel_id: str) -> dict[str, int]:
     """Library erasure utility: delete one channel everywhere.
 
-    Not wired to any CLI flag or HTTP route — the chatbot UI exposes the
-    all-channel Clear-conversations action instead; this remains the
-    single-channel primitive for scripts/tests (e.g. a deletion request for
-    one API channel).
+    Not wired to any CLI flag or HTTP route. It remains the single-channel
+    primitive for scripts and tests (for example a deletion request for one
+    API channel). A recorded conversation is archived from the chatbot, one
+    at a time, and deleted from Archived conversations.
 
     The channel's offload evidence -- the archived execute responses its
     turns produced -- lives in the same database and is erased by

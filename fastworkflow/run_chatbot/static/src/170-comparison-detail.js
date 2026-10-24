@@ -1035,17 +1035,82 @@ function showBenchmarks() {
   var actions = pageHeader(d, "BENCHMARK LIBRARY", "Build confidence in every change", "Define repeatable tasks, compare experiments, and turn observations into better workflows.");
   var create = el("button", "primary", "New benchmark");
   create.addEventListener("click", function () { editBenchmark(null); }); actions.appendChild(create);
+  var showArchived = el("button", "ghost", archivedBenchmarksShown ? "Hide archived benchmarks" : "Show archived benchmarks");
+  showArchived.type = "button";
+  showArchived.addEventListener("click", function () {
+    archivedBenchmarksShown = !archivedBenchmarksShown;
+    renderHierarchy();
+    showBenchmarks();
+  });
+  actions.appendChild(showArchived);
+  var head = sectionHeader(d, "Benchmarks");
   var list = el("div", "recordGrid"); d.appendChild(list);
   api("/api/benchmarks").then(function (data) {
     if (benchNavStale(nav)) { return; }
-    if (!data.benchmarks.length) { emptyState(d, "Start with one real task", "Create a benchmark for something your users need to do. Add a prompt, then create an experiment when you are ready to test."); }
-    data.benchmarks.forEach(function (row) {
-      var b = el("button", "recordCard");
-      var top = el("span", "eyebrow", "BENCHMARK"); top.appendChild(el("span", "arrow", "↗")); b.appendChild(top);
+    var rows = data.benchmarks || [];
+    var archivedRows = rows.filter(function (row) { return row.archived; });
+    var working = rows.filter(function (row) { return !row.archived; });
+    showArchived.disabled = !archivedRows.length && !archivedBenchmarksShown;
+    if (!rows.length) {
+      emptyState(list, "Start with one real task", "Create a benchmark for something your users need to do. Add a prompt, then create an experiment when you are ready to test.");
+      return;
+    }
+    function benchmarkCard(row, addBox) {
+      var item = el("div", "listItem sealedRow");
+      var b = el("button", "recordCard" + (row.archived ? " archived" : ""));
+      var top = el("span", "eyebrow", "BENCHMARK");
+      if (row.archived) {
+        var marks = el("span", "marks");
+        marks.appendChild(el("span", "pill", "Archived"));
+        top.appendChild(marks);
+      }
+      top.appendChild(el("span", "arrow", "↗")); b.appendChild(top);
       b.appendChild(el("strong", null, row.title || row.benchmark_id));
       b.appendChild(el("span", "sub", (row.versions || []).length + " versions · " + ((row.versions || []).slice(-1)[0] || "No version")));
-      b.addEventListener("click", function () { showBenchmark(row.benchmark_id); }); list.appendChild(b);
-    });
+      b.addEventListener("click", function () { showBenchmark(row.benchmark_id); });
+      item.appendChild(b);
+      list.appendChild(item);
+      addBox(rowCheck(item, row.benchmark_id, "Select " + (row.title || row.benchmark_id), ""));
+    }
+    if (!working.length && !archivedBenchmarksShown) {
+      emptyState(list, "Archived benchmarks are hidden", "Show archived benchmarks to bring them back. Their archived experiments stay archived.");
+    } else if (working.length) {
+      var addWorking = bulkBar(head, {
+        allLabel: "Select all benchmarks",
+        actionLabel: "Archive selected",
+        noun: "benchmark",
+        title: function (n) { return "Archive " + n + " benchmark" + (n === 1 ? "" : "s") + "?"; },
+        one: "Experiments that are not archived yet are archived first. The benchmark leaves the working list. You can show it again.",
+        many: "Experiments that are not archived yet are archived first. The benchmarks leave the working list. You can show them again.",
+        confirmOne: "Archive benchmark",
+        confirmMany: "Archive benchmarks",
+        verb: "Archived",
+        reload: function () { refreshConvs(); showBenchmarks(); },
+        oneRequest: function (id) {
+          return requestJson("/api/benchmarks/" + encodeURIComponent(id) + "/archive", "POST", {archived: true});
+        }
+      });
+      working.forEach(function (row) { benchmarkCard(row, addWorking); });
+    }
+    if (archivedBenchmarksShown && archivedRows.length) {
+      var archivedHead = sectionHeader(list, "Archived");
+      var addArchived = bulkBar(archivedHead, {
+        allLabel: "Select all archived benchmarks",
+        actionLabel: "Unarchive selected",
+        noun: "benchmark",
+        title: function (n) { return "Unarchive " + n + " benchmark" + (n === 1 ? "" : "s") + "?"; },
+        one: "The benchmark returns to the working list. Its archived experiments stay archived.",
+        many: "The benchmarks return to the working list. Their archived experiments stay archived.",
+        confirmOne: "Unarchive benchmark",
+        confirmMany: "Unarchive benchmarks",
+        verb: "Unarchived",
+        reload: function () { refreshConvs(); showBenchmarks(); },
+        oneRequest: function (id) {
+          return requestJson("/api/benchmarks/" + encodeURIComponent(id) + "/archive", "POST", {archived: false});
+        }
+      });
+      archivedRows.forEach(function (row) { benchmarkCard(row, addArchived); });
+    }
   }).catch(function (e) { if (!benchNavStale(nav)) { d.appendChild(el("p", "err fieldError", e.message)); } });
 }
 /* Only a version's tasks are frozen. `detailsOnly` edits an older version:
@@ -1141,7 +1206,6 @@ function renderBenchmarkWinner(host, result, benchmarkId) {
   (result.experiments || []).some(function (candidate) {
     if (candidate.experiment_id === winnerId) { row = candidate; return true; }
   });
-  var hidden = row && row.archived && !archivedExperimentsShown[benchmarkId];
   var card = el("div", "statusCard winnerCallout");
   var content = el("div");
   var badges = el("div", "diffToolbar");
@@ -1151,8 +1215,8 @@ function renderBenchmarkWinner(host, result, benchmarkId) {
   content.appendChild(el("strong", null, title.shortId));
   if (title.described) { content.appendChild(el("p", null, title.described)); }
   var note = "This workflow's current answer for this benchmark version.";
-  if (hidden) {
-    note += " It is archived, so the list hides it until archived experiments are shown.";
+  if (row && row.archived) {
+    note += " It is archived, so it is listed under Archived experiments.";
   } else if (!row) {
     note = "Recorded as the winner, but it is not in this version's experiment list.";
   }
@@ -1181,6 +1245,39 @@ function showBenchmark(benchmarkId, selectedVersion) {
       clear(d); var manifest = loaded.version;
       expCrumbs(d, [{label: "Benchmarks", onClick: showBenchmarks}, {label: manifest.title || benchmarkId}]);
       var actions = pageHeader(d, "BENCHMARK · " + version, manifest.title || benchmarkId, manifest.description || "A repeatable set of tasks for your workflow.");
+      var benchmarkArchived = !!data.archived;
+      var archiveBenchmark = el("button", "ghost", benchmarkArchived ? "Unarchive benchmark" : "Archive benchmark");
+      archiveBenchmark.type = "button";
+      archiveBenchmark.title = benchmarkArchived
+        ? "Return this benchmark to the working list. Archived experiments stay archived."
+        : "Archive any experiments that are not archived yet, then hide this benchmark from the working list.";
+      archiveBenchmark.addEventListener("click", function () {
+        confirmDialog({
+          opener: archiveBenchmark,
+          title: benchmarkArchived ? "Unarchive this benchmark?" : "Archive this benchmark?",
+          description: benchmarkArchived
+            ? "It returns to the working list. Its archived experiments stay archived."
+            : "Experiments that are not archived yet are archived first. The benchmark leaves the working list. You can show it again.",
+          confirmLabel: benchmarkArchived ? "Unarchive benchmark" : "Archive benchmark",
+          cancelLabel: "Keep it"
+        }).then(function (confirmed) {
+          if (!confirmed) { return; }
+          lastActionButton = archiveBenchmark;
+          mutationRequest(
+            "/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/archive",
+            "POST",
+            {archived: !benchmarkArchived},
+            benchmarkArchived ? "Benchmark unarchived" : "Benchmark archived"
+          ).then(function () {
+            refreshConvs().then(function () {
+              if (benchNavStale(nav)) { return; }
+              if (benchmarkArchived) { showBenchmark(benchmarkId, selectedVersion); }
+              else { showBenchmarks(); }
+            });
+          }).catch(function () {});
+        });
+      });
+      actions.appendChild(archiveBenchmark);
       if (versions.length > 1) {
         var select = el("select"); select.setAttribute("aria-label", "View version");
         versions.forEach(function (v) { var opt = el("option", null, v); opt.value = v; select.appendChild(opt); }); select.value = version;
@@ -1218,27 +1315,39 @@ function showBenchmark(benchmarkId, selectedVersion) {
         if (benchNavStale(nav)) { return; }
         clear(experimentList);
         renderBenchmarkWinner(winnerHost, result, benchmarkId);
-        var archivedCount = result.experiments.filter(function (row) { return row.archived; }).length;
-        var experiments = archivedExperimentsShown[benchmarkId]
-          ? result.experiments
-          : result.experiments.filter(function (row) { return !row.archived; });
+        var sealedCount = result.experiments.filter(function (row) { return row.archived; }).length;
+        var experiments = result.experiments.filter(function (row) { return !row.archived; });
         /* An unreadable evidence store is a workflow-wide condition, so the
            sidebar's warning band (/api/navigation) is the one place that says
            so; repeating it over the cards told the reader nothing new. */
         if (!experiments.length) {
-          if (archivedCount) {
-            emptyState(experimentList, "Archived experiments are hidden", "Use Show all experiments beside this version in the left rail to include them.");
+          if (sealedCount) {
+            var sealedBox = emptyState(experimentList, "Archived experiments are listed separately",
+              "Open Archived experiments to review or delete them.");
+            var openSealed = el("button", null, "Open archived experiments");
+            openSealed.type = "button";
+            openSealed.addEventListener("click", function () { showSealedExperiments(); });
+            sealedBox.appendChild(openSealed);
           } else {
             emptyState(experimentList, "No experiments on this version yet", "Create an experiment to reserve this version's task IDs for a run. Your runner records the results here.");
           }
+        } else if (sealedCount) {
+          var sealedNote = el("p", "sub");
+          sealedNote.appendChild(document.createTextNode(
+            sealedCount + (sealedCount === 1 ? " archived experiment is" : " archived experiments are")
+            + " listed separately. "));
+          var openSealed = el("button", "ghost", "Open archived experiments");
+          openSealed.type = "button";
+          openSealed.addEventListener("click", function () { showSealedExperiments(); });
+          sealedNote.appendChild(openSealed);
+          experimentList.appendChild(sealedNote);
         }
         experiments.forEach(function (row, index) {
-          var classes = "recordCard" + (row.archived ? " archived" : "") + (row.is_winner ? " winning" : "");
+          var classes = "recordCard" + (row.is_winner ? " winning" : "");
           var b = el("button", classes), top = el("span", "eyebrow");
           top.appendChild(el("span", null, row.benchmark_version || version));
           var marks = el("span", "marks");
           if (row.is_winner) { marks.appendChild(el("span", "pill ok", "Winner")); }
-          if (row.archived) { marks.appendChild(el("span", "pill", "Archived")); }
           top.appendChild(marks);
           top.appendChild(el("span", "arrow", "↗")); b.appendChild(top);
           var recordedPath = findRecordedExperimentPath(row.experiment_id);

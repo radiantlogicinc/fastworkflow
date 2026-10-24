@@ -115,7 +115,7 @@ def test_capture_complete_needs_archive_digest_before_reportable(
         "exp-1", str(archive_path)
     )
     assert archive["experiment_status"] == "complete"
-    assert archive["sealed"] is True
+    assert archive["archived"] is True
     assert archive["store_identity"] == installed_db[1]
     experiment = controller.store.get_experiment("exp-1")
     assert experiment["workspace_archive_sha256"] == archive["sha256"]
@@ -219,7 +219,7 @@ def test_archive_open_never_migrates_source(installed_db, tmp_path, monkeypatch)
 
     monkeypatch.setattr(obs.ObservabilityStore, "_ensure_schema", forbidden)
     archive = store.archive_to(str(tmp_path / "sealed.sqlite3"))
-    assert archive["sealed"] is True
+    assert archive["archived"] is True
 
 
 # ----------------------------------------------------------------------
@@ -312,7 +312,7 @@ def test_the_archive_stays_byte_immutable_after_the_status_stamp(
     assert stat.S_IMODE(archive_path.stat().st_mode) == 0o444
     assert not os.path.exists(f"{archive_path}-wal")
     assert not os.path.exists(f"{archive_path}-shm")
-    assert archive["sealed"] is True
+    assert archive["archived"] is True
     assert archive["read_only"] is True
     assert archive["consistent_snapshot"] is True
     before = _sha256(archive_path)
@@ -328,7 +328,7 @@ def test_a_second_seal_is_refused(installed_db, tmp_path):
     first = tmp_path / "workspace.sqlite3"
     controller.seal_workspace_evidence("exp-1", str(first))
 
-    with pytest.raises(ValueError, match="already sealed"):
+    with pytest.raises(ValueError, match="already archived"):
         controller.seal_workspace_evidence("exp-1", str(tmp_path / "second.sqlite3"))
     assert not (tmp_path / "second.sqlite3").exists()
     assert controller.store.get_experiment("exp-1")["status"] == "complete"

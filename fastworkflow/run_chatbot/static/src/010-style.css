@@ -681,7 +681,6 @@ header .meta { max-width: 240px; }
 .modeTabs button { border-radius: 7px; background: transparent; min-width: 66px; }
 .modeTabs button.active { background: var(--panel); color: var(--accent-ink); box-shadow: 0 1px 4px #16382a14; }
 header > button { font-size: 12px; }
-#clearConvsBtn { color: var(--muted); background: transparent; }
 #rail { width: 340px; min-width: 280px; background: var(--rail-bg); }
 .railHeading { padding: 25px 22px 16px; display: flex; flex-direction: column; gap: 4px; }
 .eyebrow { color: var(--accent-ink); text-transform: uppercase; font-size: 10px; font-weight: 750; letter-spacing: .13em; }
@@ -704,6 +703,7 @@ header > button { font-size: 12px; }
 .navLabel { min-width: 0; flex: 1; overflow-wrap: anywhere; }
 .navCount { font-size: 10px; font-variant-numeric: tabular-nums; padding: 1px 6px; background: var(--panel); border: 1px solid var(--border); border-radius: 5px; }
 .navArchiveToggle { width: 26px; min-height: 24px; padding: 0; color: var(--muted); background: transparent; border-color: transparent; font-size: 16px; line-height: 1; }
+#convList > .railTool { display: block; width: calc(100% - 16px); margin: 8px; font-size: 12px; text-align: left; }
 .navNode.archived > summary { color: var(--muted); opacity: .72; }
 .navNode.archived .navLabel { text-decoration: line-through; text-decoration-thickness: 1px; }
 .navNode .pill { flex: 0 0 auto; padding: 1px 6px; font-size: 9px; }
@@ -730,8 +730,13 @@ h1, h2, h3 { line-height: 1.3; }
 .pageHead p { margin: 8px 0 0; color: var(--muted); max-width: 68ch; }
 .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .pageHead .actions { flex-shrink: 0; padding-top: 22px; }
-.sectionHead { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 30px 0 14px; }
+.sectionHead { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 30px 0 14px; flex-wrap: wrap; }
 .sectionHead h2 { margin: 0; font-size: 17px; letter-spacing: -.02em; }
+.sectionTools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.sectionTools label { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 12px; color: var(--muted); cursor: pointer; }
+.listItem.sealedRow { cursor: default; display: flex; gap: 10px; align-items: flex-start; }
+.sealedRow > .sealedCheck { margin-top: 4px; flex: 0 0 auto; }
+.sealedBody { flex: 1; min-width: 0; }
 .count { color: var(--muted); font-weight: 400; margin-left: 8px; }
 .summaryStrip { display: flex; gap: 36px; flex-wrap: wrap; padding: 18px 22px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 24px; }
 .summaryStrip strong { display: block; font-size: 22px; font-weight: 600; letter-spacing: -.03em; }

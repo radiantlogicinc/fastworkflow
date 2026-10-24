@@ -178,7 +178,7 @@ row is then visible from both tasks.
 Reads are separate GETs, never a POST: `GET /api/feedback-notes?turn_key=…` for
 one turn, `GET /api/task-feedback?experiment=…&task=…` for a whole task, and
 `GET /api/feedback-taxonomy` for the categories above. Evidence that cannot be
-written to — a sealed archive, or an older store — still accepts a comment: it
+written to — an archived experiment, or an older store — still accepts a comment: it
 is recorded beside the evidence and the evidence file is not modified.
 
 ### Health probes (public)

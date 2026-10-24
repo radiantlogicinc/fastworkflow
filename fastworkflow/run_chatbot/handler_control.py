@@ -1,4 +1,4 @@
-"""Package-private mixin of select, configure, train, and clear routes, moved verbatim from server.py."""
+"""Package-private mixin of select, configure, and train routes, moved verbatim from server.py."""
 
 from __future__ import annotations
 
@@ -6,8 +6,11 @@ import os
 import sqlite3
 from typing import Any
 
-from fastworkflow.observability.store import IncompatibleObservabilityDB
-from fastworkflow.run_chatbot.http_common import run_clear_conversations
+from fastworkflow.observability import control
+from fastworkflow.observability.store import (
+    IncompatibleObservabilityDB,
+    open_live_store,
+)
 from fastworkflow.run_chatbot.workflow_discovery import _looks_like_workflow
 
 
@@ -67,15 +70,25 @@ class _ControlPlaneRoutes:
             return
         self._send_json(result)
 
-    def _post_clear_conversations(self, path: str, body: Any, query: dict[str, list[str]]) -> None:
-        if body.get("confirm") != "clear all conversations":
-            self._error(
-                400,
-                "confirmation required: confirm='clear all conversations'",
-            )
-            return
+    def _post_dismiss_writer_warning(self, path: str, body: Any, query: dict[str, list[str]]) -> None:
+        """Clear the writer-health banner note from the live database.
+
+        The raw drop counters stay, so an evidence run's floor does not fall.
+        The same note is not written again until a counter grows past this.
+        """
         if not self.chatbot.db_path or not os.path.exists(self.chatbot.db_path):
-            self._send_json({"deleted": {}})
+            self._send_json({"cleared": False})
             return
-        deleted = run_clear_conversations(self.chatbot.db_path)
-        self._send_json({"deleted": deleted})
+        try:
+            store = open_live_store(self.chatbot.db_path, write=True)
+            result = store.dismiss_writer_warnings()
+        except control.ControlUnavailable:
+            self._send_json({"cleared": False})
+            return
+        except IncompatibleObservabilityDB as exc:
+            self._error(409, str(exc))
+            return
+        except sqlite3.OperationalError as exc:
+            self._write_refused(exc)
+            return
+        self._send_json(result)

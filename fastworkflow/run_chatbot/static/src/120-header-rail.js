@@ -38,14 +38,42 @@ function refreshHealth() {
         "the observability writer reported " + parts.join(", ") +
         ". Some data in this view may be incomplete.";
       document.getElementById("healthBanner").classList.add("visible");
+    } else if (
+      document.getElementById("healthText").textContent
+        .indexOf("the observability writer reported") === 0
+    ) {
+      document.getElementById("healthBanner").classList.remove("visible");
     }
   }).catch(function () {
     /* Banner is advisory; a dead chatbot is surfaced by checkSession. */
   });
 }
 document.getElementById("healthDismiss").addEventListener("click", function () {
-  healthDismissed = true;
-  document.getElementById("healthBanner").classList.remove("visible");
+  var banner = document.getElementById("healthBanner");
+  var text = document.getElementById("healthText").textContent || "";
+  /* The writer warning is a saved note. Dismiss removes it from the
+     database; a missing database or an unreachable chatbot is this tab only. */
+  if (text.indexOf("the observability writer reported") !== 0) {
+    healthDismissed = true;
+    banner.classList.remove("visible");
+    return;
+  }
+  banner.classList.remove("visible");
+  fetch("/api/writer-health/dismiss", {
+    method: "POST",
+    headers: chatbotAuthHeaders({"Content-Type": "application/json"}),
+    body: "{}"
+  }).then(function (response) {
+    return response.json().catch(function () { return {}; }).then(function (data) {
+      if (!response.ok) {
+        throw new Error(data.error || ("Request failed (" + response.status + ")."));
+      }
+      refreshHealth();
+    });
+  }).catch(function (error) {
+    banner.classList.add("visible");
+    showNotice("Could not dismiss the writer warning", "error", error.message);
+  });
 });
 
 /* -- meta -------------------------------------------------------------- */
@@ -71,7 +99,7 @@ var navigationETag = null;
 var navigationAbort = null;
 var navigationTab = "conversations";
 var navigationSelection = {conversations: null, benchmarks: null};
-var archivedExperimentsShown = {};
+var archivedBenchmarksShown = false;
 
 function rebuildHierarchyIndex() {
   hierarchyIndex = { byKey: {}, recordedByExperimentId: {}, byExperimentId: {} };
@@ -237,15 +265,16 @@ function hierarchyLabel(node) {
 }
 
 function visibleHierarchyChildren(node) {
-  if (node.kind !== "benchmark_version" || archivedExperimentsShown[node.benchmark_id]) {
+  if (node.kind !== "benchmark_version") {
     return node.children;
   }
+  /* Archived experiments stay on the Archived experiments page. */
   return node.children.filter(function (child) {
     return child.kind !== "experiment" || !(child.info && child.info.archived);
   });
 }
 
-function benchmarkArchivedCount(node) {
+function benchmarkSealedCount(node) {
   return node.children.filter(function (child) {
     return child.kind === "experiment" && child.info && child.info.archived;
   }).length;
@@ -296,7 +325,7 @@ function renderHierarchy() {
     /* Channel and conversation are the enclosing groups; repeating them on
        every row would just crowd out the message. */
     var leaf = node.kind === "turn";
-    var archived = node.kind === "experiment" && node.info && node.info.archived;
+    var archived = node.kind === "benchmark" && node.info && node.info.archived;
     var row = el("details", "navNode" + (node.kind === "conversation" ? " conversation" : "") + (selected === node.key ? " selected" : "") + (archived ? " archived" : ""));
     row.open = !leaf && !!hierarchyExpanded[node.key];
     row.dataset.kind = node.kind;
@@ -312,29 +341,7 @@ function renderHierarchy() {
     if (archived) {
       summary.appendChild(el("span", "pill", "Archived"));
     }
-    var archivedCount = node.kind === "benchmark_version" ? benchmarkArchivedCount(node) : 0;
-    if (archivedCount) {
-      var showingArchived = !!archivedExperimentsShown[node.benchmark_id];
-      var archiveToggle = el("button", "navArchiveToggle", showingArchived ? "⊘" : "◉");
-      var archiveLabel = showingArchived ? "Hide archived experiments" : "Show all experiments";
-      archiveToggle.title = archiveLabel;
-      archiveToggle.setAttribute("aria-label", archiveLabel);
-      archiveToggle.addEventListener("click", function (event) {
-        event.preventDefault();
-        event.stopPropagation();
-        archivedExperimentsShown[node.benchmark_id] = !showingArchived;
-        renderHierarchy();
-        var current = hierarchyPath[hierarchyPath.length - 1];
-        /* The benchmark page lists one version's cards; refresh it whether
-           the reader opened the version row or the benchmark row above it. */
-        if (current && current.benchmark_id === node.benchmark_id
-            && (current.kind === "benchmark_version" || current.kind === "benchmark")) {
-          showBenchmark(node.benchmark_id,
-                        current.kind === "benchmark_version" ? current.benchmark_version : undefined);
-        }
-      });
-      summary.appendChild(archiveToggle);
-    }
+    var sealedCount = node.kind === "benchmark_version" ? benchmarkSealedCount(node) : 0;
     if (childNodes.length && !leaf) {
       var count = el("span", "navCount", childNodes.length); count.setAttribute("aria-hidden", "true"); summary.appendChild(count);
     }
@@ -350,7 +357,7 @@ function renderHierarchy() {
       childNodes.forEach(function (child) { childrenContainer.appendChild(render(child, path)); });
       row.appendChild(childrenContainer);
     } else if (!leaf && row.open) {
-      row.appendChild(el("div", "sub", node.kind === "benchmark_version" && archivedCount ? "Archived experiments are hidden." :
+      row.appendChild(el("div", "sub", node.kind === "benchmark_version" && sealedCount ? "Archived experiments are listed under Tools." :
         node.kind === "benchmark_version" ? "No experiments on this version yet." :
         node.kind === "experiment" ? "No conversations recorded yet." :
         node.kind === "conversation" ? "No turns recorded yet." : "No child records."));
@@ -363,8 +370,27 @@ function renderHierarchy() {
       adhoc.children.forEach(function (node) { list.appendChild(render(node, [hierarchyRoot, adhoc])); });
     }
   } else if (navigationTab === "benchmarks") {
-    hierarchyRoot.children.filter(function (node) { return node.kind !== "adhoc"; })
-      .forEach(function (node) { list.appendChild(render(node, [hierarchyRoot])); });
+    var benchmarks = hierarchyRoot.children.filter(function (node) { return node.kind !== "adhoc"; });
+    var archivedBenchmarkCount = benchmarks.filter(function (node) {
+      return node.info && node.info.archived;
+    }).length;
+    if (archivedBenchmarkCount) {
+      var showingArchivedBenchmarks = !!archivedBenchmarksShown;
+      var benchmarkToggle = el("button", "railTool", showingArchivedBenchmarks
+        ? "Hide archived benchmarks" : "Show archived benchmarks");
+      benchmarkToggle.type = "button";
+      benchmarkToggle.addEventListener("click", function () {
+        archivedBenchmarksShown = !showingArchivedBenchmarks;
+        renderHierarchy();
+        if (hierarchyPath.length === 1 && hierarchyPath[0].kind === "root") {
+          showBenchmarks();
+        }
+      });
+      list.appendChild(benchmarkToggle);
+    }
+    benchmarks.filter(function (node) {
+      return archivedBenchmarksShown || !(node.info && node.info.archived);
+    }).forEach(function (node) { list.appendChild(render(node, [hierarchyRoot])); });
   }
   (hierarchyRoot.info.warnings || []).forEach(function (warning) {
     list.appendChild(el("p", "err", warning));
@@ -614,7 +640,7 @@ function refreshConvs(reportFailure) {
     hierarchyScope = scope; hierarchyRoot = null; hierarchyPath = []; hierarchyExpanded = {};
     hierarchyIndex = null; navigationETag = null;
     navigationSelection = {conversations: null, benchmarks: null};
-    archivedExperimentsShown = {};
+    archivedBenchmarksShown = false;
   }
   if (!hierarchyRoot) {
     var list = document.getElementById("convList"); clear(list);
@@ -658,7 +684,8 @@ function refreshConvs(reportFailure) {
        does, because `setNavigationTab` calls the placeholder directly, and
        clearing conversations nulls `state.turnKey` before refreshing so the
        "all cleared" state still appears. */
-    if (!hierarchyPath.length && !state.turnKey && !sealedPageOwnsDetail()) { showNavigationTabEmpty(); }
+    if (!hierarchyPath.length && !state.turnKey && !sealedPageOwnsDetail()
+        && !archivedConversationsOwnDetail()) { showNavigationTabEmpty(); }
   }).catch(function (error) {
     if (requestWasAborted(error) || refresh !== conversationRefresh) { return; }
     var list = document.getElementById("convList"); clear(list);

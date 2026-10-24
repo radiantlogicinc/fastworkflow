@@ -202,7 +202,6 @@ function actionSuccess(path, method) {
   if (path === "/api/select_workflow") { return "Workflow selected"; }
   if (path === "/api/train") { return "Training requested"; }
   if (path === "/api/configure_env") { return "Environment files saved"; }
-  if (path === "/api/clear_conversations") { return "Conversations cleared"; }
   if (method === "PATCH") { return "Notes saved"; }
   return "Changes saved";
 }

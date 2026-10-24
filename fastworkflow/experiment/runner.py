@@ -49,6 +49,10 @@ import fastworkflow
 from fastworkflow.observability import evidence_run as evidence_run_module
 from fastworkflow import state_paths
 from fastworkflow.observability import store as observability_store
+from fastworkflow.observability.archive_files import (
+    archive_file_for,
+    archives_directory,
+)
 from fastworkflow.benchmark.catalog import load_version
 from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
@@ -702,17 +706,22 @@ class ExperimentController:
         self._require_writer_drained()
         experiment = self.store.get_experiment(experiment_id)
         if experiment is None:
+            if archive_file_for(archives_directory(self.workflow_folderpath), experiment_id):
+                raise ValueError(
+                    f"experiment {experiment_id!r} is already archived; "
+                    "archiving again is refused — one experiment names one immutable archive"
+                )
             raise observability_store.ExperimentNotFound(experiment_id)
         if experiment["workspace_archive_sha256"]:
             raise ValueError(
-                f"experiment {experiment_id!r} is already sealed under "
-                f"{experiment['workspace_archive_sha256']}; re-sealing is "
+                f"experiment {experiment_id!r} is already archived under "
+                f"{experiment['workspace_archive_sha256']}; archiving again is "
                 "refused — one experiment names one immutable archive"
             )
         if experiment["status"] not in {"capture_complete", "complete"}:
             raise ValueError(
                 f"experiment {experiment_id!r} is {experiment['status']!r}; "
-                "sealing only accepts capture_complete data"
+                "archiving only accepts capture_complete data"
             )
         # A writer in this process may still hold this experiment's records
         # unwritten, and refusing it AFTER the promotion would leave an

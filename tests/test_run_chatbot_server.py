@@ -268,6 +268,20 @@ def _get_json(server, path, **kwargs):
     return json.loads(body)
 
 
+def _writer_health_keys(db_path: str) -> list[str]:
+    conn = sqlite3.connect(db_path)
+    try:
+        return [
+            row[0]
+            for row in conn.execute(
+                "SELECT key FROM diagnostics WHERE key GLOB ? ORDER BY key",
+                (obs.WRITER_HEALTH_KEY_PREFIX + "*",),
+            )
+        ]
+    finally:
+        conn.close()
+
+
 def _row_counts(db_path: str) -> dict:
     conn = sqlite3.connect(db_path)
     try:
@@ -475,20 +489,13 @@ class TestPage:
             digest = base64.b64encode(hashlib.sha256(script).digest()).decode()
             assert f"'sha256-{digest}'" in csp
 
-    def test_clear_conversations_reports_what_the_server_deleted(self, server):
-        """The message is built from the response's counts, never a fixed claim."""
-        page = server.index_html
-        assert b"All recorded conversations were cleared." not in page
-        assert b"function clearedSummary(data)" in page
-        assert b"There was nothing to clear." in page
-        assert b'mutationRequest("/api/clear_conversations", "POST"' in page
-
     def test_page_never_uses_innerhtml(self, server):
         # [R22]: record-derived text renders via textContent only.
         assert b"innerHTML" not in server.index_html
         assert b'id="tabTurns"' not in server.index_html
         assert b'id="tabConvs"' not in server.index_html
-        assert b'id="clearConvsBtn"' in server.index_html
+        assert b'id="clearConvsBtn"' not in server.index_html
+        assert b'id="archivedConversationsBtn"' in server.index_html
         # The rail nests channel > conversation > turns, with no channel picker.
         assert b'id="channelSel"' not in server.index_html
         assert b"/api/channels" not in server.index_html
@@ -613,47 +620,81 @@ class TestApi:
         assert health["last_error"] == "disk full"
         assert health["updated_at"]
 
-    def test_clear_all_conversations_requires_explicit_confirmation(
+    def test_dismiss_clears_the_writer_warning_without_a_duplicate(
         self, server, seeded_db
     ):
-        status, body = _post(server, "/api/clear_conversations", {})
-        assert status == 400
-        assert "confirmation required" in body["error"]
-        assert _row_counts(seeded_db)["turns"] == 3
-
-    def test_clear_all_conversations_removes_turn_observability(
-        self, server, seeded_db
-    ):
-        status, body = _post(
-            server,
-            "/api/clear_conversations",
-            {"confirm": "clear all conversations"},
-        )
-        assert status == 200
-        assert body["deleted"]["turns"] == 3
-        assert body["deleted"]["conversations"] == 1
-        assert _row_counts(seeded_db) == {
-            "conversations": 0,
-            "turns": 0,
-            "spans": 0,
-            "artifacts": 0,
-            "human_feedback": 0,
-        }
-        # Clearing data never rewinds conversation identity.
-        assert obs.ObservabilityStore(seeded_db).mint_conversation_id("chan1") == 2
-
-    def test_clearing_an_empty_store_reports_zero_counts(self, server, seeded_db):
-        """What lets the page say there was nothing to clear."""
-        for _ in range(2):
-            status, body = _post(
-                server,
-                "/api/clear_conversations",
-                {"confirm": "clear all conversations"},
+        store = obs.ObservabilityStore(seeded_db)
+        with store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            store.set_diagnostic(
+                conn,
+                obs.WRITER_HEALTH_KEY_PREFIX + "writer-2",
+                {
+                    "spans_dropped": 2,
+                    "records_dropped": 1,
+                    "write_errors": 3,
+                    "last_error": "disk full",
+                },
             )
-            assert status == 200
-        counted = dict(body["deleted"])
-        assert counted and set(counted.values()) == {0}
+            conn.commit()
+        before = _writer_health_keys(seeded_db)
 
+        status, body = _post(server, "/api/writer-health/dismiss", {})
+        assert status == 200
+        assert body["cleared"] is True
+        health = _get_json(server, "/api/health")["writer_health"]
+        assert health["write_errors"] == 0
+        assert health["spans_dropped"] == 0
+        assert health["records_dropped"] == 0
+        assert not health.get("last_error")
+        raw = store.writer_health()
+        assert raw["write_errors"] == 3
+        assert raw["spans_dropped"] == 2
+        assert raw["records_dropped"] == 1
+        assert raw["last_error"] is None
+        assert _writer_health_keys(seeded_db) == before
+
+        with store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            store.merge_writer_health_row(
+                conn,
+                {
+                    "spans_dropped": 2,
+                    "records_dropped": 1,
+                    "write_errors": 3,
+                    "last_error": "disk full",
+                    "writer_incarnation": {"id": "writer-1"},
+                },
+            )
+            conn.commit()
+        again = _get_json(server, "/api/health")["writer_health"]
+        assert again["write_errors"] == 0
+        assert not again.get("last_error")
+        assert _writer_health_keys(seeded_db) == before
+
+        status, body = _post(server, "/api/writer-health/dismiss", {})
+        assert status == 200
+        assert body["cleared"] is False
+        assert _writer_health_keys(seeded_db) == before
+
+        with store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            store.merge_writer_health_row(
+                conn,
+                {
+                    "spans_dropped": 2,
+                    "records_dropped": 1,
+                    "write_errors": 4,
+                    "last_error": "disk full",
+                    "writer_incarnation": {"id": "writer-1"},
+                },
+            )
+            conn.commit()
+        grown = _get_json(server, "/api/health")["writer_health"]
+        assert grown["write_errors"] == 1
+        assert grown["spans_dropped"] == 0
+        assert grown["records_dropped"] == 0
+        assert grown["last_error"] == "disk full"
 
 # ----------------------------------------------------------------------
 # Read-only guarantee
@@ -1282,7 +1323,7 @@ class TestChatbotErrorAndBodyReliability:
         raw = _raw_http(
             server,
             (
-                f"POST /api/clear_conversations HTTP/1.1\r\n"
+                f"POST /api/archived-conversations HTTP/1.1\r\n"
                 f"Host: 127.0.0.1:{server.port}\r\n"
                 f"Authorization: Bearer {server.token}\r\n"
                 f"Content-Length: -1\r\n"
@@ -1296,7 +1337,7 @@ class TestChatbotErrorAndBodyReliability:
         raw = _raw_http(
             server,
             (
-                f"POST /api/clear_conversations HTTP/1.1\r\n"
+                f"POST /api/archived-conversations HTTP/1.1\r\n"
                 f"Host: 127.0.0.1:{server.port}\r\n"
                 f"Authorization: Bearer {server.token}\r\n"
                 f"Content-Length: {5 * 1024 * 1024}\r\n"
@@ -1311,7 +1352,7 @@ class TestChatbotErrorAndBodyReliability:
         raw = _raw_http(
             server,
             (
-                f"POST /api/clear_conversations HTTP/1.1\r\n"
+                f"POST /api/archived-conversations HTTP/1.1\r\n"
                 f"Host: 127.0.0.1:{server.port}\r\n"
                 f"Authorization: Bearer {server.token}\r\n"
                 f"Transfer-Encoding: chunked\r\n"
@@ -1324,18 +1365,18 @@ class TestChatbotErrorAndBodyReliability:
 
     def test_missing_content_length_is_empty_body(self, server):
         # Bodyless POST without Content-Length must keep today's behaviour:
-        # parse as {} and continue (here: confirmation required).
+        # parse as {} and continue (here: channel_id is required).
         raw = _raw_http(
             server,
             (
-                f"POST /api/clear_conversations HTTP/1.1\r\n"
+                f"POST /api/archived-conversations HTTP/1.1\r\n"
                 f"Host: 127.0.0.1:{server.port}\r\n"
                 f"Authorization: Bearer {server.token}\r\n"
                 f"\r\n"
             ).encode(),
         )
         assert raw.startswith(b"HTTP/1.1 400")
-        assert b"confirmation required" in raw
+        assert b"channel_id is required" in raw
 
 
 class TestProcessLogs:

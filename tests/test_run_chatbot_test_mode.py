@@ -286,7 +286,8 @@ class TestChatbotTestModeAssets:
         assert b"Prefer the highest conversation_id that actually has turns" in page
         assert b"/activate_conversation" in page
         assert b"tmClearLog" in page
-        assert b'id="clearConvsBtn"' in page
+        assert b'id="clearConvsBtn"' not in page
+        assert b'id="archivedConversationsBtn"' in page
         assert b'id="envFilePick"' in page
         assert b'id="passwordsFilePick"' in page
         assert b'id="createEnvBtn"' in page

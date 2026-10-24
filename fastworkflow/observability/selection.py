@@ -45,9 +45,11 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
 from fastworkflow.observability import control
+from fastworkflow.observability.archive_files import archive_file_for
 from fastworkflow.observability.store import (
     FEEDBACK_PROVENANCES,
     ExperimentNotFound,
+    IncompatibleObservabilityDB,
     ObservabilityStore,
     ReadOnlyObservabilityStore,
     Redactor,
@@ -882,6 +884,11 @@ class SelectionControlStore:
             (EXPERIMENT_SCOPE, group_id, "", int(limit), int(offset)),
         )
 
+    def _archives_dir(self) -> str:
+        if self.store is None or not getattr(self.store, "db_path", None):
+            return ""
+        return str(Path(self.store.db_path).parent / "archives")
+
     def store_for(self, experiment_id: str) -> Optional[ObservabilityStore]:
         """The store holding one experiment's evidence (§2.6).
 
@@ -898,8 +905,30 @@ class SelectionControlStore:
         if sealed is not None and os.path.isfile(sealed["path"]) and (
             os.path.getsize(sealed["path"]) == int(sealed["size_bytes"])
         ):
-            return ReadOnlyObservabilityStore(sealed["path"])
-        return self.store
+            opened = self._open_archive(sealed["path"])
+            if opened is not None:
+                return opened
+        # The live index is gone once an archive has been freed. The file
+        # name is `<experiment id>-<stamp>.sqlite3`.
+        found = archive_file_for(self._archives_dir(), experiment_id)
+        opened = self._open_archive(found) if found is not None else None
+        return self.store if opened is None else opened
+
+    def _open_archive(self, path: str) -> Optional[ObservabilityStore]:
+        """The archive when this build can read it, else None.
+
+        A file that is not an observability database stays on the list of
+        archives and is not used as evidence.
+        """
+        try:
+            opened = ReadOnlyObservabilityStore(path)
+        except (IncompatibleObservabilityDB, sqlite3.Error, OSError):
+            return None
+        # The digest is written on the live row after the snapshot, so the
+        # file itself never carries one. Readers still need to know this
+        # database is the archive the digest would have named.
+        opened.opened_as_archive = True
+        return opened
 
     def store_for_turn(self, turn_key: str) -> Optional[ObservabilityStore]:
         """The store holding one turn's evidence, by the same rule as `store_for`.
@@ -938,6 +967,13 @@ class SelectionControlStore:
         archives = self._rows(
             "SELECT path, size_bytes FROM sealed_archives ORDER BY sealed_at DESC"
         )
+        known = {archive["path"] for archive in archives}
+        folder = Path(self._archives_dir())
+        if folder.is_dir():
+            for path in folder.glob("*.sqlite3"):
+                if path.name.startswith(".") or str(path) in known:
+                    continue
+                archives.append({"path": str(path), "size_bytes": path.stat().st_size})
         archives.sort(key=lambda archive: archive["path"] != self._last_archive)
         for archive in archives:
             path = archive["path"]
@@ -953,7 +989,9 @@ class SelectionControlStore:
                 continue
             if hit is not None:
                 self._last_archive = path
-                return ReadOnlyObservabilityStore(path)
+                opened = self._open_archive(path)
+                if opened is not None:
+                    return opened
         return self.store
 
     def _member_group_id(self, experiment_id: str) -> Optional[str]:

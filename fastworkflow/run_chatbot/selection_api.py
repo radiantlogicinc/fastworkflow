@@ -314,7 +314,11 @@ def _require_member(
     group = control.group_for_experiment(experiment_id)
     if group is not None:
         return group
-    recorded = None if control.store is None else control.store.get_experiment(experiment_id)
+    recorded = None
+    if control.store is not None:
+        evidence = control.store_for(experiment_id)
+        holder = control.store if evidence is None else evidence
+        recorded = holder.get_experiment(experiment_id)
     if recorded is not None:
         return selection.comparison_group_identity(recorded)
     if _registration(workflow_path, experiment_id) is None:

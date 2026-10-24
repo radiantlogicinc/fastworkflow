@@ -42,6 +42,10 @@ class BenchmarkAlreadyExistsError(BenchmarkCatalogError):
     """Refused to overwrite an existing immutable benchmark version."""
 
 
+class BenchmarkArchiveBlocked(BenchmarkCatalogError):
+    """Archiving would have to archive an experiment that cannot be archived."""
+
+
 def _required_text(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise BenchmarkManifestError(f"{field} must be a non-empty string")
@@ -213,6 +217,45 @@ def _parse_manifest(
     result = dict(manifest)
     result["digest_sha256"] = _sha256_bytes(manifest_bytes)
     return result
+
+
+def archived_benchmark_ids(workflow_folderpath: str | Path) -> set[str]:
+    """Benchmark ids hidden from the working lists. Empty when none are archived."""
+
+    store = open_live_store(_db_path(workflow_folderpath))
+    return {
+        str(row["benchmark_id"])
+        for row in control.rows(
+            store,
+            "SELECT benchmark_id FROM benchmark_archived",
+            feature=control.FEATURE_BENCHMARK_ARCHIVE_V1,
+        )
+    }
+
+
+def set_benchmark_archived(
+    workflow_folderpath: str | Path, benchmark_id: str, archived: bool
+) -> None:
+    """Hide or show one benchmark. Does not seal or unseal its experiments."""
+
+    benchmark_id = _safe_segment(benchmark_id, "benchmark_id")
+    if benchmark_id not in list_benchmarks(workflow_folderpath):
+        raise BenchmarkManifestError(f"benchmark not found: {benchmark_id}")
+    store = open_live_store_for_write(_db_path(workflow_folderpath))
+    now = datetime.now(timezone.utc).isoformat()
+    with control.write(store) as conn:
+        if archived:
+            conn.execute(
+                """INSERT INTO benchmark_archived (benchmark_id, archived_at)
+                   VALUES (?, ?) ON CONFLICT(benchmark_id) DO UPDATE SET
+                     archived_at=excluded.archived_at""",
+                (benchmark_id, now),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM benchmark_archived WHERE benchmark_id=?",
+                (benchmark_id,),
+            )
 
 
 def list_benchmarks(workflow_folderpath: str | Path) -> list[str]:

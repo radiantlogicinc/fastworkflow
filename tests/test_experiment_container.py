@@ -481,32 +481,6 @@ class TestExperimentDescription:
             )
 
 
-class TestExperimentArchive:
-    def test_archive_is_durable_and_included_in_reads(self, store, db_path):
-        store.create_experiment(
-            "exp-1", "first", declared_tasks=1, declared_attempts=1,
-            **STORE_PIN,
-        )
-        store.update_experiment_archived("exp-1", True)
-
-        reopened = obs.ObservabilityStore(db_path)
-        assert reopened.get_experiment("exp-1")["archived"] is True
-        assert reopened.list_experiments()[0]["archived"] is True
-
-        reopened.update_experiment_archived("exp-1", False)
-        assert obs.ObservabilityStore(db_path).get_experiment("exp-1")["archived"] is False
-
-    def test_archive_requires_a_boolean_and_an_existing_experiment(self, store):
-        store.create_experiment(
-            "exp-1", "first", declared_tasks=1, declared_attempts=1,
-            **STORE_PIN,
-        )
-        with pytest.raises(ValueError):
-            store.update_experiment_archived("exp-1", 1)
-        with pytest.raises(obs.ExperimentNotFound):
-            store.update_experiment_archived("missing", True)
-
-
 class TestInvalidIsTerminal:
     def test_a_resume_cannot_clear_an_invalid_verdict(self, store):
         _seed(store, "exp-1", tasks=1, attempts=1, outcomes=lambda t, n: "pass")
@@ -1382,7 +1356,7 @@ class TestHarness:
         path = Path(archive["path"])
         assert path.parent == bundle
         assert _sha256_file(path) == archive["sha256"]
-        assert archive["sealed"] is True
+        assert archive["archived"] is True
         assert archive["consistent_snapshot"] is True
         assert stat.S_IMODE(path.stat().st_mode) == 0o444
         assert not Path(f"{path}-wal").exists()
@@ -1460,7 +1434,7 @@ class TestHarness:
         archive = obs.ObservabilityStore(db_path).archive_to(
             str(tmp_path / "allowed.sqlite3")
         )
-        assert archive["sealed"] is True
+        assert archive["archived"] is True
 
 
 @pytest.fixture

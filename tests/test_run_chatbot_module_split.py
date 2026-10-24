@@ -105,7 +105,6 @@ DEFAULT_PROJECTION_FUNCTIONS = (
 
 HTTP_COMMON_REEXPORTS = (
     "STORE_UNAVAILABLE",
-    "run_clear_conversations",
 )
 
 # Every method of _ChatbotRequestHandler before the phase-B mixin split.
@@ -141,7 +140,6 @@ PRE_SPLIT_HANDLER_METHODS = (
     "_post_select_workflow",
     "_post_configure_env",
     "_post_train",
-    "_post_clear_conversations",
     "_delete_selection",
     "_delete_benchmark_experiment",
     "_patch_registration",
@@ -178,6 +176,7 @@ PRE_SPLIT_HANDLER_METHODS = (
 # Mixin classes, in MRO order, each ahead of BaseHTTPRequestHandler.
 HANDLER_MIXIN_NAMES = (
     "_ExperimentRoutes",
+    "_ConversationArchiveRoutes",
     "_SealedRoutes",
     "_BenchmarkRoutes",
     "_FeedbackRoutes",
@@ -187,6 +186,7 @@ HANDLER_MIXIN_NAMES = (
 
 MIXIN_MODULES = (
     "handler_benchmark.py",
+    "handler_conversations.py",
     "handler_control.py",
     "handler_experiment.py",
     "handler_feedback.py",

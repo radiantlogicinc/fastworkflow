@@ -395,7 +395,7 @@ def test_a_seal_taken_while_another_process_writes_is_consistent(live, tmp_path)
     finally:
         _stop_writer(writer, stop)
 
-    assert archive["sealed"] is True and archive["consistent_snapshot"] is True
+    assert archive["archived"] is True and archive["consistent_snapshot"] is True
     with _sealed(archive_path) as sealed, sqlite3.connect(live["db_path"]) as source:
         assert sealed.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         # The experiments row is left out: the digest lands on the live row

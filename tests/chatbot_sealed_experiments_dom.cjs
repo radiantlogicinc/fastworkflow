@@ -26,38 +26,39 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
 
   await until(() => w.session && w.hierarchyRoot, 'the page never loaded');
   d.getElementById('sealedExperimentsBtn').click();
-  await until(() => button('Seal'), 'the experiment was never offered for sealing');
-  assert.ok(detail().includes('Nothing sealed yet'));
+  await until(() => button('Archive'), 'the experiment was never offered for archiving');
+  assert.ok(detail().includes('Nothing archived yet'));
 
-  // Cancelling the dialog seals nothing.
-  button('Seal').click();
-  await until(dialogOpen, 'sealing asked for no confirmation');
-  assert.equal(d.getElementById('confirmTitle').textContent, 'Seal this experiment?');
+  // Cancelling the dialog archives nothing.
+  button('Archive').click();
+  await until(dialogOpen, 'archiving asked for no confirmation');
+  assert.equal(d.getElementById('confirmTitle').textContent, 'Archive this experiment?');
   d.getElementById('cancelDelete').click();
   await until(() => !dialogOpen(), 'the dialog did not close');
-  assert.ok(button('Seal'));
+  assert.ok(button('Archive'));
 
-  button('Seal').click();
-  await until(dialogOpen, 'sealing asked for no confirmation');
+  button('Archive').click();
+  await until(dialogOpen, 'archiving asked for no confirmation');
   d.getElementById('confirmDelete').click();
-  await until(() => button('Delete sealed experiment'), 'the sealed archive was never listed');
+  await until(() => button('Delete archived experiment'), 'the archive was never listed');
   assert.ok(detail().includes(eid));
-  assert.ok(detail().includes('sha256 '));
+  assert.ok(detail().includes('archived '));
+  assert.equal(detail().includes('sha256 '), false);
 
   // Opened like a live experiment, read from its archive.
   button('Open').click();
-  await until(() => [...d.querySelectorAll('#detail .pill')].some(p => p.textContent === 'Sealed'),
-    'the sealed experiment did not open');
-  assert.equal(button('Seal experiment'), undefined);
+  await until(() => [...d.querySelectorAll('#detail .pill')].some(p => p.textContent === 'Archived'),
+    'the archived experiment did not open');
+  assert.equal(button('Archive experiment'), undefined);
 
   d.getElementById('sealedExperimentsBtn').click();
-  await until(() => button('Delete sealed experiment'), 'the sealed list did not come back');
-  button('Delete sealed experiment').click();
+  await until(() => button('Delete archived experiment'), 'the archived list did not come back');
+  button('Delete archived experiment').click();
   await until(dialogOpen, 'deleting asked for no confirmation');
-  assert.equal(d.getElementById('confirmTitle').textContent, 'Delete this sealed experiment?');
+  assert.equal(d.getElementById('confirmTitle').textContent, 'Delete this archived experiment?');
   d.getElementById('confirmDelete').click();
-  await until(() => detail().includes('Nothing sealed yet') && !detail().includes(eid),
-    'the sealed experiment was not deleted');
+  await until(() => detail().includes('Nothing archived yet') && !detail().includes(eid),
+    'the archived experiment was not deleted');
 
   await new Promise(r => setTimeout(r, 250));
   assert.deepEqual(errors, []);

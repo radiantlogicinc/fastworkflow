@@ -1,4 +1,4 @@
-/* checkSession unreachable banner after 3 failures; clear-all aborts on failed rotation.
+/* checkSession unreachable banner after 3 failures, then recovery.
  */
 const assert = require('node:assert/strict');
 const {JSDOM, VirtualConsole} = require(process.argv[2] + '/node_modules/jsdom');
@@ -55,24 +55,8 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   failSession = false;
   await w.checkSession();
   await until(() => !w.chatbotUnreachable, 'recovery');
-
-  w.tm.connected = true;
-  w.tm.busy = false;
-  w.tm.baseUrl = 'http://127.0.0.1:9';
-  w.tmFetch = () => Promise.resolve({ok: false, status: 503});
-  let cleared = false;
-  const originalMutation = w.mutationRequest;
-  w.mutationRequest = function () {
-    cleared = true;
-    return originalMutation.apply(this, arguments);
-  };
-  d.getElementById('clearConvsBtn').style.display = '';
-  d.getElementById('clearConvsBtn').click();
-  await until(() => d.getElementById('confirmDialog').hasAttribute('open'), 'confirm dialog');
-  d.getElementById('confirmDelete').click();
-  await until(() => notices.some(n => n.message === 'Could not clear conversations'),
-    'failed rotation notice');
-  assert.equal(cleared, false, 'clear must abort when rotation fails');
+  assert.equal(d.getElementById('clearConvsBtn'), null);
+  assert.ok(d.getElementById('archivedConversationsBtn'));
 
   assert.deepEqual(errors, []);
   w.close();

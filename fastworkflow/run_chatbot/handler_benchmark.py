@@ -10,14 +10,22 @@ from fastworkflow.benchmark import setup as benchmark_setup
 from fastworkflow.benchmark.catalog import (
     BenchmarkAlreadyExistsError,
     BenchmarkManifestError,
+    archived_benchmark_ids,
     list_benchmarks,
     list_versions,
     load_version,
+    set_benchmark_archived,
     write_version,
 )
 from fastworkflow.benchmark.conformance import experiment_conformance
 from fastworkflow.observability import control
-from fastworkflow.observability.store import IncompatibleObservabilityDB
+from fastworkflow.observability.store import (
+    ExperimentNotFound,
+    IncompatibleObservabilityDB,
+    WriterStillOpen,
+    open_live_store,
+)
+from fastworkflow.run_chatbot.handler_sealed import _SEALABLE, _all_experiments, seal_experiment_evidence
 from fastworkflow.run_chatbot.http_common import STORE_UNAVAILABLE
 
 
@@ -204,6 +212,95 @@ class _BenchmarkRoutes:
             return
         self._send_json({"experiment": record})
 
+    def _post_archive_benchmark(self, path: str, body: Any, query: dict[str, list[str]]) -> None:
+        """Hide or show one benchmark. Archiving archives its experiments first."""
+        from fastworkflow.experiment.runner import MissingExperimentLifecycleFeature
+
+        workflow_path = self._benchmark_workflow_path()
+        if workflow_path is None:
+            return
+        archived = body.get("archived")
+        if not isinstance(archived, bool):
+            self._error(400, "archived must be true or false")
+            return
+        benchmark_id = unquote(path.split("/")[3])
+        if not archived:
+            try:
+                set_benchmark_archived(workflow_path, benchmark_id, False)
+            except BenchmarkManifestError as exc:
+                self._error(404, str(exc))
+                return
+            self._send_json({
+                "benchmark_id": benchmark_id, "archived": False, "archived_experiments": [],
+            })
+            return
+        try:
+            store = self.chatbot.open_store()
+        except IncompatibleObservabilityDB as exc:
+            self._error(409, str(exc))
+            return
+        recorded = [
+            row for row in (_all_experiments(store) if store is not None else [])
+            if row.get("benchmark_id") == benchmark_id
+        ]
+        blocked = [
+            row for row in recorded
+            if not row.get("archived") and row.get("status") not in _SEALABLE
+        ]
+        if blocked:
+            shown = ", ".join(
+                f"{row['experiment_id']} ({row.get('status')})" for row in blocked[:8]
+            )
+            more = "" if len(blocked) <= 8 else f" and {len(blocked) - 8} more"
+            self._error(
+                409,
+                f"cannot archive {benchmark_id}: {len(blocked)} experiment(s) "
+                f"cannot be archived: {shown}{more}",
+            )
+            return
+        sealed: list[str] = []
+        warning = None
+        try:
+            if store is not None:
+                for row in recorded:
+                    if row.get("archived"):
+                        continue
+                    outcome = seal_experiment_evidence(
+                        workflow_path, store, row["experiment_id"]
+                    )
+                    sealed.append(row["experiment_id"])
+                    if outcome.get("warning") and warning is None:
+                        warning = outcome["warning"]
+                if store is not None:
+                    open_live_store(
+                        self.chatbot.db_path or "", write=True
+                    ).delete_benchmark_comparisons(benchmark_id)
+            set_benchmark_archived(workflow_path, benchmark_id, True)
+        except BenchmarkManifestError as exc:
+            self._error(404, str(exc))
+            return
+        except ExperimentNotFound:
+            self._error(404, "experiment not found")
+            return
+        except (
+            ValueError,
+            WriterStillOpen,
+            MissingExperimentLifecycleFeature,
+            IncompatibleObservabilityDB,
+            FileExistsError,
+        ) as exc:
+            self._error(409, str(exc))
+            return
+        except sqlite3.OperationalError as exc:
+            self._write_refused(exc)
+            return
+        self._send_json({
+            "benchmark_id": benchmark_id,
+            "archived": True,
+            "archived_experiments": sealed,
+            "warning": warning,
+        })
+
     def _benchmark_experiments(self, benchmark_id, version):
         """One benchmark VERSION's experiments and winner (`fix-873a`).
 
@@ -233,8 +330,8 @@ class _BenchmarkRoutes:
                             known = registered.get(row["experiment_id"])
                             if known is None:
                                 rows.append(row)
-                            elif known.get("store"):
-                                known["archived"] = row["archived"]
+                            else:
+                                known["archived"] = bool(row.get("archived"))
                     if len(batch) < 200:
                         break
                     offset += len(batch)
@@ -280,12 +377,14 @@ class _BenchmarkRoutes:
         if workflow_path is None:
             return
         if path == "/api/benchmarks":
+            archived = archived_benchmark_ids(workflow_path)
             payload = []
             for benchmark_id in list_benchmarks(workflow_path):
                 payload.append(
                     {
                         "benchmark_id": benchmark_id,
                         "versions": list_versions(workflow_path, benchmark_id),
+                        "archived": benchmark_id in archived,
                     }
                 )
             for row in payload:
@@ -310,6 +409,7 @@ class _BenchmarkRoutes:
                 {
                     "benchmark_id": benchmark_id,
                     "versions": list_versions(workflow_path, benchmark_id),
+                    "archived": benchmark_id in archived_benchmark_ids(workflow_path),
                 }
             )
             return

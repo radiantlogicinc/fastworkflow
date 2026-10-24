@@ -661,6 +661,44 @@ class TestConversationMemoryRoundTrip:
 
 
 class TestWriterDiscipline:
+    def test_prune_removes_clean_closed_writer_health_immediately(self, db_path):
+        store = obs.ObservabilityStore(db_path)
+        with store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            store.merge_writer_health_row(conn, {
+                "records_dropped": 0,
+                "spans_dropped": 0,
+                "write_errors": 0,
+                "busy_retries": 0,
+                "refused_terminal_writes": 0,
+                "sync_fallbacks": 0,
+                "last_error": None,
+                "writer_incarnation": {"id": "clean", "open": False},
+            })
+            store.merge_writer_health_row(conn, {
+                "records_dropped": 1,
+                "spans_dropped": 0,
+                "write_errors": 0,
+                "busy_retries": 0,
+                "refused_terminal_writes": 0,
+                "sync_fallbacks": 0,
+                "last_error": None,
+                "writer_incarnation": {"id": "warning", "open": False},
+            })
+            conn.commit()
+
+        store.prune(retention_days=30)
+
+        with store._connect() as conn:
+            keys = {
+                row[0] for row in conn.execute(
+                    "SELECT key FROM diagnostics WHERE key GLOB ?",
+                    (obs.WRITER_HEALTH_KEY_PREFIX + "*",),
+                )
+            }
+        assert obs.WRITER_HEALTH_KEY_PREFIX + "clean" not in keys
+        assert obs.WRITER_HEALTH_KEY_PREFIX + "warning" in keys
+
     def test_span_queue_overflow_drops_and_counts(self, db_path, monkeypatch):
         monkeypatch.setenv("FW_OBS_QUEUE_MAX", "1")
         sink = obs.SQLiteTraceSink(db_path)

@@ -11,6 +11,7 @@ from typing import Any
 from fastworkflow.benchmark import setup as benchmark_setup
 from fastworkflow.benchmark.catalog import (
     BenchmarkManifestError,
+    archived_benchmark_ids,
     list_benchmarks,
     list_versions,
     load_version,
@@ -26,9 +27,14 @@ class _NavigationRoutes:
         store = None
         folder = self.chatbot.workflow_path
         if folder and os.path.isdir(folder):
+            archived = archived_benchmark_ids(folder)
             for bid in list_benchmarks(folder):
                 versions = list_versions(folder, bid)
-                row = {"benchmark_id": bid, "versions": versions}
+                row = {
+                    "benchmark_id": bid,
+                    "versions": versions,
+                    "archived": bid in archived,
+                }
                 if versions:
                     try:
                         row.update(load_version(folder, bid, versions[-1]))

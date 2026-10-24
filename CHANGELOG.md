@@ -4,6 +4,11 @@
 
 ### Added
 
+- **Sealed experiments can be selected and acted on together** (Tools → Sealed
+  experiments). Select all, or pick rows, to seal complete experiments, delete
+  sealed ones, or release invalid ones in one confirmation. A released
+  experiment can be deleted the same way; the page calls that removal delete.
+
 - **Skills are written as `Signature` + `PlanGenerator`** (`fastworkflow/skill.py`,
   `docs/skill_file_layout.md`). A skill file reads like a command file: `class
   Signature` declares it as a command's does, and `class PlanGenerator` generates its

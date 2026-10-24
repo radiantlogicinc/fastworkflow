@@ -12,9 +12,8 @@ where each one actually lives:
   appears in navigation, carrying an empty label rather than a generated
   sentence nobody wrote;
 * the generated navigation label -- the page derives it from the experiment id,
-  which `tests/chatbot_hierarchy_dom.cjs` and
-  `tests/chatbot_experiment_archive_dom.cjs` already drive in a real DOM. What
-  is pinned here is the rule the two of them rely on: the label is generated,
+  which `tests/chatbot_hierarchy_dom.cjs` already drives in a real DOM. What
+  is pinned here is the rule it relies on: the label is generated,
   and the author's description is shown as a description, not as a heading;
 * the description edit rules -- editable until a runner claims the
   registration, read-only afterwards, in the UI as well as at the route;

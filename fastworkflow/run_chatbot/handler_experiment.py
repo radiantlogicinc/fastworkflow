@@ -28,6 +28,21 @@ from fastworkflow.run_chatbot.turn_annotations import (
 from fastworkflow.run_chatbot import selection_api
 
 
+def _recorded_experiment(store: Any, experiment_id: str):
+    """The store that holds the experiment, and its row.
+
+    An archived experiment's row lives in the archive file. The live database
+    no longer has a copy.
+    """
+    evidence = selection.SelectionControlStore(store).store_for(experiment_id)
+    holder = store if evidence is None else evidence
+    detail = holder.get_experiment(experiment_id)
+    if detail is None and holder is not store:
+        detail = store.get_experiment(experiment_id)
+        holder = store
+    return holder, detail
+
+
 class _ExperimentRoutes:
     def _post_selection(self, path: str, body: Any, query: dict[str, list[str]]) -> None:
         self._handle_selection_api("POST", path, body=body)
@@ -225,41 +240,46 @@ class _ExperimentRoutes:
             self._error(404, "not found")
             return
         if sub == "":
-            detail = store.get_experiment(experiment_id)
+            evidence, detail = _recorded_experiment(store, experiment_id)
             if detail is None:
                 self._error(404, "experiment not found")
                 return
             detail["evidence"] = evidence_verdict(detail.get("evidence_runs"))
             detail["provenance"] = experiment_provenance(
-                detail, store.experiment_attempt_rows(experiment_id)
+                detail, evidence.experiment_attempt_rows(experiment_id)
             )
-            # Conformance reads the turns, which a sealed experiment keeps in
-            # its archive; the row, its digest and its notes stay live.
+            # Conformance and the row both come from the archive once the
+            # live copy has been removed.
             detail["benchmark_conformance"] = self._benchmark_conformance(
-                selection.SelectionControlStore(store).store_for(experiment_id), detail
+                evidence, detail
             )
-            detail["sealed_archive"] = self._sealed_archive_summary(store, experiment_id)
+            detail["archive"] = self._sealed_archive_summary(store, experiment_id)
             self._send_json({"experiment": detail})
         elif sub == "tasks":
-            if store.get_experiment(experiment_id) is None:
-                self._error(404, "experiment not found")
-                return
-            self._send_json({"tasks": store.experiment_tasks(experiment_id)})
-        elif sub == "attempts":
-            detail = store.get_experiment(experiment_id)
+            evidence, detail = _recorded_experiment(store, experiment_id)
             if detail is None:
                 self._error(404, "experiment not found")
                 return
-            rows = store.experiment_attempt_rows(experiment_id, task_id=q("task"))
+            self._send_json({"tasks": evidence.experiment_tasks(experiment_id)})
+        elif sub == "attempts":
+            evidence, detail = _recorded_experiment(store, experiment_id)
+            if detail is None:
+                self._error(404, "experiment not found")
+                return
+            rows = evidence.experiment_attempt_rows(experiment_id, task_id=q("task"))
             annotate_attempt_rows(
-                selection.SelectionControlStore(store).store_for(experiment_id),
+                evidence,
                 rows,
                 evidence_verdict(detail.get("evidence_runs")),
             )
             self._send_json({"attempts": rows})
         elif sub == "score":
+            evidence, detail = _recorded_experiment(store, experiment_id)
+            if detail is None:
+                self._error(404, "experiment not found")
+                return
             try:
-                self._send_json({"score": store.experiment_scores(experiment_id)})
+                self._send_json({"score": evidence.experiment_scores(experiment_id)})
             except ExperimentNotFound:
                 self._error(404, "experiment not found")
         elif sub == "compare":
@@ -310,8 +330,8 @@ class _ExperimentRoutes:
 
         Admitted on the annotation argument in `[DR30]`: the invariant
         protected is "recorded observability data stays read-only over HTTP"
-        (studio design §3.4, the access-control section), and `notes` plus
-        `archived` are annotation columns that cannot alter any span, turn,
+        (studio design §3.4, the access-control section), and `notes`
+        is an annotation column that cannot alter any span, turn,
         artifact, attempt outcome or score.
         """
         rest = path[len("/api/experiment/") :]
@@ -335,23 +355,19 @@ class _ExperimentRoutes:
         if "analysis" in body:
             self._error(400, "analysis is not a field of an experiment; use notes")
             return
-        if set(body) - {"notes", "archived"}:
+        if set(body) - {"notes"}:
             self._error(
-                400, "unexpected fields: this route updates notes and archived only"
+                400, "unexpected fields: this route updates notes only"
             )
             return
         if not body:
             self._error(
-                400, 'nothing to patch: send {"notes": "..."} or {"archived": true}'
+                400, 'nothing to patch: send {"notes": "..."}'
             )
             return
         notes = body.get("notes")
         if "notes" in body and notes is not None and not isinstance(notes, str):
             self._error(400, "notes must be a string or null")
-            return
-        archived = body.get("archived")
-        if "archived" in body and not isinstance(archived, bool):
-            self._error(400, "archived must be true or false")
             return
         try:
             # `[DR53]`: the feature check above ran through the per-request
@@ -360,8 +376,6 @@ class _ExperimentRoutes:
             writable = ObservabilityStore.open_for_annotation(store.db_path)
             if "notes" in body:
                 writable.update_experiment_notes(experiment_id, notes)
-            if "archived" in body:
-                writable.update_experiment_archived(experiment_id, archived)
         except ExperimentNotFound:
             self._error(404, "experiment not found")
             return

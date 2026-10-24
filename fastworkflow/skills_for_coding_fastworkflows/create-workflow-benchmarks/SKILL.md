@@ -138,4 +138,4 @@ To score runs with checklists and decide keep or revert against run-to-run noise
 Record run conclusions in experiment notes. Keep original evidence, human comments, description
 and notes in their respective fields; notes can cite them and summarize metrics but do not replace
 scoring or change recorded outcomes.
-Sealed archives are read-only: author and annotate in the working workflow/store.
+Archived experiments are read-only: author and annotate in the working workflow/store.
