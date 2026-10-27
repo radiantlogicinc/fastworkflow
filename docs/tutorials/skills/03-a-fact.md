@@ -1,136 +1,161 @@
-# 3. A fact passed from one phase to the next
+# 3. A fact passed on, and an answer written in code
 
-**Goal:** "how many books by Jane Austen do you have?" answered by code, with no model
-writing the answer. Page 1's phases passed nothing on; here the `find` phase runs the search
-and keeps its total as a **fact**, and the `answer` phase writes the answer from that fact.
+**Goal:** "how many books by Jane Austen do you have?" answered by code, with no model writing
+the answer. Page 1's phases passed nothing on; here the `find` phase runs the search and hands
+on what it found, `find_book`'s `Output`, and `__result__` writes the answer from it.
 
-## The skill file
+## The planning command file
 
-<!-- file: tests/skill_tutorial_workflow/_skills/count_books.py -->
+<!-- file: fastworkflow/examples/library/_commands/Library/count_books.py -->
 ```python
 """count_books: how many books match the words the request gives.
 
-The find phase runs find_book and keeps its total as a fact; the answer phase writes the
-answer from that fact.
+The find phase runs find_book and hands its Output on; __result__ writes the answer from
+that Output's total.
 """
 from pydantic import BaseModel, Field
 
-from fastworkflow.skill import fact_from
+from fastworkflow.planning import count, run
+
+from .find_book import Signature as FindBook
 
 
 class Signature:
-    """Say how many books have the request's words in their title or author."""
+    """Count the books whose title or author holds some words."""
 
     plain_utterances = ["how many books by Jane Austen do you have"]
 
     class Input(BaseModel):
-        query: str = Field(description="the title or author words exactly as the request "
-                                       "writes them")
+        query: str = Field(description="words of the title or the author's name",
+                           json_schema_extra={"in_request": True})
 
 
 class PlanGenerator:
-    class Found(BaseModel):
-        total: int = fact_from("find_book.total")
+    def find(self, input) -> FindBook.Output:
+        return [run("find_book", query=input.query)]
 
-    def find(self, input) -> Found:
-        return [f"find_book query={input.query}"]
-
-    def answer(self, input, find):
-        return [f"say that {find.total} books match {input.query}"]
+    def __result__(self, input, find):
+        return f"{input.query} matches {count(find.total, 'book')}."
 ```
 
 ## Line by line
 
-- **Two phases**, as on page 1: `find`, then `answer`. Nothing passes from one phase to the
-  next but the workflow's position and the facts, so `find` declares the fact it hands on.
-- **`class Found(BaseModel)`** is a **facts model**: what the `find` phase hands on. It is
-  nested right above the method that fills it.
-- **`total: int = fact_from("find_book.total")`** says where the fact comes from: the
-  `total` field of `find_book`'s `Output` (else its `Input`). After the phase, code fills it
-  from the `find_book` run of that phase, with no model call. A required fact no run holds
-  fails the phase.
-- **`-> Found`** (the return annotation) is how `find` says it fills `Found`.
-- **`def answer(self, input, find)`**: a parameter named after an earlier phase gets that
-  phase's facts. `find.total` is the number `find_book` returned. A misspelt name fails the
-  load.
-- **`f"say that {find.total} books match {input.query}"`**: a `say that ...` step. A last
-  phase made only of `say that` steps (and guards such as `apply no change`) runs no
-  command, so it is **answer-only**: code writes the answer, each `say that P` as the
-  sentence `P.`
+- **One phase**, `find`. Nothing passes from one phase to the next, or to the answer, but
+  the workflow's position and the **facts**, so `find` says what it hands on.
+- **`-> FindBook.Output`** (the return annotation) says it: the `Output` of the phase's
+  `find_book` run, as it is. After the phase, code takes that run's `Output` and hands it on,
+  with no model call. If the phase ends without a successful `find_book` run, the phase
+  fails.
+- **`from .find_book import Signature as FindBook`**: `FindBook` is `find_book`'s
+  `Signature`, imported from the file beside this one. The reference is plain Python, so a
+  command that is renamed or moved fails at the import, and your editor follows it to the
+  command. A phase annotated with a command's `Output` must run that command: a phase whose
+  steps never name `find_book` fails the load.
+- **`def __result__(self, input, find)`** writes the call's result in code. A parameter named
+  after a phase gets that phase's facts: here `find_book`'s `Output`, so `find.total` is its
+  `total`. A misspelt name fails the load. It runs once, after the last phase.
+- **It returns a `str`**, as an execution command's `__call__` returns a `str` when it has no
+  `Output`: that text is the call's answer, as it is. When this command is the whole plan
+  for a request, the user reads it as written: no model rewrites it. `__result__` can also
+  return the command's `Output`, or both (page 11).
+- **`count(find.total, 'book')`** writes "1 book" or "2 books" (page 7 has the other
+  helpers).
+- **`query`** describes what this command takes, in its own words. Here that happens to be
+  what `find_book` takes too. Its `in_request` option makes it words the request writes
+  (page 2).
 
-## What the planner sees
+A command without `__result__` has its answer written by its last phase's agent, as on
+pages 1 and 2. When the facts a later phase or `__result__` needs come from more than one
+command, page 10 shows how to hand them on.
 
-The planner sees the phases' steps joined, every fact a placeholder named by where it comes
-from, `<find.total>`:
+## The same job as an execution command
 
-<!-- template: count_books -->
-```text
-find_book query=<query>
-say that <find.total> books match <query>
+No step of `count_books` needs the agent, so the job is shorter as an execution command
+that calls the app (page 1, Which kind to write). A sketch, not a file of the sample:
+
+```python
+class ResponseGenerator:
+    def __call__(self, workflow, command, command_parameters: Signature.Input) -> str:
+        library: Library = workflow.command_context_for_response_generation
+        found = library.find_books(command_parameters.query)
+        return f"{command_parameters.query} matches {count(len(found), 'book')}."
 ```
 
-The preview adds a table of the phases and of the facts each fills, with their sources:
+It answers the same, runs in assistant mode and through direct API and MCP calls too, and
+needs none of the planning idioms. The sample keeps `count_books` as a planning command to
+show a phase handing on a command's `Output`.
 
-<!-- preview: count_books -->
+## What the agent plans from
+
+The agent's list of commands shows the phases' steps joined, every fact a placeholder named
+by where it is read:
+
+```text
+find_book query=<query>
+```
+
+The preview adds a table of the phases and of what each hands on, and the answer
+`__result__` writes with every fact a placeholder (`count` on a placeholder writes the plural,
+since the number is not known yet):
+
 ```markdown
 ## Phases
 
 | phase | output | runs | fans out |
 |---|---|---|---|
-| `find` | `Found` | always | no |
-| `answer` | none | always | no |
+| `find` | `Library/find_book`'s `Output` | always | no |
 
 ## Facts
 
-What each phase's output holds, filled in code from the commands the phase ran.
+What each phase hands on, filled in code from the commands the phase ran.
 
-### `find` -> `Found`
+### `find` -> `Library/find_book`'s `Output`
 
-| fact | type | from |
-|---|---|---|
-| `total` | `int` | `find_book.total` |
-```
+| fact | type |
+|---|---|
+| `book_uids` | `list[str]` |
+| `titles` | `list[str]` |
+| `total` | `int` |
 
-and, for the answer phase, who writes the answer:
+## Answer
 
-<!-- preview: count_books -->
-```markdown
-### Phase 2: `answer`
-
-Reads: `find`. Output: none.
-
-_Steps below are rendered with placeholder facts: `<phase.fact>` stands for that fact as read at run time, and 999999 (or 999,999) for a number fact the code converted; values computed from facts (counts, comparisons, matches) are not real._
-
-1. `say that <find.total> books match <query>`
-
-Answer: written by code, word for word (step 1 verbatim).
+Written by `__result__`: <query> matches <find.total> books.
 ```
 
 ## At run time
 
 For "how many Dune books do you have" (`query=Dune`):
 
-<!-- dry-run: count_books {"query": "Dune"} -->
 ```text
 Phase find
   1. find_book query=Dune
   code runs: find_book query=Dune
-  facts: Found(total=2)
-Phase answer
-  1. say that 2 books match Dune
-  answer written by code:
-    2 books match Dune.
+  facts: find_book.Output(book_uids=['b1', 'b2'], titles=['Dune', 'Dune Messiah'], total=2)
+answer written by __result__:
+  Dune matches 2 books.
 ```
 
-Code ran `find_book`, filled `Found(total=2)` from its output, called `answer` with it, and
-wrote the answer from the `say that` step: no model wrote a word of it. With one match the
-same code writes "1 books"; page 6 fixes that wording.
+And for `query=Persuasion`:
 
-Page 1's overview could say its branches the same way: a `branches` phase that fills
-`total: int = fact_from("list_branches.total")`, read by `overdue` as a parameter named
-`branches`.
+```text
+Phase find
+  1. find_book query=Persuasion
+  code runs: find_book query=Persuasion
+  facts: find_book.Output(book_uids=['b4'], titles=['Persuasion'], total=1)
+answer written by __result__:
+  Persuasion matches 1 book.
+```
+
+Code ran `find_book`, handed its `Output` on, called `__result__` with it, and the text it
+returned is the answer: no model wrote a word of it.
+
+Page 1's overview could say its branches the same way: annotate its `branches` phase with
+`ListBranches.Output`, imported from `list_branches.py`, and read it through a parameter
+named `branches`.
 
 ## What you learned
 
-A facts model with `fact_from("command.field")` is what a phase hands on, and a later phase
-reads it by naming the phase as a parameter.
+A phase annotated with a command's `Output` hands that `Output` on, and whatever reads it
+names the phase as a parameter. `__result__` returns the call's result in code, from the
+input and the phases' facts; a `str` it returns is the answer, as written. A job that needs
+no agent at all is shorter as an execution command.

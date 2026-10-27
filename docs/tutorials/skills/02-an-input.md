@@ -1,113 +1,141 @@
 # 2. An input
 
-**Goal:** a skill for "find books by Jane Austen". It takes one value from the request, the
-words to search for, and writes them into its steps.
+**Goal:** "note on Raj Patel's record that he prefers email reminders". The command takes two
+values from the request, the member's name and the note, and writes them into its steps.
 
-## The skill file
+## The planning command file
 
-<!-- file: tests/skill_tutorial_workflow/_skills/find_books.py -->
+<!-- file: fastworkflow/examples/library/_commands/Library/note_member.py -->
 ```python
-"""find_books: the books whose title or author holds the words the request gives."""
+"""note_member: add the request's note to the record of the member it names.
+
+One phase, so the call is one plan, run by one executor run. It finds the member, opens
+the one named, and adds the note there.
+"""
 from pydantic import BaseModel, Field
+
+from fastworkflow.planning import pick, run
 
 
 class Signature:
-    """Find the books whose title or author holds the request's words, and name them."""
+    """Add a note to a member's record."""
 
-    plain_utterances = ["find books by Jane Austen", "do you have Dune"]
+    plain_utterances = ["note on Raj Patel's record that he prefers email reminders",
+                        "add a note to Ann Lee: card renewed"]
 
     class Input(BaseModel):
-        query: str = Field(description="the title or author words exactly as the request "
-                                       "writes them")
+        member: str = Field(description="the member's name",
+                            json_schema_extra={"in_request": True})
+        text: str = Field(description="the note to add")
 
 
 class PlanGenerator:
-    def search(self, input):
-        return [f"find_book query={input.query}",
-                "say which books were found"]
+    def note(self, input):
+        return [run("find_member", query=input.member),
+                pick("open_member", named=input.member),
+                run("add_note", text=input.text),
+                "say whose record the note was added to"]
 ```
 
 ## Line by line
 
-- **`class Input(BaseModel)`** declares what the skill takes, as a command's `Input` does.
-  The planner fills it from the request in one typed call, and the arguments are checked
-  before any step is written.
-- **`query: str`** with no default is **required**. A field is a `str`, `bool`, `int`, a
-  `Literal[...]` of text (an enum), or `Optional[str] = None`. A `bool` always defaults to
-  `False`.
-- **The `Field` description is the planner's instruction** for filling the field. Write it
-  as the rule: "exactly as the request writes them" keeps the planner from rewording a
-  name.
-- **`def search(self, input)`**: a phase method that names `input` gets the checked
-  arguments as an `Input` instance; `input.query` is the value.
-- **`f"find_book query={input.query}"`** writes the value into the step. A step written
-  `command key=value` with every required parameter given is one **code runs** itself,
-  before the agent takes a step.
-- **`"say which books were found"`** is an answer step that needs the agent: only a step
-  starting `say that` is copied into the answer word for word (page 3).
+- **`class Input(BaseModel)`** declares what the command takes, as an execution command's
+  `Input` does, and its values are filled the same way: the parameter extractor fills the
+  `Input` from the step that calls the command, which for a request the command covers is
+  the request itself (page 9). The values are then checked before any step is written, by
+  the options their fields carry.
+- **`json_schema_extra={"in_request": True}`** is such an option: the member's name must
+  appear in the request word for word (case and dashes aside), so nothing rewords a name or
+  invents one. `text` carries no option, so the extractor may tidy the note's words. A field
+  with no option is checked by its type alone. The options mean the same on an execution
+  command's field: `find_member`'s `query` could carry `in_request` too. Page 9 lists them.
+- **Both fields are required** (no default). An `Input` field may have any type the
+  parameter extractor supports.
+- **Each description says what this command takes, for a person.** `member` is "the
+  member's name". `find_member`, which the first step passes it to, describes its own
+  `query` as "words of the member's name", which is right for a search and wrong here: this
+  command wants the member's whole name. A field of a planning command describes its own
+  value, even when a callee takes the same value; the preview shows the callee's description
+  beside it (below), so you can compare the two while you write.
+- **Leave instructions to the model out of descriptions.** The framework adds the sentence
+  of each option a field carries when it asks the parameter extractor to fill the field, for
+  either kind of command. For `in_request` on a `str` that is "Copy it exactly as the request
+  writes it.", so the extractor reads "the member's name. Copy it exactly as the request
+  writes it."
+- **`def note(self, input)`**: a phase method that names `input` gets the checked arguments
+  as an `Input` instance.
+- **`run("add_note", text=input.text)`** writes the step `add_note text=...`, with the value
+  written so that the step parser reads it whole: a note that ends in brackets, or holds an
+  `=`, is quoted. Code runs a step `run` wrote when every required value is given. Do not
+  build a step with an f-string: `f"add_note text={input.text}"` would lose "(not phone)"
+  from the end of "prefers email (not phone)", with no error.
+- **`pick("open_member", named=input.member)`** writes the step that opens the row of the
+  `find_member` listing named that way: `open_member with the uid of the Raj Patel match`.
+  Code finds that row in the listing the call read, and opens it. Page 4 is about `pick`,
+  and page 5 about the record it moves the workflow to.
+- **`"say whose record the note was added to"`** is a plain string, so it is the agent's to
+  do: here, writing the answer.
 
-This job is one search, so it is one method. A skill whose one phase reads only `input`
-(and hands on no facts) runs **flat**: the whole call is one plan, run by one executor run.
+This job is one plan with no facts to hand on, so it is one method: one phase, run as one
+plan by one executor run, with the agent's whole step budget.
 
-## What the planner sees
+## What the agent plans from
 
-The template is the steps written with every input a placeholder, `<query>`:
+The template is the steps written with every input a placeholder:
 
-<!-- template: find_books -->
 ```text
-find_book query=<query>
-say which books were found
+find_member query=<member>
+open_member with the uid of the <member> match
+add_note text=<text>
+say whose record the note was added to
 ```
 
-The preview lists the inputs, with the sample value each is rendered with:
+The preview lists the inputs, and for each one the field of the command the template passes
+it to, with that field's description:
 
-<!-- preview: find_books -->
 ```markdown
-Source: `_skills/find_books.py`. Kind: flat: one list of steps.
+Source: `_commands/Library/note_member.py`.
+
+Calls: `Library/find_member`, `Library/open_member`, `Record/add_note`.
+Depth: 1 (lower bound; open steps name no command)
 
 ## Inputs
 
-| input | type | default | sample | verify | subject | description |
+| input | type | default | sample | options | description | passed to |
 |---|---|---|---|---|---|---|
-| `query` | str | required | `<query>` |  |  | the title or author words exactly as the request writes them |
-
-## Example requests
-
-- find books by Jane Austen
-- do you have Dune
-
-## Steps
-
-For the sample inputs; no input changes them.
-
-1. `find_book query=<query>`
-2. `say which books were found`
-
-Pages: step 1 reads page 1 only.
+| `member` | str | required | `<member>` | `in_request` | the member's name | `Library/find_member.query`: words of the member's name |
+| `text` | str | required | `<text>` |  | the note to add | `Record/add_note.text`: the note to add |
 ```
-
-"Pages: step 1 reads page 1 only": `find_book` takes a page (`start`), and a step without a
-note asking for the full list reads the first page ("Previews" in
-[skill_file_layout.md](../../skill_file_layout.md) has the paging rules).
 
 ## At run time
 
-For "which books by Austen do you have", the planner fills `query=Austen`. A dry run:
+For "add a note to Raj Patel: card renewed", the parameter extractor fills `member=Raj Patel`
+and `text=card renewed` from the request:
 
-<!-- dry-run: find_books {"query": "Austen"} -->
 ```text
-Runs flat: one plan, one executor run.
-Phase find_books
-  1. find_book query=Austen
-  2. say which books were found
-  code runs: find_book query=Austen
+Phase note
+  1. find_member query=Raj Patel
+  2. open_member with the uid of the Raj Patel match
+  3. add_note text=card renewed
+  4. say whose record the note was added to
+  code runs: find_member query=Raj Patel
+  code runs: open_member member_uid=m2
+  now in: Member: Raj Patel (m2)
+  code runs: add_note text=card renewed
   the agent writes the answer from these runs
 ```
 
-Code runs step 1 (`find_book query=Austen`, every value written). Step 2 is an answer step
-that is not `say that ...`, so the agent writes the answer from the run's output.
+Code runs the first three steps. Step 2 is written in pick words, and code finds the one row
+named "Raj Patel" in the listing step 1 read, and opens it.
+That moves the workflow onto Raj Patel's record, so step 3's `add_note`, a command every
+record has, runs there. Step 4 is a plain string, so the agent writes the answer from the
+runs.
+
+The call ends where its last step left the workflow: on Raj Patel. Page 5 is about that.
 
 ## What you learned
 
-`Input` fields are the skill's arguments; their descriptions tell the planner how to fill
-them; a method reading `input` writes them into its steps.
+`Input` fields are a command's arguments, filled from the request the way any command's are,
+and checked by the options they carry, such as `in_request`, on either kind of command;
+their descriptions say, for a person, what each value is. `run` writes a step with its values
+written whole; a step that opens a listing's row by name is written with `pick`.
