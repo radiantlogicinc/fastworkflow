@@ -1,0 +1,8 @@
+{
+    "Book": {
+        "base": ["Record"]
+    },
+    "Member": {
+        "base": ["Record"]
+    }
+}

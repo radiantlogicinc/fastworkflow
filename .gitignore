@@ -263,10 +263,8 @@ rejected_examples.json
 # Local backups of env files (e.g. env/.env.bak-groq)
 .env.bak-*
 
-# Local unified-command design, skills tutorial, and library sample.
-# Recorded on the local unified-command-architecture branch; working copies stay ignored.
-# The beads export (.beads/issues.jsonl, .beads/interactions.jsonl) stays tracked.
+# Local unified-command design. Recorded on the local unified-command-architecture
+# branch; the working copies stay ignored. The skills tutorial and the library
+# example stay tracked. The beads export stays tracked.
 docs/unified_command_architecture.md
 docs/unified_command_architecture/
-docs/tutorials/skills/
-fastworkflow/examples/library/
