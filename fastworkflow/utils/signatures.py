@@ -1264,7 +1264,11 @@ Today's date is {today}.
                     msg_prefix = "abort and "
                     if "run_as_agent" in app_workflow.context:
                         msg_prefix = ""
-                    message += f"{msg_prefix}use the {' or '.join(is_available_from)} command(s) to get {missing_field} information. OR...\n"
+                    bare_commands = [
+                        str(entry).split("/")[-1].split(".", 1)[0]
+                        for entry in is_available_from
+                    ]
+                    message += f"{msg_prefix}use the {' or '.join(bare_commands)} command(s) to get {missing_field} information. OR...\n"
 
         if invalid_fields:
             message += f"{INVALID_INFORMATION_ERRMSG}" + ", ".join(invalid_fields) + "\n"

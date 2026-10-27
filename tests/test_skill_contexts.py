@@ -13,7 +13,8 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow import skill_preview, workflow_agent
+from fastworkflow import skill_commands, skill_preview, workflow_agent
+from fastworkflow.observation_offloading.facts import workflow_signatures
 from fastworkflow.utils import python_utils
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -24,6 +25,9 @@ _COPIED_COMMANDS = (
     "_commands/startup.py",
     "_commands/Library/count_overdue.py",
     "_commands/Library/find_book.py",
+    "_commands/Library/find_member.py",
+    "_commands/Library/open_book.py",
+    "_commands/Library/open_member.py",
     "_commands/Book/show_book.py",
     "_commands/Member/show_member.py",
     "_commands/Record/show_notes.py",
@@ -153,8 +157,6 @@ def _preview_check(folder: str, out_dir: str, capsys) -> tuple[int, str]:
 
 
 def test_copied_execution_commands_all_load_their_signatures(tmp_path):
-    from fastworkflow.observation_offloading.facts import workflow_signatures
-
     folder = _library_workflow(tmp_path)
     expected = {
         rel.removeprefix("_commands/").removesuffix(".py")
@@ -165,6 +167,16 @@ def test_copied_execution_commands_all_load_their_signatures(tmp_path):
     assert expected <= set(signatures)
     for name in expected:
         assert signatures[name].__name__ == "Signature"
+
+    resolution = skill_commands.resolve_field_sources(folder)
+    assert resolution.errors == ()
+    assert resolution.infos == ()
+    assert signatures["Library/open_book"].Input.model_fields["book_uid"].json_schema_extra[
+        "available_from"
+    ] == ["Library/find_book.book_uids"]
+    assert signatures["Library/open_member"].Input.model_fields["member_uid"].json_schema_extra[
+        "available_from"
+    ] == ["Library/find_member.member_uids"]
 
 
 def test_library_workflow_loads_context_and_root_skills(tmp_path):

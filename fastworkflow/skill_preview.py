@@ -1523,7 +1523,7 @@ def render_previews(workflow_folder: str) -> dict[str, str]:
 
 def _load_error(name: str, path: str, folder: str) -> str:
     """Why the skill file at *path* does not load: ``<name>: <error>``."""
-    from fastworkflow import workflow_agent
+    from fastworkflow import skill_commands, workflow_agent
 
     try:
         loaded = workflow_agent._read_skill_file(name, path, folder)
@@ -1531,6 +1531,7 @@ def _load_error(name: str, path: str, folder: str) -> str:
         return f"{name}: {type(error).__name__}: {error}"
     problems = (workflow_agent.step_command_problems(loaded.command, folder)
                 if loaded.command is not None else [])
+    problems.extend(skill_commands.resolve_field_sources(folder).errors_for(name))
     if problems:
         return f"{name}: " + "; ".join(problems)
     return f"{name}: skipped by the loader (see the log)"
@@ -1562,11 +1563,13 @@ def check_previews(workflow_folder: str, out_dir: Optional[str] = None) -> list[
     """The problems of the previews in *out_dir* (``<out>/<name>.md`` and
     ``<out>/<Context>/<name>.md``) against a fresh render; empty when current.
 
-    A problem is a preview that differs, one that is missing, an extra ``.md`` file, or a
+    A problem is a preview that differs, one that is missing, an extra ``.md`` file, a
     phase output field whose ``"from"`` names a command or field the workflow does not have
-    (``workflow_agent.phase_source_problems``; at load only a warning).
+    (``workflow_agent.phase_source_problems``; at load only a warning), or a ``from_``
+    error reported by ``skill_commands.resolve_field_sources`` across the workflow's
+    execution and planning commands.
     """
-    from fastworkflow import workflow_agent
+    from fastworkflow import skill_commands, workflow_agent
 
     out_dir = out_dir or default_out_dir(workflow_folder)
     fresh = render_previews(workflow_folder)
@@ -1586,6 +1589,10 @@ def check_previews(workflow_folder: str, out_dir: Optional[str] = None) -> list[
         if command.phase_outputs:
             problems += [f"fact source not found: {problem}"
                          for problem in workflow_agent.phase_source_problems(command, folder)]
+    for err in skill_commands.resolve_field_sources(folder).errors:
+        formatted = err.format()
+        if formatted not in problems:
+            problems.append(formatted)
     return problems
 
 
@@ -1631,6 +1638,8 @@ def write_previews(workflow_folder: str, out_dir: Optional[str] = None) -> dict[
 
 def preview_main(args) -> int:
     """``fastworkflow skill preview``: write the previews, or with ``--check`` compare them."""
+    from fastworkflow import skill_commands
+
     out_dir = args.out or default_out_dir(args.workflow_folder)
     if args.check:
         try:
@@ -1638,6 +1647,8 @@ def preview_main(args) -> int:
         except PreviewError as error:   # no _skills folder, or a skill file that does not load
             print(f"skill previews in {out_dir} cannot be checked: {error}")
             return 1
+        for info in skill_commands.resolve_field_sources(os.path.abspath(args.workflow_folder)).infos:
+            print(f"info: {info.format()}")
         if problems:
             print(f"skill previews in {out_dir} are not current "
                   f"(run: fastworkflow skill preview {args.workflow_folder}"

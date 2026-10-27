@@ -9,6 +9,7 @@ from functools import lru_cache
 from pydantic import BaseModel, field_validator, model_validator, ConfigDict, Field, ValidationInfo
 
 from fastworkflow.utils import python_utils
+from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_inheritance_model import WorkflowInheritanceModel
 
 
@@ -576,11 +577,16 @@ class CommandDirectory(BaseModel):
                 generated_utterances_func_name = 'dummy'               
             )
 
-        # If already hydrated we are done.
+        # If already hydrated in this process we are done. (When a directory is
+        # deserialized from `command_directory.json` in a fresh process, the
+        # string fields on `command_metadata` are already populated from the
+        # snapshot, so we still ensure the command's in-memory `from_` edges
+        # have been resolved once for its `Signature` class before returning.)
         if command_metadata.response_generation_class_name is not None and (
             command_metadata.input_for_param_extraction_class is not None and \
             utterance_metadata.plain_utterances
         ):
+            _ensure_workflow_field_sources_resolved(command_metadata, self, command_name)
             return
 
         _lazy_hydrate_metadata(
@@ -595,6 +601,109 @@ class CommandDirectory(BaseModel):
 # Module-level helper with its own cache so that repeated
 # hydration calls across directories are cheap.
 # ------------------------------------------------------
+
+# Guard against re-entrant `resolve_field_sources` calls when `resolve_field_sources`
+# loads `CommandContextModel`, which builds `CommandDirectory` and hydrates commands.
+_RESOLVING_FIELD_SOURCES_WORKFLOWS: set[str] = set()
+# Cache of `(workflow_abs_path, command_name) -> Signature class` already resolved
+# and logged in this process. Keying on the `Signature` class object ensures that
+# resolution and error logging happen at most once per `(workflow, command, Signature)`
+# while a reloaded module (producing a new `Signature` class object) is resolved again.
+_RESOLVED_COMMAND_SIGNATURES: dict[tuple[str, str], type] = {}
+_INTERNAL_CME_WORKFLOW_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "_workflows", "command_metadata_extraction")
+)
+
+
+def clear_resolved_command_signatures_cache() -> None:
+    """Clear the per-command ``(workflow, command) -> Signature`` resolution cache."""
+    _RESOLVED_COMMAND_SIGNATURES.clear()
+
+
+def _is_subject_workflow_command(
+    command_name: str, metadata: CommandMetadata, directory: CommandDirectory
+) -> bool:
+    """True when *command_name* belongs to a subject workflow rather than the internal CME workflow."""
+    if command_name in directory.core_command_names:
+        return False
+    if os.path.abspath(metadata.workflow_folderpath or "") == _INTERNAL_CME_WORKFLOW_PATH:
+        return False
+    if os.path.abspath(directory.workflow_folderpath or "") == _INTERNAL_CME_WORKFLOW_PATH:
+        return False
+    return True
+
+
+def _handle_execution_command_field_source_errors(
+    command_name: str, errs: list[str]
+) -> bool:
+    """Policy for an execution command whose ``Signature`` has ``from_`` / ``available_from`` errors.
+
+    Returns ``True`` to keep hydrating the command (logging the error while leaving the
+    offending field's ``available_from`` unwritten), or ``False`` to skip hydrating the
+    command's parameter classes. Kept in one place so the policy can be switched cleanly.
+    """
+    logger.error(f"command {command_name!r}: " + "; ".join(errs))
+    return True
+
+
+def _ensure_workflow_field_sources_resolved(
+    metadata: CommandMetadata,
+    directory: CommandDirectory,
+    command_name: str,
+    signature_cls: Optional[type] = None,
+) -> bool:
+    """Ensure ``resolve_field_sources`` has run for the workflow and the command's
+    ``Signature`` has its ``available_from`` populated (including when ``CommandDirectory``
+    was loaded from a persisted JSON snapshot in a new process).
+
+    Cached per ``(workflow_folder, command_name, Signature class identity)`` so each
+    command's resolution and error logging runs at most once per ``Signature`` class.
+    Returns ``True`` when hydration should proceed, ``False`` if the command should be skipped.
+    """
+    if not _is_subject_workflow_command(command_name, metadata, directory):
+        return True
+    wf_folder = directory.workflow_folderpath or metadata.workflow_folderpath
+    if not wf_folder:
+        return True
+    wf_abs = os.path.abspath(wf_folder)
+    if wf_abs in _RESOLVING_FIELD_SOURCES_WORKFLOWS:
+        return True
+
+    module_path = metadata.response_generation_module_path
+    if signature_cls is None:
+        module = python_utils.get_module(module_path, metadata.workflow_folderpath or wf_folder)
+        signature_cls = getattr(module, "Signature", None) if module else None
+    if signature_cls is None:
+        return True
+
+    cache_key = (wf_abs, command_name)
+    if _RESOLVED_COMMAND_SIGNATURES.get(cache_key) is signature_cls:
+        return True
+
+    from fastworkflow import skill_commands  # circular import: skill_commands -> command_context_model -> command_directory
+
+    _RESOLVING_FIELD_SOURCES_WORKFLOWS.add(wf_abs)
+    try:
+        resolution = skill_commands.resolve_field_sources(wf_abs)
+    finally:
+        _RESOLVING_FIELD_SOURCES_WORKFLOWS.discard(wf_abs)
+
+    cmd_problems = skill_commands.resolve_signature_field_sources(
+        command_name, signature_cls, module_path, resolution
+    )
+    _RESOLVED_COMMAND_SIGNATURES[cache_key] = signature_cls
+
+    errs = resolution.errors_for(command_name) or [
+        p.format() for p in cmd_problems if p.severity == "error"
+    ]
+    if errs or command_name in resolution.skipped_commands:
+        if not _handle_execution_command_field_source_errors(command_name, errs):
+            metadata.parameter_extraction_signature_module_path = None
+            metadata.input_for_param_extraction_class = None
+            metadata.command_parameters_class = None
+            return False
+    return True
+
 
 # We purposely do *not* cache by arguments because `metadata`/`directory` are
 # unhashable Pydantic objects.  The helper itself safeguards against running
@@ -613,6 +722,11 @@ def _lazy_hydrate_metadata(module_path: str, metadata: CommandMetadata, director
 
     signature_cls = getattr(module, "Signature", None)
     if not signature_cls:
+        return
+
+    if not _ensure_workflow_field_sources_resolved(
+        metadata, directory, command_name, signature_cls=signature_cls
+    ):
         return
 
     metadata.parameter_extraction_signature_module_path = module_path

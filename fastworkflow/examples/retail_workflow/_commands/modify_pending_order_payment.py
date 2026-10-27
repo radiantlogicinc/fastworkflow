@@ -3,7 +3,7 @@ from typing import List
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.workflow import Workflow
-from fastworkflow import CommandOutput, CommandResponse
+from fastworkflow import CommandOutput, CommandResponse, from_
 
 from ..retail_data import load_data
 from ..tools.modify_pending_order_payment import ModifyPendingOrderPayment
@@ -12,23 +12,19 @@ from ..tools.modify_pending_order_payment import ModifyPendingOrderPayment
 class Signature:
     """Modify pending order payment method"""
     class Input(BaseModel):
-        order_id: str = Field(
+        order_id: str = from_(
+            "get_user_details",
             default="NOT_FOUND",
             description="The order ID to modify",
             pattern=r"^(#?[\w\d]+|NOT_FOUND)$",
             examples=["#W0000000"],
-            json_schema_extra={
-                "available_from": ["get_user_details"]
-            }
         )
-        payment_method_id: str = Field(
+        payment_method_id: str = from_(
+            "get_user_details",
             default="NOT_FOUND",
             description="Payment method ID to switch to",
             pattern=r"^((gift_card|credit_card|paypal)_\d+|NOT_FOUND)$",
             examples=["gift_card_0000000", "credit_card_0000000", "paypal_0000000"],
-            json_schema_extra={
-                "available_from": ["get_user_details"]
-            }
         )
 
         model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)

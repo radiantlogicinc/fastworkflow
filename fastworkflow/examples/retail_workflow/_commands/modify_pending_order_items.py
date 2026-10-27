@@ -3,7 +3,7 @@ from typing import List
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.workflow import Workflow
-from fastworkflow import CommandOutput, CommandResponse
+from fastworkflow import CommandOutput, CommandResponse, from_
 
 from ..retail_data import load_data
 from ..tools.modify_pending_order_items import ModifyPendingOrderItems
@@ -12,39 +12,31 @@ from ..tools.modify_pending_order_items import ModifyPendingOrderItems
 class Signature:
     """Modify pending order items"""
     class Input(BaseModel):
-        order_id: str = Field(
+        order_id: str = from_(
+            "get_user_details",
             default="NOT_FOUND",
             description="The order ID to modify",
             pattern=r"^(#?[\w\d]+|NOT_FOUND)$",
             examples=["#W0000000"],
-            json_schema_extra={
-                "available_from": ["get_user_details"]
-            }
         )
-        item_ids: List[str] = Field(
+        item_ids: List[str] = from_(
+            "get_order_details",
             default_factory=list,
             description="List of item IDs to be modified",
             examples=["'62727828', '76938178'"],
-            json_schema_extra={
-                "available_from": ["get_order_details"]
-            }
         )
-        new_item_ids: List[str] = Field(
+        new_item_ids: List[str] = from_(
+            "get_product_details",
             default_factory=list,
             description="List of new item IDs to replace with",
             examples=["'2352352', '42674747'"],
-            json_schema_extra={
-                "available_from": ["get_product_details"]
-            }
         )
-        payment_method_id: str = Field(
+        payment_method_id: str = from_(
+            ["get_order_details", "get_user_details"],
             default="NOT_FOUND",
             description="Payment method ID for price differences",
             pattern=r"^((gift_card|credit_card|paypal)_\d+|NOT_FOUND)$",
             examples=["gift_card_0000000", "credit_card_0000000", "paypal_0000000"],
-            json_schema_extra={
-                "available_from": ["get_order_details", "get_user_details"]
-            }
         )
 
         model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)

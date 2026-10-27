@@ -185,6 +185,41 @@ DEFAULT_FANOUT_MAX_ITEMS = 10
 _REFERENCE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$")
 
 
+class _FromStr(str):
+    """A ``from_`` source string: behaves identically to ``str``, while allowing
+    load-time resolution to distinguish ``from_(...)`` from ``fact_from(...)`` or
+    a hand-written ``json_schema_extra={"from": ...}`` on a facts model."""
+
+
+class _FromList(list):
+    """A ``from_`` source list: behaves identically to ``list[str]``, while allowing
+    load-time resolution to distinguish ``from_(...)`` from ``fact_from(...)``."""
+
+
+def is_from_source(value: Any) -> bool:
+    """Whether *value* was constructed by :func:`from_`."""
+    return isinstance(value, (_FromStr, _FromList))
+
+
+def from_(source: str | Sequence[str], **field_kwargs: Any) -> Any:
+    """Declare a producer edge on a command's ``Signature.Input`` field: ``Field(**field_kwargs)``
+    with ``{"from": source}`` merged into the caller's ``json_schema_extra`` (other keys kept).
+
+    ``book_uid: str = from_("find_book.book_uids", description="the uid of the book to open")``
+    """
+    from pydantic import Field
+
+    marked: Any
+    if isinstance(source, str):
+        marked = _FromStr(source)
+    elif isinstance(source, Sequence):
+        marked = _FromList(_FromStr(s) if isinstance(s, str) else s for s in source)
+    else:
+        marked = source
+    extra = {**(field_kwargs.pop("json_schema_extra", None) or {}), "from": marked}
+    return Field(json_schema_extra=extra, **field_kwargs)
+
+
 def fact_from(source: str | Sequence[str], **kwargs: Any) -> Any:
     """A facts-model field copied from ``"<command>.<field>"``: ``Field(**kwargs)`` with
     ``json_schema_extra={"from": source}`` (merged into any ``json_schema_extra`` given,
@@ -2692,7 +2727,9 @@ __all__ = [
     "fan_out_items",
     "fan_out_note",
     "fill_output",
+    "from_",
     "is_answer_only",
+    "is_from_source",
     "parameter_classes",
     "phase_steps",
     "plan_code_steps",

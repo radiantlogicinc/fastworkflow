@@ -431,6 +431,7 @@ _LAZY_ATTRS = {
         "fastworkflow.workflow_execution_context",
         "CommandCancelledError",
     ),
+    "from_": ("fastworkflow.skill_phases", "from_"),
 }
 
 __all__ = (
@@ -478,6 +479,7 @@ __all__ = (
     "contextlib",
     "dataclass",
     "datetime",
+    "from_",
     "get_active_workflow",
     "get_env_var",
     "get_fastworkflow_package_path",

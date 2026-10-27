@@ -204,12 +204,26 @@ the request with Unicode dashes folded to "-" (see ``check_arguments``).
 '''
 from __future__ import annotations
 
+import functools
+import inspect
 import json
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from types import UnionType
-from typing import Callable, Literal, Optional, Union, get_args, get_origin
+from typing import Any, Callable, Literal, Mapping, Optional, Sequence, Union, get_args, get_origin
+
+from pydantic import BaseModel
+
+from fastworkflow.command_context_model import CommandContextModel
+from fastworkflow.observation_offloading.facts import FactSourceError, fact_sources
+from fastworkflow.skill_phases import is_from_source
+from fastworkflow.utils import python_utils
+from fastworkflow.workflow_inheritance_model import (
+    WorkflowInheritanceModel,
+    WorkflowInheritanceModelError,
+)
 
 #: A ``verify`` check replaces the planner's argument only at or above this probability.
 VERIFY_THRESHOLD = 0.65
@@ -410,7 +424,8 @@ def _flag(spec: dict, key: str, name: str, where: str) -> bool:
 # ---------------------------------------------------------------- skill files (_skills/<name>.py)
 
 #: Keys a skill file's ``Input`` field may set in ``json_schema_extra``.
-SKILL_FIELD_KEYS = frozenset({"strip", "subject", "verify", "means", "in_request"})
+SKILL_FIELD_KEYS = frozenset({"strip", "subject", "verify", "means", "in_request",
+                              "from", "available_from"})
 
 
 def _spec_from_field(name: str, info, where: str) -> dict:
@@ -1051,6 +1066,14 @@ def skill_from_parts(name: str, signature, path: str, *, steps_fn: Callable | No
         input_model = type(f"{signature.__name__}Input", (BaseModel,), {})
     if not (inspect.isclass(input_model) and issubclass(input_model, BaseModel)):
         raise SkillFormatError(f"{path}: Signature.Input must be a pydantic BaseModel")
+    output_model = getattr(signature, "Output", None)
+    if inspect.isclass(output_model) and issubclass(output_model, BaseModel):
+        for field_name, info in output_model.model_fields.items():
+            extra = info.json_schema_extra if isinstance(info.json_schema_extra, Mapping) else {}
+            if "from" in extra:
+                raise SkillFormatError(
+                    f"{path}: Signature.Output.{field_name}: an Output field cannot declare "
+                    "from_; build the value in __result__")
     utterances = getattr(signature, "plain_utterances", ())
     if isinstance(utterances, str) or not all(isinstance(u, str) for u in utterances):
         raise SkillFormatError(f"{path}: plain_utterances must be a list of str")
@@ -1140,6 +1163,14 @@ def _checked_plan(command: SkillCommand, own_steps: bool = True) -> tuple[type, 
             raise SkillFormatError(f"{command.path}: plan() returns no phase")
         for phase in phases:
             if phase.output is not None and phase.output not in models:
+                for field_name, info in getattr(phase.output, "model_fields", {}).items():
+                    extra = info.json_schema_extra if isinstance(info.json_schema_extra, Mapping) else {}
+                    if "from" in extra and is_from_source(extra["from"]):
+                        raise SkillFormatError(
+                            f"{command.path}: {phase.output.__name__}.{field_name} "
+                            f"(from {_spelled_from_text(extra['from'])}): from_ is only for a "
+                            "command's Input field; type the field with the command's Output "
+                            "instead")
                 try:
                     fact_sources(phase.output)
                 except FactSourceError as exc:
@@ -1187,6 +1218,600 @@ def check_phase_sources(command: SkillCommand, signatures: dict) -> list[str]:
         else:
             warnings.append(f"{command.path}: {problem}")
     return warnings
+
+
+# ---------------------------------------------------------------- field sources (from_)
+
+_PRODUCER_REF_RE = re.compile(
+    r"^(?:([A-Za-z_][A-Za-z0-9_]*)/)?([A-Za-z_][A-Za-z0-9_]*)(?:\.([A-Za-z_][A-Za-z0-9_]*))?$"
+)
+
+
+class _ResolvedAvailableFrom(list):
+    """List written into ``json_schema_extra["available_from"]`` by :func:`resolve_signature_field_sources`,
+    distinct from a hand-written ``available_from`` list so re-running resolution stays idempotent
+    while a hand-written ``available_from`` (even alongside ``from_``) is still flagged as an error."""
+
+
+def _spelled_from_text(spelled: Any) -> str:
+    """Format a ``from_`` source value for error messages."""
+    if isinstance(spelled, list) and len(spelled) == 1:
+        return f"{str(spelled[0])!r}"
+    if isinstance(spelled, list):
+        return f"{[str(s) for s in spelled]!r}"
+    return f"{str(spelled)!r}"
+
+
+@dataclass(frozen=True)
+class FieldSourceProblem:
+    """One problem or info line reported by :func:`resolve_field_sources`."""
+
+    file: str
+    message: str
+    severity: Literal["error", "info"] = "error"
+    command: str = ""
+
+    def format(self) -> str:
+        return f"{self.file}: {self.message}" if self.file else self.message
+
+    def __str__(self) -> str:
+        return self.format()
+
+
+@dataclass(frozen=True)
+class FieldSourceResolution:
+    """Result of :func:`resolve_field_sources` for one workflow."""
+
+    workflow_folderpath: str
+    problems: tuple[FieldSourceProblem, ...]
+    skipped_commands: frozenset[str]
+    model_to_command: Mapping[type, str]
+    signatures: Mapping[str, Any]
+    command_files: Mapping[str, str]
+    import_errors: Mapping[str, str]
+    base_contexts: Mapping[str, tuple[str, ...]]
+
+    @property
+    def errors(self) -> tuple[FieldSourceProblem, ...]:
+        return tuple(p for p in self.problems if p.severity == "error")
+
+    @property
+    def infos(self) -> tuple[FieldSourceProblem, ...]:
+        return tuple(p for p in self.problems if p.severity == "info")
+
+    def errors_for(self, command_name: str) -> list[str]:
+        return [p.format() for p in self.problems
+                if p.severity == "error" and p.command == command_name]
+
+
+def _annotation_text(annotation: Any) -> str:
+    if inspect.isclass(annotation) and not get_args(annotation):
+        return annotation.__name__
+    text = re.sub(r"\btyping\.", "", repr(annotation))
+    return text
+
+
+def _strip_optional(annotation: Any) -> Any:
+    origin = get_origin(annotation)
+    if origin in (Union, UnionType):
+        non_none = [a for a in get_args(annotation) if a is not type(None)]
+        if len(non_none) == 1:
+            return non_none[0]
+        if len(non_none) < len(get_args(annotation)):
+            return Union[tuple(non_none)]
+    return annotation
+
+
+def _producer_types_match(declaring_annotation: Any, target_annotation: Any) -> bool:
+    """True when *target_annotation* equals *declaring_annotation*, equals it modulo
+    ``Optional``, or is ``list[T]`` / ``Optional[list[T]]`` of it."""
+    if declaring_annotation == target_annotation:
+        return True
+    decl_inner = _strip_optional(declaring_annotation)
+    targ_inner = _strip_optional(target_annotation)
+    if decl_inner == targ_inner:
+        return True
+    if get_origin(targ_inner) is list:
+        args = get_args(targ_inner)
+        if len(args) == 1:
+            elem = args[0]
+            if elem == declaring_annotation or _strip_optional(elem) == decl_inner:
+                return True
+    return False
+
+
+def _discover_dir_command_files(root: str) -> dict[str, str]:
+    """``{qualified_name: filepath}`` for ``.py`` command files under *root* (root and
+    one context subfolder deep, skipping ``_``- and ``.``-prefixed entries)."""
+    if not os.path.isdir(root):
+        return {}
+    out: dict[str, str] = {}
+    for entry in sorted(os.listdir(root)):
+        if entry.startswith(("_", ".")):
+            continue
+        path = os.path.join(root, entry)
+        if os.path.isdir(path):
+            for sub in sorted(os.listdir(path)):
+                if sub.startswith(("_", ".")):
+                    continue
+                sub_path = os.path.join(path, sub)
+                stem, ext = os.path.splitext(sub)
+                if ext == ".py" and os.path.isfile(sub_path):
+                    out[f"{entry}/{stem}"] = sub_path
+            continue
+        stem, ext = os.path.splitext(entry)
+        if ext == ".py" and os.path.isfile(path):
+            out[stem] = path
+    return out
+
+
+def _read_base_contexts(
+    workflow_folderpath: str,
+) -> tuple[dict[str, tuple[str, ...]], list[FieldSourceProblem]]:
+    """``({context: (base, ...)}, problems)`` in depth-first declared order for each context
+    of the workflow, using :meth:`CommandContextModel.load_base_contexts`.
+
+    Reads and validates ``_commands/context_inheritance_model.json`` directly without
+    importing any command or creating ``___command_info``. If validation fails, the error is
+    recorded as a :class:`FieldSourceProblem` on the ``context_inheritance_model.json`` path.
+    """
+    commands_dir = os.path.join(workflow_folderpath, "_commands")
+    model_path = os.path.join(commands_dir, "context_inheritance_model.json")
+    if not os.path.isdir(commands_dir) and not os.path.isfile(model_path):
+        return {}, []
+    try:
+        bases = CommandContextModel.load_base_contexts(workflow_folderpath)
+    except WorkflowInheritanceModelError as exc:
+        inh_path = os.path.join(workflow_folderpath, "workflow_inheritance_model.json")
+        return {}, [
+            FieldSourceProblem(
+                file=inh_path,
+                message=f"{type(exc).__name__}: {exc}",
+                severity="error",
+            )
+        ]
+    except Exception as exc:  # noqa: BLE001
+        return {}, [
+            FieldSourceProblem(
+                file=model_path,
+                message=f"{type(exc).__name__}: {exc}",
+                severity="error",
+            )
+        ]
+    return bases, []
+
+
+def _static_lookup_scopes(context: str, base_contexts: Mapping[str, tuple[str, ...]]) -> tuple[str, ...]:
+    """The static lookup path of *context* (``""`` for root): own context, its bases in order,
+    then ``""`` (global)."""
+    if not context or context == "*":
+        return ("",)
+    scopes: list[str] = [context]
+    for base in base_contexts.get(context, ()):
+        if base and base != "*" and base not in scopes:
+            scopes.append(base)
+    scopes.append("")
+    return tuple(scopes)
+
+
+def _resolve_producer_target(
+    ref_context: str | None,
+    ref_cmd: str,
+    declaring_context: str,
+    known_names: set[str],
+    base_contexts: Mapping[str, tuple[str, ...]],
+) -> tuple[str | None, list[str]]:
+    """Resolve ``[ref_context/]ref_cmd`` from *declaring_context*.
+
+    Returns ``(resolved_qualified_name, all_matching_qualified_names)``. When unambiguous,
+    *resolved_qualified_name* is the target's qualified name; when 0 or 2+ match on the
+    static lookup path, *resolved_qualified_name* is None and *all_matching_qualified_names*
+    lists the candidates (on the static path if 2+, else anywhere in the workflow).
+    """
+    if ref_context:
+        qualified = f"{ref_context}/{ref_cmd}"
+        if qualified in known_names:
+            return qualified, [qualified]
+        return None, []
+
+    scopes = _static_lookup_scopes(declaring_context, base_contexts)
+    on_path: list[str] = []
+    for scope in scopes:
+        candidate = f"{scope}/{ref_cmd}" if scope else ref_cmd
+        if candidate in known_names and candidate not in on_path:
+            on_path.append(candidate)
+    if len(on_path) == 1:
+        return on_path[0], on_path
+    if len(on_path) > 1:
+        return None, on_path
+    anywhere = sorted(
+        q for q in known_names
+        if q == ref_cmd or q.rsplit("/", 1)[-1] == ref_cmd
+    )
+    return None, anywhere
+
+
+def resolve_signature_field_sources(
+    command_name: str,
+    signature_cls: type,
+    file_path: str,
+    resolution: FieldSourceResolution,
+    *,
+    phase_outputs: Sequence[type] = (),
+) -> list[FieldSourceProblem]:
+    """Resolve ``from_`` declarations on *signature_cls* (its ``Input``, ``Output``, and
+    optional *phase_outputs* facts models) against *resolution*, mutating ``Input`` fields'
+    ``json_schema_extra["available_from"]`` in place when valid.
+
+    Can be called per-command (e.g. from ``CommandDirectory.ensure_command_hydrated``) on a
+    freshly imported ``Signature`` class. Idempotent if ``available_from`` was already written
+    by :func:`resolve_field_sources`.
+    """
+    problems: list[FieldSourceProblem] = []
+    declaring_context = command_name.rpartition("/")[0]
+    known_names = set(resolution.signatures) | set(resolution.import_errors)
+
+    # 1. Check Signature.Output fields for illegal from_
+    output_cls = getattr(signature_cls, "Output", None)
+    if inspect.isclass(output_cls) and issubclass(output_cls, BaseModel):
+        for field_name, info in output_cls.model_fields.items():
+            extra = info.json_schema_extra if isinstance(info.json_schema_extra, Mapping) else {}
+            if "from" in extra:
+                problems.append(FieldSourceProblem(
+                    file=file_path,
+                    message=(f"Signature.Output.{field_name}: an Output field cannot declare "
+                             "from_; build the value in __result__"),
+                    severity="error",
+                    command=command_name,
+                ))
+
+    # 2. Check facts models in phase_outputs for from_ (distinct from fact_from)
+    for model in phase_outputs:
+        if not (inspect.isclass(model) and issubclass(model, BaseModel)):
+            continue
+        for field_name, info in model.model_fields.items():
+            extra = info.json_schema_extra if isinstance(info.json_schema_extra, Mapping) else {}
+            if "from" in extra and is_from_source(extra["from"]):
+                problems.append(FieldSourceProblem(
+                    file=file_path,
+                    message=(f"{model.__name__}.{field_name} "
+                             f"(from {_spelled_from_text(extra['from'])}): from_ is "
+                             "only for a command's Input field; type the field with the "
+                             "command's Output instead"),
+                    severity="error",
+                    command=command_name,
+                ))
+
+    # 3. Check Signature.Input fields for hand-written available_from and resolve from_
+    input_cls = getattr(signature_cls, "Input", None)
+    if not (inspect.isclass(input_cls) and issubclass(input_cls, BaseModel)):
+        return problems
+
+    for field_name, info in input_cls.model_fields.items():
+        extra = info.json_schema_extra
+        if not isinstance(extra, Mapping):
+            continue
+        has_from = "from" in extra
+        has_af = "available_from" in extra
+        if has_af and not isinstance(extra["available_from"], _ResolvedAvailableFrom):
+            af_val = extra["available_from"]
+            first_cmd = (
+                af_val[0] if isinstance(af_val, (list, tuple)) and af_val and isinstance(af_val[0], str)
+                else af_val if isinstance(af_val, str) and af_val
+                else "<command>"
+            )
+            problems.append(FieldSourceProblem(
+                file=file_path,
+                message=(f"Input.{field_name}: available_from is written by from_; "
+                         f'write from_("{first_cmd}") or from_("{first_cmd}.<field>")'),
+                severity="error",
+                command=command_name,
+            ))
+            continue
+
+        if not has_from:
+            continue
+
+        raw_source = extra["from"]
+        if isinstance(raw_source, str):
+            sources = [str(raw_source)]
+        elif isinstance(raw_source, Sequence) and not isinstance(raw_source, (bytes, bytearray)):
+            sources = [s for s in raw_source]
+        else:
+            sources = []
+
+        if not sources or not all(isinstance(s, str) and s.strip() for s in sources):
+            problems.append(FieldSourceProblem(
+                file=file_path,
+                message=(f"Input.{field_name}: from_ must be '[<Context>/]<command>[.<field>]' "
+                         f"or a non-empty list of them, got {raw_source!r}"),
+                severity="error",
+                command=command_name,
+            ))
+            continue
+
+        resolved_entries: list[str] = []
+        field_ok = True
+        for raw_entry in sources:
+            entry = str(raw_entry).strip()
+            match = _PRODUCER_REF_RE.match(entry)
+            if match is None:
+                problems.append(FieldSourceProblem(
+                    file=file_path,
+                    message=(f"Input.{field_name} (from {entry!r}): malformed reference; "
+                             "expected '[<Context>/]<command>[.<field>]'"),
+                    severity="error",
+                    command=command_name,
+                ))
+                field_ok = False
+                continue
+
+            ref_ctx, ref_cmd, ref_field = match.group(1), match.group(2), match.group(3)
+            target_qname, candidates = _resolve_producer_target(
+                ref_ctx, ref_cmd, declaring_context, known_names, resolution.base_contexts
+            )
+            if target_qname is None:
+                field_ok = False
+                if ref_ctx:
+                    problems.append(FieldSourceProblem(
+                        file=file_path,
+                        message=(f"Input.{field_name} (from {entry!r}): no command "
+                                 f"{f'{ref_ctx}/{ref_cmd}'!r}"),
+                        severity="error",
+                        command=command_name,
+                    ))
+                elif len(candidates) > 1 and all(
+                    c.rpartition("/")[0] in _static_lookup_scopes(declaring_context, resolution.base_contexts)
+                    for c in candidates
+                ):
+                    problems.append(FieldSourceProblem(
+                        file=file_path,
+                        message=(f"Input.{field_name} (from {entry!r}): ambiguous command "
+                                 f"{ref_cmd!r} matches {', '.join(candidates)}; qualify it "
+                                 "as <Context>/<command>"),
+                        severity="error",
+                        command=command_name,
+                    ))
+                elif candidates:
+                    scope_label = (
+                        f"in {declaring_context}, its bases or the global commands"
+                        if declaring_context else "in the global commands"
+                    )
+                    problems.append(FieldSourceProblem(
+                        file=file_path,
+                        message=(f"Input.{field_name} (from {entry!r}): no command {ref_cmd} "
+                                 f"{scope_label}; qualify it ({', '.join(candidates)})"),
+                        severity="error",
+                        command=command_name,
+                    ))
+                else:
+                    problems.append(FieldSourceProblem(
+                        file=file_path,
+                        message=f"Input.{field_name} (from {entry!r}): no command named {ref_cmd!r}",
+                        severity="error",
+                        command=command_name,
+                    ))
+                continue
+
+            if target_qname in resolution.import_errors:
+                field_ok = False
+                problems.append(FieldSourceProblem(
+                    file=file_path,
+                    message=(f"Input.{field_name} (from {entry!r}): target command "
+                             f"{target_qname!r} could not be imported: "
+                             f"{resolution.import_errors[target_qname]}"),
+                    severity="error",
+                    command=command_name,
+                ))
+                continue
+
+            target_sig = resolution.signatures.get(target_qname)
+            target_out = getattr(target_sig, "Output", None)
+            target_in = getattr(target_sig, "Input", None)
+            out_fields = (
+                target_out.model_fields
+                if inspect.isclass(target_out) and issubclass(target_out, BaseModel)
+                else {}
+            )
+            in_fields = (
+                target_in.model_fields
+                if inspect.isclass(target_in) and issubclass(target_in, BaseModel)
+                else {}
+            )
+
+            if ref_field is None:
+                resolved_entries.append(target_qname)
+                suggestion = (
+                    f"{entry}.<field> (e.g. {', '.join(f'{entry}.{f}' for f in list(out_fields)[:3])})"
+                    if out_fields else f"{entry}.<field>"
+                )
+                problems.append(FieldSourceProblem(
+                    file=file_path,
+                    message=(f"Input.{field_name} (from {entry!r}): command-only producer "
+                             f"reference; consider naming an Output field ({suggestion})"),
+                    severity="info",
+                    command=command_name,
+                ))
+                continue
+
+            spelled_target = f"{ref_ctx}/{ref_cmd}" if ref_ctx else ref_cmd
+            if ref_field in out_fields:
+                target_finfo = out_fields[ref_field]
+                if not _producer_types_match(info.annotation, target_finfo.annotation):
+                    field_ok = False
+                    problems.append(FieldSourceProblem(
+                        file=file_path,
+                        message=(f"Input.{field_name} (from {entry!r}): "
+                                 f"{_annotation_text(info.annotation)} does not match "
+                                 f"{spelled_target}'s Output.{ref_field}: "
+                                 f"{_annotation_text(target_finfo.annotation)}"),
+                        severity="error",
+                        command=command_name,
+                    ))
+                    continue
+                resolved_entries.append(f"{target_qname}.{ref_field}")
+            elif ref_field in in_fields:
+                field_ok = False
+                problems.append(FieldSourceProblem(
+                    file=file_path,
+                    message=(f"Input.{field_name} (from {entry!r}): {spelled_target}'s "
+                             f"{ref_field} is an Input field; from_ names the Output field a "
+                             "value comes from. To describe the value, write "
+                             f"Field(description=...); the preview shows "
+                             f"{spelled_target}.{ref_field}'s description beside it"),
+                    severity="error",
+                    command=command_name,
+                ))
+            else:
+                field_ok = False
+                problems.append(FieldSourceProblem(
+                    file=file_path,
+                    message=(f"Input.{field_name} (from {entry!r}): {target_qname} has no "
+                             f"Output field {ref_field!r}"),
+                    severity="error",
+                    command=command_name,
+                ))
+
+        if field_ok and resolved_entries:
+            new_extra = dict(extra)
+            new_extra["available_from"] = _ResolvedAvailableFrom(resolved_entries)
+            info.json_schema_extra = new_extra
+
+    return problems
+
+
+def resolve_field_sources(workflow_folderpath: str) -> FieldSourceResolution:
+    """Resolve every ``from_`` declaration across the commands and skills of *workflow_folderpath*.
+
+    Runs once per workflow (cached by normalized folder path):
+    - scans ``_commands/`` (including inherited base workflows) and ``_skills/`` directly,
+      recording any import failure rather than dropping the command;
+    - builds the ``{Signature.Output | Signature.Input -> qualified_name}`` map (3.12);
+    - checks every ``from_`` placement and reference grammar, runs the type checks, flags
+      hand-written ``available_from`` declarations, and writes ``available_from`` into
+      valid ``Input`` fields' ``json_schema_extra``.
+    """
+    return _resolve_field_sources_cached(os.path.abspath(workflow_folderpath))
+
+
+@functools.lru_cache(maxsize=None)
+def _resolve_field_sources_cached(folder: str) -> FieldSourceResolution:
+    problems: list[FieldSourceProblem] = []
+    skipped: set[str] = set()
+    cmd_files: dict[str, tuple[str, str]] = {}  # qname -> (file_path, owner_workflow_folder)
+    inh_path = os.path.join(folder, "workflow_inheritance_model.json")
+    try:
+        inh = WorkflowInheritanceModel.load(folder)
+        base_paths = inh.resolve_base_paths(folder)
+    except Exception as exc:  # noqa: BLE001
+        base_paths = []
+        problems.append(FieldSourceProblem(
+            file=inh_path,
+            message=f"{type(exc).__name__}: {exc}",
+            severity="error",
+        ))
+    for base_path in base_paths:
+        base_abs = os.path.abspath(base_path)
+        for qname, fpath in _discover_dir_command_files(os.path.join(base_abs, "_commands")).items():
+            cmd_files[qname] = (fpath, base_abs)
+    for qname, fpath in _discover_dir_command_files(os.path.join(folder, "_commands")).items():
+        cmd_files[qname] = (fpath, folder)
+
+    skill_files_map = _discover_dir_command_files(os.path.join(folder, "_skills"))
+    all_files: dict[str, tuple[str, str, bool]] = {
+        qname: (fpath, owner, False) for qname, (fpath, owner) in cmd_files.items()
+    }
+    for qname, fpath in skill_files_map.items():
+        if qname not in all_files:
+            all_files[qname] = (fpath, folder, True)
+
+    signatures: dict[str, Any] = {}
+    import_errors: dict[str, str] = {}
+    model_to_command: dict[type, str] = {}
+    skill_phase_outputs: dict[str, tuple[type, ...]] = {}
+
+    for qname in sorted(all_files):
+        fpath, owner, is_skill = all_files[qname]
+        try:
+            module = python_utils.get_module(fpath, owner)
+        except Exception as exc:  # noqa: BLE001
+            import_errors[qname] = f"{type(exc).__name__}: {exc}"
+            continue
+        if module is None:
+            import_errors[qname] = f"could not import {fpath}"
+            continue
+        sig = getattr(module, "Signature", None)
+        if not inspect.isclass(sig):
+            continue
+        signatures[qname] = sig
+        for attr in ("Input", "Output"):
+            model_cls = getattr(sig, attr, None)
+            if inspect.isclass(model_cls) and issubclass(model_cls, BaseModel):
+                model_to_command[model_cls] = qname
+        if is_skill:
+            try:
+                parsed = command_from_module(qname, module, fpath)
+                if parsed.command is not None and parsed.command.phase_outputs:
+                    skill_phase_outputs[qname] = parsed.command.phase_outputs
+            except SkillFormatError as exc:
+                msg = str(exc)
+                prefix = f"{fpath}: "
+                if msg.startswith(prefix):
+                    msg = msg[len(prefix):]
+                if "from_" in msg or "available_from" in msg:
+                    problems.append(FieldSourceProblem(
+                        file=fpath, message=msg, severity="error", command=qname
+                    ))
+                    skipped.add(qname)
+
+    base_contexts, ctx_problems = _read_base_contexts(folder)
+    for cp in ctx_problems:
+        if cp not in problems:
+            problems.append(cp)
+    resolution = FieldSourceResolution(
+        workflow_folderpath=folder,
+        problems=(),
+        skipped_commands=frozenset(),
+        model_to_command=model_to_command,
+        signatures=signatures,
+        command_files={q: f for q, (f, _, _) in all_files.items()},
+        import_errors=import_errors,
+        base_contexts=base_contexts,
+    )
+
+    for qname in sorted(signatures):
+        fpath = all_files[qname][0]
+        cmd_problems = resolve_signature_field_sources(
+            qname,
+            signatures[qname],
+            fpath,
+            resolution,
+            phase_outputs=skill_phase_outputs.get(qname, ()),
+        )
+        for p in cmd_problems:
+            if p not in problems:
+                problems.append(p)
+            if p.severity == "error":
+                skipped.add(qname)
+
+    return replace(
+        resolution,
+        problems=tuple(problems),
+        skipped_commands=frozenset(skipped),
+    )
+
+
+def _clear_field_sources_cache() -> None:
+    _resolve_field_sources_cached.cache_clear()
+    from fastworkflow import command_directory  # circular import: skill_commands -> command_context_model -> command_directory
+
+    command_directory.clear_resolved_command_signatures_cache()
+
+
+resolve_field_sources.cache_clear = _clear_field_sources_cache  # type: ignore[attr-defined]
+resolve_field_sources.cache_info = _resolve_field_sources_cached.cache_info  # type: ignore[attr-defined]
+resolve_field_sources.cache_parameters = _resolve_field_sources_cached.cache_parameters  # type: ignore[attr-defined]
+
 
 
 #: A step that names a command: its first word, snake_case (``find_item``, ``go_up``) or a

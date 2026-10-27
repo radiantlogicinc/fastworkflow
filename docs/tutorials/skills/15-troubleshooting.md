@@ -101,7 +101,7 @@ order_id: str = Field(json_schema_extra={"available_from": ["find_order"]})
 ```
 
 ```text
-_commands/Library/get_order.py: Input.order_id: available_from is written by from_; write from_("find_order") or from_("find_order.order_ids")
+_commands/Library/get_order.py: Input.order_id: available_from is written by from_; write from_("find_order") or from_("find_order.<field>")
 ```
 
 **Fix:** `order_id: str = from_("find_order.order_ids")`. Prose that used to sit in the hint

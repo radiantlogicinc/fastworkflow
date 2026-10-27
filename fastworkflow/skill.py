@@ -81,10 +81,10 @@ from pydantic import BaseModel
 
 from fastworkflow.observation_offloading.finish_check import quote_step_value
 from fastworkflow.skill_phases import (Phase, PhaseError, Placeholder, _template_kwargs,
-                                       concatenated_steps, fact_from, is_building_template,
+                                       concatenated_steps, fact_from, from_, is_building_template,
                                        is_placeholder, tests_noted)
 
-__all__ = ["count", "fact_from", "listed", "num", "phase", "pick"]
+__all__ = ["count", "fact_from", "from_", "listed", "num", "phase", "pick"]
 
 
 class StepFormError(ValueError):

@@ -3,7 +3,7 @@ from typing import List
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.workflow import Workflow
-from fastworkflow import CommandOutput, CommandResponse
+from fastworkflow import CommandOutput, CommandResponse, from_
 
 from ..retail_data import load_data
 from ..tools.modify_user_address import ModifyUserAddress
@@ -12,14 +12,12 @@ from ..tools.modify_user_address import ModifyUserAddress
 class Signature:
     """Modify user address"""
     class Input(BaseModel):
-        user_id: str = Field(
+        user_id: str = from_(
+            ["find_user_id_by_email.user_id", "find_user_id_by_name_zip.user_id"],
             default="NOT_FOUND",
             description="The user ID to modify",
             pattern=r"^([a-z]+_[a-z]+_\d+|NOT_FOUND)$",
             examples=["sara_doe_496"],
-            json_schema_extra={
-                "available_from": ["find_user_id_by_email", "find_user_id_by_name_zip"]
-            }
         )
         address1: str = Field(default="NOT_FOUND", description="First line of address", examples=["123 Main St"])
         address2: str = Field(default="NOT_FOUND", description="Second line of address", examples=["Apt 1"])

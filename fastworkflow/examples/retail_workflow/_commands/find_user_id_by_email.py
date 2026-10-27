@@ -66,7 +66,10 @@ class ResponseGenerator:
         output = self._process_command(workflow, command_parameters)
         return CommandOutput(
             command_response=
-                CommandResponse(response=f"The user id is: {output.user_id}"),
+                CommandResponse(
+                    response=f"The user id is: {output.user_id}",
+                    output=Signature.Output(user_id=output.user_id),
+                ),
         )
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:

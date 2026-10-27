@@ -3,7 +3,7 @@ from typing import List
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.workflow import Workflow
-from fastworkflow import CommandOutput, CommandResponse
+from fastworkflow import CommandOutput, CommandResponse, from_
 
 from ..retail_data import load_data
 from ..tools.get_user_details import GetUserDetails
@@ -12,14 +12,12 @@ from ..tools.get_user_details import GetUserDetails
 class Signature:
     """Get user details"""
     class Input(BaseModel):
-        user_id: str = Field(
+        user_id: str = from_(
+            ["find_user_id_by_email.user_id", "find_user_id_by_name_zip.user_id"],
             default="NOT_FOUND",
             description="The user ID to get details for",
             pattern=r"^([a-z]+_[a-z]+_\d+|NOT_FOUND)$",
             examples=["sara_doe_496"],
-            json_schema_extra={
-                "available_from": ["find_user_id_by_email", "find_user_id_by_name_zip"]
-            }
         )
 
         model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)

@@ -3,7 +3,7 @@ from typing import List
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.workflow import Workflow
-from fastworkflow import CommandOutput, CommandResponse
+from fastworkflow import CommandOutput, CommandResponse, from_
 
 from ..retail_data import load_data
 from ..tools.modify_pending_order_address import ModifyPendingOrderAddress
@@ -12,14 +12,12 @@ from ..tools.modify_pending_order_address import ModifyPendingOrderAddress
 class Signature:
     """Modify pending order address"""
     class Input(BaseModel):
-        order_id: str = Field(
+        order_id: str = from_(
+            "get_user_details",
             default="NOT_FOUND",
             description="The order ID to modify",
             pattern=r"^(#?[\w\d]+|NOT_FOUND)$",
             examples=["#W0000000"],
-            json_schema_extra={
-                "available_from": ["get_user_details"]
-            }
         )
         address1: str = Field(default="NOT_FOUND", description="First line of address", examples=["123 Main St"])
         address2: str = Field(default="NOT_FOUND", description="Second line of address", examples=["Apt 1"])

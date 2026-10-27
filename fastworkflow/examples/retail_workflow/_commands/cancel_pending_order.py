@@ -10,7 +10,7 @@ import fastworkflow
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 
 # For response generation
-from fastworkflow import CommandOutput, CommandResponse
+from fastworkflow import CommandOutput, CommandResponse, from_
 from ..retail_data import load_data 
 from ..tools.cancel_pending_order import CancelPendingOrder
 
@@ -20,14 +20,12 @@ class Signature:
     class Input(BaseModel):
         order_id: Annotated[
             str,
-            Field(
+            from_(
+                "get_user_details",
                 default="NOT_FOUND",
                 description="The order ID to cancel",
                 pattern=r"^(#?[\w\d]+|NOT_FOUND)$",
                 examples=["123", "#abc123", "order456"],
-                json_schema_extra={
-                    "available_from": ["get_user_details"]
-                }
             )
         ]
 

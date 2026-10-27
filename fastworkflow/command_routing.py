@@ -422,4 +422,10 @@ class RoutingRegistry:
         # Clear the python_utils module import cache
         import fastworkflow.utils.python_utils
         if hasattr(fastworkflow.utils.python_utils.get_module, 'cache_clear'):
-            fastworkflow.utils.python_utils.get_module.cache_clear() 
+            fastworkflow.utils.python_utils.get_module.cache_clear()
+
+        # Clear the field-source resolution cache (and per-command Signature cache;
+        # inline import avoids circular import: skill_commands -> command_context_model -> command_directory)
+        import fastworkflow.skill_commands  # circular import: skill_commands -> command_context_model
+        if hasattr(fastworkflow.skill_commands.resolve_field_sources, 'cache_clear'):
+            fastworkflow.skill_commands.resolve_field_sources.cache_clear() 

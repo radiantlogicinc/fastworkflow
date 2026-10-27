@@ -1228,11 +1228,21 @@ def _build_parsed_skills(workflow_folderpath: str) -> tuple[
         tuple[str, str, tuple[str, ...], "SkillCommand | None", tuple[str, ...]], ...]:
     root = os.path.join(workflow_folderpath, "_skills")
     identifiers = identifier_patterns(workflow_folderpath)
+    field_resolution = skill_commands.resolve_field_sources(workflow_folderpath)
+    logged_commands: set[str] = set()
     files = []   # (name, SkillFile)
     for name, path in _skill_files(root):
         loaded = _load_skill_file(name, path, workflow_folderpath)
         if loaded is not None:
             files.append((name, loaded))
+    for problem in field_resolution.errors:
+        if not problem.command:
+            logger.error(problem.format())
+        elif problem.command not in dict(files) and problem.command not in logged_commands:
+            logged_commands.add(problem.command)
+            errs = field_resolution.errors_for(problem.command)
+            if errs:
+                logger.error(f"command {problem.command!r}: " + "; ".join(errs))
     out = []
     for name, loaded in files:
         if loaded.command is None:
@@ -1240,6 +1250,7 @@ def _build_parsed_skills(workflow_folderpath: str) -> tuple[
             continue
         command = dataclasses.replace(loaded.command, identifiers=identifiers)
         problems = step_command_problems(command, workflow_folderpath)
+        problems.extend(field_resolution.errors_for(name))
         if problems:
             logger.error(f"skipping skill {name!r}: " + "; ".join(problems))
             continue
@@ -1502,10 +1513,10 @@ def skill_scopes(workflow) -> tuple[str, ...]:
     if workflow is None:
         return ("",)
     folder = getattr(workflow, "folderpath", None)
-    model = None
+    base_contexts: dict[str, tuple[str, ...]] = {}
     if folder:
         try:
-            model = CommandContextModel.load(folder)
+            base_contexts = CommandContextModel.load_base_contexts(folder)
         except Exception as error:  # noqa: BLE001 - carry on without bases
             logger.warning(f"skill_scopes: could not load CommandContextModel for {folder}: "
                            f"{type(error).__name__}: {error}")
@@ -1518,11 +1529,10 @@ def skill_scopes(workflow) -> tuple[str, ...]:
         if ctx_name not in seen:
             seen.add(ctx_name)
             scopes.append(ctx_name)
-        if model is not None:
-            for base in model.ordered_base_contexts(ctx_name):
-                if base and base != "*" and base not in seen:
-                    seen.add(base)
-                    scopes.append(base)
+        for base in base_contexts.get(ctx_name, ()):
+            if base and base != "*" and base not in seen:
+                seen.add(base)
+                scopes.append(base)
 
     current = getattr(workflow, "current_command_context_name", "*")
     add_with_bases(current)
