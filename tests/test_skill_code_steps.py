@@ -417,7 +417,7 @@ def todo(initialized_fastworkflow, todo_workflow_path, monkeypatch):
 
     monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", fake_plan)
     monkeypatch.setattr("fastworkflow.workflow_agent.planner_skill_for",
-                        lambda text, folder: ("", state.skill or _skill(state.plan)))
+                        lambda text, folder, **_: ("", state.skill or _skill(state.plan)))
     monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
                         lambda *args, **kwargs: ["show the list groceries"])
     monkeypatch.setattr("fastworkflow.skill_phases.write_answer",

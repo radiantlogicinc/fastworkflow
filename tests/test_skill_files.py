@@ -354,12 +354,12 @@ def test_only_the_python_files_of_the_skills_folder_not_starting_with_an_undersc
     (skills / "_split.py").write_text('class Signature:\n    """Split it my way."""\n')
     (skills / "notes.md").write_text("Not read.")
     (skills / "__pycache__").mkdir()
-    # a subfolder is reserved for a skill context: logged and skipped, its files not loaded
+    # a subfolder naming an unknown context fails the load for its files and is skipped
     (skills / "Record").mkdir()
     (skills / "Record" / "show_record.py").write_text(EXAMPLE)
     with caplog.at_level(logging.WARNING):
         assert [s[0] for s in workflow_agent.load_skills(folder)] == ["close_out"]
-    assert "Record: skill contexts (subfolders of _skills) are not loaded yet" in caplog.text
+    assert "Record: context 'Record' does not exist in this workflow" in caplog.text
     assert "__pycache__" not in caplog.text and "_helpers" not in caplog.text
 
 

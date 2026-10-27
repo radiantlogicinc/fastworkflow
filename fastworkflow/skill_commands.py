@@ -10,12 +10,13 @@ parameters from the request (one typed dspy call), the arguments are checked, an
 without phases gives fixed steps the text planner adapts (see ``workflow_agent.load_skills``);
 one without parameters that has phases is a skill call with no arguments (its one plan).
 
-The ``_skills`` folder is laid out as the root of ``_commands`` is: a skill is the file
-``_skills/<name>.py`` and the file stem is the skill's name, so it is a Python identifier
-(snake_case: ``show_record.py``). A ``.py`` file whose name starts with ``_`` is a helper the
-skill files import (``from ._kinds import FIND``), not a skill. A subfolder is reserved for a
-skill context (as ``_commands/<Context>/`` is); its files are not loaded yet (it is logged and
-skipped). ``_skills/_split.py`` is not a skill either: it configures the split stage (the
+The ``_skills`` folder is laid out as ``_commands`` is: a root skill is the file
+``_skills/<name>.py`` whose name is the file stem, and a context skill in
+``_skills/<Context>/<name>.py`` is named ``"<Context>/<stem>"`` (as ``_commands/<Context>/``
+names its commands); the file stem is a Python identifier (snake_case: ``show_record.py``).
+A ``.py`` file or subfolder whose name starts with ``_`` or ``.`` is skipped (``_kinds.py``
+is a helper the skill files import with ``from ._kinds import FIND``, not a skill).
+``_skills/_split.py`` is not a skill either: it configures the split stage (the
 splitter's instructions, the identifier patterns of the split merge, the referent step's subject
 hints; see ``workflow_agent.split_settings``). No other file is read.
 
@@ -1928,6 +1929,7 @@ def filter_extra_steps(extra, expanded: list[str], names: frozenset[str], skill_
     first four rules apply. ``notes`` (when given) gets one line per placeholder removed.
     """
     expanded_cmds = {w for s in expanded for w in _IDENT.findall(s) if w in names}
+    skill_stem = skill_name.rpartition("/")[2]
     lowered = (request or "").lower()
     open_words = _open_request_words(request, expanded) if request else None
     kept, dropped = [], []
@@ -1945,8 +1947,11 @@ def filter_extra_steps(extra, expanded: list[str], names: frozenset[str], skill_
             continue
         if cleaned != text and notes is not None:
             notes.append(f"extra step {text!r} -> {cleaned!r} (placeholder removed)")
-        cmds = {w for w in _IDENT.findall(cleaned) if w in names}
-        if skill_name in cleaned or (names and (not cmds or cmds <= expanded_cmds)):
+        idents = set(_IDENT.findall(cleaned))
+        cmds = idents & names
+        if (skill_name in cleaned
+                or (skill_stem in idents and skill_stem not in names)
+                or (names and (not cmds or cmds <= expanded_cmds))):
             dropped.append(text)
         elif names and open_words is not None and not any(_supported(c, open_words, texts.get(c, ""))
                                                              for c in cmds - expanded_cmds):

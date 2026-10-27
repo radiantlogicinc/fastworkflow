@@ -771,7 +771,7 @@ def phased(initialized_fastworkflow, todo_workflow_path, monkeypatch):
 
     monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", fake_plan)
     monkeypatch.setattr("fastworkflow.workflow_agent.planner_skill_for",
-                        lambda text, folder: ("", state.command))
+                        lambda text, folder, **_: ("", state.command))
     monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
                         lambda *args, **kwargs: ["show the book Dune"])
 

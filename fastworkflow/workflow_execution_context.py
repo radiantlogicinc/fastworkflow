@@ -1981,13 +1981,14 @@ class WorkflowExecutionContext:
         of its sub-task before it); it defaults to ``first_step``.
         """
         from fastworkflow.workflow_agent import (
-            build_query_with_next_steps, _what_can_i_do, planner_skill_for)
+            build_query_with_next_steps, _what_can_i_do, planner_skill_for, skill_scopes)
 
         # One skill match gives both the template and, for a skill with params or phases, its parsed
         # form; a hand-off continuation (query differs from its original text) plans from
         # the template only, since the skill call would plan the whole job again.
         plan_template, skill_command = (
-            planner_skill_for(template_text or query, self._app_workflow.folderpath)
+            planner_skill_for(template_text or query, self._app_workflow.folderpath,
+                              scopes=skill_scopes(self._app_workflow))
             if self._app_workflow is not None else ("", None))
         if template_text is not None and template_text != query:
             skill_command = None

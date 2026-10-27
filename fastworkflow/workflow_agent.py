@@ -27,6 +27,7 @@ from fastworkflow.split_merge import (
 from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
+from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_executor import AlreadyInContextError, CommandNotFoundError
 from fastworkflow.context_navigation import (
@@ -1084,20 +1085,77 @@ class SplitIntoSubtasks(dspy.Signature):
     subtasks: str = dspy.OutputField(desc="the sub-tasks as a numbered list, one per line")
 
 
+def _workflow_contexts(workflow_folderpath: str) -> set[str]:
+    """The context names of the workflow at *workflow_folderpath*: each ``_commands/<Context>/``
+    folder and each key or ``base`` entry in ``_commands/context_inheritance_model.json``."""
+    commands = os.path.join(workflow_folderpath, "_commands")
+    contexts = {
+        entry for entry in (os.listdir(commands) if os.path.isdir(commands) else ())
+        if not entry.startswith(("_", ".")) and os.path.isdir(os.path.join(commands, entry))
+    }
+    model_path = os.path.join(commands, "context_inheritance_model.json")
+    if os.path.isfile(model_path):
+        try:
+            with open(model_path, encoding="utf-8") as handle:
+                model = json.load(handle)
+        except Exception as error:  # noqa: BLE001 - fall back to _commands folders alone
+            logger.warning(f"could not read {model_path}: {type(error).__name__}: {error}")
+            model = None
+        if isinstance(model, dict):
+            contexts.update(k for k in model if isinstance(k, str))
+            for entry in model.values():
+                if isinstance(entry, dict) and isinstance(entry.get("base"), list):
+                    contexts.update(b for b in entry["base"] if isinstance(b, str))
+    return contexts
+
+
+def _workflow_command_files(workflow_folderpath: str) -> dict[str, str]:
+    """``{qualified_name: path}`` for each command file of *workflow_folderpath*'s ``_commands``
+    folder (``_commands/<name>.py`` at the root and ``_commands/<Context>/<name>.py`` per
+    context, skipping ``_``- and ``.``-prefixed entries)."""
+    commands = os.path.join(workflow_folderpath, "_commands")
+    if not os.path.isdir(commands):
+        return {}
+    out: dict[str, str] = {}
+    for entry in sorted(os.listdir(commands)):
+        if entry.startswith(("_", ".")):
+            continue
+        path = os.path.join(commands, entry)
+        if os.path.isdir(path):
+            for sub in sorted(os.listdir(path)):
+                stem, ext = os.path.splitext(sub)
+                sub_path = os.path.join(path, sub)
+                if ext == ".py" and not sub.startswith(("_", ".")) and os.path.isfile(sub_path):
+                    out[f"{entry}/{stem}"] = sub_path
+            continue
+        stem, ext = os.path.splitext(entry)
+        if ext == ".py" and os.path.isfile(path):
+            out[stem] = path
+    return out
+
+
 def _read_skill_file(name: str, path: str, workflow_folderpath: str):
-    """The ``SkillFile`` of ``_skills/<name>.py``.
+    """The ``SkillFile`` of ``_skills/<name>.py`` (or ``_skills/<Context>/<name>.py``, where
+    *name* is ``"<Context>/<stem>"``).
 
     The file is imported as a command file is (``python_utils.get_module`` under the
     workflow's package, so package-relative imports work: ``from ._helpers import ...`` reads
-    ``_skills/_helpers.py``). Raises SkillFormatError for a file name that is not a Python
-    identifier or a malformed declaration, and the import's own error for a file that does
-    not import.
+    ``_skills/_helpers.py``). Raises SkillFormatError when the file stem is not a Python
+    identifier, the skill's context does not exist in the workflow, the skill has the same
+    qualified name as one of the workflow's commands, or the declaration is malformed, and
+    the import's own error for a file that does not import.
     """
     from fastworkflow.utils import python_utils
 
-    if not name.isidentifier():
+    context, _, stem = name.rpartition("/")
+    if not stem.isidentifier():
         raise SkillFormatError(f"{path}: a skill's name is its file name, a Python identifier "
-                               f"(snake_case): rename it to {re.sub(r'[^0-9A-Za-z_]', '_', name)}.py")
+                               f"(snake_case): rename it to {re.sub(r'[^0-9A-Za-z_]', '_', stem)}.py")
+    if context and context not in _workflow_contexts(workflow_folderpath):
+        raise SkillFormatError(f"{os.path.dirname(path)}: context {context!r} does not exist in this workflow")
+    command_path = _workflow_command_files(workflow_folderpath).get(name)
+    if command_path is not None:
+        raise SkillFormatError(f"{path}: skill {name!r} has the same name as command {command_path}")
     module = python_utils.get_module(path, workflow_folderpath)
     return skill_commands.command_from_module(name, module, path)
 
@@ -1119,23 +1177,34 @@ def _load_skill_file(name: str, path: str, workflow_folderpath: str):
 def _skill_files(root: str) -> list[tuple[str, str]]:
     """``(name, path)`` of each skill file of a workflow's ``_skills`` folder, by name.
 
-    As for command files at the root of ``_commands``: a skill is a file ``_skills/<name>.py``
-    and its name is the file stem, a Python identifier (snake_case; ``_read_skill_file``
-    refuses another). A ``.py`` file whose name starts with ``_`` is a helper
-    the skill files may import, not a skill; ``_split.py`` is the workflow's split settings
-    (``split_settings``). Other files are not read. A subfolder is reserved for a skill context (as a
-    ``_commands/<Context>/`` folder is): its files are not loaded yet, and it is logged and
-    skipped (one starting with ``_`` or ``.``, such as ``__pycache__``, silently).
+    As for command files under ``_commands``: a root skill is a file ``_skills/<name>.py``
+    whose name is the file stem, and a context skill in ``_skills/<Context>/<name>.py`` is
+    named ``"<Context>/<stem>"`` (the file stem is a Python identifier, snake_case;
+    ``_read_skill_file`` refuses another). A ``.py`` file or subfolder whose name starts
+    with ``_`` or ``.`` (such as ``__pycache__`` or a ``_helpers.py`` module the skill files
+    import) is skipped silently at both levels; ``_split.py`` is the workflow's split
+    settings (``split_settings``). A folder nested deeper than ``_skills/<Context>/`` is not
+    a skill location and is logged and skipped. Other files are not read.
     """
     out = []
     for entry in sorted(os.listdir(root)) if os.path.isdir(root) else ():
+        if entry.startswith(("_", ".")):
+            continue
         path = os.path.join(root, entry)
         if os.path.isdir(path):
-            if not entry.startswith(("_", ".")):
-                logger.warning(f"{path}: skill contexts (subfolders of _skills) are not loaded yet; skipped")
+            for sub in sorted(os.listdir(path)):
+                if sub.startswith(("_", ".")):
+                    continue
+                sub_path = os.path.join(path, sub)
+                if os.path.isdir(sub_path):
+                    logger.warning(f"{sub_path}: folders nested inside a skill context are not loaded; skipped")
+                    continue
+                stem, ext = os.path.splitext(sub)
+                if ext == ".py":
+                    out.append((f"{entry}/{stem}", sub_path))
             continue
         stem, ext = os.path.splitext(entry)
-        if ext != ".py" or stem.startswith("_"):
+        if ext != ".py":
             continue
         out.append((stem, path))
     return out
@@ -1224,11 +1293,14 @@ def phase_source_problems(command: SkillCommand, workflow_folderpath: str) -> li
 
 
 def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
-    """``(name, description, steps)`` for each skill of the workflow (``_skills/<name>.py``).
+    """``(name, description, steps)`` for each skill of the workflow (``_skills/<name>.py``
+    and ``_skills/<Context>/<name>.py``).
 
-    A skill is defined by the file ``_skills/<name>.py`` (format: ``fastworkflow.skill_commands``;
-    which files are skills: ``_skill_files``); the file stem is the skill's name and the
-    ``Signature`` docstring its description. A
+    A skill is defined by the file ``_skills/<name>.py`` at the root or
+    ``_skills/<Context>/<name>.py`` in a context subfolder (format:
+    ``fastworkflow.skill_commands``; which files are skills: ``_skill_files``); its name is
+    the file stem (or ``"<Context>/<stem>"`` in a context) and the ``Signature`` docstring
+    its description. A
     skill without parameters or phases gives its fixed ``steps()``; a skill with parameters
     or phases gives its template text, and ``load_skill_commands`` holds its parsed form. A skill
     file that cannot be imported or is malformed is logged as an error and skipped (the
@@ -1259,12 +1331,17 @@ def warm_skills(workflow_folderpath: str) -> None:
     logged and the turn path meets it again."""
     if not os.path.isdir(os.path.join(workflow_folderpath, "_skills")):
         return
+    skills = ()
     for step in (load_skills, skill_commands.command_utterances):
         try:
-            step(workflow_folderpath)
+            result = step(workflow_folderpath)
+            if step is load_skills:
+                skills = result
         except Exception as error:  # noqa: BLE001 - warm-up must not stop startup
             logger.warning(f"skill warm-up: {step.__name__} failed for {workflow_folderpath}: "
                            f"{type(error).__name__}: {error}")
+    if skills and _jev_lm() is None:
+        _warn_missing_jev_key(workflow_folderpath)
 
 
 #: The workflow's split settings file, ``_skills/_split.py`` (see ``split_settings``).
@@ -1404,17 +1481,86 @@ def _job_types_for(workflow_folderpath: str | None) -> str:
     return "\n".join(f"- {name}: {description}" for name, description, _ in skills)
 
 
+def _skill_scope(name: str) -> str:
+    """The context name of skill ``name`` (``"Library"`` for ``"Library/dune_search"``),
+    or ``""`` for a root skill."""
+    return name.rpartition("/")[0]
+
+
+def skill_scopes(workflow) -> tuple[str, ...]:
+    """The skill scopes on ``workflow``'s lookup path, ending with ``""`` for the root.
+
+    Planning commands are matched scope by scope along the lookup path:
+    1. The active context.
+    2. Its bases, in ``CommandContextModel`` order, transitively.
+    3. Each live ancestor's context (``workflow.get_parent`` on the live chain, up to the
+       root context object) and that ancestor's bases.
+    4. The root planning commands (``""``).
+
+    A scope already on the path is skipped. Does not depend on intent-classifier code.
+    """
+    if workflow is None:
+        return ("",)
+    folder = getattr(workflow, "folderpath", None)
+    model = None
+    if folder:
+        try:
+            model = CommandContextModel.load(folder)
+        except Exception as error:  # noqa: BLE001 - carry on without bases
+            logger.warning(f"skill_scopes: could not load CommandContextModel for {folder}: "
+                           f"{type(error).__name__}: {error}")
+    scopes: list[str] = []
+    seen: set[str] = set()
+
+    def add_with_bases(ctx_name: str) -> None:
+        if not ctx_name or ctx_name == "*":
+            return
+        if ctx_name not in seen:
+            seen.add(ctx_name)
+            scopes.append(ctx_name)
+        if model is not None:
+            for base in model.ordered_base_contexts(ctx_name):
+                if base and base != "*" and base not in seen:
+                    seen.add(base)
+                    scopes.append(base)
+
+    current = getattr(workflow, "current_command_context_name", "*")
+    add_with_bases(current)
+    obj = getattr(workflow, "current_command_context", None)
+    root = getattr(workflow, "root_command_context", None)
+    visited_objs: set[int] = {id(obj)} if obj is not None else set()
+    while obj is not None and obj is not root:
+        try:
+            parent = workflow.get_parent(obj)
+        except Exception:  # noqa: BLE001 - never fail scope lookup on parent walk
+            logger.debug(f"skill_scopes parent walk stopped at {obj!r}", exc_info=True)
+            break
+        if parent is None or id(parent) in visited_objs:
+            break
+        visited_objs.add(id(parent))
+        add_with_bases(fastworkflow.Workflow.get_command_context_name(parent))
+        if parent is root:
+            break
+        obj = parent
+    scopes.append("")
+    return tuple(scopes)
+
+
 #: The skill matcher shows at most this many of a skill's ``plain_utterances`` (its first
 #: ones) after its description, to bound the prompt.
 MATCHER_EXAMPLES = 9
 
 
-def _matcher_job_types(workflow_folderpath: str, examples: int = MATCHER_EXAMPLES) -> str:
+def _matcher_job_types(workflow_folderpath: str, examples: int = MATCHER_EXAMPLES,
+                       scope: str | None = None) -> str:
     """The skill matcher's job types: one ``- name: description`` line per skill, followed by
-    ``e.g. "...", "..."`` when the skill declares ``plain_utterances`` (at most ``examples``)."""
+    ``e.g. "...", "..."`` when the skill declares ``plain_utterances`` (at most ``examples``).
+    With ``scope`` given (``""`` for root, or a context name), only that scope's skills are listed."""
     utterances = skill_utterances(workflow_folderpath)
     lines = []
     for name, description, _ in load_skills(workflow_folderpath):
+        if scope is not None and _skill_scope(name) != scope:
+            continue
         shown = [" ".join(u.split()) for u in utterances.get(name, ())[:max(0, examples)]]
         shown = [u for u in shown if u]
         lines.append(f"- {name}: {description}" + (
@@ -1434,6 +1580,21 @@ def _jev_lm():
     return TypeSafe(api_key=key, cache=True) if key else None
 
 
+@functools.lru_cache(maxsize=None)
+def _warn_missing_jev_key(workflow_folderpath: str) -> None:
+    """Warn once per workflow folder per process when a workflow has planning commands
+    (``_skills``) and ``JEV_API_KEY`` is not set.
+
+    Phase 6 replaces this warning with an INFO line once the agent chooses planning
+    commands as it plans.
+    """
+    logger.warning(
+        f"{workflow_folderpath} has planning commands, but JEV_API_KEY is not set: "
+        "no request will be matched to one; they run only when a plan or the agent "
+        "names one in a step."
+    )
+
+
 def _choice_value_and_probability(choice) -> tuple[str, float]:
     value = str(choice.value)
     return value, float((choice.probabilities or {}).get(value, choice.confidence))
@@ -1441,47 +1602,74 @@ def _choice_value_and_probability(choice) -> tuple[str, float]:
 
 @functools.lru_cache(maxsize=None)
 def _skill_matcher(workflow_folderpath: str):
-    """``(predictor, jev_lm)`` choosing a sub-task's skill, or None without skills or a Jev key."""
+    """``{scope: (predictor, jev_lm)}`` choosing a sub-task's skill per scope (``""`` for root),
+    or None without skills or a JEV_API_KEY."""
     skills = load_skills(workflow_folderpath)
-    jev_lm = _jev_lm()
-    if not skills or jev_lm is None:
+    if not skills:
         return None
-    options = tuple((name, description) for name, description, _ in skills) + (
-        ("none", "None of the job types fits this sub-task."),)
-    listing = "the available job types, one per line as '- name: description'"
-    if any(skill_utterances(workflow_folderpath).values()):
-        listing += ", some followed by example requests for that job (e.g. ...)"
+    jev_lm = _jev_lm()
+    if jev_lm is None:
+        _warn_missing_jev_key(workflow_folderpath)
+        return None
+    utterances = skill_utterances(workflow_folderpath)
+    by_scope: dict[str, list[tuple[str, str]]] = {}
+    for name, description, _ in skills:
+        by_scope.setdefault(_skill_scope(name), []).append((name, description))
+    matchers: dict[str, tuple] = {}
+    for scope, scope_skills in by_scope.items():
+        options = tuple(scope_skills) + (("none", "None of the job types fits this sub-task."),)
+        listing = "the available job types, one per line as '- name: description'"
+        if any(utterances.get(name) for name, _ in scope_skills):
+            listing += ", some followed by example requests for that job (e.g. ...)"
 
-    class MatchSkill(dspy.Signature):
-        """Decide which job type a sub-task asks for."""
+        class MatchSkill(dspy.Signature):
+            """Decide which job type a sub-task asks for."""
 
-        subtask: str = dspy.InputField(desc="one sub-task from a user request")
-        job_types: str = dspy.InputField(desc=listing)
-        job: Choice[options] = dspy.OutputField(
-            desc="Which job type does this sub-task ask for? 'none' if none of them fits.")
+            subtask: str = dspy.InputField(desc="one sub-task from a user request")
+            job_types: str = dspy.InputField(desc=listing)
+            job: Choice[options] = dspy.OutputField(
+                desc="Which job type does this sub-task ask for? 'none' if none of them fits.")
 
-    return dspy.Predict(MatchSkill), jev_lm
+        matchers[scope] = (dspy.Predict(MatchSkill), jev_lm)
+    return matchers
 
 
-def match_skill(text: str, workflow_folderpath: str) -> tuple[str, tuple[str, ...]] | None:
-    """``(name, steps)`` of the skill ``text`` asks for, when Jev is confident; None otherwise.
+def match_skill(text: str, workflow_folderpath: str,
+                scopes: tuple[str, ...] = ("",)) -> tuple[str, tuple[str, ...]] | None:
+    """``(name, steps)`` of the skill ``text`` asks for along ``scopes`` (``""`` for root),
+    when Jev is confident; None otherwise.
 
-    Never raises: a failed match only means the planner gets no template.
+    Runs once for each scope on ``scopes`` that has planning commands, offering only that
+    scope's skills plus ``"none"``; the first confident match (>= ``SKILL_MATCH_THRESHOLD``)
+    wins and later scopes are not asked. Never raises: a failed match only means the
+    planner gets no template.
     """
     try:
         matcher = _skill_matcher(workflow_folderpath)
         if matcher is None:
             return None
-        predictor, jev_lm = matcher
         skills = load_skills(workflow_folderpath)
-        job_types = _matcher_job_types(workflow_folderpath)
-        with dspy.context(lm=jev_lm):
-            choice = predictor(subtask=text, job_types=job_types).job
-        value, probability = _choice_value_and_probability(choice)
-        logger.info(f"skill match for {text!r}: {value} (confidence {probability:.2f})")
-        steps = {name: steps for name, _, steps in skills}
-        if value in steps and probability >= SKILL_MATCH_THRESHOLD:
-            return value, steps[value]
+        by_scope: dict[str, dict[str, tuple[str, ...]]] = {}
+        for name, _, steps in skills:
+            by_scope.setdefault(_skill_scope(name), {})[name] = steps
+        seen: set[str] = set()
+        for scope in scopes:
+            if scope in seen:
+                continue
+            seen.add(scope)
+            scope_steps = by_scope.get(scope)
+            scope_matcher = matcher.get(scope) if scope_steps else None
+            if not scope_steps or scope_matcher is None:
+                continue
+            predictor, jev_lm = scope_matcher
+            job_types = _matcher_job_types(workflow_folderpath, scope=scope)
+            with dspy.context(lm=jev_lm):
+                choice = predictor(subtask=text, job_types=job_types).job
+            value, probability = _choice_value_and_probability(choice)
+            scope_label = scope or "root"
+            logger.info(f"skill match in scope {scope_label!r} for {text!r}: {value} (confidence {probability:.2f})")
+            if value in scope_steps and probability >= SKILL_MATCH_THRESHOLD:
+                return value, scope_steps[value]
         return None
     except Exception:  # noqa: BLE001 - a template is an optimisation; never fail the turn
         logger.warning("could not match the sub-task to a skill", exc_info=True)
@@ -1494,22 +1682,24 @@ def _template_text(steps: tuple[str, ...]) -> str:
             "Adapt this to the request: drop steps it does not need and add steps it asks for.")
 
 
-def planner_skill_for(text: str, workflow_folderpath: str) -> tuple[str, SkillCommand | None]:
-    """``(template, command)`` for the skill ``text`` asks for: one Jev match.
+def planner_skill_for(text: str, workflow_folderpath: str,
+                      scopes: tuple[str, ...] = ("",)) -> tuple[str, SkillCommand | None]:
+    """``(template, command)`` for the skill ``text`` asks for along ``scopes`` (``""`` for root).
 
     ``template`` is ``plan_template_for``'s text ("" when no skill matches); ``command`` is
     the matched skill's parsed form when it has params or phases, else None.
     """
-    matched = match_skill(text, workflow_folderpath)
+    matched = match_skill(text, workflow_folderpath, scopes=scopes)
     if matched is None:
         return "", None
     name, steps = matched
     return _template_text(steps), load_skill_commands(workflow_folderpath).get(name)
 
 
-def plan_template_for(text: str, workflow_folderpath: str) -> str:
+def plan_template_for(text: str, workflow_folderpath: str,
+                      scopes: tuple[str, ...] = ("",)) -> str:
     """The matched skill's steps as a planner template for ``text``; "" when no skill matches."""
-    return planner_skill_for(text, workflow_folderpath)[0]
+    return planner_skill_for(text, workflow_folderpath, scopes=scopes)[0]
 
 
 #: A reply's non-answer intent applies only at or above this Jev probability.

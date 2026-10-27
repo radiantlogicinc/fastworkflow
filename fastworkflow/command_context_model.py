@@ -280,6 +280,29 @@ class CommandContextModel:
                 pending.extend(self._command_contexts.get(base, {}).get("base") or [])
         return bases
 
+    def ordered_base_contexts(self, context_name: str) -> list[str]:
+        """Every context whose commands *context_name* inherits, transitively,
+        depth-first in declared ``base`` order, each once.
+
+        Matches the order :meth:`commands` resolves inherited commands in.
+        Unknown contexts (including the global ``*``) inherit nothing and give
+        ``[]``. Cycles are rejected when the model loads, so the walk
+        terminates.
+        """
+        ordered: list[str] = []
+        seen: set[str] = {context_name}
+
+        def walk(name: str) -> None:
+            for base in self._command_contexts.get(name, {}).get("base") or []:
+                if base in seen:
+                    continue
+                seen.add(base)
+                ordered.append(base)
+                walk(base)
+
+        walk(context_name)
+        return ordered
+
     # ---------------------------------------------------------------------
     # Context callback class resolution
     # ---------------------------------------------------------------------

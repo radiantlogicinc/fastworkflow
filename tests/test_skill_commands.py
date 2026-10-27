@@ -150,7 +150,7 @@ def test_match_skill_sends_the_listing_with_examples_to_the_matcher(tmp_path, mo
         seen.update(inputs)
         return SimpleNamespace(job=SimpleNamespace(value="plain", probabilities={"plain": 0.9}, confidence=0.9))
 
-    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: (predict, DummyLM([])))
+    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: {"": (predict, DummyLM([]))})
     assert workflow_agent.match_skill("please shut it", folder) == ("plain", ("close it",))
     assert seen["job_types"] == '- plain: Close an account. e.g. "shut this account down"'
 
@@ -161,7 +161,7 @@ def test_the_matcher_signature_mentions_examples_only_when_a_skill_has_them(tmp_
     without = _write(tmp_path / "b", {"plain": _plain("Close it.", ["x"])})
 
     def desc(folder):
-        return workflow_agent._skill_matcher(folder)[0].signature.input_fields["job_types"].json_schema_extra["desc"]
+        return workflow_agent._skill_matcher(folder)[""][0].signature.input_fields["job_types"].json_schema_extra["desc"]
     try:
         assert "example requests" in desc(with_examples)
         assert desc(without) == "the available job types, one per line as '- name: description'"
@@ -291,6 +291,29 @@ def test_extra_steps_the_expansion_already_runs_are_dropped():
     assert kept == ["show_tags for Payroll", "find_group, then assess_risk"]
     assert dropped == ["open_directory", "find_group Payroll; list_members", "lookup(name='Payroll')", "count them"]
     assert sc.command_names("Commands:\n- open_directory\n  Enter it.\n- find_group\n") == {"open_directory", "find_group"}
+
+
+def test_filter_extra_steps_drops_context_skill_self_reference_by_whole_stem_token():
+    names = frozenset({"find_book", "member_report", "show_tags"})
+    expanded = ["find_book query=Dune"]
+    # 1. A step calling the context skill by its bare stem `report(query='x')` (even alongside an
+    # unexpanded command) or by its qualified name is dropped; `member_report` is not dropped as a
+    # self-reference.
+    kept, dropped = sc.filter_extra_steps(
+        ["report(query='x')", "report(query='x'), then show_tags", "Library/report(query='x')",
+         "member_report for Ann Lee"],
+        expanded, names, "Library/report")
+    assert kept == ["member_report for Ann Lee"]
+    assert dropped == ["report(query='x')", "report(query='x'), then show_tags", "Library/report(query='x')"]
+    # 2. With `names` empty, `report(query='x')` is still dropped while `member_report` is kept.
+    assert sc.filter_extra_steps(
+        ["report(query='x')", "member_report"], expanded, frozenset(), "Library/report"
+    ) == (["member_report"], ["report(query='x')"])
+    # 3. When `report` is itself an available execution command in `names`, a step `report(...)` is
+    # not treated as the skill's self-reference.
+    assert sc.filter_extra_steps(
+        ["report(query='x')"], expanded, names | {"report"}, "Library/report"
+    ) == (["report(query='x')"], [])
 
 
 def test_an_extra_step_copied_from_the_template_is_dropped():
@@ -431,12 +454,12 @@ def test_without_a_skill_command_the_planner_is_unchanged(workflow_env):
 
 def test_one_match_gives_the_template_and_the_command_of_a_skill_with_params(tmp_path, monkeypatch):
     folder = _write(tmp_path, {"lookup": LOOKUP, "leaver": "Someone is leaving.\nfind them\n"})
-    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: _fake_matcher("lookup", 0.9))
+    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: {"": _fake_matcher("lookup", 0.9)})
     template, command = workflow_agent.planner_skill_for("Who is in Payroll?", folder)
     assert command is workflow_agent.load_skill_commands(folder)["lookup"]
     assert template.startswith("A job like this is usually done as:\n- open_directory\n- <find_group or find_feed")
     # a skill without params: the template only, as before
-    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: _fake_matcher("leaver", 0.9))
+    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: {"": _fake_matcher("leaver", 0.9)})
     assert workflow_agent.planner_skill_for("Ann Lee is leaving", folder) == (
         workflow_agent.plan_template_for("Ann Lee is leaving", folder), None)
 
@@ -454,7 +477,7 @@ def test_the_execution_context_passes_the_matched_command_except_to_a_continuati
         seen.append((query, kwargs["plan_template"], kwargs["skill_command"]))
         raise Stop
 
-    monkeypatch.setattr(workflow_agent, "planner_skill_for", lambda text, folder: ("TEMPLATE", sentinel))
+    monkeypatch.setattr(workflow_agent, "planner_skill_for", lambda text, folder, **_: ("TEMPLATE", sentinel))
     monkeypatch.setattr(workflow_agent, "build_query_with_next_steps", fake_build)
     with pytest.raises(Stop):
         ctx._call_agent_for_query("Who is in Payroll?", "Who is in Payroll?", template_text="Who is in Payroll?")

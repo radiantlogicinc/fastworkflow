@@ -1,5 +1,6 @@
 # This file is for testing the CommandContextModel loader and its logic.
 
+import json
 from pathlib import Path
 import pytest
 
@@ -99,3 +100,39 @@ def test_cycle_detection(sample_workflow_path: Path):
         
     with pytest.raises(CommandContextModelValidationError, match="Inheritance cycle detected"):
         CommandContextModel.load(str(cyclic_path)) 
+
+
+def test_ordered_base_contexts_diamond_and_two_level_chain(tmp_path: Path):
+    """ordered_base_contexts walks bases depth-first in declared order, each once."""
+    commands_dir = tmp_path / "_commands"
+    cmd_body = (
+        "class Signature:\n"
+        "    \"\"\"No-op.\"\"\"\n\n"
+        "class ResponseGenerator:\n"
+        "    def __call__(self, workflow, command, command_parameters=None):\n"
+        "        return None\n"
+    )
+    for ctx in ("RootBase", "MidA", "MidB", "Extra", "Leaf", "ChainTop", "ChainMid", "ChainBase"):
+        ctx_dir = commands_dir / ctx
+        ctx_dir.mkdir(parents=True, exist_ok=True)
+        (ctx_dir / f"{ctx.lower()}_cmd.py").write_text(cmd_body, encoding="utf-8")
+
+    # Diamond: Leaf -> [MidA, MidB], MidA -> [RootBase], MidB -> [RootBase, Extra].
+    # Two-level chain: ChainTop -> [ChainMid], ChainMid -> [ChainBase].
+    inheritance = {
+        "Leaf": {"base": ["MidA", "MidB"]},
+        "MidA": {"base": ["RootBase"]},
+        "MidB": {"base": ["RootBase", "Extra"]},
+        "ChainTop": {"base": ["ChainMid"]},
+        "ChainMid": {"base": ["ChainBase"]},
+    }
+    (commands_dir / "context_inheritance_model.json").write_text(
+        json.dumps(inheritance, indent=2) + "\n", encoding="utf-8"
+    )
+
+    model = CommandContextModel.load(str(tmp_path))
+    assert model.ordered_base_contexts("Leaf") == ["MidA", "RootBase", "MidB", "Extra"]
+    assert model.ordered_base_contexts("ChainTop") == ["ChainMid", "ChainBase"]
+    assert model.ordered_base_contexts("RootBase") == []
+    assert model.ordered_base_contexts("*") == []
+    assert model.ordered_base_contexts("UnknownContext") == []

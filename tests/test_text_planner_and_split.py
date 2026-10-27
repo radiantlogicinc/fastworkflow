@@ -622,7 +622,7 @@ def test_the_planner_template_gets_the_skills_steps(tmp_path, monkeypatch):
     from fastworkflow import workflow_agent
 
     folder = _write_skills(tmp_path, {"leaver": "Someone is leaving.\nfind them\nclose it\n"})
-    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: _fake_matcher("leaver", 0.9))
+    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: {"": _fake_matcher("leaver", 0.9)})
     assert workflow_agent.match_skill("Pat is leaving", folder) == ("leaver", ("find them", "close it"))
     assert "- find them\n- close it\n" in workflow_agent.plan_template_for("Pat is leaving", folder)
 
@@ -688,11 +688,11 @@ def _fake_matcher(value, probability):
 def test_a_plan_template_is_the_matched_skill_steps_in_a_fixed_format(monkeypatch):
     from fastworkflow import workflow_agent
 
-    monkeypatch.setattr(workflow_agent, "match_skill", lambda text, folder: ("leaver", ("find them", "open them")))
+    monkeypatch.setattr(workflow_agent, "match_skill", lambda text, folder, **_: ("leaver", ("find them", "open them")))
     assert workflow_agent.plan_template_for("Two people are leaving", "unused") == (
         "A job like this is usually done as:\n- find them\n- open them\n"
         "Adapt this to the request: drop steps it does not need and add steps it asks for.")
-    monkeypatch.setattr(workflow_agent, "match_skill", lambda text, folder: None)
+    monkeypatch.setattr(workflow_agent, "match_skill", lambda text, folder, **_: None)
     assert workflow_agent.plan_template_for("What is the weather in Paris?", "unused") == ""
 
 
@@ -702,11 +702,11 @@ def test_match_skill_only_returns_a_confident_skill_pick(tmp_path, monkeypatch):
     folder = _skill_folder(tmp_path)
     match = lambda: workflow_agent.match_skill("Two people are leaving", folder)  # noqa: E731
 
-    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: _fake_matcher("leaver", 0.9))
+    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: {"": _fake_matcher("leaver", 0.9)})
     assert match() == ("leaver", ("find them", "open them"))
-    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: _fake_matcher("none", 0.9))
+    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: {"": _fake_matcher("none", 0.9)})
     assert match() is None
-    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: _fake_matcher("leaver", 0.49))
+    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: {"": _fake_matcher("leaver", 0.49)})
     assert match() is None
 
     def broken(folder):
