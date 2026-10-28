@@ -106,6 +106,12 @@ ATTR_CONTEXT_AFTER = "context_after"
 # version where the store actually keeps it.
 ATTR_SPAN_CONTRACT_VERSION = "span_contract_version"
 
+# The alias of the planning-command frame a span was opened under (design 3.5): "" for
+# the turn frame. It is stamped by `start_span` from the host's top frame, so no emitter
+# writes it and a span opened inside a nested frame keeps that frame's alias when it
+# closes after the frame has been popped.
+ATTR_FRAME_ALIAS = "frame_alias"
+
 _current_call_id: contextvars.ContextVar = contextvars.ContextVar(
     "fw_command_call_id", default=None
 )
@@ -284,7 +290,13 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 #
 # v23: fw.planner.plan / fw.planner.replan v5 (fix-hia1.34) -- `skill_notes`: what
 # the argument guards and verify verdicts changed in a skill call's arguments.
-SPAN_CONTRACT_VERSION = 23
+#
+# v24: `frame_alias` on every span (design 3.5, Phase 4 of fix-3rsq, fix-3rsq.4.6): the
+# alias of the planning-command frame the span was opened under, "" for the turn frame.
+# It is an envelope attribute, stamped by the emission machinery rather than declared by
+# an emitter, so no per-emitter version moved for it. fw.skill.phase v6 (fix-3rsq.4.10)
+# declares `uses_result`, which it has written since Phase 3 without declaring it.
+SPAN_CONTRACT_VERSION = 24
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -524,12 +536,16 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # Absent on an answer-only phase and on a resumed run.
     # v5 (fix-hia1.30): `answer_by_code` on an answer-only phase only: true when code
     # wrote its answer from its steps with no model call (`skill_phases.answer_by_code`).
+    # v6 (fix-3rsq.4.10): `uses_result`, written on an answer-only phase of a command with
+    # a result method when that phase is skipped (no executor, no model call). It was
+    # written from Phase 3 without being declared here.
     SPAN_SKILL_PHASE: SpanContract(
-        version=5,
+        version=6,
         attributes=frozenset(
             {
                 "answer_only",
                 "answer_by_code",
+                "uses_result",
                 "skipped",
                 "stop_condition_met",
                 "steps_by_code",
@@ -756,7 +772,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
 
 # Written by the emission machinery rather than by an emitter, so it is not part
 # of any emitter's declared set: it describes the record, not the thing recorded.
-ENVELOPE_ATTRIBUTES = frozenset({ATTR_SPAN_CONTRACT_VERSION})
+ENVELOPE_ATTRIBUTES = frozenset({ATTR_SPAN_CONTRACT_VERSION, ATTR_FRAME_ALIAS})
 
 
 def span_contract_versions() -> dict[str, int]:
@@ -991,6 +1007,12 @@ def _get_stack(host: Any) -> Optional[list]:
     return _resolve(host, "trace_span_stack")
 
 
+def get_frame_alias(host: Any) -> str:
+    """The alias of the planning frame on top of *host*; "" for the turn frame."""
+    alias = _resolve(host, "current_frame_alias")
+    return alias if isinstance(alias, str) else ""
+
+
 # ----------------------------------------------------------------------
 # Emission helpers — never raise to the caller
 # ----------------------------------------------------------------------
@@ -1073,7 +1095,7 @@ def start_span(
             context=context,
             start_ns=time.time_ns(),
             status=STATUS_OPEN,
-            attributes=_capped(attributes),
+            attributes=_capped(attributes) | {ATTR_FRAME_ALIAS: get_frame_alias(host)},
             experiment_id=claim.get("experiment_id"),
             task_id=claim.get("task_id"),
             attempt=claim.get("attempt"),
@@ -1123,6 +1145,10 @@ def end_span(
 
         sink = get_sink(host)
         if sink is not None:
+            # A span rebuilt to close across a suspension was never opened here, so it
+            # has no alias yet and takes the frame on top at close. A span from
+            # start_span already has its own, and keeps it.
+            span.attributes.setdefault(ATTR_FRAME_ALIAS, get_frame_alias(host))
             _emit(sink, span)
     except Exception as exc:
         logger.warning(f"end_span({span.name}) failed: {exc!r}")

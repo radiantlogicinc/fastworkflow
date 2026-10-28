@@ -128,6 +128,10 @@ class fastWorkflowReAct(Module):
         # Caller-owned state for one executor run; reset in forward().
         self.run_state: dict[str, Any] = {}
         self._on_step_complete = on_step_complete
+        # Caller hooks, None on a plain agent. step_floor is the lowest index the next step may
+        # take; on_iteration is asked after each counted step and returning False ends the run.
+        self.step_floor: Callable[[], int] | None = None
+        self.on_iteration: Callable[[], bool] | None = None
         self._suspended: dict[str, Any] | None = None
         # True when the most recent _run_loop ended because max_iters was
         # reached without the agent selecting the `finish` tool.
@@ -261,7 +265,7 @@ class fastWorkflowReAct(Module):
             # Code runs the leading steps it can (see _run_loop); the loop goes on after them.
             self._run_loop(self.trajectory, idx, input_args, max_iters, exception_count,
                            code=source)
-            idx = max(_step_indexes(self.trajectory), default=idx - 1) + 1
+            idx = self._next_idx(max(_step_indexes(self.trajectory), default=idx - 1))
         go_on = source is None or source.stop != "stopped"
         if go_on and source is not None and source.finished and not source.answers:
             # Every step ran by code and the run's answer is not shown: it ends here with
@@ -307,7 +311,7 @@ class fastWorkflowReAct(Module):
         self.inputs = input_args
 
         self.trajectory[f"observation_{idx}"] = observation
-        idx += 1
+        idx = self._next_idx(idx)
         self.iteration_counter += 1
         self._suspended = None
 
@@ -382,7 +386,7 @@ class fastWorkflowReAct(Module):
                         f"Agent failed to select a valid tool: {_fmt_exc(err)}"
                     )
                     trajectory[f"observation_{idx}"] = invalid_tool_obs
-                    idx += 1
+                    idx = self._next_idx(idx)
                     recovery_thought = (
                         "To execute a command, I should use one of the available tools"
                     )
@@ -391,7 +395,7 @@ class fastWorkflowReAct(Module):
                     )
                     trajectory[f"thought_{idx}"] = recovery_thought
                     trajectory[f"observation_{idx}"] = recovery_obs
-                    idx += 1
+                    idx = self._next_idx(idx)
                     exception_count += 1
                     tracing.end_span(
                         host,
@@ -433,8 +437,9 @@ class fastWorkflowReAct(Module):
                 step_attributes["repaired_tool_name"] = repaired_tool_name
             if planned is not None:
                 step_attributes["by_code"] = True
-            if isinstance(self.run_state, dict):
-                self.run_state["by_code"] = planned is not None
+            run_state = getattr(self, "run_state", None)
+            if isinstance(run_state, dict):
+                run_state["by_code"] = planned is not None
 
             try:
                 if pred.next_tool_name in self.disabled_tools:
@@ -520,24 +525,33 @@ class fastWorkflowReAct(Module):
                 break
             if code is not None:
                 code.ran(idx, observed)
-                idx += 1
+                idx = self._next_idx(idx)
                 continue
 
             if pred.next_tool_name == "finish" and not reopened:
                 break
 
-            idx += 1
+            idx = self._next_idx(idx)
             # Still counted: execute_workflow_query reads iteration_counter <= 0
             # as "this command came from the user".
             self.iteration_counter += 1
+            on_iteration = getattr(self, "on_iteration", None)
+            keep_going = on_iteration() if on_iteration is not None else True
             # The cap is a hand-off signal: the caller summarises progress and
             # runs a fresh executor to continue the same sub-task.
-            if self.iteration_counter >= max_iters:
+            if not keep_going or self.iteration_counter >= max_iters:
                 logger.warning("Max iterations reached")
                 self._exhausted_last_run = True
                 break
 
         return None
+
+    def _next_idx(self, idx: int) -> int:
+        """The index of the step after step *idx*: never below the caller's step_floor."""
+        step_floor = getattr(self, "step_floor", None)
+        if step_floor is None:
+            return idx + 1
+        return max(idx + 1, step_floor())
 
     def _review_finish(self, trajectory: dict[str, Any], max_iters: int) -> str | None:
         """The finish reviewer's note, at most once per run; None on any failure."""

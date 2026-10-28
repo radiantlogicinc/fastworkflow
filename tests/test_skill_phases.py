@@ -985,7 +985,7 @@ def test_the_trace_shows_each_phase(phased):
     assert all(s.status == tracing.STATUS_OK for s in spans)
     contract = tracing.SPAN_CONTRACTS[tracing.SPAN_SKILL_PHASE].attributes
     for span in spans:
-        assert set(span.attributes) - {tracing.ATTR_SPAN_CONTRACT_VERSION} <= contract
+        assert set(span.attributes) - tracing.ENVELOPE_ATTRIBUTES <= contract
     # Each phase's executor run is its child.
     executes = phased.sink.named(tracing.SPAN_AGENT_EXECUTE)
     assert [e.parent_span_id for e in executes] == [s.span_id for s in spans]

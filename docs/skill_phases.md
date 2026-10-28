@@ -131,6 +131,9 @@ sub-task runs its phases in order instead of one executor run on the whole list.
    same input. The last phase's input is the request followed by its steps: it does
    them and answers the request. Code runs the phase's leading mechanical steps before
    the executor's model takes a step (see "Steps run by code" below).
+   Nested planning-command calls of one turn share a second budget, `FW_TURN_MAX_STEPS`
+   (optional; default 400; read the same way, and a value that is not a positive integer
+   logs a warning and the default applies). It is read but not yet enforced.
 3. **Finish check per phase.** The finish check reads the phase's own steps against the
    outputs archived from the phase's first step on. In a phase it also compares a step's
    concrete argument values (`values=True`, the rule facts use below): a run of
@@ -621,7 +624,7 @@ rebuilt from the skill and resumes. Nothing changes for the app developer.
 ## Tracing
 
 Each phase run (each item of a fan-out phase) is one `fw.skill.phase` span (span
-contract v22, `fw.skill.phase` v5), the parent of that run's `fw.agent.execute`:
+contract v24, `fw.skill.phase` v6), the parent of that run's `fw.agent.execute`:
 
 | attribute | meaning |
 |---|---|
@@ -629,6 +632,7 @@ contract v22, `fw.skill.phase` v5), the parent of that run's `fw.agent.execute`:
 | `step_budget`, `first_step` | the run's budget and its first step number |
 | `answer_only` | the phase named no command: one model call with no tools wrote its answer (its `fw.agent.execute` is the child, with no tool calls) |
 | `answer_by_code` | an answer-only phase only: `true` when code wrote its answer from its steps, with no model call (every step verbatim or a guard, `answer_by_code`) |
+| `uses_result` | an answer-only phase of a command with a result method, written when that phase is skipped (no executor, no model call) |
 | `item`, `item_index`, `item_count`, `items_total` | one item of a fan-out phase: the item, its 0-based index of `item_count` items run, of `items_total` before the cap |
 | `record_issues` | a bound item's record-check flags (a list, `[]` when none); `record` is then the item's bound record |
 | `skipped` | the phase's callable `when` was false: nothing ran, no child span (`false` with `facts_error` when deciding it failed) |

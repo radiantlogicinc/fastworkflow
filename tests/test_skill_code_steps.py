@@ -483,9 +483,9 @@ def test_code_steps_are_ordinary_trajectory_steps_spans_and_archive_rows(todo):
         (0, "list_todo_lists"), (1, "get_todo_list"), (2, "get_all_children"),
         (3, "get_properties")]
     contract = tracing.SPAN_CONTRACTS[tracing.SPAN_AGENT_STEP].attributes
-    assert all(set(s.attributes) - {tracing.ATTR_SPAN_CONTRACT_VERSION} <= contract for s in steps)
+    assert all(set(s.attributes) - tracing.ENVELOPE_ATTRIBUTES <= contract for s in steps)
     phase_contract = tracing.SPAN_CONTRACTS[tracing.SPAN_SKILL_PHASE].attributes
-    assert all(set(s.attributes) - {tracing.ATTR_SPAN_CONTRACT_VERSION} <= phase_contract
+    assert all(set(s.attributes) - tracing.ENVELOPE_ATTRIBUTES <= phase_contract
                for s in _phases(todo.sink))
 
 

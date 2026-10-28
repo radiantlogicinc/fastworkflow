@@ -37,6 +37,7 @@ import fastworkflow.turn
 from fastworkflow import active_workflow, metrics, tracing
 from fastworkflow.session_state_store import SCHEMA_VERSION, IncompatibleSessionState
 from fastworkflow.state_serialization import validate_state
+from fastworkflow.plan_frame import PlanFrame, runs_outside_ranges
 from fastworkflow.observability import store as observability_store
 from fastworkflow.observability.execution_recorder import ExecutionRecorder, record_execution
 from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
@@ -131,6 +132,18 @@ def _parse_isoformat(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _frame_property(field_name: str) -> property:
+    """A property over one field of the top PlanFrame, ``self._frames[-1]``."""
+
+    def fget(self):
+        return getattr(self._top_frame(), field_name)
+
+    def fset(self, value):
+        setattr(self._top_frame(), field_name, value)
+
+    return property(fget, fset)
+
+
 class WorkflowExecutionContext:
     """
     Owns NLU (cme_workflow), the bound app workflow, and message execution.
@@ -186,30 +199,17 @@ class WorkflowExecutionContext:
         from fastworkflow.command_executor import CommandExecutor
         self._CommandExecutor = CommandExecutor
 
-        self._workflow_tool_agent = None
+        # One PlanFrame per planning-command call; the turn frame is at index 0. The per-call
+        # planning attributes (_subtasks, _phase_run, ...) are properties over the top frame.
+        self._frames: list[PlanFrame] = [PlanFrame.turn()]
         self._context_change_listener = None
 
         self._awaiting_user = False
         self._suspended_user_message: Optional[str] = None
         self._pending_clarification_request: Optional[str] = None
-        # Sub-task split of one turn (see _run_agent / _run_subtasks_from).
-        self._subtasks: list[str] = []
-        # Original sub-task number of each entry in _subtasks; a hand-off continuation shares its origin.
-        self._origins: list[int] = []
-        self._subtask_index = 0
-        self._subtask_answers: list[str] = []
-        # Set when a sub-task hit the step cap with no hand-off left: the turn is then exhausted.
-        self._subtask_exhausted = False
         self._next_step = 0
-        # Finish check (fix-3xts): the first step each sub-task origin's outputs count from,
-        # and the run's initial plan as the planner wrote it.
-        self._evidence_floors: dict[int, int] = {}
-        self._initial_plan_text = ""
-        # A phased skill call in progress (skill_phases; see _run_skill_phases): JSON
-        # state that rides the suspension blob, and the live (command, phases) for it.
-        self._phase_run: Optional[dict[str, Any]] = None
-        self._phase_live: Optional[tuple[Any, list[Any]]] = None
-        self._phased_skill_call = None
+        # Model steps taken by nested planning-command frames this turn (design 3.5).
+        self._turn_steps_used = 0
 
         # Insights-distillation (teacher/student) state — CLI/Topology-A only.
         self._generate_insights = generate_insights
@@ -291,6 +291,39 @@ class WorkflowExecutionContext:
         )
 
         self.clear_conversation_history()
+
+    def _frame_stack(self) -> list[PlanFrame]:
+        frames = getattr(self, "_frames", None)
+        if not frames:
+            # A context built with __new__ (no __init__) starts with the turn frame.
+            frames = self._frames = [PlanFrame.turn()]
+        return frames
+
+    def _top_frame(self) -> PlanFrame:
+        return self._frame_stack()[-1]
+
+    def _turn_frame(self) -> PlanFrame:
+        return self._frame_stack()[0]
+
+    # Sub-task split of one turn (see _run_agent / _run_subtasks_from).
+    _subtasks = _frame_property("subtasks")
+    # Original sub-task number of each entry in _subtasks; a hand-off continuation shares its origin.
+    _origins = _frame_property("origins")
+    _subtask_index = _frame_property("subtask_index")
+    _subtask_answers = _frame_property("subtask_answers")
+    # Set when a sub-task hit the step cap with no hand-off left: the turn is then exhausted.
+    _subtask_exhausted = _frame_property("subtask_exhausted")
+    # Finish check (fix-3xts): the first step each sub-task origin's outputs count from,
+    # and the run's initial plan as the planner wrote it.
+    _evidence_floors = _frame_property("evidence_floors")
+    _initial_plan_text = _frame_property("initial_plan_text")
+    # A phased skill call in progress (skill_phases; see _run_skill_phases): JSON
+    # state that rides the suspension blob, and the live (command, phases) for it.
+    _phase_run = _frame_property("phase_run")
+    _phase_live = _frame_property("phase_live")
+    _phased_skill_call = _frame_property("phased_skill_call")
+    # The ReAct agent of the call in progress: the top frame's agent (the turn frame's, for now).
+    _workflow_tool_agent = _frame_property("agent")
 
     @property
     def session_key(self) -> Optional[str]:
@@ -547,6 +580,12 @@ class WorkflowExecutionContext:
         return self._turn_key
 
     @property
+    def current_frame_alias(self) -> str:
+        """The alias of the planning frame on top, "" for the turn frame (design 3.5).
+        Tracing reads it when a span opens, so the span records the frame it ran under."""
+        return self._top_frame().alias
+
+    @property
     def trace_span_stack(self) -> list[tracing.Span]:
         """Open-span stack for parenting nested spans (single-turn: I5)."""
         return self._trace_span_stack
@@ -575,6 +614,11 @@ class WorkflowExecutionContext:
         """
         self.assert_experiment_claim_current()
         self._ensure_observability_conversation()
+        # Drops nested frames only. The turn frame's own state (its sub-tasks and its agent)
+        # is left as it was: _clear_subtask_state clears the sub-task state when a run starts,
+        # and a message that resumes a suspended turn still finds its sub-tasks.
+        del self._frame_stack()[1:]
+        self._turn_steps_used = 0
         self._turn_outputs = []
         self._turn_key = mint_turn_key()
         self._turn_started_at = datetime.now(timezone.utc)
@@ -982,9 +1026,10 @@ class WorkflowExecutionContext:
 
         Requires session_key and bound app_workflow when persisting.
         """
+        turn = self._turn_frame()
         react_blob = None
-        if self._workflow_tool_agent is not None:
-            react_blob = self._workflow_tool_agent.export_suspended()
+        if turn.agent is not None:
+            react_blob = turn.agent.export_suspended()
 
         nlu_stage = self._cme_workflow.context.get("NLU_Pipeline_Stage")
         if hasattr(nlu_stage, "value"):
@@ -998,6 +1043,7 @@ class WorkflowExecutionContext:
 
         from fastworkflow.conversation_history_io import extract_turns_from_history
 
+        nested = self._frame_stack()[1:]
         payload = {
             "schema_version": SCHEMA_VERSION,
             "channel_id": channel_id,
@@ -1012,14 +1058,21 @@ class WorkflowExecutionContext:
             "awaiting_user": self._awaiting_user,
             "suspended_user_message": self._suspended_user_message,
             "pending_clarification_request": self._pending_clarification_request,
-            "subtasks": list(self._subtasks),
-            "subtask_origins": list(self._origins),
-            "subtask_index": self._subtask_index,
-            "subtask_answers": list(self._subtask_answers),
-            "subtask_exhausted": self._subtask_exhausted,
+            "subtasks": list(turn.subtasks),
+            "subtask_origins": list(turn.origins),
+            "subtask_index": turn.subtask_index,
+            "subtask_answers": list(turn.subtask_answers),
+            "subtask_exhausted": turn.subtask_exhausted,
             "next_step": self._next_step,
-            "skill_phase_run": self._phase_run,
+            "skill_phase_run": turn.phase_run,
             "react": react_blob,
+            "frames": [frame.to_state() for frame in nested],
+            "frame_react": [
+                None if frame.agent is None else frame.agent.export_suspended()
+                for frame in nested
+            ],
+            "turn_child_step_ranges": [list(step_range) for step_range in turn.child_step_ranges],
+            "turn_steps_used": self._turn_steps_used,
             "nlu_stage": nlu_stage,
             "turn": self._serialize_turn_accumulator(),
             "cme": self._serialize_cme_continuation(),
@@ -1074,16 +1127,22 @@ class WorkflowExecutionContext:
             "pending_clarification_request"
         )
         # Absent from blobs written before sub-task splitting; the defaults mean "not split".
-        self._subtasks = list(state.get("subtasks") or [])
+        turn = self._turn_frame()
+        turn.subtasks = list(state.get("subtasks") or [])
         # Absent before hand-off continuations: each entry is then its own origin.
-        self._origins = list(state.get("subtask_origins") or range(len(self._subtasks)))
-        self._subtask_index = int(state.get("subtask_index") or 0)
-        self._subtask_answers = list(state.get("subtask_answers") or [])
-        self._subtask_exhausted = bool(state.get("subtask_exhausted"))
+        turn.origins = list(state.get("subtask_origins") or range(len(turn.subtasks)))
+        turn.subtask_index = int(state.get("subtask_index") or 0)
+        turn.subtask_answers = list(state.get("subtask_answers") or [])
+        turn.subtask_exhausted = bool(state.get("subtask_exhausted"))
         self._next_step = int(state.get("next_step") or 0)
         # Absent before skill phases: no phased skill call in progress.
-        self._phase_run = state.get("skill_phase_run") or None
-        self._phase_live = None
+        turn.phase_run = state.get("skill_phase_run") or None
+        turn.phase_live = None
+        # Absent from blobs written before nested frames: no child ranges, zero steps used.
+        turn.child_step_ranges = [
+            list(step_range) for step_range in state.get("turn_child_step_ranges") or []
+        ]
+        self._turn_steps_used = int(state.get("turn_steps_used") or 0)
 
         self._action_log = list(state.get("action_log") or [])
         # Absent from blobs written before ruling I3 landed; a missing key just
@@ -1120,11 +1179,22 @@ class WorkflowExecutionContext:
         self._apply_cme_continuation(state.get("cme"))
         self._apply_turn_accumulator(state.get("turn"))
 
+        # Restore the turn agent with the turn frame on top: _workflow_tool_agent reads the top frame.
+        del self._frame_stack()[1:]
         react_blob = state.get("react")
         if react_blob and self._awaiting_user:
             self._ensure_agent_initialized()
             if self._workflow_tool_agent is not None:
                 self._workflow_tool_agent.import_suspended(react_blob)
+
+        # Absent from blobs written before nested frames: no nested frames.
+        nested = [PlanFrame.from_state(frame_state) for frame_state in state.get("frames") or []]
+        frame_react = state.get("frame_react") or [None] * len(nested)
+        for frame, blob in zip(nested, frame_react):
+            if blob and self._awaiting_user:
+                frame.agent = self._build_react_agent()
+                frame.agent.import_suspended(blob)
+        self._frames.extend(nested)
 
         saved_context_name = state.get("current_command_context_name")
         if (
@@ -1801,13 +1871,19 @@ class WorkflowExecutionContext:
     # Agent mode
     # ------------------------------------------------------------------
 
+    def _build_react_agent(self):
+        """A workflow-tool ReAct agent for one run; its steps number from this context's next step."""
+        from fastworkflow.workflow_agent import initialize_workflow_tool_agent
+        agent = initialize_workflow_tool_agent(self)
+        agent.step_floor = lambda: self._next_step
+        return agent
+
     def _initialize_agent_functionality(self) -> None:
         self._cme_workflow.context["run_as_agent"] = True
         if self._app_workflow:
             self._app_workflow.context["run_as_agent"] = True
 
-        from fastworkflow.workflow_agent import initialize_workflow_tool_agent
-        self._workflow_tool_agent = initialize_workflow_tool_agent(self)
+        self._workflow_tool_agent = self._build_react_agent()
 
         # Re-scope the active ReAct agent's available_commands whenever the context changes,
         # driven by the workflow's context-change observer (the single switch chokepoint)
@@ -1834,15 +1910,18 @@ class WorkflowExecutionContext:
             self._workflow_tool_agent.clear_suspension()
 
     def _clear_subtask_state(self) -> None:
-        self._subtasks = []
-        self._origins = []
-        self._subtask_index = 0
-        self._subtask_answers = []
-        self._subtask_exhausted = False
+        turn = self._turn_frame()
+        turn.subtasks = []
+        turn.origins = []
+        turn.subtask_index = 0
+        turn.subtask_answers = []
+        turn.subtask_exhausted = False
         self._next_step = 0
-        self._evidence_floors = {}
-        self._phase_run = None
-        self._phase_live = None
+        turn.evidence_floors = {}
+        turn.phase_run = None
+        turn.phase_live = None
+        # Step numbers restart at 0 with _next_step, so ranges from an earlier run no longer apply.
+        turn.child_step_ranges = []
         self._enable_all_tools()
 
     def _enable_all_tools(self) -> None:
@@ -2365,12 +2444,14 @@ class WorkflowExecutionContext:
     def _archived_command_runs(self, *, from_step: Optional[int] = None,
                                to_step: Optional[int] = None) -> list[dict[str, Any]]:
         """The command runs archived for this turn, in run order (``offload_command_runs``);
-        only steps ``from_step``..``to_step`` (inclusive) when given, filtered in SQL."""
+        only steps ``from_step``..``to_step`` (inclusive) when given, filtered in SQL. Runs
+        inside the top frame's child step ranges are left out (design 3.5)."""
         from fastworkflow.observation_offloading.state import (
             archive_for_path, observability_db_path, scope_for_host)
 
-        return archive_for_path(observability_db_path(self)).command_runs(
+        runs = archive_for_path(observability_db_path(self)).command_runs(
             scope_for_host(self), from_step=from_step, to_step=to_step)
+        return runs_outside_ranges(runs, self._top_frame().child_step_ranges)
 
     def _phase_command_names(self) -> dict[str, list[str]]:
         """``commands`` / ``core_commands`` a phase's steps are read with, as the finish check
@@ -2716,23 +2797,24 @@ class WorkflowExecutionContext:
         The progress check reads the agent's current trajectory, so it runs before
         the next run replaces that trajectory. At most MAX_HANDOFFS continuations per sub-task.
         """
-        origin = self._origins[k]
-        if self._origins.count(origin) > MAX_HANDOFFS:
+        turn = self._turn_frame()
+        origin = turn.origins[k]
+        if turn.origins.count(origin) > MAX_HANDOFFS:
             # No continuation left: the capped answer stands as partial and the turn is exhausted.
-            self._subtask_exhausted = True
+            turn.subtask_exhausted = True
             return
         from fastworkflow.workflow_agent import run_progress_check
 
         done = run_progress_check(self, "step_limit", done_only=True).strip()
-        opened = _opened_part(getattr(self._workflow_tool_agent, "trajectory", None) or {})
+        opened = _opened_part(getattr(turn.agent, "trajectory", None) or {})
         logger.info("sub-task %d hit the step limit; handing off to a fresh executor (hand-off %d)",
-                    origin + 1, self._origins.count(origin))
-        self._subtasks.insert(k + 1, (
+                    origin + 1, turn.origins.count(origin))
+        turn.subtasks.insert(k + 1, (
             f"{self._original_text(origin)}\n\n"
             "Already done in this sub-task (do not repeat it; observation ids such as O12 can be looked up):\n"
             f"{done}"
             + (f"\n\n{opened}" if opened else "")))
-        self._origins.insert(k + 1, origin)
+        turn.origins.insert(k + 1, origin)
         # This capped run's answer is kept: _combined_answer joins it with the continuation's.
 
     def _combined_answer(self) -> str:

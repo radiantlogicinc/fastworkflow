@@ -23,6 +23,12 @@ from fastworkflow.command_executor import CommandExecutor, call_response_generat
 from fastworkflow.examples.library._commands.Record.add_note import Signature as AddNote
 from fastworkflow.observation_offloading import finish_check
 from fastworkflow.observation_offloading.facts import workflow_signatures
+from fastworkflow.observation_offloading.state import (
+    archive_for_path,
+    observability_db_path,
+    scope_for_host,
+)
+from fastworkflow.plan_frame import runs_outside_ranges
 from fastworkflow.planning import (
     StepFormError,
     do_not_run,
@@ -1009,6 +1015,84 @@ def test_pick_joins_pages_of_a_full_list_listing(library_env, monkeypatch):
         "find_book query=Frank Herbert start=1",
         "open_book book_uid=b2",
     ]
+
+
+@pytest.mark.parametrize("child_range", [True, False], ids=["child_range", "no_child_range"])
+def test_pick_skips_a_child_listing_inside_a_child_range(library_env, monkeypatch, child_range):
+    # The find phase lists Dune in code (step 0), then the agent lists it again (step 1), as a
+    # child's run would. That second run finds a second "Dune" (b5), so its listing has two
+    # exact matches and the parent's has one. With step 1 in a child range on the top frame,
+    # the pick reads the parent's listing and opens b1 in code; without it, the pick reads
+    # the later listing, finds two matches, and goes to the agent.
+    lib = library_env.wf.root_command_context
+    book_cls = type(lib.books["b1"])
+    runner = library_env.runner
+
+    def add_second_dune_before_the_second_listing(cls, session, command):
+        if runner.sent == ["find_book query=Dune"]:
+            lib.books["b5"] = book_cls(lib, "b5", "Dune", "Frank Herbert", 1, "Riverside")
+            if child_range:
+                # The child's run is about to take step 1: its range is recorded now, after
+                # the turn's run start has cleared the ranges.
+                library_env.ctx._top_frame().child_step_ranges = [[1, 1]]
+        return runner(session, command)
+
+    monkeypatch.setattr(CommandExecutor, "invoke_command",
+                        classmethod(add_second_dune_before_the_second_listing))
+
+    class Plan:
+        def find(self, input) -> FoundBooks:
+            return [run("find_book", query=input.title), "look up the Dune books again"]
+
+        def book(self, input, find) -> OpenedBook:
+            return [pick("open_book", named=input.title)]
+
+        def answer(self, book):
+            return [f"say that {book.book_uid} was opened"]
+
+    library_env.skill = _build_skill(Plan)
+    library_env.model.run("find_book query=Dune")
+    library_env.model.finish()
+    if not child_range:
+        library_env.model.run("open_book book_uid=b1")
+        library_env.model.finish()
+
+    result = library_env.ctx.process_turn("look up Dune")
+
+    # The steps are where the test said: the parent's listing at 0, the second at 1, the pick at 3.
+    rows = archive_for_path(observability_db_path(library_env.ctx)).command_runs(
+        scope_for_host(library_env.ctx))
+    assert [(row["step_index"], row["command"]) for row in rows] == [
+        (0, "Library/find_book"), (1, "Library/find_book"), (3, "Library/open_book")]
+    assert result.status == TurnStatus.COMPLETED
+    book_span = library_env.sink.named(tracing.SPAN_SKILL_PHASE)[1]
+    if child_range:
+        assert book_span.attributes["code_stop"] == "done"
+        assert book_span.attributes["steps_by_code"] == 1
+        assert library_env.runner.sent == [
+            "find_book query=Dune", "find_book query=Dune", "open_book book_uid=b1"]
+        assert len(library_env.model.asked) == 2
+    else:
+        assert book_span.attributes["code_stop"] == "open step 1"
+        assert book_span.attributes["steps_by_code"] == 0
+        assert "1. open_book with the uid of the Dune match" in library_env.model.asked[2]["query"]
+
+
+def test_runs_outside_ranges_keeps_runs_outside_every_range():
+    def row(step_index, command):
+        return {"alias": f"O{step_index}", "step_index": step_index, "ordinal": 1,
+                "command": command, "success": True, "context_clause": None,
+                "context_name": None, "input": {"query": "Dune"}, "output": None}
+
+    runs = [row(2, "Library/find_book"), row(3, "Library/find_book"),
+            row(4, "Library/find_member"), row(5, "Library/find_book"), row(6, "Library/find_book")]
+    no_step = {"alias": "", "ordinal": 1, "command": "Library/find_book", "success": True}
+    runs_with_no_step = [*runs, no_step]
+
+    assert runs_outside_ranges(runs_with_no_step, []) == runs_with_no_step
+    kept = runs_outside_ranges(runs_with_no_step, [[3, 5]])
+    assert [run.get("step_index") for run in kept] == [2, 6, None]
+    assert kept == [runs[0], runs[4], no_step]
 
 
 # ----------------------------------------------------------------------
