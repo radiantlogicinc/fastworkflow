@@ -103,10 +103,11 @@ import re
 import types
 import typing
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, Optional, Union, get_args, get_origin
+from typing import Any, Callable, Literal, Mapping, Optional, Union, get_args, get_origin
 
 from pydantic import BaseModel
 
+from fastworkflow import skill_commands
 from fastworkflow.skill_commands import MAX_GRID, input_grid  # noqa: F401 - MAX_GRID bounds input_grid
 
 #: The first line of every preview; ``write_previews`` only removes ``.md`` files that carry it.
@@ -649,7 +650,17 @@ class _PhaseRender:
     items: Optional[list[tuple[str, list[str]]]] = None
 
     def key(self) -> tuple:
-        return (self.name, tuple(self.reads), self.output.__name__ if self.output else "",
+        from fastworkflow.typed_phase_facts import union_members
+
+        if self.output is None:
+            out_key = ""
+        elif union_members(self.output) is not None:
+            out_key = repr(self.output)
+        elif inspect.isclass(self.output):
+            out_key = self.output.__name__
+        else:
+            out_key = str(self.output)
+        return (self.name, tuple(self.reads), out_key,
                 tuple(self.steps), tuple(self.settings), self.note, self.condition, self.fan_out,
                 self.optional, self.placeholders,
                 None if self.items is None else tuple((h, tuple(s)) for h, s in self.items))
@@ -965,8 +976,19 @@ class _Variant:
 
 def _layout(render: _Render) -> tuple:
     """The shape of a render: flat, or its phases with their outputs and fan-outs."""
+    from fastworkflow.typed_phase_facts import union_members
+
+    def _out_name(output: Any) -> str:
+        if output is None:
+            return ""
+        if union_members(output) is not None:
+            return repr(output)
+        if inspect.isclass(output):
+            return output.__name__
+        return str(output)
+
     return (render.flat, bool(render.error),
-            tuple((p.name, p.output.__name__ if p.output else "", p.fan_out) for p in render.phases))
+            tuple((p.name, _out_name(p.output), p.fan_out) for p in render.phases))
 
 
 def variants(command) -> tuple[list[_Variant], list[str]]:
@@ -1081,7 +1103,10 @@ def _inputs_section(command) -> list[str]:
         if p.means:
             notes.append(f"- `{p.name}` means: " + "; ".join(f"{_code(v)}: {_text(t)}" for v, t in p.means) + ".")
         if p.in_request:
-            notes.append(f"- `{p.name}` must be a number the request writes (`in_request`).")
+            if p.type == "str":
+                notes.append(f"- `{p.name}` must be written in the request (`in_request`).")
+            else:
+                notes.append(f"- `{p.name}` must be a number the request writes (`in_request`).")
     lines.append("")
     if notes:
         lines += notes + [""]
@@ -1301,8 +1326,22 @@ def _cell_alternatives(pairs: list[tuple[str, str]]) -> str:
     return "<br>".join(f"{_text(when, True)}: {text}" for text, when in pairs)
 
 
-def _output_cell(name: str, found: list[_Variant]) -> str:
-    pairs = _by_value(name, found, lambda p: f"`{p.output.__name__}`" if p.output else "none")
+def _phase_output_label(output: Any, model_to_command: Mapping[type, str]) -> str:
+    if output is None:
+        return "none"
+    from fastworkflow import typed_phase_facts as tpf
+
+    if tpf.union_members(output) is not None or output in model_to_command:
+        return tpf.preview_output_type(output, model_to_command)
+    if inspect.isclass(output):
+        return f"`{output.__name__}`"
+    return _code(str(output))
+
+
+def _output_cell(name: str, found: list[_Variant], model_to_command: Mapping[type, str]) -> str:
+    pairs = _by_value(
+        name, found, lambda p: _phase_output_label(p.output, model_to_command),
+    )
     return _cell_alternatives(pairs)
 
 
@@ -1312,7 +1351,15 @@ def _fan_out_cell(name: str, found: list[_Variant]) -> str:
     return _cell_alternatives(pairs)
 
 
-def _phases_section(found: list[_Variant]) -> list[str]:
+def _workflow_root_from_path(path: str) -> str:
+    folder = os.path.abspath(os.path.dirname(path))
+    while folder and os.path.basename(folder) not in ("_commands", "_skills"):
+        folder = os.path.dirname(folder)
+    return os.path.dirname(folder) if folder else ""
+
+
+def _phases_section(found: list[_Variant], model_to_command: Mapping[type, str]) -> list[str]:
+    from fastworkflow import typed_phase_facts as tpf
     from fastworkflow.observation_offloading.facts import FactSourceError, fact_sources
 
     order = _phase_order(found)
@@ -1327,7 +1374,7 @@ def _phases_section(found: list[_Variant]) -> list[str]:
                   "about the phased calls.", ""]
     lines += ["| phase | output | runs | fans out |", "|---|---|---|---|"]
     for name in order:
-        lines.append(f"| `{name}` | {_output_cell(name, found)} "
+        lines.append(f"| `{name}` | {_output_cell(name, found, model_to_command)} "
                      f"| {_runs_when(name, found)} | {_fan_out_cell(name, found)} |")
     lines += ["", "## Facts", "",
               "What each phase's output holds, filled in code from the commands the phase ran.",
@@ -1338,24 +1385,39 @@ def _phases_section(found: list[_Variant]) -> list[str]:
         outputs = list(dict.fromkeys(p.output for _, p in _with_phase(name, found) if p.output))
         for output in outputs:
             shown = True
-            lines += [f"### `{name}` -> `{output.__name__}`", ""]
+            heading = _phase_output_label(output, model_to_command)
+            lines += [f"### `{name}` -> {heading}", ""]
             if output in described:
                 lines += [f"The same model as `{described[output]}`.", ""]
                 continue
             described[output] = name
-            doc = inspect.getdoc(output)
-            if doc and output.__doc__:
-                lines += [_text(doc), ""]
+            if inspect.isclass(output):
+                doc = inspect.getdoc(output)
+                if doc and output.__doc__:
+                    lines += [_text(doc), ""]
+            typed_rows = tpf.preview_fact_rows(output, model_to_command) if inspect.isclass(output) else []
+            if typed_rows:
+                lines += ["| fact | type | from |", "|---|---|---|"]
+                for field_name, type_text, origin in typed_rows:
+                    lines.append(
+                        f"| `{field_name}` | {_code(type_text).replace('|', chr(92) + '|')} | {origin} |"
+                    )
+                lines.append("")
+                continue
             try:
                 sources = {s.field: s for s in fact_sources(output)}
             except FactSourceError as error:
                 sources, lines = {}, lines + [f"Malformed \"from\": {_text(error)}", ""]
-            lines += ["| fact | type | from |", "|---|---|---|"]
-            for field_name, info in output.model_fields.items():
-                source = sources.get(field_name)
-                origin = _code(f"{source.command}.{source.source_field}") if source else "not filled from a command"
-                lines.append(f"| `{field_name}` | {_code(_type_text(info.annotation)).replace('|', chr(92) + '|')} | {origin} |")
-            lines.append("")
+            if inspect.isclass(output):
+                lines += ["| fact | type | from |", "|---|---|---|"]
+                for field_name, info in output.model_fields.items():
+                    source = sources.get(field_name)
+                    origin = (_code(f"{source.command}.{source.source_field}") if source
+                              else "not filled from a command")
+                    lines.append(
+                        f"| `{field_name}` | {_code(_type_text(info.annotation)).replace('|', chr(92) + '|')} | {origin} |"
+                    )
+                lines.append("")
     if not shown:
         lines += ["No phase passes facts on.", ""]
     return lines
@@ -1392,8 +1454,18 @@ def _render_lines(render: _Render, level: str, first: Optional[_Render] = None,
         if phase.key() in same:
             lines += [f"As in the plan {first_title}.", ""]
             continue
+        output_note = ""
+        if phase.output is not None:
+            from fastworkflow import typed_phase_facts as tpf
+
+            if tpf.union_members(phase.output) is not None:
+                output_note = f"Output: {tpf.preview_output_type(phase.output, {})}."
+            elif inspect.isclass(phase.output):
+                output_note = f"Output: `{phase.output.__name__}`."
+            else:
+                output_note = f"Output: {phase.output!r}."
         about = [f"Reads: {', '.join(f'`{r}`' for r in phase.reads)}." if phase.reads else "Reads no earlier facts.",
-                 f"Output: `{phase.output.__name__}`." if phase.output else "Output: none."]
+                 output_note or "Output: none."]
         if phase.settings:
             about.append(f"Settings: {', '.join(_code(s) for s in phase.settings)}.")
         lines += [" ".join(about), ""]
@@ -1477,7 +1549,10 @@ def render_preview(name: str, description: str, steps: tuple, command,
     else:
         found, changing = variants(command)
         if phased:
-            lines += _phases_section(found)
+            wf = _workflow_root_from_path(command.path)
+            resolution = (skill_commands.resolve_field_sources(wf).model_to_command
+                          if wf else {})
+            lines += _phases_section(found, resolution)
         lines += _steps_section(found, changing, phased, names, bool(command.params))
     while lines and lines[-1] == "":
         lines.pop()
@@ -1531,7 +1606,7 @@ def _load_error(name: str, path: str, folder: str) -> str:
         return f"{name}: {type(error).__name__}: {error}"
     problems = (workflow_agent.step_command_problems(loaded.command, folder)
                 if loaded.command is not None else [])
-    problems.extend(skill_commands.resolve_field_sources(folder).errors_for(name))
+    # Field-source errors do not prevent loading (unified policy, 3.3); --check reports them.
     if problems:
         return f"{name}: " + "; ".join(problems)
     return f"{name}: skipped by the loader (see the log)"

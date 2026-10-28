@@ -328,6 +328,43 @@ class PlanGenerator:
     assert "Input.hours_note (from 'library_hours')" in stdout
 
 
+def test_planning_command_under_commands_gets_producer_missing_output_field_check(tmp_path):
+    """Step 2: ``from_`` producer field checks apply to planning commands in ``_commands/``."""
+    planning_cmd = '''import fastworkflow
+from fastworkflow import from_
+from pydantic import BaseModel, Field
+
+
+class Signature:
+    """Planning command referencing a missing Output field."""
+
+    class Input(BaseModel):
+        book_uid: str = from_("find_book.uids", description="the uid")
+
+
+class PlanGenerator:
+    def steps(self, input):
+        return ["say hello"]
+'''
+    folder = _build_workflow(
+        tmp_path,
+        "wf_planning_commands_from",
+        extra_commands={"Library/plan_bad_from": planning_cmd},
+    )
+    res = skill_commands.resolve_field_sources(folder)
+    assert any(
+        "Input.book_uid (from 'find_book.uids'): Library/find_book has no Output field 'uids'"
+        in e.message
+        for e in res.errors
+    )
+    # Rule changed by owner decision 2026-10-28 (fix-3rsq.3.8): from_ errors load; skipped_commands
+    # lists commands with a field-source error, not commands dropped at load.
+    assert "Library/plan_bad_from" in res.skipped_commands
+    assert "Library/plan_bad_from" in CommandDirectory.scan(folder).map_command_2_metadata
+    plan_sig = res.signatures["Library/plan_bad_from"]
+    assert "available_from" not in (plan_sig.Input.model_fields["book_uid"].json_schema_extra or {})
+
+
 def test_unqualified_resolution_across_own_context_inherited_base_and_global_and_qualified_other_context(tmp_path):
     # Book inherits from Record; library_hours is global; show_book is in Book;
     # Library/find_member is in another context (checked for existence and type at load)
@@ -588,6 +625,9 @@ class Signature:
 class PlanGenerator:
     def steps(self):
         return ["library_hours"]
+
+    def __result__(self, input):
+        return Signature.Output(author="Herbert")
 '''
     bad_missing_field_cmd = '''import fastworkflow
 from fastworkflow import from_
@@ -642,8 +682,11 @@ class PlanGenerator:
     )
     with caplog.at_level(logging.ERROR):
         loaded_skills = workflow_agent.load_skill_commands(folder)
-    assert "Book/bad_output_skill" not in loaded_skills
-    assert "Book/shelf_report" not in loaded_skills
+    # Rule changed by owner decision 2026-10-28 (fix-3rsq.3.8): from_ errors load; --check fails.
+    assert "Book/bad_output_skill" in loaded_skills
+    assert "Book/shelf_report" in loaded_skills
+    assert "skipping skill 'Book/bad_output_skill'" not in caplog.text
+    assert "skipping skill 'Book/shelf_report'" not in caplog.text
 
     res = skill_commands.resolve_field_sources(folder)
     messages = [e.message for e in res.errors]
@@ -796,7 +839,7 @@ class ResponseGenerator:
     assert "Library/open_book" in res.skipped_commands
 
 
-def test_hand_written_available_from_skips_planning_command_and_keeps_execution_command_routable(tmp_path, caplog, capsys):
+def test_hand_written_available_from_loads_planning_command_and_keeps_execution_command_routable(tmp_path, caplog, capsys):
     hand_cmd = '''import fastworkflow
 from pydantic import BaseModel, Field
 
@@ -838,12 +881,21 @@ class PlanGenerator:
     )
     with caplog.at_level(logging.ERROR):
         loaded_skills = workflow_agent.load_skill_commands(folder)
-    assert "Library/hand_skill" not in loaded_skills
-    assert "skipping skill 'Library/hand_skill'" in caplog.text
-    assert "available_from is written by from_" in caplog.text
+    # Rule changed by owner decision 2026-10-28 (fix-3rsq.3.8): planning commands with from_ /
+    # available_from errors stay matchable; the error is logged once, not via "skipping skill".
+    assert "Library/hand_skill" in loaded_skills
+    assert "skipping skill 'Library/hand_skill'" not in caplog.text
+    hand_skill_logs = [
+        rec for rec in caplog.records
+        if "command 'Library/hand_skill':" in rec.getMessage()
+    ]
+    assert len(hand_skill_logs) == 1
+    assert "available_from is written by from_" in hand_skill_logs[0].getMessage()
 
     res = skill_commands.resolve_field_sources(folder)
     assert {"Library/get_order", "Library/hand_skill"} <= res.skipped_commands
+    hand_sig = res.signatures["Library/hand_skill"]
+    assert "available_from" not in (hand_sig.Input.model_fields["book_uid"].json_schema_extra or {})
     messages = [e.message for e in res.errors]
     assert any(
         'Input.order_id: available_from is written by from_; write from_("find_book") '
@@ -883,6 +935,63 @@ class PlanGenerator:
     code, stdout = _preview_check(folder_exec_only, out_dir, capsys)
     assert code == 1
     assert "available_from is written by from_" in stdout
+
+    out_dir_both = str(tmp_path / "previews_both")
+    skill_preview.write_previews(folder, out_dir_both)
+    problems_both = skill_preview.check_previews(folder, out_dir_both)
+    assert any("available_from is written by from_" in p for p in problems_both)
+    code_both, stdout_both = _preview_check(folder, out_dir_both, capsys)
+    assert code_both == 1
+    assert "available_from is written by from_" in stdout_both
+
+
+def test_planning_command_with_from_error_loads_matchable_logs_once_and_preview_check_fails(
+    tmp_path, caplog, capsys,
+):
+    """Planning skill with a bad ``from_`` stays in the registry and ``load_skill_commands``."""
+    bad_planning = '''import fastworkflow
+from fastworkflow import from_
+from pydantic import BaseModel
+
+
+class Signature:
+    """Planning command with invalid from_ reference."""
+
+    class Input(BaseModel):
+        book_uid: int = from_("find_book.book_uids")
+
+
+class PlanGenerator:
+    def steps(self, input):
+        return [f"say {input.book_uid}"]
+'''
+    folder = _build_workflow(
+        tmp_path,
+        "wf_plan_from_err",
+        extra_skills={"Library/bad_plan": bad_planning},
+    )
+    caplog.clear()
+    with caplog.at_level(logging.ERROR):
+        loaded = workflow_agent.load_skill_commands(folder)
+    assert "Library/bad_plan" in loaded
+    assert "skipping skill 'Library/bad_plan'" not in caplog.text
+    plan_logs = [
+        rec for rec in caplog.records if "command 'Library/bad_plan':" in rec.getMessage()
+    ]
+    assert len(plan_logs) == 1
+    assert "int does not match" in plan_logs[0].getMessage()
+
+    res = skill_commands.resolve_field_sources(folder)
+    bad_sig = res.signatures["Library/bad_plan"]
+    assert "available_from" not in (bad_sig.Input.model_fields["book_uid"].json_schema_extra or {})
+
+    out_dir = str(tmp_path / "previews_plan")
+    skill_preview.write_previews(folder, out_dir)
+    problems = skill_preview.check_previews(folder, out_dir)
+    assert any("int does not match" in p for p in problems)
+    code, stdout = _preview_check(folder, out_dir, capsys)
+    assert code == 1
+    assert "int does not match" in stdout
 
 
 def test_target_command_whose_file_fails_to_import_is_reported(tmp_path):

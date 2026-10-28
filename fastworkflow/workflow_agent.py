@@ -28,6 +28,7 @@ from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
 from fastworkflow.command_context_model import CommandContextModel
+from fastworkflow.command_directory import CommandDirectory, _handle_command_field_source_errors
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_executor import AlreadyInContextError, CommandNotFoundError
 from fastworkflow.context_navigation import (
@@ -1096,55 +1097,6 @@ class SplitIntoSubtasks(dspy.Signature):
     subtasks: str = dspy.OutputField(desc="the sub-tasks as a numbered list, one per line")
 
 
-def _workflow_contexts(workflow_folderpath: str) -> set[str]:
-    """The context names of the workflow at *workflow_folderpath*: each ``_commands/<Context>/``
-    folder and each key or ``base`` entry in ``_commands/context_inheritance_model.json``."""
-    commands = os.path.join(workflow_folderpath, "_commands")
-    contexts = {
-        entry for entry in (os.listdir(commands) if os.path.isdir(commands) else ())
-        if not entry.startswith(("_", ".")) and os.path.isdir(os.path.join(commands, entry))
-    }
-    model_path = os.path.join(commands, "context_inheritance_model.json")
-    if os.path.isfile(model_path):
-        try:
-            with open(model_path, encoding="utf-8") as handle:
-                model = json.load(handle)
-        except Exception as error:  # noqa: BLE001 - fall back to _commands folders alone
-            logger.warning(f"could not read {model_path}: {type(error).__name__}: {error}")
-            model = None
-        if isinstance(model, dict):
-            contexts.update(k for k in model if isinstance(k, str))
-            for entry in model.values():
-                if isinstance(entry, dict) and isinstance(entry.get("base"), list):
-                    contexts.update(b for b in entry["base"] if isinstance(b, str))
-    return contexts
-
-
-def _workflow_command_files(workflow_folderpath: str) -> dict[str, str]:
-    """``{qualified_name: path}`` for each command file of *workflow_folderpath*'s ``_commands``
-    folder (``_commands/<name>.py`` at the root and ``_commands/<Context>/<name>.py`` per
-    context, skipping ``_``- and ``.``-prefixed entries)."""
-    commands = os.path.join(workflow_folderpath, "_commands")
-    if not os.path.isdir(commands):
-        return {}
-    out: dict[str, str] = {}
-    for entry in sorted(os.listdir(commands)):
-        if entry.startswith(("_", ".")):
-            continue
-        path = os.path.join(commands, entry)
-        if os.path.isdir(path):
-            for sub in sorted(os.listdir(path)):
-                stem, ext = os.path.splitext(sub)
-                sub_path = os.path.join(path, sub)
-                if ext == ".py" and not sub.startswith(("_", ".")) and os.path.isfile(sub_path):
-                    out[f"{entry}/{stem}"] = sub_path
-            continue
-        stem, ext = os.path.splitext(entry)
-        if ext == ".py" and os.path.isfile(path):
-            out[stem] = path
-    return out
-
-
 def _read_skill_file(name: str, path: str, workflow_folderpath: str):
     """The ``SkillFile`` of ``_skills/<name>.py`` (or ``_skills/<Context>/<name>.py``, where
     *name* is ``"<Context>/<stem>"``).
@@ -1158,15 +1110,7 @@ def _read_skill_file(name: str, path: str, workflow_folderpath: str):
     """
     from fastworkflow.utils import python_utils
 
-    context, _, stem = name.rpartition("/")
-    if not stem.isidentifier():
-        raise SkillFormatError(f"{path}: a skill's name is its file name, a Python identifier "
-                               f"(snake_case): rename it to {re.sub(r'[^0-9A-Za-z_]', '_', stem)}.py")
-    if context and context not in _workflow_contexts(workflow_folderpath):
-        raise SkillFormatError(f"{os.path.dirname(path)}: context {context!r} does not exist in this workflow")
-    command_path = _workflow_command_files(workflow_folderpath).get(name)
-    if command_path is not None:
-        raise SkillFormatError(f"{path}: skill {name!r} has the same name as command {command_path}")
+    CommandDirectory.check_skill_path(name, path, workflow_folderpath)
     module = python_utils.get_module(path, workflow_folderpath)
     return skill_commands.command_from_module(name, module, path)
 
@@ -1240,30 +1184,41 @@ def _build_parsed_skills(workflow_folderpath: str) -> tuple[
     root = os.path.join(workflow_folderpath, "_skills")
     identifiers = identifier_patterns(workflow_folderpath)
     field_resolution = skill_commands.resolve_field_sources(workflow_folderpath)
-    logged_commands: set[str] = set()
+    logged_field_source_commands: set[str] = set()
     files = []   # (name, SkillFile)
     for name, path in _skill_files(root):
         loaded = _load_skill_file(name, path, workflow_folderpath)
         if loaded is not None:
             files.append((name, loaded))
+    skill_names = {name for name, _ in files}
     for problem in field_resolution.errors:
         if not problem.command:
             logger.error(problem.format())
-        elif problem.command not in dict(files) and problem.command not in logged_commands:
-            logged_commands.add(problem.command)
-            errs = field_resolution.errors_for(problem.command)
-            if errs:
-                logger.error(f"command {problem.command!r}: " + "; ".join(errs))
+        elif (
+            problem.command not in skill_names
+            and problem.command not in logged_field_source_commands
+        ):
+            logged_field_source_commands.add(problem.command)
+            _handle_command_field_source_errors(
+                problem.command,
+                field_resolution.errors_for(problem.command),
+                workflow_folderpath=workflow_folderpath,
+            )
     out = []
     for name, loaded in files:
         if loaded.command is None:
             out.append((name, loaded.description, loaded.steps, None, loaded.plain_utterances))
             continue
         command = dataclasses.replace(loaded.command, identifiers=identifiers)
-        problems = step_command_problems(command, workflow_folderpath)
-        problems.extend(field_resolution.errors_for(name))
-        if problems:
-            logger.error(f"skipping skill {name!r}: " + "; ".join(problems))
+        step_problems = step_command_problems(command, workflow_folderpath)
+        field_source_errs = field_resolution.errors_for(name)
+        if field_source_errs and name not in logged_field_source_commands:
+            logged_field_source_commands.add(name)
+            _handle_command_field_source_errors(
+                name, field_source_errs, workflow_folderpath=workflow_folderpath
+            )
+        if step_problems:
+            logger.error(f"skipping skill {name!r}: " + "; ".join(step_problems))
             continue
         if command.phase_outputs:
             _warn_phase_sources(command, workflow_folderpath)

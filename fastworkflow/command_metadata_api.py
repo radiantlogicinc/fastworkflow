@@ -78,9 +78,14 @@ class CommandMetadataAPI:
 
         candidate_commands = set(cme_command_names) | set(subject_command_names)
 
+        directory = CommandDirectory.load(subject_workflow_path)
+
         commands = []
         for fq_cmd in candidate_commands:
             if fq_cmd == "wildcard":
+                continue
+            cmd_meta = directory.map_command_2_metadata.get(fq_cmd)
+            if cmd_meta is not None and cmd_meta.is_planning:
                 continue
 
             utterance_meta = (
@@ -1037,7 +1042,7 @@ class CommandMetadataAPI:
         directory = CommandDirectory.load(workflow_path)
 
         params_by_command: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
-        for qualified_name in directory.get_commands():
+        for qualified_name in directory.get_execution_commands():
             try:
                 # Ensure metadata is hydrated and import module by file path
                 directory.ensure_command_hydrated(qualified_name)
@@ -1102,7 +1107,7 @@ class CommandMetadataAPI:
         directory = CommandDirectory.load(workflow_path)
 
         metadata_list: List[Dict[str, Any]] = []
-        for qualified_name in sorted(directory.get_commands()):
+        for qualified_name in sorted(directory.get_execution_commands()):
             meta = {
                 "command_name": qualified_name.split("/")[-1],
                 "file_path": None,

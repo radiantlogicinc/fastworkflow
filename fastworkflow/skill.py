@@ -403,7 +403,9 @@ def _parameters(fn: Callable) -> list[str]:
     return [p for p in inspect.signature(fn).parameters if p != "self"]
 
 
-def _output(cls: type, fn: Callable, options: dict, input: Any) -> Optional[type[BaseModel]]:
+def _output(cls: type, fn: Callable, options: dict, input: Any) -> Any:
+    from fastworkflow.typed_phase_facts import union_members
+
     if "output" in options:
         return _decided(options["output"], input)
     annotation = fn.__annotations__.get("return")
@@ -415,6 +417,8 @@ def _output(cls: type, fn: Callable, options: dict, input: Any) -> Optional[type
                              f"{annotation!r}: {error}") from None
     if annotation is None or annotation is inspect.Signature.empty:
         return None
+    if union_members(annotation) is not None:
+        return annotation
     if inspect.isclass(annotation) and issubclass(annotation, BaseModel):
         return annotation
     raise PhaseError(f"phase {fn.__name__!r}: its return annotation must be the facts model "
@@ -462,7 +466,7 @@ def _template_self(plan: Any) -> Any:
 def _template_class(cls: type) -> type:
     def __getattribute__(self, name):
         value = super(template, self).__getattribute__(name)
-        if not name.startswith("_") or name.startswith("__") or not callable(value):
+        if name == "__result__" or not name.startswith("_") or name.startswith("__") or not callable(value):
             return value
 
         @functools.wraps(value)
@@ -653,8 +657,10 @@ def skill_parts(cls: type) -> tuple[Callable, Optional[Callable]]:
         return concatenated_steps(phases)
 
     methods = phase_methods(cls)
+    has_result = any("__result__" in klass.__dict__ for klass in cls.__mro__)
     always_flat = (len(methods) == 1 and _custom_call(cls) is None
                    and not getattr(methods[0][1], "__phase_options__", None)
                    and _parameters(methods[0][1]) in ([], ["input"])
-                   and _output(cls, methods[0][1], {}, None) is None)
+                   and _output(cls, methods[0][1], {}, None) is None
+                   and not has_result)
     return steps_fn, (None if always_flat else plan_fn)

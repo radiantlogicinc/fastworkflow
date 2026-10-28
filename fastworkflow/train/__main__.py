@@ -80,7 +80,7 @@ def _validate_command_inputs(
     cmd_dir = crd.command_directory
     core_commands = set(cmd_dir.core_command_names)
     thin: list[tuple[str, int]] = []
-    for command_name in sorted(cmd_dir.get_commands()):
+    for command_name in sorted(cmd_dir.get_execution_commands()):
         if (
             command_name in core_commands
             or command_name.split("/")[-1]
@@ -692,6 +692,8 @@ def _get_commands_with_parameters(json_path):
     
     # Iterate through each command entry
     for command_key, metadata in commands_metadata.items():
+        if metadata.get("is_planning"):
+            continue
         # Check if command_parameters_class is not null
         if metadata.get("command_parameters_class") is not None:
             # We want to train on the full command path including the ContextFolder prefix

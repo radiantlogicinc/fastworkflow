@@ -270,7 +270,7 @@ class RoutingDefinition(BaseModel):
         # contend for the importlib module lock at request time.  This
         # increases build() cost slightly but removes ~300 ms of latency
         # from the first real user message.
-        all_command_names: list[str] = command_directory.get_commands()
+        all_command_names: list[str] = command_directory.get_execution_commands()
 
         for cmd_name in all_command_names:
             # The vast majority of run-time look-ups are for the inference

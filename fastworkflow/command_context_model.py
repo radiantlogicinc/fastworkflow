@@ -79,7 +79,7 @@ class CommandContextModel:
         # 2. Use cached CommandDirectory to get filesystem-derived commands
         cmd_dir = get_cached_command_directory(str(workflow_path_obj))
         fs_derived_direct_commands = {}
-        for qualified_cmd_name in cmd_dir.map_command_2_metadata.keys():
+        for qualified_cmd_name in cmd_dir.get_execution_commands():
             if "/" in qualified_cmd_name:
                 context_part, _ = qualified_cmd_name.split("/", 1)
                 if context_part not in fs_derived_direct_commands:

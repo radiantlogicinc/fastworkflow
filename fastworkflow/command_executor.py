@@ -37,6 +37,53 @@ class AlreadyInContextError(CommandNotFoundError):
     """The command enters the context the caller is already in."""
 
 
+def _command_name_token(text: str) -> str:
+    parts = (text or "").strip().split(maxsplit=1)
+    return parts[0].lstrip("/") if parts else ""
+
+
+def _resolve_planning_command_name(workflow_folderpath: str, name: str) -> str | None:
+    """Return the qualified planning command name *name* refers to, or None."""
+    if not name:
+        return None
+    directory = CommandDirectory.load(workflow_folderpath)
+    if name in directory.map_command_2_metadata:
+        meta = directory.get_command_metadata(name)
+        return name if meta.is_planning else None
+    short = name.split("/")[-1].lower()
+    matches = [
+        qualified_name
+        for qualified_name, meta in directory.map_command_2_metadata.items()
+        if meta.is_planning and qualified_name.split("/")[-1].lower() == short
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _planning_command_refusal_output(
+    qualified_name: str,
+    *,
+    direct_or_assistant: bool,
+    workflow: fastworkflow.Workflow | None = None,
+) -> CommandOutput:
+    if direct_or_assistant:
+        message = f"{qualified_name} is a planning command; it runs in agent mode."
+    else:
+        message = (
+            f"{qualified_name} is a planning command; "
+            "it cannot be called as a step yet."
+        )
+    command_output = CommandOutput(
+        command_response=fastworkflow.CommandResponse(response=message, success=False),
+        command_name=qualified_name,
+    )
+    if workflow is not None:
+        command_output.workflow_name = workflow.folderpath.split("/")[-1]
+        command_output.context = workflow.current_command_context_displayname
+    return command_output
+
+
 def _annotate_exception(exc: BaseException, **fields) -> None:
     """Stamp routed identity onto an in-flight exception, first writer wins.
 
@@ -257,6 +304,21 @@ class CommandExecutor(CommandExecutorInterface):
         chat_session: 'fastworkflow.ChatSession',
         command: str,
     ) -> fastworkflow.CommandOutput:
+        app_workflow = chat_session.get_active_workflow()
+        if app_workflow is not None:
+            token = _command_name_token(command)
+            if planning_name := _resolve_planning_command_name(
+                app_workflow.folderpath, token
+            ):
+                assistant_path = (
+                    "is_assistant_mode_command" in chat_session.cme_workflow._context
+                )
+                return _planning_command_refusal_output(
+                    planning_name,
+                    direct_or_assistant=assistant_path,
+                    workflow=app_workflow,
+                )
+
         command_output = cls.perform_action(
             chat_session.cme_workflow, 
             Action(
@@ -278,6 +340,20 @@ class CommandExecutor(CommandExecutorInterface):
         workflow = chat_session.get_active_workflow()
         workflow_name = workflow.folderpath.split('/')[-1]
         context = workflow.current_command_context_displayname
+
+        if planning_name := _resolve_planning_command_name(
+            workflow.folderpath, command_name
+        ):
+            assistant_path = (
+                "is_assistant_mode_command" in chat_session.cme_workflow._context
+            )
+            if "is_assistant_mode_command" in chat_session.cme_workflow._context:
+                del chat_session.cme_workflow._context["is_assistant_mode_command"]
+            return _planning_command_refusal_output(
+                planning_name,
+                direct_or_assistant=assistant_path,
+                workflow=workflow,
+            )
 
         command_routing_definition = fastworkflow.RoutingRegistry.get_definition(
             workflow.folderpath
@@ -331,6 +407,9 @@ class CommandExecutor(CommandExecutorInterface):
         if "is_assistant_mode_command" in chat_session.cme_workflow._context:
             del chat_session.cme_workflow._context["is_assistant_mode_command"]
 
+        fastworkflow.turn.warn_on_missing_declared_output(
+            command_output, workflow.folderpath
+        )
         return command_output
 
     @classmethod
@@ -350,6 +429,16 @@ class CommandExecutor(CommandExecutorInterface):
 
         workflow_name = workflow.folderpath.split('/')[-1]
         context = workflow.current_command_context_displayname
+
+        if action.command_name != "wildcard":
+            if planning_name := _resolve_planning_command_name(
+                workflow.folderpath, action.command_name
+            ):
+                return _planning_command_refusal_output(
+                    planning_name,
+                    direct_or_assistant=True,
+                    workflow=workflow,
+                )
         
         command_routing_definition = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
 
@@ -403,7 +492,11 @@ class CommandExecutor(CommandExecutorInterface):
             # Set the additional attributes
             command_output.workflow_name = workflow_name
             command_output.context = context
+            command_output.command_name = action.command_name
             command_output.command_call_id = call_id
+            fastworkflow.turn.warn_on_missing_declared_output(
+                command_output, workflow.folderpath
+            )
             return command_output
 
         # Always resolve the command's Signature class via create() so
@@ -457,8 +550,12 @@ class CommandExecutor(CommandExecutorInterface):
         # Set the additional attributes
         command_output.workflow_name = workflow_name
         command_output.context = context
+        command_output.command_name = action.command_name
         command_output.command_call_id = call_id
-        
+
+        fastworkflow.turn.warn_on_missing_declared_output(
+            command_output, workflow.folderpath
+        )
         return command_output
 
     # MCP-compliant methods

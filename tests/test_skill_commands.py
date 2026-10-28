@@ -544,7 +544,8 @@ class PlanGenerator:
     ("flag: bool = Field(default=False, json_schema_extra={'means': {'true': 'asked'}})",
      "means of 'flag' must be a block of its enum values"),
     ("kind: Literal['a', 'b'] = Field(json_schema_extra={'means': {'c': 'x'}})", "'c' is not a value of it"),
-    ("kind: Literal['a', 'b'] = Field(json_schema_extra={'in_request': True})", "only an int parameter takes in_request"),
+    ("kind: Literal['a', 'b'] = Field(json_schema_extra={'in_request': True})",
+     "only a str or int parameter takes in_request"),
 ])
 def test_a_malformed_check_fails_the_load(tmp_path, field, message):
     assert re.search(message, _load_error(_write(tmp_path, {"bad": CHECK_FIELD.replace("{field}", field)})))

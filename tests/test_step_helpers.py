@@ -1128,17 +1128,19 @@ class PlanGenerator:
 # Pins today's load state for every library ``PlanGenerator``; update rows when Phase 3
 # (``find_record`` union return) and Phase 11 (``in_request`` on str fields) land — do not
 # delete ``test_library_planning_commands_load_inventory``.
+# The ``find_record`` union return annotation loads since Phase 3 step 3a.
+# ``in_request`` on ``str`` fields loads since Phase 3 step fix-3rsq.3.9.
 _LIBRARY_PLANNING_INVENTORY = (
     ("Book/loan_report", "_commands/Book/loan_report.py", True, "", ""),
     ("Book/shelf_report", "_commands/Book/shelf_report.py", True, "", ""),
     ("Library/overdue_summary", "_commands/Library/overdue_summary.py", True, "", ""),
-    ("Library/author_books", "_commands/Library/author_books.py", False, "in_request", "11"),
-    ("Library/book_by_title", "_commands/Library/book_by_title.py", False, "in_request", "11"),
-    ("Library/book_loans", "_commands/Library/book_loans.py", False, "in_request", "11"),
-    ("Library/count_books", "_commands/Library/count_books.py", False, "in_request", "11"),
-    ("Library/find_record", "_commands/Library/find_record.py", False, "facts model it fills", "3"),
-    ("Library/member_report", "_commands/Library/member_report.py", False, "in_request", "11"),
-    ("Library/note_member", "_commands/Library/note_member.py", False, "in_request", "11"),
+    ("Library/author_books", "_commands/Library/author_books.py", True, "", ""),
+    ("Library/book_by_title", "_commands/Library/book_by_title.py", True, "", ""),
+    ("Library/book_loans", "_commands/Library/book_loans.py", True, "", ""),
+    ("Library/count_books", "_commands/Library/count_books.py", True, "", ""),
+    ("Library/find_record", "_commands/Library/find_record.py", True, "", ""),
+    ("Library/member_report", "_commands/Library/member_report.py", True, "", ""),
+    ("Library/note_member", "_commands/Library/note_member.py", True, "", ""),
 )
 
 

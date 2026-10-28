@@ -118,10 +118,11 @@ A skill file::
     For a subject it chooses among the request's subjects (at most ``MAX_SUBJECT_OPTIONS``)
     or ``NO_SUBJECT`` ("none": the default, or a failed call for a required parameter); a
     request naming no subject is not checked.
-  - ``in_request: True`` (an ``int``): when the request writes numbers (digits or the words
-    zero to twenty) outside the text of the other arguments, the argument must be one of
-    them; otherwise it takes the only one written, or its default when that is written, and
-    with several others the call fails ("the first two" never runs as 3).
+  - ``in_request: True`` (a ``str`` or an ``int``): a ``str`` must appear in the request
+    exactly as the request writes it (a verbatim substring); an ``int`` must be a number
+    the request writes (digits or the words zero to twenty outside the text of the other
+    arguments); otherwise it takes the only one written, or its default when that is
+    written, and with several others the call fails ("the first two" never runs as 3).
 
 - ``PlanGenerator`` (required): its public methods are the skill's phases, in order, each
   returning its steps as a list of str, one per step (empty ones are dropped); see
@@ -209,6 +210,7 @@ import inspect
 import json
 import os
 import re
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from types import UnionType
@@ -217,6 +219,11 @@ from typing import Any, Callable, Literal, Mapping, Optional, Sequence, Union, g
 from pydantic import BaseModel
 
 from fastworkflow.command_context_model import CommandContextModel
+from fastworkflow.command_directory import CommandDirectory, compute_commands_source_fingerprint
+from fastworkflow.skill_json_schema_internal import (
+    HAND_WRITTEN_AVAILABLE_FROM_KEY as _HAND_WRITTEN_AVAILABLE_FROM_KEY,
+    SKILL_JSON_SCHEMA_EXTRA_INTERNAL_KEYS as _SKILL_JSON_SCHEMA_EXTRA_INTERNAL_KEYS,
+)
 from fastworkflow.observation_offloading.facts import FactSourceError, fact_sources
 from fastworkflow.observation_offloading.finish_check import (
     KIND_COMMAND,
@@ -233,7 +240,16 @@ from fastworkflow.observation_offloading.finish_check import (
 _NOTE_CONDITION_RE = re.compile(
     r"\b(?:if|only\s+(?:if|when)|when|whenever|unless|otherwise|optional(?:ly)?|in case|as needed|"
     r"where (?:needed|applicable)|else)\b", re.IGNORECASE)
-from fastworkflow.skill_phases import FULL_LIST_PHRASES, _PICK_NAMED_RE, is_from_source
+from fastworkflow import skill as skill_api
+from fastworkflow.skill_phases import (
+    FULL_LIST_PHRASES,
+    PhaseError,
+    _PICK_NAMED_RE,
+    active_phases,
+    is_flat_plan,
+    is_from_source,
+    phase_steps,
+)
 from fastworkflow.utils import python_utils
 from fastworkflow.workflow_inheritance_model import (
     WorkflowInheritanceModel,
@@ -327,6 +343,12 @@ class SkillCommand:
     plan_fn: Callable | None = field(default=None, compare=False)
     #: The phases' ``output`` models seen when ``plan()`` ran on the placeholder inputs at load.
     phase_outputs: tuple[type, ...] = field(default=(), compare=False)
+    #: The skill file's ``PlanGenerator`` class (``command_from_module`` only).
+    plan_cls: type | None = field(default=None, compare=False)
+    #: ``Signature.Output`` when the skill declares one.
+    output_model: type | None = field(default=None, compare=False)
+    #: Whether ``PlanGenerator`` defines or inherits ``__result__``.
+    uses_result: bool = field(default=False, compare=False)
 
     def param(self, name: str) -> Param | None:
         return next((p for p in self.params if p.name == name), None)
@@ -422,8 +444,8 @@ def _parse_param(name: str, spec, where: str) -> Param:
                 raise SkillFormatError(f"{where}: means of {name!r}: {key!r} is not a value of it, or not text")
         means = tuple((v, block[v]) for v in values if v in block)
     in_request = _flag(spec, "in_request", name, where)
-    if in_request and kind != "int":
-        raise SkillFormatError(f"{where}: only an int parameter takes in_request ({name!r})")
+    if in_request and kind not in ("str", "int"):
+        raise SkillFormatError(f"{where}: only a str or int parameter takes in_request ({name!r})")
     return Param(name=name, type=kind, values=values, default=default, required=required,
                  desc=desc, strip=strip, verify=verify, means=means, in_request=in_request,
                  subject=subject)
@@ -441,6 +463,10 @@ def _flag(spec: dict, key: str, name: str, where: str) -> bool:
 #: Keys a skill file's ``Input`` field may set in ``json_schema_extra``.
 SKILL_FIELD_KEYS = frozenset({"strip", "subject", "verify", "means", "in_request",
                               "from", "available_from"})
+
+
+def _allowed_skill_field_json_schema_extra_keys() -> set[str]:
+    return set(SKILL_FIELD_KEYS) | set(_SKILL_JSON_SCHEMA_EXTRA_INTERNAL_KEYS)
 
 
 def _spec_from_field(name: str, info, where: str) -> dict:
@@ -486,7 +512,8 @@ def _spec_from_field(name: str, info, where: str) -> dict:
     if "requires" in extra:
         raise SkillFormatError(f"{where}: field {name!r}: requires is not a skill option; reset the "
                                "argument (or refuse the call) in Signature.validate_extracted_parameters")
-    _check_keys(extra, set(SKILL_FIELD_KEYS), f"field {name!r} json_schema_extra", where)
+    _check_keys(extra, _allowed_skill_field_json_schema_extra_keys(),
+                f"field {name!r} json_schema_extra", where)
     for key in ("subject", "verify", "in_request"):
         if key in extra:
             if not isinstance(extra[key], bool):
@@ -1037,6 +1064,80 @@ def _is_template_line(text: str) -> bool:
     return _FACT_CONDITION in text or _SOME_ARGUMENTS in text
 
 
+def _plan_generator_inherits_foreign(plan_cls: type, path: str) -> None:
+    """Load error when *plan_cls* subclasses another command's ``PlanGenerator`` (3.4, 2.36)."""
+    module = sys.modules.get(plan_cls.__module__)
+    own = getattr(module, "PlanGenerator", None) if module is not None else None
+    for base in plan_cls.__bases__:
+        if not inspect.isclass(base) or base.__name__ != "PlanGenerator":
+            continue
+        if base is own:
+            continue
+        other_path = getattr(sys.modules.get(base.__module__, None), "__file__", "") or ""
+        if os.path.basename(other_path).startswith("_"):
+            continue
+        other_name = _qualified_name_from_command_path(other_path)
+        if other_name is None:
+            continue
+        raise SkillFormatError(
+            f"{path}: PlanGenerator inherits from {other_name}'s PlanGenerator; to reuse its "
+            f"whole job, call {other_name.split('/')[-1]} in a step; to share phases, move "
+            "them to a base class in a _ module")
+
+
+def _qualified_name_from_command_path(fpath: str) -> str | None:
+    marker = f"{os.sep}_commands{os.sep}"
+    if marker not in fpath:
+        return None
+    rel = fpath.split(marker, 1)[1]
+    if rel.startswith("_") or f"{os.sep}_" in rel:
+        return None
+    return rel[:-3].replace(os.sep, "/")
+
+
+def _result_method(plan_cls: type) -> tuple[Callable | None, type | None]:
+    for klass in plan_cls.__mro__:
+        if "__result__" in klass.__dict__:
+            return klass.__dict__["__result__"], klass
+    return None, None
+
+
+def _phase_names_for_command(command: "SkillCommand") -> set[str]:
+    names: set[str] = set()
+    if command.plan_cls is not None:
+        names.update(name for name, _ in skill_api.phase_methods(command.plan_cls))
+    if command.plan_fn is None:
+        return names
+    for env in _template_grid(command):
+        try:
+            result = command.plan_fn(input_instance(command, env))
+        except Exception:  # noqa: BLE001 - other grid points may still bind
+            continue
+        if is_flat_plan(result):
+            continue
+        try:
+            phases = active_phases(result, command.path)
+        except PhaseError:
+            continue
+        names.update(phase.name for phase in phases)
+    return names
+
+
+def _check_result_method(plan_cls: type, path: str, command: "SkillCommand") -> bool:
+    result_fn, owner = _result_method(plan_cls)
+    if result_fn is None:
+        return False
+    phase_names = _phase_names_for_command(command)
+    for parameter in inspect.signature(result_fn).parameters.values():
+        if parameter.name in ("self", "input"):
+            continue
+        if parameter.name not in phase_names:
+            where = "__result__" if owner is plan_cls else f"{owner.__qualname__}.__result__"
+            raise SkillFormatError(
+                f"{path}: {where} takes {parameter.name!r}, which is not a phase of this command")
+    return True
+
+
 def command_from_module(name: str, module, path: str) -> SkillFile:
     """The skill a skill file (``_skills/<name>.py``, already imported) defines.
 
@@ -1065,12 +1166,14 @@ def command_from_module(name: str, module, path: str) -> SkillFile:
         raise SkillFormatError(f"{path}: {exc}") from None
     methods = skill_api.phase_methods(plan_cls)
     phase_name = methods[0][0] if len(methods) == 1 else ""
+    _plan_generator_inherits_foreign(plan_cls, path)
     return skill_from_parts(name, signature, path, steps_fn=steps_fn, plan_fn=plan_fn,
-                            phase_name=phase_name)
+                            phase_name=phase_name, plan_cls=plan_cls)
 
 
 def skill_from_parts(name: str, signature, path: str, *, steps_fn: Callable | None = None,
-                     plan_fn: Callable | None = None, phase_name: str = "") -> SkillFile:
+                     plan_fn: Callable | None = None, phase_name: str = "",
+                     plan_cls: type | None = None) -> SkillFile:
     """The skill a ``Signature`` and its behaviour define: a flat ``steps_fn(input)`` or a
     ``plan_fn(input) -> list[Phase]`` (or both: a plan that may return no phases runs flat,
     from ``steps_fn``). ``command_from_module`` builds them from the file's ``PlanGenerator``
@@ -1093,13 +1196,9 @@ def skill_from_parts(name: str, signature, path: str, *, steps_fn: Callable | No
     if not (inspect.isclass(input_model) and issubclass(input_model, BaseModel)):
         raise SkillFormatError(f"{path}: Signature.Input must be a pydantic BaseModel")
     output_model = getattr(signature, "Output", None)
-    if inspect.isclass(output_model) and issubclass(output_model, BaseModel):
-        for field_name, info in output_model.model_fields.items():
-            extra = info.json_schema_extra if isinstance(info.json_schema_extra, Mapping) else {}
-            if "from" in extra:
-                raise SkillFormatError(
-                    f"{path}: Signature.Output.{field_name}: an Output field cannot declare "
-                    "from_; build the value in __result__")
+    declared_output = (inspect.isclass(output_model) and issubclass(output_model, BaseModel))
+    # Signature.Output ``from_`` is checked at field-source resolution (3.3), not here, so a
+    # planning command with that error still loads under the unified load policy.
     utterances = getattr(signature, "plain_utterances", ())
     if isinstance(utterances, str) or not all(isinstance(u, str) for u in utterances):
         raise SkillFormatError(f"{path}: plain_utterances must be a list of str")
@@ -1109,6 +1208,7 @@ def skill_from_parts(name: str, signature, path: str, *, steps_fn: Callable | No
 
     params = {n: _parse_param(n, _spec_from_field(n, info, path), path)
               for n, info in input_model.model_fields.items()}
+    _apply_extraction_field_descriptions(input_model, params)
     if not params and plan_fn is None:
         try:
             lines = _call_steps(steps_fn, input_model(), path)
@@ -1121,9 +1221,17 @@ def skill_from_parts(name: str, signature, path: str, *, steps_fn: Callable | No
                          phase_name=phase_name or name, path=path)
 
     command = SkillCommand(name=name, description=description, params=tuple(params.values()), path=path, input_model=input_model, steps_fn=steps_fn, validate=validate,
-                           plain_utterances=tuple(utterances), plan_fn=plan_fn)
+                           plain_utterances=tuple(utterances), plan_fn=plan_fn,
+                           plan_cls=plan_cls,
+                           output_model=output_model if declared_output else None)
     if plan_fn is not None:
         command = replace(command, phase_outputs=_checked_plan(command, own_steps=own_steps))
+    uses_result = plan_cls is not None and _check_result_method(plan_cls, path, command)
+    if declared_output and not uses_result:
+        raise SkillFormatError(
+            f"{path}: Signature.Output is declared, but nothing builds it; return it from "
+            "__result__(self, input, ...)")
+    command = replace(command, uses_result=uses_result)
     declared = getattr(signature, "template", None)
     if declared is not None:
         if isinstance(declared, str) or not all(isinstance(t, str) for t in declared):
@@ -1191,24 +1299,27 @@ def _checked_plan(command: SkillCommand, own_steps: bool = True) -> tuple[type, 
             raise SkillFormatError(f"{command.path}: plan() returns no phase")
         for phase in phases:
             if phase.output is not None and phase.output not in models:
-                for field_name, info in getattr(phase.output, "model_fields", {}).items():
-                    extra = info.json_schema_extra if isinstance(info.json_schema_extra, Mapping) else {}
-                    if "from" in extra and is_from_source(extra["from"]):
-                        raise SkillFormatError(
-                            f"{command.path}: {phase.output.__name__}.{field_name} "
-                            f"(from {_spelled_from_text(extra['from'])}): from_ is only for a "
-                            "command's Input field; type the field with the command's Output "
-                            "instead")
-                try:
-                    fact_sources(phase.output)
-                except FactSourceError as exc:
-                    raise SkillFormatError(f"{command.path}: phase {phase.name!r}: {exc}") from None
+                from fastworkflow.typed_phase_facts import (
+                    check_typed_facts_model,
+                    handles_typed_output,
+                    union_members,
+                )
+
+                # Facts-model ``from_`` is checked at field-source resolution (3.3), not here.
+                for message in check_typed_facts_model(
+                        command.path, phase.output, {}, {}):
+                    raise SkillFormatError(f"{command.path}: {message}")
+                if not handles_typed_output(phase.output):
+                    try:
+                        fact_sources(phase.output)
+                    except FactSourceError as exc:
+                        raise SkillFormatError(f"{command.path}: phase {phase.name!r}: {exc}") from None
                 models.append(phase.output)
     for (phase, what, parameter), bound in binds.items():
         if not bound:
             raise SkillFormatError(
                 f"{command.path}: phase {phase!r}: {what} takes {parameter!r}, which names no "
-                "earlier phase with an output in any plan; check its spelling")
+                "earlier phase in any plan; check its spelling")
     return tuple(models)
 
 
@@ -1220,8 +1331,9 @@ def check_phase_sources(command: SkillCommand, signatures: dict) -> list[str]:
     that several contexts define is resolved against the record's context only when
     the phase runs, so here it passes when some context resolves every field. A
     missing command or field is a warning, not a load failure: a workflow may add a
-    command's ``Output`` after the skill that reads it. (A malformed ``"from"`` already
-    failed the load, see ``command_from_module``.)
+    command's ``Output`` after the skill that reads it. Malformed ``from_`` on Input,
+    Output, or facts models is reported by ``resolve_field_sources`` without skipping
+    the planning command.
     """
     from fastworkflow.observation_offloading.facts import (
         AmbiguousFactSourceError, FactSourceError, check_fact_sources)
@@ -1261,6 +1373,16 @@ class _ResolvedAvailableFrom(list):
     while a hand-written ``available_from`` (even alongside ``from_``) is still flagged as an error."""
 
 
+def _hand_written_available_from_value(extra: Mapping) -> Any | None:
+    """The hand-written ``available_from`` value for *extra*, if any (not resolver-written)."""
+    if _HAND_WRITTEN_AVAILABLE_FROM_KEY in extra:
+        return extra[_HAND_WRITTEN_AVAILABLE_FROM_KEY]
+    af = extra.get("available_from")
+    if af is not None and not isinstance(af, _ResolvedAvailableFrom):
+        return af
+    return None
+
+
 def _spelled_from_text(spelled: Any) -> str:
     """Format a ``from_`` source value for error messages."""
     if isinstance(spelled, list) and len(spelled) == 1:
@@ -1292,6 +1414,9 @@ class FieldSourceResolution:
 
     workflow_folderpath: str
     problems: tuple[FieldSourceProblem, ...]
+    #: Command names (execution or planning) that have a ``from_`` / ``available_from``
+    #: resolution error. They still load and stay routable or matchable; preview
+    #: ``--check`` fails on the reported problems. Not "skipped" at load time.
     skipped_commands: frozenset[str]
     model_to_command: Mapping[type, str]
     signatures: Mapping[str, Any]
@@ -1520,9 +1645,9 @@ def resolve_signature_field_sources(
         if not isinstance(extra, Mapping):
             continue
         has_from = "from" in extra
-        has_af = "available_from" in extra
-        if has_af and not isinstance(extra["available_from"], _ResolvedAvailableFrom):
-            af_val = extra["available_from"]
+        hw_af = _hand_written_available_from_value(extra)
+        if hw_af is not None:
+            af_val = hw_af
             first_cmd = (
                 af_val[0] if isinstance(af_val, (list, tuple)) and af_val and isinstance(af_val[0], str)
                 else af_val if isinstance(af_val, str) and af_val
@@ -1535,6 +1660,13 @@ def resolve_signature_field_sources(
                 severity="error",
                 command=command_name,
             ))
+            # Drop a hand-written edge so consumers do not keep reading it after the error;
+            # preserve the value under ``_HAND_WRITTEN_AVAILABLE_FROM_KEY`` for later passes.
+            if "available_from" in extra and not isinstance(extra["available_from"], _ResolvedAvailableFrom):
+                new_extra = dict(extra)
+                new_extra[_HAND_WRITTEN_AVAILABLE_FROM_KEY] = extra["available_from"]
+                new_extra.pop("available_from", None)
+                info.json_schema_extra = new_extra
             continue
 
         if not has_from:
@@ -1708,58 +1840,112 @@ def resolve_signature_field_sources(
     return problems
 
 
+def _typed_phase_output_problems(
+    folder: str,
+    planning_commands: Mapping[str, SkillCommand],
+    resolution: FieldSourceResolution,
+) -> list[FieldSourceProblem]:
+    """Load errors for typed phase outputs and step coverage (3.12)."""
+    from fastworkflow import typed_phase_facts as tpf
+
+    problems: list[FieldSourceProblem] = []
+    signatures = resolution.signatures
+    known = set(signatures) | {name.split("/", 1)[-1] for name in signatures}
+    for qname, command in sorted(planning_commands.items()):
+        fpath = command.path
+        for model in command.phase_outputs:
+            for message in tpf.check_typed_facts_model(
+                fpath, model, resolution.model_to_command, signatures,
+            ):
+                problems.append(FieldSourceProblem(
+                    file=fpath, message=message, severity="error", command=qname,
+                ))
+        if command.plan_fn is None:
+            continue
+        for env in _template_grid(command):
+            try:
+                result = command.plan_fn(input_instance(command, env))
+            except Exception:  # noqa: BLE001
+                continue
+            if is_flat_plan(result):
+                continue
+            try:
+                phases = active_phases(result, fpath)
+            except PhaseError:
+                continue
+            for phase in phases:
+                if phase.output is None:
+                    continue
+                inst = input_instance(command, env)
+                try:
+                    lines = phase_steps(phase, {"input": inst})
+                except PhaseError:
+                    try:
+                        lines = phase_steps(phase, {})
+                    except PhaseError:
+                        lines = []
+                step_cmds = [name for name, _ in step_commands(lines, known)]
+                for message in tpf.check_phase_steps_name_commands(
+                    fpath, phase.name, step_cmds, phase.output,
+                    resolution.model_to_command, signatures,
+                ):
+                    problems.append(FieldSourceProblem(
+                        file=fpath, message=message, severity="error", command=qname,
+                    ))
+    return problems
+
+
 def resolve_field_sources(workflow_folderpath: str) -> FieldSourceResolution:
     """Resolve every ``from_`` declaration across the commands and skills of *workflow_folderpath*.
 
-    Runs once per workflow (cached by normalized folder path):
-    - scans ``_commands/`` (including inherited base workflows) and ``_skills/`` directly,
+    Runs once per workflow (cached by normalized folder path and command-source fingerprint):
+    - reads command files from :class:`CommandDirectory` (``_commands/`` and ``_skills/``),
       recording any import failure rather than dropping the command;
     - builds the ``{Signature.Output | Signature.Input -> qualified_name}`` map (3.12);
     - checks every ``from_`` placement and reference grammar, runs the type checks, flags
       hand-written ``available_from`` declarations, and writes ``available_from`` into
       valid ``Input`` fields' ``json_schema_extra``.
     """
-    return _resolve_field_sources_cached(os.path.abspath(workflow_folderpath))
+    folder = os.path.abspath(workflow_folderpath)
+    fingerprint = compute_commands_source_fingerprint(workflow_folderpath)
+    return _resolve_field_sources_cached(folder, fingerprint)
 
 
 @functools.lru_cache(maxsize=None)
-def _resolve_field_sources_cached(folder: str) -> FieldSourceResolution:
+def _resolve_field_sources_cached(folder: str, _source_fingerprint: str) -> FieldSourceResolution:
     problems: list[FieldSourceProblem] = []
     skipped: set[str] = set()
-    cmd_files: dict[str, tuple[str, str]] = {}  # qname -> (file_path, owner_workflow_folder)
     inh_path = os.path.join(folder, "workflow_inheritance_model.json")
     try:
         inh = WorkflowInheritanceModel.load(folder)
-        base_paths = inh.resolve_base_paths(folder)
+        inh.resolve_base_paths(folder)
     except Exception as exc:  # noqa: BLE001
-        base_paths = []
         problems.append(FieldSourceProblem(
             file=inh_path,
             message=f"{type(exc).__name__}: {exc}",
             severity="error",
         ))
-    for base_path in base_paths:
-        base_abs = os.path.abspath(base_path)
-        for qname, fpath in _discover_dir_command_files(os.path.join(base_abs, "_commands")).items():
-            cmd_files[qname] = (fpath, base_abs)
-    for qname, fpath in _discover_dir_command_files(os.path.join(folder, "_commands")).items():
-        cmd_files[qname] = (fpath, folder)
-
-    skill_files_map = _discover_dir_command_files(os.path.join(folder, "_skills"))
-    all_files: dict[str, tuple[str, str, bool]] = {
-        qname: (fpath, owner, False) for qname, (fpath, owner) in cmd_files.items()
-    }
-    for qname, fpath in skill_files_map.items():
-        if qname not in all_files:
-            all_files[qname] = (fpath, folder, True)
+    cmd_dir = CommandDirectory.scan(folder)
+    core_names = set(cmd_dir.core_command_names)
+    all_files: dict[str, tuple[str, str, bool]] = {}
+    for qname, metadata in cmd_dir.map_command_2_metadata.items():
+        if qname in core_names:
+            continue
+        owner = metadata.workflow_folderpath or folder
+        all_files[qname] = (
+            metadata.response_generation_module_path,
+            owner,
+            metadata.is_planning,
+        )
 
     signatures: dict[str, Any] = {}
     import_errors: dict[str, str] = {}
     model_to_command: dict[type, str] = {}
     skill_phase_outputs: dict[str, tuple[type, ...]] = {}
+    planning_commands: dict[str, SkillCommand] = {}
 
     for qname in sorted(all_files):
-        fpath, owner, is_skill = all_files[qname]
+        fpath, owner, is_planning = all_files[qname]
         try:
             module = python_utils.get_module(fpath, owner)
         except Exception as exc:  # noqa: BLE001
@@ -1776,21 +1962,21 @@ def _resolve_field_sources_cached(folder: str) -> FieldSourceResolution:
             model_cls = getattr(sig, attr, None)
             if inspect.isclass(model_cls) and issubclass(model_cls, BaseModel):
                 model_to_command[model_cls] = qname
-        if is_skill:
+        if is_planning and getattr(module, "PlanGenerator", None) is not None:
             try:
                 parsed = command_from_module(qname, module, fpath)
-                if parsed.command is not None and parsed.command.phase_outputs:
-                    skill_phase_outputs[qname] = parsed.command.phase_outputs
+                if parsed.command is not None:
+                    planning_commands[qname] = parsed.command
+                    if parsed.command.phase_outputs:
+                        skill_phase_outputs[qname] = parsed.command.phase_outputs
             except SkillFormatError as exc:
                 msg = str(exc)
                 prefix = f"{fpath}: "
                 if msg.startswith(prefix):
                     msg = msg[len(prefix):]
-                if "from_" in msg or "available_from" in msg:
-                    problems.append(FieldSourceProblem(
-                        file=fpath, message=msg, severity="error", command=qname
-                    ))
-                    skipped.add(qname)
+                problems.append(FieldSourceProblem(
+                    file=fpath, message=msg, severity="error", command=qname
+                ))
 
     base_contexts, ctx_problems = _read_base_contexts(folder)
     for cp in ctx_problems:
@@ -1821,6 +2007,8 @@ def _resolve_field_sources_cached(folder: str) -> FieldSourceResolution:
                 problems.append(p)
             if p.severity == "error":
                 skipped.add(qname)
+
+    problems.extend(_typed_phase_output_problems(folder, planning_commands, resolution))
 
     return replace(
         resolution,
@@ -2417,6 +2605,27 @@ def _screen(command: SkillCommand, raw: dict, request: str) -> tuple[dict, dict[
     return {n: getattr(values, n) for n in names}, refused
 
 
+IN_REQUEST_STR_SENTENCE = "Copy it exactly as the request writes it."
+
+
+def extraction_field_description(p: Param) -> str:
+    """Field description the CME parameter extractor reads for *p*, with the ``in_request`` str
+    rule sentence appended when applicable (3.4, Descriptions)."""
+    desc = (p.desc or p.name).rstrip(". ")
+    if p.in_request and p.type == "str":
+        return f"{desc}. {IN_REQUEST_STR_SENTENCE}"
+    return p.desc or p.name
+
+
+def _apply_extraction_field_descriptions(input_model: type, params: dict[str, Param]) -> None:
+    for name, p in params.items():
+        if not p.in_request or p.type != "str":
+            continue
+        info = input_model.model_fields.get(name)
+        if info is not None:
+            info.description = extraction_field_description(p)
+
+
 def check_arguments(command: SkillCommand, raw: dict, request: str,
                     verdicts: dict | None = None) -> tuple[dict, list[str]]:
     """The guarded, complete arguments of a skill call; ``(args, notes)``.
@@ -2439,8 +2648,9 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
     - a str argument inside an identifier match of the request (``command.identifiers``)
       becomes the whole match; a ``subject`` one must name a record of the request
       (``_as_subject``); one that does not is reset or fails the call as above;
-    - an ``in_request`` int must be a number the request writes, when it writes any
-      (see the module doc);
+    - an ``in_request`` ``str`` must be a verbatim substring of ``request`` (after the
+      usual ``str`` normalisation); an ``in_request`` ``int`` must be a number the request
+      writes, when it writes any (see the module doc);
     - ``verdicts`` (``{param: (value, probability)}``, from ``check_verdicts``): a sure
       verdict on a ``verify`` parameter replaces its argument, and stands in for a missing
       or invalid enum (for a subject, ``NO_SUBJECT`` resets it, or fails a required one);
@@ -2557,6 +2767,18 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
                                  f"({', '.join(map(str, sorted(written)))})")
         notes.append(f"{p.name}={args[p.name]} -> {only} (the number the request writes)")
         args[p.name] = only
+    for p in command.params:
+        if not p.in_request or p.type != "str":
+            continue
+        value = args[p.name]
+        if _empty(value) or (not p.required and value == p.default):
+            continue
+        if value not in request:
+            shown = raw.get(p.name, value)
+            if p.required:
+                raise SkillInputError(f"{p.name}={shown!r} is not written in the request")
+            notes.append(f"{p.name}={shown!r} is not written in the request: default")
+            args[p.name] = p.default
     for p in command.params:
         sure = _confident(verdicts, p.name) if p.verify and p.type != "str" else None
         if sure is not None and args[p.name] != sure[0]:

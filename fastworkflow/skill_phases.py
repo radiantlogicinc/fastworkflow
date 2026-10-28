@@ -165,7 +165,9 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from pydantic import BaseModel
 
+from fastworkflow.observation_offloading import finish_check
 from fastworkflow.observation_offloading.facts import facts_text
+from fastworkflow.observation_offloading.labels import context_clause
 
 #: The env setting for the executor step budget of one phase.
 PHASE_MAX_STEPS_ENV = "FW_SKILL_PHASE_MAX_STEPS"
@@ -525,9 +527,12 @@ def active_phases(phases: Any, where: str = "plan()") -> list[Phase]:
         seen.add(phase.name)
         if not callable(phase.steps_fn):
             raise PhaseError(f"{where}: phase {phase.name!r}: steps_fn must be callable")
-        if phase.output is not None and not (
-                inspect.isclass(phase.output) and issubclass(phase.output, BaseModel)):
-            raise PhaseError(f"{where}: phase {phase.name!r}: output must be a pydantic model")
+        if phase.output is not None:
+            from fastworkflow.typed_phase_facts import union_members
+
+            if union_members(phase.output) is None and not (
+                    inspect.isclass(phase.output) and issubclass(phase.output, BaseModel)):
+                raise PhaseError(f"{where}: phase {phase.name!r}: output must be a pydantic model")
         if phase.fans_out:
             if isinstance(phase.over, str) and phase.over_reference is None:
                 raise PhaseError(
@@ -574,11 +579,13 @@ def _parameters(phase: Phase, fn: Optional[Callable] = None,
         raise PhaseError(f"phase {phase.name!r}: cannot read {what}'s parameters: {error}") from None
 
 
-def _bound(phase: Phase, fn: Callable, what: str, outputs: Mapping[str, Any]) -> dict[str, Any]:
+def _bound(phase: Phase, fn: Callable, what: str, outputs: Mapping[str, Any], *,
+           phase_names: frozenset[str] | None = None) -> dict[str, Any]:
     """*fn*'s keyword arguments: each parameter named like an entry of *outputs*.
 
-    A parameter with no entry keeps its default; one with no default raises PhaseError.
-    ``*args`` / ``**kwargs`` receive nothing.
+    With *phase_names*, a parameter named after a phase of the call that did not run or
+    filled nothing receives ``None`` instead of its default. ``*args`` / ``**kwargs``
+    receive nothing.
     """
     kwargs: dict[str, Any] = {}
     for parameter in _parameters(phase, fn, what):
@@ -586,6 +593,8 @@ def _bound(phase: Phase, fn: Callable, what: str, outputs: Mapping[str, Any]) ->
             continue
         if parameter.name in outputs:
             kwargs[parameter.name] = outputs[parameter.name]
+        elif phase_names is not None and parameter.name in phase_names:
+            kwargs[parameter.name] = None
         elif parameter.default is parameter.empty:
             raise PhaseError(
                 f"phase {phase.name!r}: {what} needs {parameter.name!r}, but no earlier phase "
@@ -601,7 +610,8 @@ def _called(phase: Phase, fn: Callable, what: str, kwargs: Mapping[str, Any]) ->
             f"phase {phase.name!r}: {what} failed: {type(error).__name__}: {error}") from None
 
 
-def runs_now(phase: Phase, outputs: Mapping[str, Any]) -> bool:
+def runs_now(phase: Phase, outputs: Mapping[str, Any], *,
+             phase_names: frozenset[str] | None = None) -> bool:
     """Whether *phase* runs, now that the runner reached it.
 
     A bool ``when`` was already applied by ``plan()`` (``active_phases``). A callable
@@ -611,10 +621,12 @@ def runs_now(phase: Phase, outputs: Mapping[str, Any]) -> bool:
     """
     if not phase.has_condition:
         return bool(phase.when)
-    return _called(phase, phase.when, "when", _bound(phase, phase.when, "when", outputs))
+    return _called(phase, phase.when, "when",
+                    _bound(phase, phase.when, "when", outputs, phase_names=phase_names))
 
 
-def stops_after(phase: Phase, so_far: Sequence[Any], outputs: Mapping[str, Any]) -> bool:
+def stops_after(phase: Phase, so_far: Sequence[Any], outputs: Mapping[str, Any], *,
+                phase_names: frozenset[str] | None = None) -> bool:
     """Whether the fan-out *phase* stops after the items that ran (``until``).
 
     ``until``'s parameter named after the phase gets *so_far*, the list of the items'
@@ -624,8 +636,9 @@ def stops_after(phase: Phase, so_far: Sequence[Any], outputs: Mapping[str, Any])
     """
     if phase.until is None:
         return False
+    merged = {**outputs, phase.name: list(so_far)}
     return _called(phase, phase.until, "until",
-                   _bound(phase, phase.until, "until", {**outputs, phase.name: list(so_far)}))
+                   _bound(phase, phase.until, "until", merged, phase_names=phase_names))
 
 
 #: ``item`` of ``bound_arguments`` / ``phase_steps`` when no item is given.
@@ -633,14 +646,17 @@ NO_ITEM: Any = object()
 
 
 def bound_arguments(phase: Phase, outputs: Mapping[str, Any],
-                    item: Any = NO_ITEM) -> dict[str, Any]:
+                    item: Any = NO_ITEM, *,
+                    phase_names: frozenset[str] | None = None) -> dict[str, Any]:
     """``steps_fn``'s keyword arguments: each parameter named like an earlier phase's output.
 
     *outputs* maps the name of each earlier phase that ran and filled an output to that
-    output (a fan-out phase's: the list of its per-item outputs). A parameter with no
-    output of its name keeps its default; one with no default raises PhaseError.
-    ``*args`` / ``**kwargs`` receive nothing. For a fan-out phase, the parameter named
-    ``phase.item`` receives *item* (when given).
+    output (a fan-out phase's: the list of its per-item outputs). With *phase_names*, a
+    parameter named after a phase of the call that did not run or filled nothing receives
+    ``None`` instead of its default. Without *phase_names*, a parameter with no output of
+    its name keeps its default; one with no default raises PhaseError. ``*args`` /
+    ``**kwargs`` receive nothing. For a fan-out phase, the parameter named ``phase.item``
+    receives *item* (when given).
     """
     kwargs: dict[str, Any] = {}
     for parameter in _parameters(phase):
@@ -654,6 +670,8 @@ def bound_arguments(phase: Phase, outputs: Mapping[str, Any],
             continue
         if parameter.name in outputs:
             kwargs[parameter.name] = outputs[parameter.name]
+        elif phase_names is not None and parameter.name in phase_names:
+            kwargs[parameter.name] = None
         elif parameter.default is parameter.empty:
             raise PhaseError(
                 f"phase {phase.name!r}: steps_fn needs {parameter.name!r}, but no earlier phase "
@@ -674,13 +692,14 @@ def _checked_steps(lines: Any, phase: Phase) -> list[str]:
     ]
 
 
-def phase_steps(phase: Phase, outputs: Mapping[str, Any], item: Any = NO_ITEM) -> list[str]:
+def phase_steps(phase: Phase, outputs: Mapping[str, Any], item: Any = NO_ITEM, *,
+                phase_names: frozenset[str] | None = None) -> list[str]:
     """The phase's steps, ``steps_fn`` called with the earlier outputs (and *item*) bound.
 
     Raises PhaseError when a parameter cannot be bound, ``steps_fn`` raises, or it
     returns something other than a list of str.
     """
-    kwargs = bound_arguments(phase, outputs, item)
+    kwargs = bound_arguments(phase, outputs, item, phase_names=phase_names)
     try:
         lines = phase.steps_fn(**kwargs)
     except Exception as error:  # noqa: BLE001 - workflow code; the phase fails cleanly
@@ -878,6 +897,7 @@ def check_bindings(phases: Sequence[Phase], where: str = "plan()") -> dict[tuple
     """
     defaults: dict[tuple[str, str, str], bool] = {}
     with_output: dict[str, type[BaseModel]] = {}
+    earlier_names: set[str] = set()
     for phase in phases:
         reference = phase.over_reference
         if reference is not None:
@@ -897,11 +917,11 @@ def check_bindings(phases: Sequence[Phase], where: str = "plan()") -> dict[tuple
             if phase.fans_out and parameter.name == phase.item:
                 continue
             if parameter.default is None:
-                defaults[(phase.name, "steps_fn", parameter.name)] = parameter.name in with_output
-            if parameter.default is parameter.empty and parameter.name not in with_output:
+                defaults[(phase.name, "steps_fn", parameter.name)] = parameter.name in earlier_names
+            if parameter.default is parameter.empty and parameter.name not in earlier_names:
                 raise PhaseError(
                     f"{where}: phase {phase.name!r} takes {parameter.name!r}, which is not an "
-                    "earlier phase with an output; give the parameter a default or build the "
+                    "earlier phase of this call; give the parameter a default or build the "
                     "phase without it"
                 )
         conditions = [("when", phase.when, set())] if phase.has_condition else []
@@ -914,16 +934,17 @@ def check_bindings(phases: Sequence[Phase], where: str = "plan()") -> dict[tuple
                     continue
                 if parameter.default is None:
                     defaults[(phase.name, what, parameter.name)] = \
-                        parameter.name in with_output or parameter.name in also
+                        parameter.name in earlier_names or parameter.name in also
                 if parameter.default is parameter.empty and \
-                        parameter.name not in with_output and parameter.name not in also:
+                        parameter.name not in earlier_names and parameter.name not in also:
                     raise PhaseError(
                         f"{where}: phase {phase.name!r}: {what} takes {parameter.name!r}, "
-                        "which is not an earlier phase with an output"
+                        "which is not an earlier phase of this call"
                         + (" (or this phase, which has an output)" if what == "until" else "")
                         + "; give the parameter a default")
         if phase.output is not None:
             with_output[phase.name] = phase.output
+        earlier_names.add(phase.name)
     return defaults
 
 
@@ -1465,7 +1486,16 @@ def fill_output(model: type[BaseModel], runs: Sequence[Mapping[str, Any]], *,
         kept = runs_standing_in_for_openers(
             earlier_runs, runs, record, steps, fact_sources(model), done=kept,
             names=plain_names) + kept
+    from fastworkflow.typed_phase_facts import (
+        fill_typed_phase_output, handles_typed_output, validate_phase_output_value,
+    )
+
     try:
+        if handles_typed_output(model):
+            filled = fill_typed_phase_output(
+                model, kept, context=record, plan_text=plan_text,
+            )
+            return validate_phase_output_value(model, filled)
         return facts_from_runs(model, kept, context=record, context_name=record_context or None)
     except MissingFactError as error:
         source = getattr(error, "source", None)
@@ -1544,24 +1574,26 @@ _ANSWER_REQUEST_RE = re.compile(r"(?:Do these steps, then )?[Aa]nswer the reques
 
 def phase_query(request: str, plan_text: str, *, index: int, count: int, name: str,
                 answer_only: bool = False, item: Optional[tuple[int, int, Any]] = None,
-                code_steps: bool = False, code_ran_all: bool = False) -> str:
+                code_steps: bool = False, code_ran_all: bool = False,
+                result_driven: bool = False) -> str:
     """The executor's input for phase *index* (0-based) of *count*: its steps, framed.
 
     A phase other than the last gets only its own steps: the request is left out, so
     the run cannot take on the rest of the job (later phases do it). The last phase
-    gets the request too, since it writes the answer to it. An *answer_only* phase is
-    told to run no command and to write from the facts its steps carry
-    (``ANSWER_ONLY_RULE``). *item* ``(k, n, value)`` (0-based *k*) frames one item's
-    sub-plan of a fan-out phase. *code_steps*: code runs the phase's leading steps first
-    (``CodeSteps``), and the run is told those are done (``_CODE_STEPS_DONE``).
-    *code_ran_all*: code ran every step of the last phase; the run is told to answer from
-    their outputs (``_CODE_STEPS_ALL_DONE``), with the copy rule answer-only phases get.
+    gets the request too, since it writes the answer to it, unless *result_driven* is
+    true (``__result__`` writes the call's answer). An *answer_only* phase is told to
+    run no command and to write from the facts its steps carry (``ANSWER_ONLY_RULE``).
+    *item* ``(k, n, value)`` (0-based *k*) frames one item's sub-plan of a fan-out phase.
+    *code_steps*: code runs the phase's leading steps first (``CodeSteps``), and the run
+    is told those are done (``_CODE_STEPS_DONE``). *code_ran_all*: code ran every step of
+    the last phase; the run is told to answer from their outputs (``_CODE_STEPS_ALL_DONE``),
+    with the copy rule answer-only phases get.
     """
     part = f"part {index + 1} of {count} ({name})"
     by_code = f" {_CODE_STEPS_DONE}" if code_steps else ""
     if item is not None:
         part += f" for item {item[0] + 1} of {item[1]} ({item[2]})"
-    if index < count - 1:
+    if result_driven or index < count - 1:
         if answer_only:
             return f"This is {part} of a larger job. {ANSWER_ONLY_RULE}\n{plan_text}"
         return (f"This is {part} of a larger job. {_DO_ONLY_THESE} "
@@ -2706,13 +2738,56 @@ def names_value(clause: Any, value: Any) -> bool:
         finish_check.plain_value(clause)) is not None
 
 
+def _run_names_item(run: Mapping[str, Any], item: Any) -> bool:
+    """Whether *run*'s archived input or output names *item* (spacing and case ignored)."""
+    wanted = finish_check.plain_value(item)
+    if not wanted:
+        return False
+    for blob in (run.get("input"), run.get("output")):
+        if not isinstance(blob, Mapping):
+            continue
+        for value in blob.values():
+            if finish_check.plain_value(value) == wanted:
+                return True
+    return False
+
+
+def _record_from_opening_run(runs: Sequence[Mapping[str, Any]], item: Any, ended_on: Optional[str],
+                             planned: Optional[Iterable[str]]) -> Optional[str]:
+    """Record clause when a planned step opened *item* but the context has no instance label."""
+    wanted_plain = {_plain(c) for c in planned} if planned is not None else None
+    for index, run in enumerate(runs):
+        if not run.get("success"):
+            continue
+        if wanted_plain is not None and _plain(run.get("command")) not in wanted_plain:
+            continue
+        if not _run_names_item(run, item):
+            continue
+        for clause in (run.get("context_clause"), _entered(runs, index, ended_on), ended_on):
+            if is_record_clause(clause) and names_value(clause, item):
+                return str(clause)
+        name = str(run.get("context_name") or "").strip()
+        if not name:
+            for clause in (ended_on, _entered(runs, index, ended_on), run.get("context_clause")):
+                text = str(clause or "").strip()
+                if text and " " not in text:
+                    name = text.split()[0]
+                    break
+        if name:
+            return context_clause(name, finish_check.plain_value(item))
+    return None
+
+
 def item_record(runs: Sequence[Mapping[str, Any]], item: Any,
-                ended_on: Optional[str] = None) -> Optional[str]:
+                ended_on: Optional[str] = None,
+                planned: Optional[Iterable[str]] = None) -> Optional[str]:
     """The record an item of a fan-out phase is bound to, or None when it was never opened.
 
     It is a record clause that names *item* (``names_value``) among the clauses the
     item's *runs* (in run order) ran on or moved the workflow to, and *ended_on*, the
     clause the item's run ended on: *ended_on* when it is one of them, else the last.
+    When the workflow declares no instance label on the descended context (``open_book``
+    with ``book_uid=<item>``), a clause is synthesized from the context name and *item*.
     """
     candidates: list[str] = []
     clauses = []
@@ -2724,7 +2799,9 @@ def item_record(runs: Sequence[Mapping[str, Any]], item: Any,
             candidates.append(clause)
     if ended_on in candidates:
         return ended_on
-    return candidates[-1] if candidates else None
+    if candidates:
+        return candidates[-1]
+    return _record_from_opening_run(runs, item, ended_on, planned)
 
 
 def item_record_issues(runs: Sequence[Mapping[str, Any]], item: Any, others: Iterable[Any],
@@ -2741,7 +2818,7 @@ def item_record_issues(runs: Sequence[Mapping[str, Any]], item: Any, others: Ite
       workflow onto the item's own record (it opened it from there) is not flagged.
     """
     issues: list[str] = []
-    if item_record(runs, item, ended_on) is None:
+    if item_record(runs, item, ended_on, planned=commands) is None:
         issues.append(f"item {item} was never opened: no command ran on a record that names it")
     others = [other for other in others if other != item]
     wanted = None if commands is None else {_plain(c) for c in commands}
@@ -2908,6 +2985,98 @@ def failure_text(answers: Sequence[str], phase: str, error: str, not_run: Sequen
 
 #: The line before the facts a stopped job's answer shows (``failure_text``).
 FOUND_FACTS_LEAD = "Found before the job stopped (facts read from the commands that ran):"
+
+
+def bound_result_arguments(result_fn: Callable, input: Any, outputs: Mapping[str, Any], *,
+                           phase_names: frozenset[str]) -> dict[str, Any]:
+    """Keyword arguments for ``__result__``: ``input`` and each phase name of the call."""
+    kwargs: dict[str, Any] = {}
+    parameters = inspect.signature(result_fn).parameters
+    if "input" in parameters:
+        kwargs["input"] = input
+    for parameter in parameters.values():
+        if parameter.name in ("self", "input"):
+            continue
+        if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
+            continue
+        if parameter.name in outputs:
+            kwargs[parameter.name] = outputs[parameter.name]
+        elif parameter.name in phase_names:
+            kwargs[parameter.name] = None
+        elif parameter.default is not parameter.empty:
+            continue
+        else:
+            raise PhaseError(
+                f"__result__ needs {parameter.name!r}, which is not a phase of this call")
+    return kwargs
+
+
+def typed_phase_outputs(raw: Mapping[str, Any], phases: Sequence[Phase]) -> dict[str, Any]:
+    """Phase outputs as pydantic models (or lists of them for a fan-out), for ``__result__``."""
+    from fastworkflow.typed_phase_facts import validate_phase_output_value
+
+    by_name = {phase.name: phase for phase in phases}
+    typed: dict[str, Any] = {}
+    for name, value in raw.items():
+        phase = by_name.get(name)
+        if phase is None or phase.output is None:
+            typed[name] = value
+            continue
+        if phase.fans_out:
+            typed[name] = [validate_phase_output_value(phase.output, item) for item in value]
+        else:
+            typed[name] = validate_phase_output_value(phase.output, value)
+    return typed
+
+
+def command_response_from_call_result(value: Any, output_model: type[BaseModel] | None):
+    """Build a ``CommandResponse`` from what ``__result__`` or ``__call__`` returned (3.14)."""
+    import fastworkflow
+
+    if isinstance(value, fastworkflow.CommandResponse):
+        return value
+    if isinstance(value, str):
+        return fastworkflow.CommandResponse(response=value, output=None)
+    if output_model is not None and isinstance(value, output_model):
+        return fastworkflow.CommandResponse(response=value.model_dump_json(), output=value)
+    raise TypeError(type(value).__name__)
+
+
+def _result_fn_on_class(plan_cls: type) -> Callable | None:
+    """The ``__result__`` function as defined on *plan_cls* or a base (not inherited descriptor)."""
+    for klass in plan_cls.__mro__:
+        if "__result__" in klass.__dict__:
+            return klass.__dict__["__result__"]
+    return None
+
+
+def run_call_result(plan_cls: type, input: Any, outputs: Mapping[str, Any], *,
+                    phase_names: frozenset[str], output_model: type[BaseModel] | None,
+                    command_name: str, request: str) -> tuple[Any, bool]:
+    """Run ``__result__`` once; on failure or an unexpected return, one model call writes the answer.
+
+    Returns ``(command_response, fallback_used)``.
+    """
+    import fastworkflow
+    from fastworkflow.utils.logging import logger
+
+    result_fn = _result_fn_on_class(plan_cls)
+    if result_fn is None:
+        raise PhaseError(f"{plan_cls.__qualname__} defines no __result__")
+    instance = plan_cls()
+    kwargs = bound_result_arguments(result_fn, input, outputs, phase_names=phase_names)
+    try:
+        raw = result_fn(instance, **kwargs)
+        if isinstance(raw, str) and not raw.strip():
+            raise TypeError("empty str")
+        try:
+            return command_response_from_call_result(raw, output_model), False
+        except TypeError as error:
+            raise TypeError(str(error)) from None
+    except Exception as error:  # noqa: BLE001 - runtime rule 3.16
+        logger.warning("planning command %r: __result__ failed (%s: %s); writing the answer "
+                       "with one model call", command_name, type(error).__name__, error)
+        return fastworkflow.CommandResponse(response=write_answer(request), output=None), True
 
 
 #: The author-facing API: what a skill file writes (``Phase``, ``concatenated_steps``,

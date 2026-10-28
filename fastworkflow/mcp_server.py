@@ -66,6 +66,13 @@ class FastWorkflowMCPServer:
         active_ctx_name = workflow.current_command_context_name
         active_ctx = active_ctx_name if active_ctx_name in routing.contexts else '*'
         command_names = routing.get_command_names(active_ctx)
+        cmd_directory = CommandDirectory.load(workflow_folderpath)
+        command_names = [
+            qualified_name
+            for qualified_name in command_names
+            if not cmd_directory.map_command_2_metadata.get(qualified_name)
+            or not cmd_directory.map_command_2_metadata[qualified_name].is_planning
+        ]
 
         # Centralized command metadata (docstrings, inputs, plain_utterances)
         cme_path = fastworkflow.get_internal_workflow_path("command_metadata_extraction")

@@ -189,7 +189,7 @@ def test_a_parameter_no_earlier_phase_provides_fails_the_load():
         _phased_command(plan=lambda input: [Phase("report", lambda book: ["say it"])])
     # a fact parameter defaulting to None must name a phase with an output in some plan
     with pytest.raises(SkillFormatError, match="phase 'book': steps_fn takes 'fnd', which names no "
-                                               "earlier phase with an output in any plan"):
+                                               "earlier phase in any plan"):
         _phased_command(plan=lambda input: [Phase("find", lambda: ["find it"], output=Found),
                                             Phase("book", lambda fnd=None: book_steps(fnd))])
     with pytest.raises(SkillFormatError, match="phase 'report': when takes 'bok'"):
@@ -1566,7 +1566,7 @@ def test_a_phase_whose_condition_fails_is_skipped_and_counts_as_not_run(phased):
 
     assert not any("(notes)" in call["user_query"] for call in executor.calls)
     assert "notes" not in SEEN
-    assert SEEN["report"]["notes"] is None          # bound to it: its default
+    assert SEEN["report"]["notes"] is None          # skipped phase: None (step 1a), not a default
     spans = phased.sink.named(tracing.SPAN_SKILL_PHASE)
     assert [s.attributes["phase"] for s in spans] == ["find", "book", "notes", "report"]
     assert spans[2].attributes["skipped"] is True and spans[2].status == tracing.STATUS_OK
@@ -1877,7 +1877,7 @@ def test_an_optional_phase_that_fails_does_not_stop_the_call(phased):
     assert "stopped at its part" not in result.answer
     assert result.answer == "Dune (b1) is on loan: l1, l2."
     assert "7 notes" not in result.answer            # the failed phase's own text is dropped
-    assert SEEN["report"]["notes"] is None          # counts as not run: the default
+    assert SEEN["report"]["notes"] is None          # counts as not run: None (step 1a)
     assert "part 4 of 4 (report)" in phased.answered[-1]
     notes = phased.sink.named(tracing.SPAN_SKILL_PHASE)[2]
     assert notes.status == tracing.STATUS_ERROR and "NoteFacts.total" in notes.attributes["facts_error"]

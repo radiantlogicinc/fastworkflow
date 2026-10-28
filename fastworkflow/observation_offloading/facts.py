@@ -164,8 +164,18 @@ def fact_sources(model: type[BaseModel]) -> list[FactSource]:
     """Every field of *model* that declares a ``"from"``, parsed.
 
     Raises ``FactSourceError`` for a ``"from"`` that is not
-    ``"<command>.<field>"``. Fields without one are not listed.
+    ``"<command>.<field>"``. Fields without one are not listed. A union of
+    command ``Output`` models (typed phase output, design 3.12) yields the
+    sources of each member.
     """
+    from fastworkflow.typed_phase_facts import union_members
+
+    members = union_members(model)
+    if members is not None:
+        sources: list[FactSource] = []
+        for member in members:
+            sources.extend(fact_sources(member))
+        return sources
     sources = []
     for name, info in model.model_fields.items():
         extra = info.json_schema_extra

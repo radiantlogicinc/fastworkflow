@@ -639,6 +639,8 @@ class WorkflowExecutionContext:
         """Append one command execution to the current turn's accumulator."""
         self._turn_outputs.append(command_output)
         fastworkflow.turn.warn_on_unserializable_artifacts(command_output)
+        wf_folder = self._app_workflow.folderpath if self._app_workflow else None
+        fastworkflow.turn.warn_on_missing_declared_output(command_output, wf_folder)
 
     def append_ask_user_entry(self, question: str) -> fastworkflow.CommandOutput:
         """Append an unanswered ask_user exchange entry and return it.
@@ -2133,6 +2135,7 @@ class WorkflowExecutionContext:
             "call_first_step": first_step,
             "first_step": first_step,
             "plan": "",
+            "uses_result": bool(getattr(command, "uses_result", False)),
         }
         return self._run_skill_phases(first_step)
 
@@ -2196,6 +2199,7 @@ class WorkflowExecutionContext:
             command, phases = self._live_skill_phases()
         except Exception as error:  # noqa: BLE001 - the call stops, saying why
             return self._skill_phases_failed(state["phases"][state["index"]], f"{error}")
+        phase_names = frozenset(state["phases"])
         while state["index"] < len(phases):
             phase = phases[state["index"]]
             starting = resume_observation is None and (
@@ -2208,12 +2212,15 @@ class WorkflowExecutionContext:
             if starting and phase.has_condition:
                 try:
                     runs, why = skill_phases.runs_now(
-                        phase, self._phase_outputs(phases, state["index"])), None
+                        phase, self._phase_outputs(phases, state["index"]),
+                        phase_names=phase_names), None
                 except skill_phases.PhaseError as error:
                     runs, why = False, str(error)
                 if not runs:
                     # Skipped: counts as not run (no output, later parameters keep their
                     # defaults). The phase's span says so; no executor runs.
+                    # Phase 3 step 1a: phase-named parameters bind None when skipped, not
+                    # those defaults (``skill_phases.bound_arguments`` with ``phase_names``).
                     outcome, value = self._run_skill_phase(command, phases, first_step,
                                                            skip=True, skip_error=why)
                     if outcome == "failed":
@@ -2270,20 +2277,52 @@ class WorkflowExecutionContext:
                     state["notes"].append(note)
             state.update(items=None, items_total=0, item_index=0, until_met=False)
             state["index"] += 1
-        answers = state["answers"]
-        # The last phase writes the answer, from the facts its steps carry (a fan-out
-        # last phase: its items' answers, in item order).
-        last = [a for a in state.get("phase_answers") or [] if a]
-        answer = "\n\n".join(last) if last else "\n\n".join(a for a in answers if a)
-        if state.get("extra_answer") and last:
-            # The extra command steps' own report (their phase is not the last).
-            answer = f"{answer}\n\n{state['extra_answer']}"
-        if state.get("before_answer") and last:
-            # The report of the extra steps before the skill's own (their phase is first).
-            answer = f"{state['before_answer']}\n\n{answer}"
-        notes = list(state.get("notes") or [])
-        if notes:
-            answer = "\n\n".join(part for part in (answer, " ".join(notes)) if part)
+        uses_result = state.get("uses_result")
+        if uses_result and command.plan_cls is not None:
+            from fastworkflow.skill_commands import input_instance
+
+            typed = skill_phases.typed_phase_outputs(state["outputs"], phases)
+            input_obj = input_instance(command, state["args"])
+            response, _fallback = skill_phases.run_call_result(
+                command.plan_cls, input_obj, typed,
+                phase_names=phase_names,
+                output_model=command.output_model,
+                command_name=command.name,
+                request=state["query"],
+            )
+            answer = response.response or ""
+            notes = list(state.get("notes") or [])
+            if notes:
+                answer = "\n\n".join(part for part in (answer, " ".join(notes)) if part)
+            command_output = fastworkflow.CommandOutput(
+                command_response=response,
+                command_name=command.name,
+                command_parameters=input_obj,
+            )
+            if self._app_workflow:
+                command_output.workflow_name = self._app_workflow.folderpath.split("/")[-1]
+            wf_folder = self._app_workflow.folderpath if self._app_workflow else None
+            fastworkflow.turn.warn_on_missing_declared_output(
+                command_output,
+                wf_folder,
+                output_model=command.output_model,
+            )
+            self.append_turn_output(command_output)
+        else:
+            answers = state["answers"]
+            # The last phase writes the answer, from the facts its steps carry (a fan-out
+            # last phase: its items' answers, in item order).
+            last = [a for a in state.get("phase_answers") or [] if a]
+            answer = "\n\n".join(last) if last else "\n\n".join(a for a in answers if a)
+            if state.get("extra_answer") and last:
+                # The extra command steps' own report (their phase is not the last).
+                answer = f"{answer}\n\n{state['extra_answer']}"
+            if state.get("before_answer") and last:
+                # The report of the extra steps before the skill's own (their phase is first).
+                answer = f"{state['before_answer']}\n\n{answer}"
+            notes = list(state.get("notes") or [])
+            if notes:
+                answer = "\n\n".join(part for part in (answer, " ".join(notes)) if part)
         self._phase_run = self._phase_live = None
         return dspy.Prediction(final_answer=answer, exhausted=False)
 
@@ -2380,6 +2419,8 @@ class WorkflowExecutionContext:
         index = state["index"]
         phase = phases[index]
         last = index == len(phases) - 1
+        uses_result = state.get("uses_result")
+        phase_names = frozenset(state["phases"])
         budget = (getattr(self._workflow_tool_agent, "max_iters", None)
                   if state.get("flat") else None) or skill_phases.phase_step_budget()
         resumed = resume_observation is not None
@@ -2418,8 +2459,9 @@ class WorkflowExecutionContext:
         if not resumed:
             outputs = self._phase_outputs(phases, index)
             try:
-                steps = (skill_phases.phase_steps(phase, outputs, item) if phase.fans_out
-                         else skill_phases.phase_steps(phase, outputs))
+                steps = (skill_phases.phase_steps(phase, outputs, item, phase_names=phase_names)
+                         if phase.fans_out
+                         else skill_phases.phase_steps(phase, outputs, phase_names=phase_names))
             except skill_phases.PhaseError as error:
                 tracing.end_span(self, span, status=tracing.STATUS_ERROR,
                                  attributes={"steps": "", "facts_error": str(error)})
@@ -2435,6 +2477,10 @@ class WorkflowExecutionContext:
         planned = sorted(skill_phases.planned_steps(plan_text, **names))
         item_frame = (state["item_index"], len(state["items"]), item) if phase.fans_out else None
         try:
+            if answer_only and uses_result:
+                tracing.end_span(self, span, attributes={"skipped": True, "answer_only": True,
+                                                         "uses_result": True})
+                return "done", None
             if answer_only:
                 # Steps that name no command: one model call, with no tools, writes the
                 # answer from the facts the steps carry (none when every step is verbatim
@@ -2471,8 +2517,13 @@ class WorkflowExecutionContext:
                     user_query = skill_phases.phase_query(
                         state["query"], plan_text, index=index, count=len(phases),
                         name=phase.name, item=item_frame,
-                        code_steps=code is not None and code.runs_any)
-                    if code is not None and last:
+                        code_steps=code is not None and code.runs_any,
+                        result_driven=uses_result)
+                    if uses_result and last and last_item:
+                        notes = list(state.get("notes") or [])
+                        if notes:
+                            user_query = f"{user_query}\n\n{' '.join(notes)}"
+                    if code is not None and last and not uses_result:
                         # Code may run every step: the agent then answers from their outputs.
                         code.done_inputs = {"user_query": skill_phases.phase_query(
                             state["query"], plan_text, index=index, count=len(phases),
@@ -2517,12 +2568,13 @@ class WorkflowExecutionContext:
             if indices:
                 self._next_step = max(indices) + 1
         answer = skill_phases.clean_answer(getattr(result, "final_answer", "") or "")
-        if phase.name == state.get("extra_phase"):
-            state["extra_answer"] = answer
-        if phase.name == state.get("before_phase"):
-            state["before_answer"] = answer
-        state["answers"].append(answer)
-        state.setdefault("phase_answers", []).append(answer)
+        if not uses_result:
+            if phase.name == state.get("extra_phase"):
+                state["extra_answer"] = answer
+            if phase.name == state.get("before_phase"):
+                state["before_answer"] = answer
+            state["answers"].append(answer)
+            state.setdefault("phase_answers", []).append(answer)
         exhausted = getattr(result, "exhausted", None) is True
         closing = {"steps": plan_text, "steps_used": steps_used, "exhausted": exhausted,
                    "suspended": False, "answer_only": answer_only, **by_code}
@@ -2540,7 +2592,7 @@ class WorkflowExecutionContext:
             if phase.fans_out and phase.bind:
                 # The item is bound to the record that names it, wherever the run ended.
                 issues = skill_phases.item_record_issues(runs, item, others, ended_on, planned)
-                record = skill_phases.item_record(runs, item, ended_on)
+                record = skill_phases.item_record(runs, item, ended_on, planned=planned)
                 if record != ended_on:
                     record_context = None
             elif phase.output is not None and not phase.fans_out:
@@ -2561,7 +2613,9 @@ class WorkflowExecutionContext:
                     plan_text=plan_text, earlier_runs=earlier, ended_on=ended_on, **names)
                 facts = filled.model_dump(mode="json")
         except Exception as error:  # noqa: BLE001 - the phase fails, saying why
-            message = (str(error) if isinstance(error, FactsError) else
+            from pydantic import ValidationError
+
+            message = (str(error) if isinstance(error, (FactsError, ValidationError)) else
                        f"its command runs could not be read ({type(error).__name__}: {error})")
             if phase.fans_out:
                 message = f"item {item}: {message}"
@@ -2575,11 +2629,15 @@ class WorkflowExecutionContext:
                 state["outputs"][phase.name] = facts
         if phase.fans_out and phase.until is not None:
             # The stop condition reads the items' outputs so far (typed) and earlier outputs.
-            so_far = ([phase.output.model_validate(v) for v in state["outputs"][phase.name]]
+            from fastworkflow.typed_phase_facts import validate_phase_output_value
+
+            so_far = ([validate_phase_output_value(phase.output, v)
+                       for v in state["outputs"][phase.name]]
                       if phase.output is not None else [])
             try:
                 state["until_met"] = skill_phases.stops_after(
-                    phase, so_far, self._phase_outputs(phases, index))
+                    phase, so_far, self._phase_outputs(phases, index),
+                    phase_names=phase_names)
             except skill_phases.PhaseError as error:
                 message = f"item {item}: {error}"
                 tracing.end_span(self, span, status=tracing.STATUS_ERROR, attributes={

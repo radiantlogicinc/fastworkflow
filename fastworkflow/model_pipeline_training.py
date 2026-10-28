@@ -1348,7 +1348,16 @@ def trained_command_labels(ctx_name: str, crd: RoutingDefinition) -> set[str]:
     commands. Shared by `train()` and by the escalation tests so the two cannot disagree
     about the label space, which is the disagreement AR5 was.
     """
-    return set(crd.contexts[ctx_name]) | set(crd.command_directory.core_command_names)
+    cmd_dir = crd.command_directory
+    labels: set[str] = set()
+    for name in set(crd.contexts[ctx_name]) | set(cmd_dir.core_command_names):
+        try:
+            if cmd_dir.get_command_metadata(name).is_planning:
+                continue
+        except KeyError:
+            pass
+        labels.add(name)
+    return labels
 
 
 def cache_context_command_utterances(
@@ -1638,7 +1647,7 @@ def preflight_benchmark(
 
     benchmark_cases = heldout_evaluation.load_benchmark_file(benchmark_path)
     seed_utterances_by_command: dict[str, list[str]] = {}
-    for command_key in cmd_dir.get_utterance_keys():
+    for command_key in cmd_dir.get_execution_commands():
         if metadata := cmd_dir.get_utterance_metadata(command_key):
             seed_utterances_by_command[command_key] = list(metadata.plain_utterances)
     # Deliberately NOT caught: an unnoticed leak silently turns the whole evaluation

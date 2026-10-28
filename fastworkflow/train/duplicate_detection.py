@@ -680,7 +680,7 @@ def utterances_from_workflow(workflow_folderpath: str) -> dict[str, list[str]]:
     command_directory = crd.command_directory
 
     utterances_by_command: dict[str, list[str]] = {}
-    for command in sorted(command_directory.get_commands()):
+    for command in sorted(command_directory.get_execution_commands()):
         if command.split("/")[-1] in NON_CAPABILITY_LABELS:
             continue
         utterance_metadata = command_directory.get_utterance_metadata(command)
@@ -697,8 +697,9 @@ def utterances_from_workflow(workflow_folderpath: str) -> dict[str, list[str]]:
 def contexts_from_workflow(workflow_folderpath: str) -> dict[str, list[str]]:
     """Return ``context name -> commands in its label space``."""
     crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
+    execution = set(crd.command_directory.get_execution_commands())
     return {
-        context_name: sorted(commands)
+        context_name: sorted(set(commands) & execution)
         for context_name, commands in crd.contexts.items()
     }
 

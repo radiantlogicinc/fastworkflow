@@ -15,6 +15,8 @@ from pydantic_core import PydanticUndefined
 
 from pydantic import Field as _PydanticField
 
+from fastworkflow.skill_json_schema_internal import omit_internal_json_schema_extra
+
 
 def _build_field(field_type: str, desc: str = ""):
     """Return a pydantic Field carrying DSPy-specific metadata."""
@@ -84,7 +86,9 @@ class TypedPredictorSignature:
                 field.description = inner_field.description
                 field.examples = inner_field.examples
                 field.metadata = inner_field.metadata
-                field.json_schema_extra = inner_field.json_schema_extra
+                field.json_schema_extra = omit_internal_json_schema_extra(
+                    inner_field.json_schema_extra
+                )
             else:
                 field.validate_default = False
 
@@ -109,7 +113,9 @@ class TypedPredictorSignature:
                 field.description = inner_field.description
                 field.examples = inner_field.examples
                 field.metadata = inner_field.metadata
-                field.json_schema_extra = inner_field.json_schema_extra
+                field.json_schema_extra = omit_internal_json_schema_extra(
+                    inner_field.json_schema_extra
+                )
             else:
                 field.validate_default = False
 

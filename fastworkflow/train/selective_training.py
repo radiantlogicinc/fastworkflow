@@ -352,7 +352,7 @@ def compute_command_fingerprints(workflow_folderpath: str) -> dict[str, CommandF
     cmd_dir = crd.command_directory
 
     fingerprints: dict[str, CommandFingerprint] = {}
-    for command_name in cmd_dir.get_commands():
+    for command_name in cmd_dir.get_execution_commands():
         try:
             cmd_dir.ensure_command_hydrated(command_name)
         except Exception as exc:  # noqa: BLE001 - any failure means "unknown"
@@ -1401,7 +1401,7 @@ def _generation_eligible_commands(workflow_folderpath: str) -> set[str]:
     """
     try:
         cmd_dir = CommandDirectory.load(workflow_folderpath)
-        names = set(cmd_dir.get_utterance_keys()) | set(cmd_dir.core_command_names)
+        names = set(cmd_dir.get_execution_commands()) | set(cmd_dir.core_command_names)
     except Exception:
         return set()
 
