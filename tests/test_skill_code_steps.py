@@ -278,18 +278,24 @@ class Workflow:
         self.ctx, self.wf = ctx, wf
         self.sent: list[str] = []
         self.scripted: dict = {}
+        self.toys: dict = {}
 
     def __call__(self, session, command):
         self.sent.append(command)
         name = command.split()[0]
         wf = self.wf
         if name in self.scripted:
+            cls = self.toys.get(name)
+            params = (ParameterExtraction._extract_parameters_from_key_values(command, cls, name)
+                      or ParameterExtraction._extract_parameters_from_bare(command, cls, name)) \
+                if cls is not None else None
             reply = self.scripted[name]
             reply = reply(command) if callable(reply) else reply
             response, output, success = (reply + (True,))[:3] if isinstance(reply, tuple) else (
                 reply, None, True)
             return fastworkflow.CommandOutput(
                 command_name=f"Shelf/{name}",
+                command_parameters=params,
                 command_response=fastworkflow.CommandResponse(
                     response=response, success=success, output=output))
         if name in ("go_up", "reset_context"):
@@ -388,8 +394,8 @@ def todo(initialized_fastworkflow, todo_workflow_path, monkeypatch):
     monkeypatch.setattr(CommandExecutor, "invoke_command",
                         classmethod(lambda cls, session, command: workflow(session, command)))
     state = SimpleNamespace(ctx=ctx, wf=wf, sink=sink, agent=agent, model=model,
-                            workflow=workflow, plan=PLANS["three"], answered=[], toys={},
-                            skill=None)
+                            workflow=workflow, plan=PLANS["three"], answered=[],
+                            toys=workflow.toys, skill=None)
     # Toy commands (scripted in `workflow.scripted`) for what the todo workflow lacks:
     # their parameters classes, and their names among the commands a plan is read with.
     real_classes = skill_phases.parameter_classes

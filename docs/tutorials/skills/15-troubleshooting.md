@@ -251,18 +251,6 @@ _commands/Library/bad_command.py: a step passes title to 'find_book', whose Sign
 **Fix:** use the command's name and its `Input` fields. Text for the agent goes in a note,
 `run("find_book", query=input.title).note("the first page")`, which is never sent.
 
-**A note that holds a condition.** Code never reads a note, so a condition written in one does
-not stop the step:
-
-```python
-def note(self, input):
-    return [run("add_note", text=input.text).note("only when the member asked")]
-```
-
-```text
-_commands/Library/bad_note.py: phase 'note', step 'add_note text=<text> (only when the member asked)': the note holds a condition, but code never reads a note, so add_note would run every time. Decide it in code with if, or write when("the member asked", "add_note text=<text>") for the agent to decide
-```
-
 **A step written by hand.** It loads and runs, and `preview --check` warns without failing:
 
 ```python
@@ -278,6 +266,23 @@ _commands/Library/count_books.py: phase 'find', step 'find_book query=<title>': 
 step parser reads otherwise: written by hand, `add_note text=prefers email (not phone)` adds
 the note "prefers email". The same warning names `full_list`, `when`, `do_not_run` or `pick`
 for their words typed by hand.
+
+**A note that holds a condition.** It loads and runs; `preview --check` warns without
+failing. Code never reads a note, so a condition written in one does not stop the step.
+Bare `only` in a note (`first page only`) is not treated as a condition word; `only if` and
+`only when` are.
+
+```python
+def note(self, input):
+    return [run("add_note", text=input.text).note("only when the member asked")]
+```
+
+```text
+_commands/Library/bad_note.py: phase 'note', step 'add_note text=<text> (only when the member asked)': the note holds a condition, but code never reads a note, so add_note would run every time. Decide it in code with if, or write when("the member asked", "add_note text=<text>") for the agent to decide
+```
+
+**Fix:** `when("the member asked", run("add_note", text=input.text))`, or decide in code
+with `if`.
 
 **`pick` with the wrong parameter.** `pick` takes a `named=` name, and at most one
 `..._uid=` parameter, for a uid your own rule chose:

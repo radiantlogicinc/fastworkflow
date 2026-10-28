@@ -5,7 +5,7 @@ new loans phase in order, and answer extends book_by_title's answer with super()
 """
 from pydantic import BaseModel, Field
 
-from fastworkflow.skill import fact_from, listed
+from fastworkflow.planning import fact_from, full_list, listed
 
 from .book_by_title import PlanGenerator as BookByTitle
 
@@ -30,7 +30,7 @@ class PlanGenerator(BookByTitle):
     def loans(self, book=None) -> Loans:
         if book is None:
             return []
-        return [f"list_loans book_uid={book.uid} (full list)"]
+        return [full_list("list_loans", book_uid=book.uid)]
 
     def answer(self, input, book=None, loans=None):
         steps = super().answer(input, book)

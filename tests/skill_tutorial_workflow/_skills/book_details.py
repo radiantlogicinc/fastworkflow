@@ -5,7 +5,7 @@ answer says what book found, or that no book matches.
 """
 from pydantic import BaseModel, Field
 
-from fastworkflow.skill import fact_from
+from fastworkflow.planning import fact_from, run
 
 
 class Signature:
@@ -22,7 +22,7 @@ class PlanGenerator:
         book_uids: list[str] = fact_from("find_book.book_uids")
 
     def find(self, input) -> Found:
-        return [f"find_book query={input.title}"]
+        return [run("find_book", query=input.title)]
 
     class Book(BaseModel):
         name: str = fact_from("show_book.title")
@@ -32,7 +32,7 @@ class PlanGenerator:
     def book(self, find) -> Book:
         if not find.book_uids:
             return []
-        return [f"show_book book_uid={find.book_uids[0]}"]
+        return [run("show_book", book_uid=find.book_uids[0])]
 
     def answer(self, input, book=None):
         if book is None:

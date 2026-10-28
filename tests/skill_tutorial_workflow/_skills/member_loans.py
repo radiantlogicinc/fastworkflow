@@ -7,7 +7,7 @@ answer names the books.
 import fastworkflow
 from pydantic import BaseModel, Field
 
-from fastworkflow.skill import fact_from, listed, pick
+from fastworkflow.planning import fact_from, listed, pick, run
 
 
 class Signature:
@@ -32,14 +32,8 @@ class PlanGenerator:
         member_uids: list[str] = fact_from("find_member.member_uids")
         names: list[str] = fact_from("find_member.names")
 
-        def only_uid(self, name):
-            """The uid of the one member named *name* (case ignored), else None."""
-            hits = [uid for uid, n in zip(self.member_uids, self.names)
-                    if n.casefold() == name.casefold()]
-            return hits[0] if len(hits) == 1 else None
-
     def find(self, input) -> Found:
-        return [f"find_member query={input.member}"]
+        return [run("find_member", query=input.member)]
 
     class Loans(BaseModel):
         titles: list[str] = fact_from("list_member_loans.titles")
@@ -48,8 +42,7 @@ class PlanGenerator:
     def member(self, input, find) -> Loans:
         if not find.member_uids:
             return []
-        return [pick("list_member_loans", member_uid=find.only_uid(input.member),
-                     named=input.member)]
+        return [pick("list_member_loans", named=input.member)]
 
     def answer(self, input, member=None):
         if member is None:

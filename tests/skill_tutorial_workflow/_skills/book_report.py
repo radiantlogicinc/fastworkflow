@@ -6,7 +6,7 @@ skipped when no book was opened) and answer.
 """
 from pydantic import BaseModel, Field
 
-from fastworkflow.skill import fact_from, listed, pick
+from fastworkflow.planning import fact_from, full_list, listed, pick, run
 
 
 class Signature:
@@ -31,21 +31,15 @@ class PlanGenerator:
         return [self.find, self.book, *loans, self.answer]
 
     def check(self, input):
-        return [f"find_book query={input.title}",
+        return [run("find_book", query=input.title),
                 "say whether the library has the book"]
 
     class Found(BaseModel):
         book_uids: list[str] = fact_from("find_book.book_uids")
         titles: list[str] = fact_from("find_book.titles")
 
-        def only_uid(self, title):
-            """The uid of the one book titled *title* (case ignored), else None."""
-            hits = [uid for uid, t in zip(self.book_uids, self.titles)
-                    if t.casefold() == title.casefold()]
-            return hits[0] if len(hits) == 1 else None
-
     def find(self, input) -> Found:
-        return [f"find_book query={input.title}"]
+        return [run("find_book", query=input.title)]
 
     class Book(BaseModel):
         uid: str = fact_from("show_book.book_uid")
@@ -56,7 +50,7 @@ class PlanGenerator:
     def book(self, input, find) -> Book:
         if not find.book_uids:
             return []
-        return [pick("show_book", book_uid=find.only_uid(input.title), named=input.title)]
+        return [pick("show_book", named=input.title)]
 
     class Loans(BaseModel):
         borrowers: list[str] = fact_from("list_loans.borrowers")
@@ -65,7 +59,7 @@ class PlanGenerator:
     def loans(self, book=None) -> Loans:
         if book is None:
             return []
-        return [f"list_loans book_uid={book.uid} (full list)"]
+        return [full_list("list_loans", book_uid=book.uid)]
 
     def answer(self, input, book=None, loans=None):
         if book is None:

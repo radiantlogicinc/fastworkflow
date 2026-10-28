@@ -663,10 +663,15 @@ def bound_arguments(phase: Phase, outputs: Mapping[str, Any],
 
 
 def _checked_steps(lines: Any, phase: Phase) -> list[str]:
+    from fastworkflow.skill import Step
+
     if isinstance(lines, str) or not isinstance(lines, (list, tuple)) or \
             not all(isinstance(line, str) for line in lines):
         raise PhaseError(f"phase {phase.name!r}: steps_fn must return a list of str")
-    return [line.strip() for line in lines if line.strip()]
+    return [
+        (Step(line.strip(), line.helper) if isinstance(line, Step) else line.strip())
+        for line in lines if line.strip()
+    ]
 
 
 def phase_steps(phase: Phase, outputs: Mapping[str, Any], item: Any = NO_ITEM) -> list[str]:
@@ -739,17 +744,28 @@ def concatenated_steps(phases: Iterable[Phase]) -> list[str]:
                          "its own, not concatenated_steps(...)")
     out: list[str] = []
     earlier: set[str] = set()
+    from fastworkflow.skill import _PHASE_STEPS, note_phase_steps
+
     with building_template():
         for phase in active_phases(list(phases)):
             kwargs = _template_kwargs(phase, earlier)
             if phase.output is not None:
                 earlier.add(phase.name)
+            seen = _PHASE_STEPS.get()
+            before = len(seen) if seen is not None else 0
             if phase.fans_out and phase.over_reference is None:
                 for item in fan_out_items(phase, {})[0]:
-                    out.extend(_checked_steps(phase.steps_fn(**{**kwargs, phase.item: item}),
-                                              phase))
+                    checked = _checked_steps(phase.steps_fn(**{**kwargs, phase.item: item}),
+                                             phase)
+                    if seen is not None and len(seen) == before:
+                        note_phase_steps(phase.name, checked)
+                    before = len(seen) if seen is not None else 0
+                    out.extend(checked)
                 continue
-            out.extend(_checked_steps(phase.steps_fn(**kwargs), phase))
+            checked = _checked_steps(phase.steps_fn(**kwargs), phase)
+            if seen is not None and len(seen) == before:
+                note_phase_steps(phase.name, checked)
+            out.extend(checked)
     return out
 
 
@@ -1575,6 +1591,44 @@ _CODE_NAVIGATION = ("go_up", "reset_context")
 _WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
+def _code_step_arguments(chain: str) -> Optional[dict[str, tuple[str, bool]]]:
+    """``key -> (value, was_quoted)`` of *chain* as ``_code_step`` compares them against the
+    bound model.
+
+    A quoted value (``key="..."`` or ``key='...'``) is taken whole (its outer quote pair
+    removed, internal quotes and placeholders kept); an unquoted value is read as
+    ``finish_check.step_arguments`` reads it, and any placeholder or empty value returns
+    None.
+    """
+    from fastworkflow.observation_offloading import finish_check
+
+    probe = finish_check._QUOTED_VALUE_RE.sub(
+        lambda m: "=" + "x" * (len(m.group(0)) - 1), chain
+    )
+    keys = list(finish_check._ARGUMENT_KEY_RE.finditer(probe))
+    if not keys:
+        return None
+    out: dict[str, tuple[str, bool]] = {}
+    for i, match in enumerate(keys):
+        end = keys[i + 1].start() if i + 1 < len(keys) else len(chain)
+        span = chain[match.end():end].strip()
+        q = re.match(r"""^("[^"\n]*"|'[^'\n]*')\s*$""", span)
+        if q:
+            inner = q.group(1)[1:-1]
+            if not inner:
+                return None
+            out[match.group(1)] = (" ".join(inner.split()).strip(" .,:").casefold(), True)
+            continue
+        if span.startswith(('"', "'")):
+            return None
+        raw = finish_check._value_text(span)
+        value = finish_check.plain_value(raw)
+        if not value or finish_check._PLACEHOLDER_RE.search(raw):
+            return None
+        out[match.group(1)] = (value, False)
+    return out
+
+
 def _code_step(step: Any, parameters_class: Any) -> tuple[Optional[str], str]:
     """``(command, reason)``: see ``code_step``; *reason* says why, in a few words."""
     from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
@@ -1589,7 +1643,7 @@ def _code_step(step: Any, parameters_class: Any) -> tuple[Optional[str], str]:
         return None, "command not first"
     # The chain: the text after the command up to the first "(" or ";" outside a quoted
     # value (finish_check.step_chain). The rest is a note.
-    chain = finish_check.step_chain(clean[first.end():]).strip()
+    chain = finish_check.step_chain(step.text[first.end():]).strip()
     fields = getattr(parameters_class, "model_fields", None) or {}
     if not chain:
         if any(info.is_required() for info in fields.values()):
@@ -1599,15 +1653,30 @@ def _code_step(step: Any, parameters_class: Any) -> tuple[Optional[str], str]:
         return None, "prose after command"
     command = f"{step.command} {chain}"
     bound = ParameterExtraction._extract_parameters_from_key_values(
-        command, parameters_class, step.command)
+        command, parameters_class, step.command, code_written=True)
     if bound is None:
         return None, "not key=value"
-    given = {match.group(1) for match in finish_check._ARGUMENT_KEY_RE.finditer(chain)}
-    if given != set(step.arguments):
+    expected = _code_step_arguments(chain)
+    if expected is None:
+        raw_keys = list(finish_check._ARGUMENT_KEY_RE.finditer(
+            finish_check._QUOTED_VALUE_RE.sub(
+                lambda m: "=" + "x" * (len(m.group(0)) - 1), chain
+            )
+        ))
+        for i, match in enumerate(raw_keys):
+            end = raw_keys[i + 1].start() if i + 1 < len(raw_keys) else len(chain)
+            span = chain[match.end():end].strip()
+            if span.startswith(('"', "'")):
+                return None, "prose in value"
         return None, "placeholder"
-    if any(finish_check.plain_value(getattr(bound, key, None)) != value
-           for key, value in step.arguments.items()):
-        return None, "prose in value"
+    given = set(expected)
+    for key, (value, was_quoted) in expected.items():
+        actual = getattr(bound, key, None)
+        norm_actual = (" ".join(str(actual).split()).strip(" .,:").casefold()
+                       if was_quoted and actual is not None
+                       else finish_check.plain_value(actual))
+        if norm_actual != value:
+            return None, "prose in value"
     if any(info.is_required() and name not in given for name, info in fields.items()):
         return None, "missing required field"
     return command, "key=value"
@@ -1630,12 +1699,154 @@ def code_step(step: Any, parameters_class: Any) -> Optional[str]:
     return _code_step(step, parameters_class)[0]
 
 
+_PICK_NAMED_RE = re.compile(r"\bwith the (?:uid|id) of the (.+?) match\b", re.IGNORECASE)
+
+
+def _uid_parameter(step: Any,
+                   parameters_classes: Sequence[Any]) -> tuple[Optional[str], str, str]:
+    """``(uid_param, rest, reason)`` for a candidate pick *step*, or ``(None, "", reason)``."""
+    from fastworkflow.observation_offloading import finish_check
+
+    clean = step.text.replace("`", " ").replace("*", " ")
+    first = _WORD_RE.search(clean)
+    if step.kind != finish_check.KIND_COMMAND or not parameters_classes \
+            or first is None or first.group(0) != step.command:
+        return None, "", "not a pick"
+    required = {tuple(name for name, info in (getattr(cls, "model_fields", None) or {}).items()
+                      if info.is_required()) for cls in parameters_classes}
+    # The one required field the step leaves to fill: a uid (its other required fields,
+    # if any, it writes concretely).
+    fields = [name for name in required.pop() if name not in step.arguments] \
+        if len(required) == 1 else []
+    if len(fields) != 1 or not _is_uid_field(fields[0]):
+        return None, "", "not one required uid"
+    # Any placeholder but the uid's leaves the step to the agent. The step's other values
+    # stay as written; only the uid's placeholder is filled.
+    chain = finish_check.step_chain(clean[first.end():]).strip()
+    keys = list(finish_check._ARGUMENT_KEY_RE.finditer(chain))
+    named = [match.group(1) for match in keys]
+    if set(named) - {fields[0]} != set(step.arguments) or \
+            (step.arguments and named.count(fields[0]) != 1):
+        return None, "", "not a pick"
+    rest = ""
+    if step.arguments:
+        at = named.index(fields[0])
+        rest = " ".join(part.strip() for part in (
+            chain[:keys[at].start()],
+            chain[keys[at + 1].start():] if at + 1 < len(keys) else "") if part.strip())
+    return fields[0], rest, ""
+
+
+def _producer_sources(parameters_classes: Sequence[Any],
+                      uid_param: str) -> list[tuple[str, str]]:
+    """``(command, list_field)`` producer declarations on *uid_param* across *parameters_classes*."""
+    sources: list[tuple[str, str]] = []
+    for cls in parameters_classes:
+        info = (getattr(cls, "model_fields", None) or {}).get(uid_param)
+        extra = getattr(info, "json_schema_extra", None)
+        if not isinstance(extra, Mapping):
+            continue
+        for key in ("available_from", "from"):
+            raw = extra.get(key) or ()
+            for entry in ([raw] if isinstance(raw, str) else raw):
+                if isinstance(entry, str) and "." in entry:
+                    cmd, _, field = entry.strip().rpartition(".")
+                    if cmd and field and (cmd, field) not in sources:
+                        sources.append((cmd, field))
+    return sources
+
+
+def _fitting_uid_column(uid_param: str, parameters_classes: Sequence[Any],
+                        run_command: str, output: Any) -> Optional[str]:
+    """The one uid list column of *output* that fits *uid_param*, or None."""
+    from fastworkflow.observation_offloading.facts import _command_matches
+
+    if not isinstance(output, Mapping):
+        return None
+    uids = [str(key) for key, value in output.items()
+            if _is_uid_field(str(key)) and isinstance(value, (list, tuple))]
+    if len(uids) != 1:
+        return None
+    col = uids[0]
+    if col == f"{uid_param}s":
+        return col
+    sources = _producer_sources(parameters_classes, uid_param)
+    if any(field == col and (not run_command or _command_matches(cmd, run_command))
+           for cmd, field in sources):
+        return col
+    if "_" not in uid_param and not sources:
+        return col
+    return None
+
+
+def _lookup_values_for_step(step: Any, lookup_or_run: Any) -> list[str]:
+    """The non-paging argument values of *lookup_or_run* that *step* names."""
+    from fastworkflow.observation_offloading import finish_check
+    from fastworkflow.observation_offloading.facts import PAGING_PARAMETERS
+
+    if isinstance(lookup_or_run, Mapping):
+        args = finish_check._given_inputs(lookup_or_run.get("input"))
+    else:
+        args = getattr(lookup_or_run, "arguments", None) or {}
+    match = _PICK_NAMED_RE.search(step.text)
+    if match is not None:
+        wanted = _folded(match.group(1))
+        return [finish_check.plain_value(value) for key, value in args.items()
+                if key not in PAGING_PARAMETERS and wanted and _folded(value) == wanted]
+    text = _folded(step.text)
+    return [finish_check.plain_value(value) for key, value in args.items()
+            if key not in PAGING_PARAMETERS and _folded(value)
+            and re.search(rf"(?<![a-z0-9_]){re.escape(_folded(value))}(?![a-z0-9_])", text)]
+
+
+def pick_listing(
+    step: Any,
+    runs: Sequence[Mapping[str, Any]],
+    parameters_classes: Sequence[Any],
+) -> Optional[tuple[Mapping[str, Any], dict[str, Any]]]:
+    """The latest run in *runs* (the call's own runs, in run order) whose arguments hold
+    the value *step* names and whose ``Output`` has one uid list that fits *step*'s uid
+    parameter, with the pages of that listing joined (``facts._join_list``); None when
+    none fits. Never after a page that shows more pages."""
+    from fastworkflow.observation_offloading.facts import (
+        PAGING_PARAMETERS, _join_list, _page_key, _scalar_of_pages)
+
+    uid_param, _, _ = _uid_parameter(step, parameters_classes)
+    if uid_param is None:
+        return None
+    for run in reversed(runs):
+        if not run.get("success") or not _lookup_values_for_step(step, run):
+            continue
+        if _fitting_uid_column(uid_param, parameters_classes,
+                               str(run.get("command") or ""), run.get("output")) is None:
+            continue
+        if run.get("more_pages"):
+            return None
+        cmd = _plain(run.get("command"))
+        query, _, _ = _page_key(run.get("input"), PAGING_PARAMETERS, None)
+        pages = [r for r in runs if r.get("success") and _plain(r.get("command")) == cmd
+                 and isinstance(r.get("output"), Mapping)
+                 and _page_key(r.get("input"), PAGING_PARAMETERS, None)[0] == query]
+        if len(pages) <= 1:
+            return run, dict(run["output"])
+        joined: dict[str, Any] = {}
+        for key, val in run["output"].items():
+            keyed = [(*_page_key(r.get("input"), PAGING_PARAMETERS, None),
+                      r["output"][key], r["output"])
+                     for r in pages if key in r["output"]]
+            joined[key] = (_join_list(keyed) if isinstance(val, (list, tuple))
+                           else _scalar_of_pages(keyed))
+        return run, joined
+    return None
+
+
 def pick_step(step: Any, lookup: Any, output: Any,
               parameters_classes: Sequence[Any]) -> tuple[Optional[str], str]:
-    """``(command, reason)`` for an open *step* that opens one row of the step before it.
+    """``(command, reason)`` for an open *step* that opens one row of a listing.
 
-    *lookup* is the step code ran just before (a ``finish_check.PlanStep``) and *output*
-    the Output of its one run. Code runs *step* as ``command P=<uid>`` only when:
+    *lookup* is the listing step or run (a ``finish_check.PlanStep`` or a command-run
+    mapping) and *output* its Output (pages joined when read with ``full_list``,
+    ``pick_listing``). Code runs *step* as ``command P=<uid>`` only when:
 
     - *step* is a command step whose first word is its command, and its command has the
       same required fields under every parameters class, of which the step leaves exactly
@@ -1644,7 +1855,8 @@ def pick_step(step: Any, lookup: Any, output: Any,
       its other values, all concrete, are sent as written;
     - *step* names a concrete value of *lookup* (``open_book_by_uid with the uid of the
       Dune match`` after ``find_book query=Dune``), paging values aside;
-    - *output* has exactly one uid list (rows read as ``narrowed_output`` reads them), and
+    - *output* has exactly one uid list that fits P (``<x>_uids`` for ``<x>_uid``, or the
+      list a producer ``from_`` on P names), and
       exactly one row holds the named values whole (``Dune``, not ``Dune 1``; spacing,
       quotes and case ignored), or the output has exactly one row at all.
 
@@ -1654,58 +1866,33 @@ def pick_step(step: Any, lookup: Any, output: Any,
     from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
         ParameterExtraction)
     from fastworkflow.observation_offloading import finish_check
-    from fastworkflow.observation_offloading.facts import PAGING_PARAMETERS
 
-    clean = step.text.replace("`", " ").replace("*", " ")
-    first = _WORD_RE.search(clean)
-    if step.kind != finish_check.KIND_COMMAND or not parameters_classes \
-            or first is None or first.group(0) != step.command:
-        return None, "not a pick"
-    required = {tuple(name for name, info in (getattr(cls, "model_fields", None) or {}).items()
-                      if info.is_required()) for cls in parameters_classes}
-    # The one required field the step leaves to fill: a uid (its other required fields,
-    # if any, it writes concretely).
-    fields = [name for name in required.pop() if name not in step.arguments] \
-        if len(required) == 1 else []
-    if len(fields) != 1 or not _is_uid_field(fields[0]):
-        return None, "not one required uid"
-    # Any placeholder but the uid's leaves the step to the agent. The step's other values
-    # stay as written; only the uid's placeholder is filled.
-    chain = finish_check.step_chain(clean[first.end():]).strip()
-    keys = list(finish_check._ARGUMENT_KEY_RE.finditer(chain))
-    named = [match.group(1) for match in keys]
-    if set(named) - {fields[0]} != set(step.arguments) or \
-            (step.arguments and named.count(fields[0]) != 1):
-        return None, "not a pick"
-    rest = ""
-    if step.arguments:
-        at = named.index(fields[0])
-        rest = " ".join(part.strip() for part in (
-            chain[:keys[at].start()],
-            chain[keys[at + 1].start():] if at + 1 < len(keys) else "") if part.strip())
-    text = _folded(step.text)
-    values = [value for key, value in lookup.arguments.items() if key not in PAGING_PARAMETERS
-              and re.search(rf"(?<![a-z0-9_]){re.escape(_folded(value))}(?![a-z0-9_])", text)]
+    uid_param, rest, reason = _uid_parameter(step, parameters_classes)
+    if uid_param is None:
+        return None, reason
+    values = _lookup_values_for_step(step, lookup)
     if not values:
         return None, "names no lookup value"
-    uids = [key for key, value in (output.items() if isinstance(output, Mapping) else ())
-            if _is_uid_field(str(key)) and isinstance(value, (list, tuple)) and value]
-    if len(uids) != 1:
+    run_command = str(lookup.get("command") if isinstance(lookup, Mapping)
+                      else getattr(lookup, "command", "") or "")
+    uid_col = _fitting_uid_column(uid_param, parameters_classes, run_command, output)
+    if uid_col is None or not output[uid_col]:
         return None, "no uid column"
-    rows = (narrowed_output(output, values) or output)[uids[0]]
+    rows = (narrowed_output(output, values) or output)[uid_col]
     if len(rows) != 1 or rows[0] is None or isinstance(rows[0], (Mapping, list, tuple, bool)):
         return None, "no single match"
-    command = (f"{step.command} {fields[0]}={finish_check.quote_step_value(rows[0])}"
+    command = (f"{step.command} {uid_param}={finish_check.quote_step_value(rows[0])}"
                + (f" {rest}" if rest else ""))
     for cls in parameters_classes:
-        bound = ParameterExtraction._extract_parameters_from_key_values(command, cls, step.command)
-        if bound is None or finish_check.plain_value(getattr(bound, fields[0], None)) != \
+        bound = ParameterExtraction._extract_parameters_from_key_values(
+            command, cls, step.command, code_written=True)
+        if bound is None or finish_check.plain_value(getattr(bound, uid_param, None)) != \
                 finish_check.plain_value(rows[0]):
             return None, "uid does not bind"
         if any(finish_check.plain_value(getattr(bound, key, None)) != value
                for key, value in step.arguments.items()):
             return None, "prose in value"
-    return command, "only row" if len(output[uids[0]]) == 1 else "exact match"
+    return command, "only row" if len(output[uid_col]) == 1 else "exact match"
 
 
 def parameter_classes(routing: Any) -> Callable[[str], list]:
@@ -1860,10 +2047,12 @@ class CodeSteps:
 
     def __init__(self, plan_text: str, *, workflow: Callable[[], Any],
                  runs: Callable[[int], list], commands: Iterable[str],
-                 core_commands: Iterable[str], own_steps: int, answers: bool):
+                 core_commands: Iterable[str], own_steps: int, answers: bool,
+                 call_runs: Optional[Callable[[], list]] = None):
         import fastworkflow
 
         self.workflow, self.runs, self.answers = workflow, runs, answers
+        self.call_runs = call_runs
         routing = fastworkflow.RoutingRegistry.get_definition(workflow().folderpath)
         self._parameters = parameter_classes(routing)
         read = plan_code_steps(plan_text, commands, core_commands, self._parameters)
@@ -1881,6 +2070,7 @@ class CodeSteps:
         self._current: Optional[tuple[Any, list, bool]] = None
         # The last step code ran (step, step index, observation), for a pick (pick_step).
         self._lookup: Optional[tuple[Any, int, Any]] = None
+        self._step_info: dict[int, tuple[int, bool]] = {}
         self._picks: dict[int, str] = {}
         # A full-list step's paging (fix-ajir.36): its command, the page read last, the
         # pages read, and the next page to read (name, value) or None.
@@ -1955,30 +2145,47 @@ class CodeSteps:
             later = _next_page(observation, paging, start)
             if later is not None and pages < CODE_MAX_PAGES:
                 self._next = later
+        if not move:
+            from fastworkflow.observation_offloading.facts import PAGING_PARAMETERS
+
+            more = not paging and _more_pages(observation, PAGING_PARAMETERS)
+            self._step_info[step_index] = (step.number, more)
         self._lookup = None if move else (step, step_index, observation)
 
-    def _pick(self, step: Any) -> Optional[str]:
-        """The command for open *step* when it opens one row of the step code ran just
-        before (``pick_step``), or None. Never after a page that shows more pages."""
-        from fastworkflow.observation_offloading.facts import PAGING_PARAMETERS
-
-        if self._lookup is None:
-            return None
-        lookup, index, observation = self._lookup
-        if _more_pages(observation, PAGING_PARAMETERS):
-            return None
+    def _call_runs(self) -> list[dict[str, Any]]:
+        """The call's own runs so far, in run order, for ``pick_listing``."""
         try:
-            runs = [run for run in self.runs(index) if run.get("success")]
+            raw = (list(self.call_runs()) if self.call_runs is not None
+                   else [r for idx in sorted(self._step_info) for r in self.runs(idx)])
         except Exception:  # noqa: BLE001 - runs that cannot be read give no row to pick
+            return []
+        enriched: list[dict[str, Any]] = []
+        for run in raw:
+            entry = dict(run)
+            idx = entry.get("step_index")
+            if idx in self._step_info:
+                num, more = self._step_info[idx]
+                entry["plan_step_number"] = num
+                if more:
+                    entry["more_pages"] = True
+            enriched.append(entry)
+        return enriched
+
+    def _pick(self, step: Any) -> Optional[str]:
+        """The command for open *step* when it opens one row of a listing this call read
+        (``pick_listing``, ``pick_step``), or None. Never after a page that shows more pages."""
+        classes = self._parameters(step.command)
+        found = pick_listing(step, self._call_runs(), classes)
+        if found is None:
             return None
-        if len(runs) != 1:
-            return None
-        command, reason = pick_step(step, lookup, runs[0].get("output"),
-                                    self._parameters(step.command))
+        chosen, output = found
+        command, reason = pick_step(step, chosen, output, classes)
         if command is not None:
-            self._picks[step.number] = (f" (the only exact match of step {lookup.number})"
+            num = chosen.get("plan_step_number")
+            where = f" of step {num}" if num is not None else ""
+            self._picks[step.number] = (f" (the only exact match{where})"
                                         if reason == "exact match"
-                                        else f" (the only row of step {lookup.number})")
+                                        else f" (the only row{where})")
         return command
 
     def _succeeded(self, step_index: int, observation: Any) -> bool:

@@ -1,6 +1,8 @@
 """find_books: the books whose title or author holds the words the request gives."""
 from pydantic import BaseModel, Field
 
+from fastworkflow.planning import run
+
 
 class Signature:
     """Find the books whose title or author holds the request's words, and name them."""
@@ -14,5 +16,5 @@ class Signature:
 
 class PlanGenerator:
     def search(self, input):
-        return [f"find_book query={input.query}",
+        return [run("find_book", query=input.query),
                 "say which books were found"]

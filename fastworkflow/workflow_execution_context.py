@@ -2130,6 +2130,7 @@ class WorkflowExecutionContext:
             # A fan-out phase's `until` condition was met: its remaining items do not run.
             "until_met": False,
             "notes": [],
+            "call_first_step": first_step,
             "first_step": first_step,
             "plan": "",
         }
@@ -2600,10 +2601,13 @@ class WorkflowExecutionContext:
         if not own_steps or self._app_workflow is None:
             return None
         try:
+            state = getattr(self, "_phase_run", None) or {}
+            call_first = state.get("call_first_step", state.get("first_step", 0))
             return skill_phases.CodeSteps(
                 plan_text, workflow=lambda: self.get_active_workflow() or self._app_workflow,
                 runs=lambda index: self._archived_command_runs(from_step=index,
                                                                 to_step=index),
+                call_runs=lambda: self._archived_command_runs(from_step=call_first),
                 own_steps=own_steps, answers=answers, **names)
         except Exception as error:  # noqa: BLE001 - the agent runs the steps instead
             logger.warning("code-run steps skipped: %s: %s", type(error).__name__, error)

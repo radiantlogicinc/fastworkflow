@@ -433,6 +433,8 @@ class fastWorkflowReAct(Module):
                 step_attributes["repaired_tool_name"] = repaired_tool_name
             if planned is not None:
                 step_attributes["by_code"] = True
+            if isinstance(self.run_state, dict):
+                self.run_state["by_code"] = planned is not None
 
             try:
                 if pred.next_tool_name in self.disabled_tools:

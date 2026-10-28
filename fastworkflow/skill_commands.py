@@ -218,7 +218,22 @@ from pydantic import BaseModel
 
 from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.observation_offloading.facts import FactSourceError, fact_sources
-from fastworkflow.skill_phases import is_from_source
+from fastworkflow.observation_offloading.finish_check import (
+    KIND_COMMAND,
+    KIND_CONDITIONAL,
+    KIND_SKIPPED,
+    _CONDITION_RE,
+    _NEGATION_RE,
+    _outside_quoted_values,
+    parse_plan,
+    step_chain,
+)
+
+#: Like ``finish_check._CONDITION_RE``, but bare ``only`` in a note is not a condition word.
+_NOTE_CONDITION_RE = re.compile(
+    r"\b(?:if|only\s+(?:if|when)|when|whenever|unless|otherwise|optional(?:ly)?|in case|as needed|"
+    r"where (?:needed|applicable)|else)\b", re.IGNORECASE)
+from fastworkflow.skill_phases import FULL_LIST_PHRASES, _PICK_NAMED_RE, is_from_source
 from fastworkflow.utils import python_utils
 from fastworkflow.workflow_inheritance_model import (
     WorkflowInheritanceModel,
@@ -498,6 +513,10 @@ class SkillFile:
     command: SkillCommand | None
     #: ``Signature.plain_utterances``: example requests for the skill (with or without params).
     plain_utterances: tuple[str, ...] = ()
+    #: The single phase method's name for a fixed-steps skill (``command`` None).
+    phase_name: str = ""
+    #: The skill file's path.
+    path: str = ""
 
 
 def _absent_as_none(command: SkillCommand, args: dict) -> dict:
@@ -516,13 +535,17 @@ def input_instance(command: SkillCommand, args: dict):
 
 def _call_steps(fn: Callable, instance, where: str) -> list[str]:
     import inspect
+    from fastworkflow.skill import Step
 
     takes_input = bool(inspect.signature(fn).parameters)
     lines = fn(instance) if takes_input else fn()
     if isinstance(lines, str) or not isinstance(lines, (list, tuple)) or \
             not all(isinstance(line, str) for line in lines):
         raise SkillCallError(f"{where}: steps() must return a list of str")
-    return [line.strip() for line in lines if line.strip()]
+    return [
+        (Step(line.strip(), line.helper) if isinstance(line, Step) else line.strip())
+        for line in lines if line.strip()
+    ]
 
 
 #: A skill's input combinations are each tried up to this many; past it, a bounded set of
@@ -1040,11 +1063,14 @@ def command_from_module(name: str, module, path: str) -> SkillFile:
         steps_fn, plan_fn = skill_api.skill_parts(plan_cls)
     except PhaseError as exc:
         raise SkillFormatError(f"{path}: {exc}") from None
-    return skill_from_parts(name, signature, path, steps_fn=steps_fn, plan_fn=plan_fn)
+    methods = skill_api.phase_methods(plan_cls)
+    phase_name = methods[0][0] if len(methods) == 1 else ""
+    return skill_from_parts(name, signature, path, steps_fn=steps_fn, plan_fn=plan_fn,
+                            phase_name=phase_name)
 
 
 def skill_from_parts(name: str, signature, path: str, *, steps_fn: Callable | None = None,
-                     plan_fn: Callable | None = None) -> SkillFile:
+                     plan_fn: Callable | None = None, phase_name: str = "") -> SkillFile:
     """The skill a ``Signature`` and its behaviour define: a flat ``steps_fn(input)`` or a
     ``plan_fn(input) -> list[Phase]`` (or both: a plan that may return no phases runs flat,
     from ``steps_fn``). ``command_from_module`` builds them from the file's ``PlanGenerator``
@@ -1091,7 +1117,8 @@ def skill_from_parts(name: str, signature, path: str, *, steps_fn: Callable | No
         if not lines:
             raise SkillFormatError(f"{path}: steps() returns no steps")
         return SkillFile(description=description, steps=tuple(lines), command=None,
-                         plain_utterances=tuple(utterances))
+                         plain_utterances=tuple(utterances),
+                         phase_name=phase_name or name, path=path)
 
     command = SkillCommand(name=name, description=description, params=tuple(params.values()), path=path, input_model=input_model, steps_fn=steps_fn, validate=validate,
                            plain_utterances=tuple(utterances), plan_fn=plan_fn)
@@ -1107,7 +1134,8 @@ def skill_from_parts(name: str, signature, path: str, *, steps_fn: Callable | No
     if not template:
         raise SkillFormatError(f"{path}: a skill needs steps")
     return SkillFile(description=description, steps=tuple(template), command=replace(command, template=tuple(template)),
-                     plain_utterances=tuple(utterances))
+                     plain_utterances=tuple(utterances),
+                     phase_name=phase_name, path=path)
 
 
 def _concatenated_steps_fn(plan_fn: Callable) -> Callable:
@@ -1816,8 +1844,8 @@ resolve_field_sources.cache_parameters = _resolve_field_sources_cached.cache_par
 
 #: A step that names a command: its first word, snake_case (``find_item``, ``go_up``) or a
 #: qualified name (``Resource/show_metadata``); then its chain, cut at ``(``, ``;`` or ``,``
-#: (``go_up, then ...`` is prose after the command).
-_STEP_COMMAND = re.compile(r"^([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+|[A-Z]\w*/\w+)\b([^(;,]*)")
+#: outside a quoted value (``go_up, then ...`` is prose after the command).
+_STEP_COMMAND = re.compile(r"^([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+|[A-Z]\w*/\w+)\b")
 _STEP_ARG = re.compile(r"(?<![\w<])([A-Za-z_]\w*)=")
 #: The note a template line ends with when it is written only under a condition
 #: (``find_item query=<q> (only when find.uids)``).
@@ -1833,7 +1861,8 @@ def step_commands(lines, known: set[str]) -> list[tuple[str, tuple[str, ...]]]:
     """``(command, parameters)`` of each command step of *lines*: a step whose first word is
     a snake_case name or one of *known* (``find_item query=Dune (note)`` gives
     ``("find_item", ("query",))``); the parameters are the ``key=`` of its chain, before
-    the first ``(``, ``;`` or ``,``, as code reads them (``skill_phases.code_step``)."""
+    the first ``(``, ``;`` or ``,`` outside a quoted value, as code reads them
+    (``skill_phases.code_step``)."""
     out = []
     for line in lines:
         text = without_condition_note(str(line).strip())
@@ -1842,9 +1871,44 @@ def step_commands(lines, known: set[str]) -> list[tuple[str, tuple[str, ...]]]:
         if match is None and not (first and first.group(0) in known):
             continue
         name = match.group(1) if match else first.group(0)
-        chain = match.group(2) if match else re.split(r"[(;,]", text[len(name):], maxsplit=1)[0]
+        chain = _outside_quoted_values(step_chain(text[len(name):])).split(",", 1)[0]
         out.append((name, tuple(_STEP_ARG.findall(chain))))
     return out
+
+
+def _note_condition_problem(path: str, phase: str, step_text,
+                            known: set[str]) -> str | None:
+    """The preview --check warning for a non-conditional command step whose note holds a
+    condition word (``_NOTE_CONDITION_RE``: runtime words except bare ``only``), or None."""
+    text = str(step_text).strip()
+    parsed = parse_plan(f"1. {text}", known)
+    if not parsed or parsed[0].kind != KIND_COMMAND or not parsed[0].command:
+        return None
+    clean = text.replace("`", " ").replace("*", " ")
+    m_cmd = re.search(rf"\b{re.escape(parsed[0].command)}\b", clean)
+    if m_cmd is None:
+        return None
+    rest = text[m_cmd.end():]
+    chain = step_chain(rest)
+    note = rest[len(chain):].strip()
+    if not note or not _NOTE_CONDITION_RE.search(note):
+        return None
+    body = note[1:-1].strip() if note.startswith("(") and note.endswith(")") else note.lstrip(";").strip()
+    cond_match = _NOTE_CONDITION_RE.search(body)
+    if cond_match is None:
+        return None
+    tail = body[cond_match.start():]
+    cond_text = re.sub(
+        r"^(?:only\s+when|only\s+if|whenever|when|if|unless|in\s+case)\s+",
+        "",
+        tail,
+        flags=re.IGNORECASE,
+    ).strip() or tail.strip()
+    without_note = text[:m_cmd.end() + len(chain)].rstrip()
+    return (f"{path}: phase {phase!r}, step {text!r}: the note holds a condition, "
+            f"but code never reads a note, so {parsed[0].command} would run every time. "
+            f'Decide it in code with if, or write when("{cond_text}", "{without_note}") '
+            "for the agent to decide")
 
 
 def check_step_commands(command: SkillCommand, signatures: dict) -> list[str]:
@@ -1856,21 +1920,20 @@ def check_step_commands(command: SkillCommand, signatures: dict) -> list[str]:
     (``workflow_agent``) and ``fastworkflow skill preview --check`` fails."""
     from fastworkflow import skill as skill_api
 
-    fields: dict[str, list[set]] = {}
-    for key, sig in signatures.items():
-        for name in {key, key.rsplit("/", 1)[-1]}:
-            fields.setdefault(name, []).append(
-                set(getattr(getattr(sig, "Input", None), "model_fields", {}) or {}))
-    known = set(fields)
-    seen: dict[tuple[str, tuple[str, ...]], None] = {}
-    for env in _template_grid(command):
-        with skill_api.picks_noted() as picks:
-            try:
-                lines = _call_steps(command.steps_fn, input_instance(command, env), command.path)
-            except Exception:  # noqa: BLE001 - the template build reports it
-                continue
-        for found in step_commands(lines, known) + [(c, (p,)) for c, p in picks]:
-            seen.setdefault(found)
+    with skill_api.command_inputs_for_steps(signatures, collect=True) as (fields_map, steps):
+        fields = fields_map or {}
+        known = set(fields)
+        seen: dict[tuple[str, tuple[str, ...]], None] = {}
+        for env in _template_grid(command):
+            steps.clear()
+            with skill_api.picks_noted() as picks, skill_api.steps_by_phase_noted() as by_phase:
+                try:
+                    lines = _call_steps(command.steps_fn, input_instance(command, env), command.path)
+                except Exception:  # noqa: BLE001 - the template build reports it
+                    continue
+            for found in (step_commands(lines, known) + list(steps)
+                          + [(c, (p,) if p else ()) for c, p in picks]):
+                seen.setdefault(found)
     problems = []
     for name, args in seen:
         if name not in fields:
@@ -1885,6 +1948,110 @@ def check_step_commands(command: SkillCommand, signatures: dict) -> list[str]:
         if problem not in problems:
             problems.append(problem)
     return problems
+
+
+def _grid_phase_steps(skill: SkillCommand | SkillFile,
+                      signatures: dict) -> tuple[str, list[tuple[str, object]]]:
+    """*skill*'s path and each ``(phase, step line)`` of its placeholder grid (3.13 checks)."""
+    from fastworkflow import skill as skill_api
+
+    with skill_api.command_inputs_for_steps(signatures, collect=True) as (_, steps):
+        seen_steps: list[tuple[str, object]] = []
+        if isinstance(skill, SkillFile) and skill.command is None:
+            path = skill.path
+            for step_line in skill.steps:
+                seen_steps.append((skill.phase_name or "steps", step_line))
+        else:
+            command = skill.command if isinstance(skill, SkillFile) else skill
+            path = command.path
+            for env in _template_grid(command):
+                steps.clear()
+                with skill_api.steps_by_phase_noted() as by_phase:
+                    try:
+                        lines = _call_steps(command.steps_fn, input_instance(command, env), command.path)
+                    except Exception:  # noqa: BLE001 - the template build reports it
+                        continue
+                items = by_phase or [
+                    (command.name,
+                     skill_api.Step(without_condition_note(line), line.helper)
+                     if isinstance(line, skill_api.Step) else without_condition_note(line))
+                    for line in lines
+                ]
+                for phase_name, step_line in items:
+                    key = (phase_name, str(step_line), getattr(step_line, "helper", None))
+                    if key not in {(p, str(s), getattr(s, "helper", None)) for p, s in seen_steps}:
+                        seen_steps.append((phase_name, step_line))
+        return path, seen_steps
+
+
+def _hand_typed_warning(path: str, phase: str, step_line: str,
+                        known: set[str]) -> str | None:
+    """The warning for a step that a helper would write, typed by hand (3.13), or None."""
+    from fastworkflow.skill import Step
+
+    if isinstance(step_line, Step):
+        return None
+    text = str(step_line).strip()
+    if not text:
+        return None
+    parsed = parse_plan(f"1. {text}", known)
+    if not parsed or not parsed[0].command:
+        return None
+    step = parsed[0]
+    clean = text.replace("`", " ").replace("*", " ")
+    m_cmd = re.search(rf"\b{re.escape(step.command)}\b", clean)
+    if m_cmd is None:
+        return None
+    before = clean[:m_cmd.start()]
+    rest = text[m_cmd.end():]
+    chain = step_chain(rest)
+    note = rest[len(chain):]
+    helper: str | None = None
+    if step.kind == KIND_SKIPPED and _NEGATION_RE.search(before):
+        helper = "do_not_run"
+    elif step.kind == KIND_CONDITIONAL and _CONDITION_RE.search(before):
+        helper = "when"
+    elif step.kind == KIND_COMMAND and _PICK_NAMED_RE.search(text):
+        helper = "pick"
+    elif step.kind == KIND_COMMAND and any(p in note.lower() for p in FULL_LIST_PHRASES):
+        helper = "full_list"
+    elif step.kind == KIND_COMMAND:
+        helper = "run"
+    if helper is None:
+        return None
+    return (f"{path}: phase {phase!r}, step {text!r}: written by hand; "
+            f"write {helper}(...) so that code reads it as you mean")
+
+
+def check_hand_typed_steps(skill: SkillCommand | SkillFile, signatures: dict) -> list[str]:
+    """Warnings for steps of *skill*'s placeholder grid that a helper would write,
+    typed by hand (3.13)."""
+    from fastworkflow import skill as skill_api
+
+    with skill_api.command_inputs_for_steps(signatures, collect=True) as (fields_map, _):
+        known = set(fields_map or {})
+    path, seen_steps = _grid_phase_steps(skill, signatures)
+    warnings: list[str] = []
+    for phase_name, step_line in seen_steps:
+        warning = _hand_typed_warning(path, phase_name, step_line, known)
+        if warning is not None and warning not in warnings:
+            warnings.append(warning)
+    return warnings
+
+
+def check_note_condition_steps(skill: SkillCommand | SkillFile, signatures: dict) -> list[str]:
+    """Warnings for non-conditional command steps whose note holds a condition word (3.13)."""
+    from fastworkflow import skill as skill_api
+
+    with skill_api.command_inputs_for_steps(signatures, collect=True) as (fields_map, _):
+        known = set(fields_map or {})
+    path, seen_steps = _grid_phase_steps(skill, signatures)
+    warnings: list[str] = []
+    for phase_name, step_line in seen_steps:
+        warning = _note_condition_problem(path, phase_name, step_line, known)
+        if warning is not None and warning not in warnings:
+            warnings.append(warning)
+    return warnings
 
 
 def phases_for(command: SkillCommand, args: dict) -> list | None:

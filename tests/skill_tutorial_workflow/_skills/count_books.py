@@ -5,7 +5,7 @@ answer from that fact.
 """
 from pydantic import BaseModel, Field
 
-from fastworkflow.skill import fact_from
+from fastworkflow.planning import fact_from, run
 
 
 class Signature:
@@ -23,7 +23,7 @@ class PlanGenerator:
         total: int = fact_from("find_book.total")
 
     def find(self, input) -> Found:
-        return [f"find_book query={input.query}"]
+        return [run("find_book", query=input.query)]
 
     def answer(self, input, find):
         return [f"say that {find.total} books match {input.query}"]

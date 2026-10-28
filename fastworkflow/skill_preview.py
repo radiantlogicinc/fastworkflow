@@ -1636,6 +1636,56 @@ def write_previews(workflow_folder: str, out_dir: Optional[str] = None) -> dict[
     return result
 
 
+def check_hand_typed_warnings(workflow_folder: str) -> list[str]:
+    """The hand-typed step warnings (3.13) across the loaded skills of *workflow_folder*."""
+    from fastworkflow import skill_commands, workflow_agent
+    from fastworkflow.observation_offloading.facts import workflow_signatures
+
+    folder = os.path.abspath(workflow_folder)
+    try:
+        signatures = workflow_signatures(folder)
+    except Exception:  # noqa: BLE001 - without signatures no command is known
+        return []
+    root = os.path.join(folder, "_skills")
+    loaded_names = {name for name, _, _ in workflow_agent.load_skills(folder)}
+    warnings: list[str] = []
+    for name, path in workflow_agent._skill_files(root):
+        if name not in loaded_names:
+            continue
+        skill_file = workflow_agent._load_skill_file(name, path, folder)
+        if skill_file is None:
+            continue
+        for w in skill_commands.check_hand_typed_steps(skill_file, signatures):
+            if w not in warnings:
+                warnings.append(w)
+    return warnings
+
+
+def check_note_condition_warnings(workflow_folder: str) -> list[str]:
+    """The note-condition step warnings (3.13) across loaded skills of *workflow_folder*."""
+    from fastworkflow import skill_commands, workflow_agent
+    from fastworkflow.observation_offloading.facts import workflow_signatures
+
+    folder = os.path.abspath(workflow_folder)
+    try:
+        signatures = workflow_signatures(folder)
+    except Exception:  # noqa: BLE001 - without signatures no command is known
+        return []
+    root = os.path.join(folder, "_skills")
+    loaded_names = {name for name, _, _ in workflow_agent.load_skills(folder)}
+    warnings: list[str] = []
+    for name, path in workflow_agent._skill_files(root):
+        if name not in loaded_names:
+            continue
+        skill_file = workflow_agent._load_skill_file(name, path, folder)
+        if skill_file is None:
+            continue
+        for w in skill_commands.check_note_condition_steps(skill_file, signatures):
+            if w not in warnings:
+                warnings.append(w)
+    return warnings
+
+
 def preview_main(args) -> int:
     """``fastworkflow skill preview``: write the previews, or with ``--check`` compare them."""
     from fastworkflow import skill_commands
@@ -1649,6 +1699,10 @@ def preview_main(args) -> int:
             return 1
         for info in skill_commands.resolve_field_sources(os.path.abspath(args.workflow_folder)).infos:
             print(f"info: {info.format()}")
+        for warning in check_hand_typed_warnings(args.workflow_folder):
+            print(warning)
+        for warning in check_note_condition_warnings(args.workflow_folder):
+            print(warning)
         if problems:
             print(f"skill previews in {out_dir} are not current "
                   f"(run: fastworkflow skill preview {args.workflow_folder}"
@@ -1672,6 +1726,8 @@ __all__ = [
     "PLACEHOLDER_NUMBER",
     "PreviewError",
     "answer_mode",
+    "check_hand_typed_warnings",
+    "check_note_condition_warnings",
     "check_previews",
     "condition_text",
     "default_out_dir",

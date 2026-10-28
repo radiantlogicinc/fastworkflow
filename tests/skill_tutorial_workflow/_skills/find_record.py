@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from fastworkflow.skill import fact_from, listed, phase
+from fastworkflow.planning import fact_from, listed, phase, run
 
 
 class Signature:
@@ -35,7 +35,7 @@ class MemberMatch(BaseModel):
 class PlanGenerator:
     @phase(output=lambda input: BookMatch if input.kind == "book" else MemberMatch)
     def find(self, input):
-        return [f"{FIND[input.kind]} query={input.name}"]
+        return [run(FIND[input.kind], query=input.name)]
 
     def answer(self, input, find):
         return [f"say that {input.name} matches {listed(find.labels, find.total, input.kind)}"]

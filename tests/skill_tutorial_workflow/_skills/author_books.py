@@ -5,7 +5,7 @@ sub-plan; answer names every book with its copies.
 """
 from pydantic import BaseModel, Field
 
-from fastworkflow.skill import count, fact_from, phase
+from fastworkflow.planning import count, fact_from, phase, run
 
 
 class Signature:
@@ -22,7 +22,7 @@ class PlanGenerator:
         book_uids: list[str] = fact_from("find_book.book_uids")
 
     def find(self, input) -> Found:
-        return [f"find_book query={input.author}"]
+        return [run("find_book", query=input.author)]
 
     class Book(BaseModel):
         name: str = fact_from("show_book.title")
@@ -30,7 +30,7 @@ class PlanGenerator:
 
     @phase(over="find.book_uids", max_items=5, noun="books", bind=False)
     def book(self, uid) -> Book:
-        return [f"show_book book_uid={uid}"]
+        return [run("show_book", book_uid=uid)]
 
     def answer(self, input, book=None):
         return [f"say that {self._books_by(input.author, book)}"]

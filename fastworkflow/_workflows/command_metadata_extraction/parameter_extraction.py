@@ -289,7 +289,8 @@ class ParameterExtraction:
                 # does not change; ``deterministic_form`` says which one bound.
                 if new_params is None:
                     new_params = self._extract_parameters_from_key_values(
-                        self.command, command_parameters_class, self.command_name)
+                        self.command, command_parameters_class, self.command_name,
+                        code_written=bool(self.app_workflow.context.get("by_code")))
                     if new_params is not None:
                         diagnostics["deterministic_form"] = "key_value"
                 if new_params is None:
@@ -787,7 +788,7 @@ class ParameterExtraction:
     @staticmethod
     def _extract_parameters_from_key_values(
             command: str, command_parameters_class: type[BaseModel],
-            command_name: str = "") -> Optional[BaseModel]:
+            command_name: str = "", *, code_written: bool = False) -> Optional[BaseModel]:
         """Parameters from a ``name=value`` command (``query=Ann Lee start=2``), or None.
 
         Parsed in code, before the LLM fallback, only when the form is plain:
@@ -804,17 +805,24 @@ class ParameterExtraction:
           validate, and the only errors allowed are fields that were not given
           and are required (validation later reports those as missing).
 
-        Any doubt -- a ``word=`` that is not a field, an XML tag, a placeholder
-        (``<...>``), an example value, an empty value, a validation error --
-        returns None, and extraction goes on as before.
+        With *code_written* (``skill_phases.code_step`` and ``pick_step``), the examples
+        guard is skipped and a quoted value is taken whole, with nothing inside it read
+        as a key, a placeholder or a note (3.13). Without it, any doubt -- a ``word=``
+        that is not a field, an XML tag, a placeholder (``<...>``), an example value, an
+        empty value, a validation error -- returns None, and extraction goes on as before.
         """
         from pydantic import TypeAdapter, ValidationError
+        from fastworkflow.observation_offloading.finish_check import _QUOTED_VALUE_RE
 
         fields = command_parameters_class.model_fields
         text = (command or "").strip()
-        if not fields or "=" not in text or re.search(r"</?[A-Za-z_][\w.-]*>", text):
+        if not fields or "=" not in text:
             return None
-        keys = list(re.finditer(r"(?:^|(?<=\s))([A-Za-z_][A-Za-z0-9_]*)\s*=", text))
+        probe = (_QUOTED_VALUE_RE.sub(lambda m: "=" + "x" * (len(m.group(0)) - 1), text)
+                 if code_written else text)
+        if re.search(r"</?[A-Za-z_][\w.-]*>", probe):
+            return None
+        keys = list(re.finditer(r"(?:^|(?<=\s))([A-Za-z_][A-Za-z0-9_]*)\s*=", probe))
         if not keys:
             return None
         lead = text[:keys[0].start()].strip()
@@ -831,17 +839,34 @@ class ParameterExtraction:
         for i, match in enumerate(keys):
             end = keys[i + 1].start() if i + 1 < len(keys) else len(text)
             value = text[match.end():end].strip()
-            if i + 1 == len(keys):
-                value = re.sub(r"\s*\([^()]*\)\s*\.?$", "", value)
-            value = value.strip().rstrip(",;").strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'`":
-                value = value[1:-1].strip()
-            if not value or re.search(r"[<>{}]|\.\.\.|\u2026", value):
+            was_quoted = False
+            if code_written and len(value) >= 2 and value[0] in "\"'":
+                q = re.match(r"""^("[^"\n]*"|'[^'\n]*')\s*$""", value)
+                if q:
+                    value = q.group(1)[1:-1]
+                    was_quoted = True
+                elif i + 1 == len(keys):
+                    # Try stripping a trailing parenthetical note after the closing quote
+                    trimmed = re.sub(r"\s*\([^()]*\)\s*\.?$", "", value).strip()
+                    q = re.match(r"""^("[^"\n]*"|'[^'\n]*')\s*$""", trimmed)
+                    if q:
+                        value = q.group(1)[1:-1]
+                        was_quoted = True
+            if not was_quoted:
+                if i + 1 == len(keys):
+                    value = re.sub(r"\s*\([^()]*\)\s*\.?$", "", value)
+                value = value.strip().rstrip(",;").strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'`":
+                    value = value[1:-1].strip()
+                if not value or re.search(r"[<>{}]|\.\.\.|\u2026", value):
+                    return None
+                if not code_written:
+                    examples = getattr(fields[match.group(1)], "examples", None)
+                    if examples and value in examples:
+                        return None
+            elif not value:
                 return None
-            examples = getattr(fields[match.group(1)], "examples", None)
-            if examples and value in examples:
-                return None
-            raw[match.group(1)] = None if value in ("None", "null") else value
+            raw[match.group(1)] = None if (not was_quoted and value in ("None", "null")) else value
 
         converted: dict[str, Any] = {}
         for name, value in raw.items():

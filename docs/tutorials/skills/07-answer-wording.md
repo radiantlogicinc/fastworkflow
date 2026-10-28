@@ -40,8 +40,9 @@ do_not_run("add_note")                               # do not run add_note
   command. Add one with `.note(...)`: `run("find_book", query="Dune").note("the first page")`
   writes `find_book query=Dune (the first page)`. Code reads one note only, `(full list)`,
   which `full_list` writes. A note that holds a condition (`(only when the member asked)`)
-  fails the load: code does not read notes, so the step would run every time. Write
-  `when(...)`, or an `if`.
+  loads, but `preview --check` warns: code does not read notes, so the step would run every
+  time. Write `when(...)`, or an `if`. Bare `only` in a note (`first page only`) is not a
+  condition word for this warning.
 - **Typed by hand, the same words still run**, as workflows written before the helpers have
   them, but `fastworkflow command preview --check` warns about each and names the helper to
   write instead. A misspelt helper fails where you can see it; a misspelt phrase did not.

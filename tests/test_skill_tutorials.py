@@ -13,8 +13,8 @@ Every tutorial page marks what it shows with an HTML comment right above a fence
   tutorial workflow, gives that load error, ``skill preview --check`` problem, or template line.
 
 ``dry_run`` runs a skill call offline, with no model: each phase's steps as the runtime
-writes them, the leading steps code runs (``skill_phases.plan_code_steps`` and ``pick_step``,
-the rules ``CodeSteps`` uses) run against the tutorial workflow's commands, each phase's
+writes them, the leading steps code runs (``skill_phases.plan_code_steps``, ``pick_listing``
+and ``pick_step``, the rules ``CodeSteps`` uses) run against the tutorial workflow's commands, each phase's
 facts filled from those runs (``skill_phases.fill_output``), and the answer code writes.
 Where code stops (an open step) the agent would take over; the dry run says so and stops
 that phase. Try it: ``python -m tests.test_skill_tutorials book_by_title '{"title": "Dune"}'``.
@@ -76,16 +76,19 @@ def dry_run(skill: str, args: dict, folder: str = WORKFLOW) -> str:
     if len(phases) == 1 and phases[0].name == skill:
         lines.append("Runs flat: one plan, one executor run.")
     outputs: dict = {}
+    call_runs: list[dict] = []
 
     def run_steps(steps: list[str], last: bool):
         text = skill_commands.number(steps)
         lines.extend(f"  {line}" for line in text.splitlines())
-        runs, lookup, open_step = [], None, False
+        runs, open_step = [], False
         for step, run, _ in sp.plan_code_steps(text, commands, CORE, parameters):
             if run == "":
                 continue
-            if run is None and lookup is not None:
-                run, _ = sp.pick_step(step, lookup[0], lookup[1], parameters(step.command))
+            if run is None:
+                found = sp.pick_listing(step, call_runs, parameters(step.command))
+                if found is not None:
+                    run, _ = sp.pick_step(step, *found, parameters(step.command))
             if run is None:
                 lines.append(f"  step {step.number} is open: the agent runs it and the rest "
                              "(the dry run stops here)")
@@ -93,9 +96,10 @@ def dry_run(skill: str, args: dict, folder: str = WORKFLOW) -> str:
                 break
             given, output = _run(routing, run)
             lines.append(f"  code runs: {run}")
-            runs.append({"command": run.split()[0], "input": given, "output": output.model_dump(),
-                         "success": True, "context_clause": ""})
-            lookup = (step, output.model_dump())
+            entry = {"command": run.split()[0], "input": given, "output": output.model_dump(),
+                     "success": True, "context_clause": ""}
+            runs.append(entry)
+            call_runs.append(entry)
         if sp.is_answer_only(text, commands, CORE):
             if sp.answer_by_code(text):
                 lines.append("  answer written by code:")
@@ -282,7 +286,10 @@ def test_pick_opens_the_exact_title_and_else_leaves_the_row_to_code_or_the_agent
     # no title is exactly "Dune Messia": the step is written in pick words, for the agent
     near = dry_run("book_by_title", {"title": "Dune Messia"})
     assert "1. show_book with the uid of the Dune Messia match" in near
-    assert near.endswith("step 1 is open: the agent runs it and the rest (the dry run stops here)")
+    assert "code runs: show_book book_uid=b2" in near
+    two = dry_run("book_by_title", {"title": "Dun"})
+    assert "1. show_book with the uid of the Dun match" in two
+    assert two.endswith("step 1 is open: the agent runs it and the rest (the dry run stops here)")
 
 
 def test_call_shapes_the_plan_and_a_brief_call_runs_flat():

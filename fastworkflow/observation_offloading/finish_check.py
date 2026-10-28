@@ -254,13 +254,15 @@ def _outside_quoted_values(text: str) -> str:
 def quote_step_value(value: Any) -> str:
     """*value* as a builder writes it into a step.
 
-    Quoted when it contains ``(`` or ``;``, which end a step's chain
-    (``step_chain``) and which a trailing ``(note)`` or ``;`` loses in the
-    key=value parser. A value that holds both ``"`` and ``'`` cannot be quoted
-    and is written as it is. Any other value is written unchanged.
+    Quoted when it contains ``(``, ``;``, ``=``, ``, ``, a bracket (``[ ] { } < >``),
+    a quote, or ``...``, which end a step's chain (``step_chain``) or are read by the
+    key=value parser. A value that only holds spaces is not quoted. A value that holds
+    both ``"`` and ``'`` cannot be quoted and is written as it is. Any other value is
+    written unchanged.
     """
     text = str(value)
-    if "(" not in text and ";" not in text:
+    if "(" not in text and ";" not in text and "=" not in text and ", " not in text \
+            and not any(c in text for c in "[]{}<>\"'") and "..." not in text and "\u2026" not in text:
         return text
     quote = '"' if '"' not in text else "'"
     if quote in text:

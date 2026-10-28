@@ -5,7 +5,7 @@ is skipped when nothing matched; answer says what book found, or that no book ma
 """
 from pydantic import BaseModel, Field
 
-from fastworkflow.skill import fact_from, pick
+from fastworkflow.planning import fact_from, pick, run
 
 
 class Signature:
@@ -22,14 +22,8 @@ class PlanGenerator:
         book_uids: list[str] = fact_from("find_book.book_uids")
         titles: list[str] = fact_from("find_book.titles")
 
-        def only_uid(self, title):
-            """The uid of the one book titled *title* (case ignored), else None."""
-            hits = [uid for uid, t in zip(self.book_uids, self.titles)
-                    if t.casefold() == title.casefold()]
-            return hits[0] if len(hits) == 1 else None
-
     def find(self, input) -> Found:
-        return [f"find_book query={input.title}"]
+        return [run("find_book", query=input.title)]
 
     class Book(BaseModel):
         uid: str = fact_from("show_book.book_uid")
@@ -40,7 +34,7 @@ class PlanGenerator:
     def book(self, input, find) -> Book:
         if not find.book_uids:
             return []
-        return [pick("show_book", book_uid=find.only_uid(input.title), named=input.title)]
+        return [pick("show_book", named=input.title)]
 
     def answer(self, input, book=None):
         if book is None:

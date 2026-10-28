@@ -858,27 +858,38 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         # Check if this command originated from user input (iteration_counter == 0)
         # Set flag in workflow context so validate_extracted_parameters can access it
         is_user_command = chat_session_obj.workflow_tool_agent.iteration_counter <= 0 
+        run_state = getattr(chat_session_obj.workflow_tool_agent, "run_state", None)
+        by_code = isinstance(run_state, dict) and bool(run_state.get("by_code"))
         workflow = chat_session_obj.get_active_workflow()
         if workflow:
             workflow.context["is_user_command"] = is_user_command
-        
-        # Retry logic for workflow execution
-        max_retries = 2
-        for attempt in range(max_retries):
-            try:
-                return _execute_workflow_query(command, chat_session_obj=chat_session_obj)
-            except AlreadyInContextError as e:
-                return reenter_from_parent(command, e)
-            except CommandNotFoundError as e:
-                # Deterministic and recoverable: the message says where to go.
-                return str(e)
-            except Exception as e:
-                if attempt == max_retries - 1:  # Last attempt
-                    message = f"Terminate immediately! Exception processing {command}: {str(e)}"
-                    logger.critical(message)                    
-                    return message
-                # Continue to next attempt
-                logger.warning(f"Attempt {attempt + 1} failed for command '{command}': {str(e)}")
+            workflow.context["by_code"] = by_code
+
+        try:
+            # Retry logic for workflow execution
+            max_retries = 2
+            for attempt in range(max_retries):
+                try:
+                    return _execute_workflow_query(command, chat_session_obj=chat_session_obj)
+                except AlreadyInContextError as e:
+                    return reenter_from_parent(command, e)
+                except CommandNotFoundError as e:
+                    # Deterministic and recoverable: the message says where to go.
+                    return str(e)
+                except Exception as e:
+                    if attempt == max_retries - 1:  # Last attempt
+                        message = f"Terminate immediately! Exception processing {command}: {str(e)}"
+                        logger.critical(message)                    
+                        return message
+                    # Continue to next attempt
+                    logger.warning(f"Attempt {attempt + 1} failed for command '{command}': {str(e)}")
+        finally:
+            active = chat_session_obj.get_active_workflow()
+            for wf in (workflow, active):
+                if wf is not None and "by_code" in wf.context:
+                    del wf.context["by_code"]
+            if isinstance(run_state, dict):
+                run_state.pop("by_code", None)
 
     def reenter_from_parent(command: str, refusal: AlreadyInContextError) -> str:
         """Open another instance of the context the agent is in: go_up, then the command.

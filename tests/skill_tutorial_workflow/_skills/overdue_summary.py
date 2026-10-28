@@ -3,6 +3,7 @@
 Two phases and no inputs: branches lists the branches; overdue counts the overdue loans
 across the library and answers.
 """
+from fastworkflow.planning import run
 
 
 class Signature:
@@ -13,8 +14,8 @@ class Signature:
 
 class PlanGenerator:
     def branches(self):
-        return ["list_branches"]
+        return [run("list_branches")]
 
     def overdue(self):
-        return ["count_overdue",
+        return [run("count_overdue"),
                 "say how many loans are overdue across the library"]

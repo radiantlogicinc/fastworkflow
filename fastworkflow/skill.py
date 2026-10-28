@@ -1,4 +1,4 @@
-"""What a skill file writes: ``class PlanGenerator``, ``@phase``, ``pick`` and three filters.
+"""What a skill file writes: ``class PlanGenerator``, ``@phase``, ``pick``, the step helpers and three filters.
 
 A skill file (``_skills/<name>.py``) reads like a command file. ``class Signature`` declares
 the skill exactly as a command's does (docstring, ``Input``, ``plain_utterances``,
@@ -6,13 +6,13 @@ the skill exactly as a command's does (docstring, ``Input``, ``plain_utterances`
 ``ResponseGenerator`` because it generates a response, a skill has a ``PlanGenerator``
 because it generates a plan::
 
-    from fastworkflow.skill import fact_from, pick
+    from fastworkflow.skill import fact_from, full_list, pick, run
 
 
     class PlanGenerator:
         def find(self, input) -> Match:                  # a phase; it fills a Match
-            return ["open_catalog",
-                    f"find_item query={input.name}"]
+            return [run("open_catalog"),
+                    run("find_item", query=input.name)]
 
         class Item(BaseModel):                           # facts: like a command's Output
             uid: str = fact_from("open_item_by_uid.item_uid")
@@ -23,7 +23,7 @@ because it generates a plan::
                 return []                                # no steps: skipped when reached
             return [pick("open_item_by_uid", item_uid=find.only_uid(input.name),
                          named=input.name),
-                    "list_parts (full list)"]
+                    full_list("list_parts")]
 
         def answer(self, input, item=None):              # None: the item phase was skipped
             if item is None:
@@ -84,7 +84,19 @@ from fastworkflow.skill_phases import (Phase, PhaseError, Placeholder, _template
                                        concatenated_steps, fact_from, from_, is_building_template,
                                        is_placeholder, tests_noted)
 
-__all__ = ["count", "fact_from", "from_", "listed", "num", "phase", "pick"]
+__all__ = [
+    "count",
+    "do_not_run",
+    "fact_from",
+    "from_",
+    "full_list",
+    "listed",
+    "num",
+    "phase",
+    "pick",
+    "run",
+    "when",
+]
 
 
 class StepFormError(ValueError):
@@ -96,7 +108,110 @@ class TemplateError(PhaseError):
     a load error (``skill_commands.placeholder_template``)."""
 
 
-# --------------------------------------------------------------------------- pick
+# --------------------------------------------------------------------------- steps
+
+class Step(str):
+    """A step written by a helper: a ``str`` carrying which helper wrote it (``.helper``)."""
+
+    __slots__ = ("helper",)
+
+    def __new__(cls, text: str, helper: str) -> Step:
+        obj = super().__new__(cls, text)
+        obj.helper = helper
+        return obj
+
+    def note(self, text: str) -> Step:
+        """This step with `` (text)`` appended, still marked as the helper's."""
+        return Step(f"{self} ({text})", self.helper)
+
+
+#: ``(command name -> [set of Input field names, ...], collected (command, keys) list or None)``.
+_COMMAND_INPUTS: contextvars.ContextVar[
+    Optional[tuple[dict[str, list[set[str]]], Optional[list[tuple[str, tuple[str, ...]]]]]]
+] = contextvars.ContextVar("fw_skill_command_inputs", default=None)
+
+
+@contextlib.contextmanager
+def command_inputs_for_steps(signatures: Optional[dict[str, Any]], collect: bool = False):
+    """Set the workflow's command ``Signature.Input`` field sets for ``run`` and ``full_list``.
+
+    With *collect* (``skill_commands.check_step_commands``), each call's ``(command, keys)`` is
+    appended to the yielded list instead of raising ``StepFormError`` on the first bad keyword.
+    """
+    fields: Optional[dict[str, list[set[str]]]] = None
+    steps: Optional[list[tuple[str, tuple[str, ...]]]] = [] if collect else None
+    if signatures is not None:
+        fields = {}
+        for key, sig in signatures.items():
+            names = set(getattr(getattr(sig, "Input", None), "model_fields", {}) or {})
+            for name in {key, key.rsplit("/", 1)[-1]}:
+                fields.setdefault(name, []).append(names)
+    token = _COMMAND_INPUTS.set((fields, steps) if fields is not None else None)
+    try:
+        yield (fields, steps) if collect else fields
+    finally:
+        _COMMAND_INPUTS.reset(token)
+
+
+def _check_step_keywords(command: str, values: dict[str, Any]) -> None:
+    state = _COMMAND_INPUTS.get()
+    if state is None:
+        return
+    fields, steps = state
+    if steps is not None:
+        steps.append((command, tuple(values)))
+        return
+    if not values or command not in fields:
+        return
+    unknown = [k for k in values if not any(k in f for f in fields[command])]
+    if unknown:
+        raise StepFormError(
+            f"a step passes {', '.join(unknown)} to {command!r}, whose "
+            "Signature.Input has no such field"
+        )
+
+
+def _is_step_placeholder(value: Any) -> bool:
+    if is_placeholder(value):
+        return True
+    return isinstance(value, str) and len(value) >= 3 and value.startswith("<") and value.endswith(">") \
+        and "<" not in value[1:-1] and ">" not in value[1:-1]
+
+
+def _step_value(value: Any) -> str:
+    if _is_step_placeholder(value):
+        return str(value)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return quote_step_value(value)
+
+
+def _command_step(command: str, values: dict[str, Any]) -> str:
+    _check_step_keywords(command, values)
+    parts = [f"{k}={_step_value(v)}" for k, v in values.items() if v is not None]
+    return f"{command} {' '.join(parts)}" if parts else str(command)
+
+
+def run(command: str, **values: Any) -> Step:
+    """A command step code runs when every required value is given: ``<command> <k=v ...>``."""
+    return Step(_command_step(command, values), "run")
+
+
+def full_list(command: str, **values: Any) -> Step:
+    """A paged command step code reads through every page (up to ``CODE_MAX_PAGES``):
+    ``<command> <k=v ...> (full list)``."""
+    return Step(f"{_command_step(command, values)} (full list)", "full_list")
+
+
+def when(condition: str, step: str) -> Step:
+    """A conditional step the agent decides whether to run: ``only when <condition>, <step>``."""
+    return Step(f"only when {condition}, {step}", "when")
+
+
+def do_not_run(command: str) -> Step:
+    """A negated step code passes over, and a guard: ``do not run <command>``."""
+    return Step(f"do not run {command}", "do_not_run")
+
 
 #: ``(command, uid parameter)`` of each ``pick`` while ``picks_noted`` is open.
 _PICKS: contextvars.ContextVar[Optional[list]] = contextvars.ContextVar("fw_skill_picks",
@@ -115,23 +230,59 @@ def picks_noted():
         _PICKS.reset(token)
 
 
-def pick(command: str, *, named: str, **uid: Any) -> str:
-    """Open one row the previous step listed: ``command <uid_param>=<uid>`` when the facts
-    give the uid; else (None at run time, unknown in the template) ``command with the uid of
-    the NAMED match``, which code runs on the one row named exactly. A uid containing ``(``
-    or ``;`` is quoted (``quote_step_value``), so the chain keeps it."""
-    if len(uid) != 1 or not next(iter(uid)).endswith("_uid"):
-        raise StepFormError(f"pick({command!r}): give exactly one uid parameter "
+def pick(command: str, *, named: Any = "", **uid: Any) -> Step:
+    """Open one row a listing read: ``command <uid_param>=<uid>`` when a concrete uid is
+    given; else ``command with the uid of the NAMED match``, which code runs on the one
+    matching row of the listing this call read. Only a missing uid, ``None``, or a
+    ``Placeholder`` fact uses pick words; plain ``'<...>'`` strings (such as an indexed
+    template value from ``only_uid``) are written as ``uid=<value>``. A uid containing
+    ``(`` or ``;`` is quoted (``quote_step_value``), so the chain keeps it."""
+    if len(uid) > 1 or any(not k.endswith("_uid") for k in uid):
+        raise StepFormError(f"pick({command!r}): give at most one uid parameter "
                             f"(..._uid=...), got {sorted(uid)}")
-    (param, value), = uid.items()
-    if not str(named).strip():
+    if not str(named if named is not None else "").strip():
         raise StepFormError(f"pick({command!r}): named= is the name the row is picked by")
+    param, value = next(iter(uid.items())) if uid else ("", None)
     picks = _PICKS.get()
     if picks is not None:
+        if not param:
+            state = _COMMAND_INPUTS.get()
+            if state is not None and command in state[0]:
+                uid_fields = {f for s in state[0][command] for f in s if f.endswith("_uid")}
+                if len(uid_fields) == 1:
+                    (param,) = uid_fields
         picks.append((command, param))
-    if value is None or is_placeholder(value):
-        return f"{command} with the uid of the {named} match"
-    return f"{command} {param}={quote_step_value(value)}"
+    if not uid or value is None or is_placeholder(value):
+        return Step(f"{command} with the uid of the {named} match", "pick")
+    return Step(f"{command} {param}={_step_value(value)}", "pick")
+
+
+#: ``(phase_name, step_text)`` of each step written while ``steps_by_phase_noted`` is open.
+_PHASE_STEPS: contextvars.ContextVar[Optional[list[tuple[str, str]]]] = contextvars.ContextVar(
+    "fw_skill_phase_steps", default=None)
+
+
+@contextlib.contextmanager
+def steps_by_phase_noted():
+    """A list that gets ``(phase_name, step_text)`` of each step a phase returns
+    (before the template's ``(only when ...)`` suffix is appended)."""
+    seen: list[tuple[str, str]] = []
+    token = _PHASE_STEPS.set(seen)
+    try:
+        yield seen
+    finally:
+        _PHASE_STEPS.reset(token)
+
+
+def note_phase_steps(phase_name: str, lines: Any) -> None:
+    """Record *lines* under *phase_name* when ``steps_by_phase_noted`` is open."""
+    seen = _PHASE_STEPS.get()
+    if seen is not None and isinstance(lines, (list, tuple)):
+        for line in lines:
+            text = str(line).strip()
+            if text:
+                kept = Step(text, line.helper) if isinstance(line, Step) else text
+                seen.append((phase_name, kept))
 
 
 # --------------------------------------------------------------------------- filters
@@ -368,6 +519,7 @@ def _phase_functions(plan: Any, fn: Callable, input: Any) -> tuple[Callable, Cal
             if _NONE.search(str(line)):
                 raise TemplateError(f"phase {name!r} writes None into a step ({str(line)!r}): "
                                     "a value it formats is None for some input")
+        note_phase_steps(name, lines)
         when = f" (only when {' and '.join(tests)})" if tests else ""
         return [f"{line}{when}" for line in lines if str(line).strip()]
 
@@ -378,8 +530,11 @@ def _phase_functions(plan: Any, fn: Callable, input: Any) -> tuple[Callable, Cal
             result = kept.pop()[1]
             if isinstance(result, Exception):
                 raise result
+            note_phase_steps(name, result)
             return result
-        return call(plan, facts)
+        lines = call(plan, facts)
+        note_phase_steps(name, lines)
+        return lines
 
     def writes_steps(**facts):
         try:
