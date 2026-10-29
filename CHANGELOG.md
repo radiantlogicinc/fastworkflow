@@ -427,6 +427,32 @@
   the expanded steps. An unknown skill or a cycle raises `ValueError` naming
   the include chain. A skill without `@` lines loads as before.
 
+- **Planning commands can run other planning commands** (fix-3rsq.5,
+  `fastworkflow/workflow_execution_context.py`). A planning command's step may
+  name another one. `run_planning_command` runs it as a nested frame, and the
+  calling step gets the child's whole run back as one run. A command already
+  running is refused: "<name> is already running; call its steps directly."
+  A call cycle is a load error (see below).
+  - Nested calls share one turn-wide step budget, `FW_TURN_MAX_STEPS` (default
+    400), which is now enforced. Once it is spent, a nested call returns "The
+    step budget for nested commands is spent; continue with the remaining steps
+    directly."
+  - `ask_user` inside a nested call suspends the turn with its stack intact.
+    The user's reply resumes it there, also after the session is restored.
+
+- **Planning commands are in the executor's and planner's catalogs**
+  (fix-3rsq.5, `fastworkflow/workflow_agent.py`). They are listed by the same
+  context rule as execution commands, and an agent step that calls one from
+  another context is refused, as it is for an execution command. MCP
+  `list_tools`, the capability answer and training still leave them out.
+
+- **Load errors for call cycles and for `from_` on a callee** (fix-3rsq.5,
+  `fastworkflow/skill_commands.py`). The loader builds a graph of the planning
+  commands each one's steps call. A call cycle is a load error for every
+  command on it. A producer `from_` on a planning command's Input that names
+  one of its own callees is also a load error; the message says to write
+  `Field(description=...)` instead.
+
 ### Removed
 
 - **Skill `repeat()` / `REPEAT_LIMIT` and `@<skill>` include lines**
@@ -580,6 +606,23 @@
   whole, so the cap is a real bound. No new settings. A malformed `FW_OBS_*`
   integer now logs a warning, and so does an unsealed experiment holding the
   file over the cap.
+
+- **`fastworkflow skill preview` is now `fastworkflow command preview`**
+  (fix-3rsq.5, `fastworkflow/cli.py`). There is no `skill preview` alias. Every
+  app workflow's pinned previews go stale, so regenerate them with
+  `fastworkflow command preview <workflow_folder> --out <dir>`.
+
+- **Planning command previews show calls and depth** (fix-3rsq.5,
+  `fastworkflow/skill_preview.py`). A preview adds a `Calls:` line (the commands
+  its steps call, or `none`) and a `Depth:` line: the longest chain of
+  planning commands from it, a lower bound while open steps name no command.
+  The `Kind:` line is gone.
+
+- **`process_action` refuses while a question waits for the user** (fix-3rsq.5,
+  `fastworkflow/workflow_execution_context.py`). A direct action sent while
+  `ask_user` waits for the reply returns "A question is waiting for the user's
+  answer; reply to it before running an action." The suspended turn is left as
+  it was; the user's reply resumes it.
 
 ### Fixed
 
