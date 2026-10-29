@@ -329,9 +329,20 @@ _commands/Library/bad_order.py: PlanGenerator adds the phase(s) overdue to those
 
 ## Calls between planning commands
 
-**A cycle.** If `a`'s steps name `b` and `b`'s name `a`, both fail the load, and the preview
-names the cycle. A step written in open words can still name a running command at run
-time; it is refused with `a is already running; call its steps directly.`
+**A cycle.** If `a`'s steps name `b` and `b`'s name `a`, each command on the cycle gets a load
+error that names the path. The commands still load, and `fastworkflow command preview --check`
+fails with the same lines. For `Library/book_loans` and `Library/book_by_title` calling each
+other, the load reports:
+
+```text
+_commands/Library/book_by_title.py: a planning command cannot call itself, even through others: Library/book_by_title -> Library/book_loans -> Library/book_by_title
+_commands/Library/book_loans.py: a planning command cannot call itself, even through others: Library/book_loans -> Library/book_by_title -> Library/book_loans
+```
+
+A command whose steps name itself directly gets the one-step form,
+`a planning command cannot call itself: Library/count_books -> Library/count_books`. A step
+written in open words can still name a running command at run time; it is refused with
+`Library/a is already running; call its steps directly.`
 
 **The step budget.** `The step budget for nested commands is spent; continue with the
 remaining steps directly.` means the nested calls of one turn used `FW_TURN_MAX_STEPS`

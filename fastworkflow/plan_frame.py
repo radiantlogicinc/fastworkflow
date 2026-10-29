@@ -3,8 +3,8 @@ Per-call planning state for a turn: the PlanFrame stack (design 3.5).
 
 A PlanFrame holds the sub-task state of one planning-command call: one frame per
 planning-command call, with the turn frame at index 0 of
-WorkflowExecutionContext._frames. Nothing pushes a nested frame yet, so for now
-the stack is always the turn frame alone.
+WorkflowExecutionContext._frames. run_planning_command pushes a frame for each
+call and pops it when the call ends.
 
 to_state / from_state carry a frame across a suspension. The turn frame is
 written to the existing top-level keys of the session blob instead, so its
@@ -24,6 +24,9 @@ from fastworkflow.utils.logging import logger
 TURN_MAX_STEPS_ENV = "FW_TURN_MAX_STEPS"
 #: The default turn-wide step budget.
 DEFAULT_TURN_MAX_STEPS = 400
+#: The raw values already warned about. turn_max_steps() runs once per nested
+#: command, so a bad setting would otherwise log on every one of them.
+_warned_turn_max_steps: set[str] = set()
 
 
 def turn_max_steps() -> int:
@@ -31,7 +34,7 @@ def turn_max_steps() -> int:
 
     Read through ``fastworkflow.get_env_var``, which takes the workflow's env file
     before the process environment. A value that is not a positive integer logs a
-    warning and the default applies.
+    warning (once per distinct raw value) and the default applies.
     """
     raw = str(fastworkflow.get_env_var(TURN_MAX_STEPS_ENV, str, default=""))
     if raw == "":
@@ -42,10 +45,12 @@ def turn_max_steps() -> int:
         value = 0
     if value > 0:
         return value
-    logger.warning(
-        f"{TURN_MAX_STEPS_ENV}={raw!r} is not a positive integer; "
-        f"using the default {DEFAULT_TURN_MAX_STEPS}"
-    )
+    if raw not in _warned_turn_max_steps:
+        _warned_turn_max_steps.add(raw)
+        logger.warning(
+            f"{TURN_MAX_STEPS_ENV}={raw!r} is not a positive integer; "
+            f"using the default {DEFAULT_TURN_MAX_STEPS}"
+        )
     return DEFAULT_TURN_MAX_STEPS
 
 
@@ -67,8 +72,25 @@ class PlanFrame:
     phased_skill_call: Any = None        # not serialised (as today)
     child_step_ranges: list[list[int]] = field(default_factory=list)  # [first, last] per child run
     invoking_step: Optional[int] = None  # the parent step index this frame runs inside
+    #: The step number the call's first step takes (its run's range starts here).
+    first_step: Optional[int] = None
+    #: The context the parent's step ran in: the clause its now-in note compares against. The run is
+    #: held under the context the call ended on, not this one.
+    ran_in_clause: str = ""
+    ran_in_context_name: str = ""
+    #: The arguments the call was run with, to rebuild its command input when it finishes after a suspension.
+    call_args: dict[str, Any] = field(default_factory=dict)
+    #: The command the parent's step ran, as the action log holds it, and the note on the
+    #: arguments that were folded into it: a step that suspended never wrote either.
+    command_text: str = ""
+    folded_note: str = ""
     agent: Any = None                    # per-frame fastWorkflowReAct, built lazily
     fast_path: bool = False              # the whole plan of its sub-task (3.6)
+    #: How many planning-command calls this frame has made, per command stem: the
+    #: ``n`` of a child's alias (``<alias>/<stem>#<n>``). Not serialised, so a restored
+    #: frame counts from its restore; alias numbers are for tracing, and step indexes
+    #: stay unique regardless.
+    child_counts: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def turn(cls) -> "PlanFrame":
@@ -94,6 +116,12 @@ class PlanFrame:
             "phase_run": copy.deepcopy(self.phase_run),
             "child_step_ranges": [list(step_range) for step_range in self.child_step_ranges],
             "invoking_step": self.invoking_step,
+            "first_step": self.first_step,
+            "ran_in_clause": self.ran_in_clause,
+            "ran_in_context_name": self.ran_in_context_name,
+            "call_args": copy.deepcopy(self.call_args),
+            "command_text": self.command_text,
+            "folded_note": self.folded_note,
             "fast_path": self.fast_path,
         }
 
@@ -115,6 +143,12 @@ class PlanFrame:
             phase_run=copy.deepcopy(d.get("phase_run") or None),
             child_step_ranges=[list(step_range) for step_range in d.get("child_step_ranges") or []],
             invoking_step=d.get("invoking_step"),
+            first_step=None if d.get("first_step") is None else int(d["first_step"]),
+            ran_in_clause=str(d.get("ran_in_clause") or ""),
+            ran_in_context_name=str(d.get("ran_in_context_name") or ""),
+            call_args=copy.deepcopy(d.get("call_args") or {}),
+            command_text=str(d.get("command_text") or ""),
+            folded_note=str(d.get("folded_note") or ""),
             fast_path=bool(d.get("fast_path")),
         )
 

@@ -98,9 +98,11 @@ import os
 import types
 import typing
 from dataclasses import dataclass, replace
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from pydantic import BaseModel, ValidationError
+
+from fastworkflow.plan_frame import runs_outside_ranges
 
 
 class FactsError(ValueError):
@@ -505,10 +507,16 @@ def facts_from_archive(
     context: Optional[str] = None,
     context_name: Optional[str] = None,
     signatures: Optional[Mapping[str, Any]] = None,
+    child_step_ranges: Sequence[Sequence[int]] = (),
 ) -> BaseModel:
-    """``facts_from_runs`` over the command runs *archive* holds for *scope*."""
+    """``facts_from_runs`` over the command runs *archive* holds for *scope*, leaving out the
+    runs inside *child_step_ranges* (each ``[first, last]``): a parent's facts do not read
+    what its planning-command children ran (design 3.5)."""
+    runs = archive.command_runs(scope)
+    if child_step_ranges:
+        runs = runs_outside_ranges(runs, child_step_ranges)
     return facts_from_runs(
-        model, archive.command_runs(scope), context=context,
+        model, runs, context=context,
         context_name=context_name, signatures=signatures,
     )
 

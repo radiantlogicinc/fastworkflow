@@ -95,21 +95,41 @@ def _append_action_record(chat_session_obj, record: dict) -> None:
         core.append_action_log(record)
 
 
+def _held_context(chat_session_obj, command_output, ran_in_clause, ran_in_name):
+    """The (clause, name) a command's held run is recorded under.
+
+    A planning command's child leaves the workflow where its last step ended,
+    so its run names the context the workflow is in once the call returns;
+    any other command ran, and is held, in the context it was called from.
+    Never raises: a label hook must not stop the command.
+    """
+    active = chat_session_obj.get_active_workflow()
+    try:
+        if active is None or skill_commands.planning_command(
+                active.folderpath, command_output.command_name) is None:
+            return ran_in_clause, ran_in_name
+        return context_clause_for(active), context_identity(active)[0]
+    except Exception:  # noqa: BLE001 - a label hook must not stop the command
+        return ran_in_clause, ran_in_name
+
+
 def _hold_command_run(chat_session_obj, command_output, context_clause,
-                      context_name=None) -> None:
+                      context_name=None, alias=None) -> None:
     """Hold this command's run for the in-flight execute step's archive row.
 
     Its name, success, context, parameters and ``Signature.Output``
     (``CommandResponse.output``) are stored beside the step's text when the
     step is archived; the observation the agent reads is not touched. Outside
     an agent execute step there is no row to store it in, and nothing is held.
+    *alias* names the step the run is held under; None reads the in-flight step.
     Never raises: this record must not be able to fail a command.
     """
     try:
         name = command_output.command_name
         if not name:
             return
-        alias = current_execute_alias(getattr(chat_session_obj, "workflow_tool_agent", None))
+        if alias is None:
+            alias = current_execute_alias(getattr(chat_session_obj, "workflow_tool_agent", None))
         if alias is None:
             return
         note_command_run(scope_for_host(chat_session_obj), alias, command_run_record(
@@ -122,6 +142,60 @@ def _hold_command_run(chat_session_obj, command_output, context_clause,
         ))
     except Exception:  # noqa: BLE001
         logger.debug("could not hold the command run for its archive row", exc_info=True)
+
+
+def command_run_response(command_output) -> str:
+    """The response text a command run gives the agent: its response, or a line saying it produced none.
+
+    Shared by the step that ran the command (_execute_workflow_query) and the step a
+    nested run finishes for after a suspension (WorkflowExecutionContext).
+    """
+    if command_output.command_response.response:
+        return command_output.command_response.response
+    return "Command executed successfully but produced no output."
+
+
+def _parameters_dict(params) -> dict | None:
+    """A command's parameters as a dict: a typed Input is dumped, a dict is kept."""
+    if params is None:
+        return None
+    if hasattr(params, "model_dump"):
+        return params.model_dump()
+    if isinstance(params, dict):
+        return params
+    return None
+
+
+def action_record(command: str, command_output, response_text: str) -> dict:
+    """The action-log record of one command run: the text the agent sent, the command it
+    ran as, its parameters and the response it gave.
+
+    Written by the step that ran the command, and by the step a nested run completes after
+    a suspension, so the two records read alike.
+    """
+    return {
+        "command": command,
+        "command_name": command_output.command_name,
+        "parameters": _parameters_dict(command_output.command_parameters),
+        "response": response_text,
+    }
+
+
+def run_observation(alias: str | None, ran_in_clause: str, response: str, *,
+                    folded_note: str = "", context_changed: bool,
+                    now_clause: str | None) -> str:
+    """The observation a command run gives the agent: its response, the note on arguments
+    folded into its command, and the handle line naming the step it ran in (with where it
+    left the agent, when the run moved it).
+
+    Shared by the step that ran the command and by the step a nested run completes after a
+    suspension, so both observations read alike.
+    """
+    text = response + folded_note
+    if alias is None:
+        return text
+    return annotated_observation(alias, ran_in_clause, text, context_changed=context_changed,
+                                 now_in=now_clause if context_changed else None)
 
 
 def _append_turn_output(chat_session_obj, command_output) -> None:
@@ -308,7 +382,11 @@ def _explicit_agent_command(command: str, workflow) -> str:
     token = parts[0].lstrip("/") if parts else ""
     app = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
     current_context = workflow.current_command_context_name
-    available = set(app.get_command_names(current_context)) | core_command_names()
+    # A planning command is available where it is runnable, by the same rule as an
+    # execution command: a name outside this set is refused with the same message.
+    available = (set(app.get_command_names(current_context))
+                 | set(app.get_planning_command_names(current_context))
+                 | core_command_names())
     matches = [name for name in available if _command_name_matches(token, name)]
     if not matches:
         home_contexts = context_homes(workflow, token)
@@ -439,7 +517,9 @@ def _parameter_fields(command: str, workflow) -> frozenset[str] | None:
         return None
     try:
         app = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
-        names = [name for name in app.get_command_names(workflow.current_command_context_name)
+        context = workflow.current_command_context_name
+        names = [name for name in (*app.get_command_names(context),
+                                   *app.get_planning_command_names(context))
                  if _command_name_matches(token, name)]
         if len(names) != 1:
             return None
@@ -637,21 +717,10 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
 
     # Live path: typed Pydantic instance. After cold-rehydrate of turn outputs,
     # command_parameters is the dumped dict [A10]. Accept both.
-    if params is None:
-        params_dict = None
-    elif hasattr(params, "model_dump"):
-        params_dict = params.model_dump()
-    elif isinstance(params, dict):
-        params_dict = params
-    else:
-        params_dict = None
+    params_dict = _parameters_dict(params)
 
     # Extract response text
-    response_text = ""
-    if command_output.command_response.response:
-        response_text = command_output.command_response.response
-    else:
-        response_text = "Command executed successfully but produced no output."
+    response_text = command_run_response(command_output)
 
     # Same command text, same context, same response as this run's previous call: block it next step.
     if guard is not None:
@@ -690,14 +759,9 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     # Append executed action to the session action log for external consumers
     # (agent mode only): distillation compares teacher/student passes off it and
     # final-answer synthesis summarizes it.
-    record = {
-        "command": command,
-        "command_name": name,
-        "parameters": params_dict,
-        "response": response_text
-    }
-    _append_action_record(chat_session_obj, record)
-    _hold_command_run(chat_session_obj, command_output, ran_in_clause, ran_in_name)
+    _append_action_record(chat_session_obj, action_record(command, command_output, response_text))
+    held_clause, held_name = _held_context(chat_session_obj, command_output, ran_in_clause, ran_in_name)
+    _hold_command_run(chat_session_obj, command_output, held_clause, held_name)
 
     # Check workflow context to determine if we're in an error state that needs specialized handling
     cme_workflow = chat_session_obj.cme_workflow
@@ -952,16 +1016,23 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         workflow = chat_session_obj.get_active_workflow()
         clause = context_clause_for(workflow)
         context_before = getattr(workflow, "current_command_context", None)
-        response = run_execute_workflow_query(command) + folded_note
-        if alias is None:
-            return response
+        # What a nested run this command starts needs to finish this step after a suspension:
+        # the command as the action log holds it, and the note on its folded arguments.
+        run_state = getattr(chat_session_obj.workflow_tool_agent, "run_state", None)
+        if isinstance(run_state, dict):
+            run_state["execute_call"] = {"command": command, "folded_note": folded_note}
+        try:
+            response = run_execute_workflow_query(command)
+        finally:
+            if isinstance(run_state, dict):
+                run_state.pop("execute_call", None)
         workflow_after = chat_session_obj.get_active_workflow()
         context_changed = getattr(workflow_after, "current_command_context", None) is not context_before
         # Name where the command left the agent: a weak model otherwise reads
         # the context the command ran in as the one it is now in.
-        now_in = context_clause_for(workflow_after) if context_changed else None
-        return annotated_observation(alias, clause, response,
-                                     context_changed=context_changed, now_in=now_in)
+        return run_observation(
+            alias, clause, response, folded_note=folded_note, context_changed=context_changed,
+            now_clause=context_clause_for(workflow_after) if context_changed else None)
 
     def ask_user(clarification_request: str) -> str:
         """
@@ -1118,7 +1189,7 @@ def _read_skill_file(name: str, path: str, workflow_folderpath: str):
 def _load_skill_file(name: str, path: str, workflow_folderpath: str):
     """The ``SkillFile`` of ``_skills/<name>.py`` (``_read_skill_file``), or None when it
     cannot be read: a broken skill file costs that skill, not the workflow. The error is
-    logged, and ``fastworkflow skill preview`` reports the skill as not loaded.
+    logged, and ``fastworkflow command preview`` reports the skill as not loaded.
     """
     try:
         return _read_skill_file(name, path, workflow_folderpath)
@@ -1170,8 +1241,8 @@ _parsed_skills_lock = threading.RLock()
 
 
 def _parsed_skills(workflow_folderpath: str) -> tuple[
-        tuple[str, str, tuple[str, ...], "SkillCommand | None", tuple[str, ...]], ...]:
-    """``(name, description, template steps, command or None, plain_utterances)`` per skill;
+        tuple[str, str, tuple[str, ...], "SkillCommand", tuple[str, ...]], ...]:
+    """``(name, description, template steps, command, plain_utterances)`` per skill;
     see ``load_skills``. Built once per process (``_build_parsed_skills``): a skill file that
     cannot be read is skipped (``_load_skill_file``), so it is not read again each turn."""
     with _parsed_skills_lock:
@@ -1180,7 +1251,7 @@ def _parsed_skills(workflow_folderpath: str) -> tuple[
 
 @functools.lru_cache(maxsize=None)
 def _build_parsed_skills(workflow_folderpath: str) -> tuple[
-        tuple[str, str, tuple[str, ...], "SkillCommand | None", tuple[str, ...]], ...]:
+        tuple[str, str, tuple[str, ...], "SkillCommand", tuple[str, ...]], ...]:
     root = os.path.join(workflow_folderpath, "_skills")
     identifiers = identifier_patterns(workflow_folderpath)
     field_resolution = skill_commands.resolve_field_sources(workflow_folderpath)
@@ -1206,10 +1277,12 @@ def _build_parsed_skills(workflow_folderpath: str) -> tuple[
             )
     out = []
     for name, loaded in files:
-        if loaded.command is None:
-            out.append((name, loaded.description, loaded.steps, None, loaded.plain_utterances))
-            continue
         command = dataclasses.replace(loaded.command, identifiers=identifiers)
+        if skill_commands.fixed_steps(command):
+            # Its steps are text the planner reads and code runs as they are: not checked
+            # against the workflow's commands (a step that names no command is run by the agent).
+            out.append((name, loaded.description, loaded.steps, command, loaded.plain_utterances))
+            continue
         step_problems = step_command_problems(command, workflow_folderpath)
         field_source_errs = field_resolution.errors_for(name)
         if field_source_errs and name not in logged_field_source_commands:
@@ -1231,7 +1304,7 @@ def _warn_phase_sources(command: SkillCommand, workflow_folderpath: str) -> None
 
     Not a load failure: the workflow may add the command's ``Output`` later
     (``skill_commands.check_phase_sources``). A phase whose field is still missing
-    when it runs fails then, naming the field; ``fastworkflow skill preview --check``
+    when it runs fails then, naming the field; ``fastworkflow command preview --check``
     fails on it (``phase_source_problems``).
     """
     for warning in phase_source_problems(command, workflow_folderpath):
@@ -1242,7 +1315,7 @@ def step_command_problems(command: SkillCommand, workflow_folderpath: str) -> li
     """``skill_commands.check_step_commands`` of *command* against the workflow's command
     signatures: a step naming a command the workflow lacks, or a parameter its
     ``Signature.Input`` lacks. A load error (the skill is skipped); empty, with a logged
-    warning, when the signatures cannot be read (``fastworkflow skill preview --check``
+    warning, when the signatures cannot be read (``fastworkflow command preview --check``
     still checks)."""
     from fastworkflow.observation_offloading.facts import workflow_signatures
 
@@ -1278,10 +1351,10 @@ def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ..
     ``fastworkflow.skill_commands``; which files are skills: ``_skill_files``); its name is
     the file stem (or ``"<Context>/<stem>"`` in a context) and the ``Signature`` docstring
     its description. A
-    skill without parameters or phases gives its fixed ``steps()``; a skill with parameters
-    or phases gives its template text, and ``load_skill_commands`` holds its parsed form. A skill
-    file that cannot be imported or is malformed is logged as an error and skipped (the
-    other skills still load; ``fastworkflow skill preview`` fails on it); a malformed split
+    skill's template text is its steps (its ``steps()`` on placeholder inputs; for a skill
+    without parameters or phases, its fixed ``steps()``), and ``load_skill_commands`` holds its
+    parsed form. A skill file that cannot be imported or is malformed is logged as an error and skipped (the
+    other skills still load; ``fastworkflow command preview`` fails on it); a malformed split
     settings file raises SkillFormatError. ``_skills`` also holds the workflow's
     split settings, ``_split.py`` (``split_settings``), and helper modules named ``_<name>.py``.
     """
@@ -1289,9 +1362,9 @@ def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ..
 
 
 def load_skill_commands(workflow_folderpath: str) -> dict[str, SkillCommand]:
-    """The workflow's skills called with typed arguments (those with params or phases), by
-    name."""
-    return {name: command for name, _, _, command, _ in _parsed_skills(workflow_folderpath) if command is not None}
+    """The workflow's skills as commands, by name: each skill's parsed form, which a call of it
+    runs (a skill with fixed steps has one with no parameters, ``skill_commands.fixed_steps``)."""
+    return {name: command for name, _, _, command, _ in _parsed_skills(workflow_folderpath)}
 
 
 def skill_utterances(workflow_folderpath: str) -> dict[str, tuple[str, ...]]:
@@ -1663,7 +1736,8 @@ def planner_skill_for(text: str, workflow_folderpath: str,
     """``(template, command)`` for the skill ``text`` asks for along ``scopes`` (``""`` for root).
 
     ``template`` is ``plan_template_for``'s text ("" when no skill matches); ``command`` is
-    the matched skill's parsed form when it has params or phases, else None.
+    the matched skill's parsed form (None when no skill matches). A matched skill's call runs
+    through the phase runner, whatever its shape.
     """
     matched = match_skill(text, workflow_folderpath, scopes=scopes)
     if matched is None:
@@ -1932,12 +2006,13 @@ def build_query_with_next_steps(user_query: str,
             request in the planner prompt (not in the returned string). Used on
             the turn's initial plan, not on a replan.
         done_only: With a trajectory, return only the "what's done" summary.
-        skill_command: The matched skill's parsed form when it has params or phases. On the
-            turn's initial plan the planner then fills the skill's typed parameters
-            and code expands its steps (``skill_commands.plan_skill_call``; span
-            ``plan_source`` "skill_call"); Jev, when configured, checks the skill's
-            ``verify`` parameters against the request. Any failure falls back to the
-            text planner with ``plan_template``. Ignored on a replan.
+        skill_command: The matched skill's parsed form. On the turn's initial plan the
+            planner then fills the skill's typed parameters and code expands its steps
+            (``skill_commands.plan_skill_call``; span ``plan_source`` "skill_call"; a skill
+            without parameters makes no planner call); Jev, when configured, checks the
+            skill's ``verify`` parameters against the request. The call's phases are then
+            run by the execution context (``_phased_skill_call``). Any failure falls back to
+            the text planner with ``plan_template``. Ignored on a replan.
     """
     current_workflow = chat_session_obj.get_active_workflow()
     base_docstring = """
@@ -2045,8 +2120,7 @@ def build_query_with_next_steps(user_query: str,
                     prediction, plan_text, skill_args = call.prediction, call.plan, call.args
                     skill_notes = list(call.notes) or None
                     plan_source = "skill_call"
-                    if call.phases is not None:
-                        chat_session_obj._phased_skill_call = (skill_command, call)
+                    chat_session_obj._phased_skill_call = (skill_command, call)
                     logger.info(f"skill call {skill_command.name}{call.args}"
                                 + (f" ({'; '.join(call.notes)})" if call.notes else ""))
                 except Exception as exc:  # noqa: BLE001 - the text planner with the template takes over

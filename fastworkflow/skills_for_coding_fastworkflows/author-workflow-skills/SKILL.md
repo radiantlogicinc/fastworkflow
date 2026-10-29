@@ -5,7 +5,7 @@ description: >-
   steps are built in code and expanded into the agent's numbered plan, flat or as phases that
   pass facts to each other. Covers when to write a skill instead of a command, the file shape
   (`Signature` + `PlanGenerator`), the `Input` rules, phases, facts and `fact_from`, `@phase`,
-  `__call__`, the `skill preview` / `--check` loop, and the step wording the framework reads
+  `__call__`, the `command preview` / `--check` loop, and the step wording the framework reads
   in code (what code runs, what the finish check holds, what writes the answer). Use when
   adding, reviewing or debugging a skill file, or when a skill's steps are run, checked or
   answered differently than intended.
@@ -54,7 +54,7 @@ planner's skill call has no arguments (`skill_commands.py` `skill_from_parts`).
   models, `PlanGenerator` (`__call__` first, then the phases in run order, then `_helpers`),
   module-level tables and shared functions.
 - A file that fails to import or is malformed is logged and skipped at run time (the other
-  skills still load); `fastworkflow skill preview` fails naming it
+  skills still load); `fastworkflow command preview` fails naming it
   (`workflow_agent.py` `_load_skill_file`, `skill_preview.py` `render_previews`).
 
 A complete phased skill, for a toy catalog whose commands are `find_item query=`
@@ -198,19 +198,19 @@ check on a live call.
   that fails on placeholder facts or writes `None` into a step, and a step naming a command
   the workflow lacks or a parameter its `Signature.Input` lacks fail the load. A `"from"`
   naming a command or field the workflow lacks is only a warning at load
-  (`check_phase_sources`) and fails `skill preview --check`.
+  (`check_phase_sources`) and fails `command preview --check`.
 - A skill imports from `fastworkflow.skill` what it writes: `fact_from`, `pick`, `phase`,
   `num`, `count`, `listed`.
 
 ## The preview loop
 
 ```sh
-fastworkflow skill preview <workflow_folder>            # writes <workflow_folder>/../docs/skill_previews/<skill>.md
-fastworkflow skill preview <workflow_folder> --check    # writes nothing; exit 1 when not current
+fastworkflow command preview <workflow_folder>            # writes <workflow_folder>/../docs/skill_previews/<skill>.md
+fastworkflow command preview <workflow_folder> --check    # writes nothing; exit 1 when not current
 ```
 
 1. Write or change the skill file.
-2. Run `skill preview`. A load error names the file and its reason; fix it first.
+2. Run `command preview`. A load error names the file and its reason; fix it first.
 3. Read the preview: the inputs, the phases table ("runs" says when each phase runs),
    the facts with their sources, and the steps of each different plan. A step rendered
    with `<phase.fact>` placeholders shows where a value comes from at run time. Under the
@@ -296,7 +296,7 @@ Consequences worth designing for:
   a phase that may be skipped is read through =None
 - [ ] The template (preview) reads well: wording that tests facts lives in helpers
 - [ ] Each step checked against the grammar table (code-run, held, answered as intended)
-- [ ] skill preview written and committed; --check passes in CI
+- [ ] command preview written and committed; --check passes in CI
 ```
 
 ## Related

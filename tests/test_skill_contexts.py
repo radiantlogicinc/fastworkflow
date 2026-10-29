@@ -205,8 +205,9 @@ class PlanGenerator:
         "Look up Dune in the library and report how many books match.",
         ("find_book query=Dune", "say how many books match"),
     )
+    # Plain (fixed-steps) skills are commands too: a call of one runs through the phase runner.
     commands = workflow_agent.load_skill_commands(folder)
-    assert set(commands) == {"Library/search_books"}
+    assert set(commands) == {"hours_overview", "Library/dune_search", "Library/search_books"}
     assert commands["Library/search_books"].name == "Library/search_books"
 
 

@@ -633,7 +633,7 @@ def test_a_skill_with_no_inputs_and_one_method_stays_fixed_steps():
 
     loaded = skill_commands.command_from_module("summary", _module(NoInputSignature, OnePlan),
                                                 "_skills/summary.py")
-    assert loaded.command is None
+    assert skill_commands.fixed_steps(loaded.command)
     assert loaded.steps == ("list_sections", "say how many sections there are")
 
 
@@ -643,10 +643,9 @@ def test_a_no_input_phased_skill_call_has_no_arguments():
 
     command = skill_commands.command_from_module(
         "summary", _module(NoInputSignature, NoInputPlan), "_skills/summary.py").command
-    lm = DummyLM([{"reasoning": "r", "steps_before": [], "steps_after": []}])
+    lm = DummyLM([])
     with dspy.context(lm=lm):
         call = skill_commands.plan_skill_call(command, "give me the catalog summary",
                                               "list_sections: x\ncount_late: y")
-    assert call.args == {} and [p.name for p in call.phases] == ["sections", "late"]
-    assert call.plan.splitlines() == ["1. list_sections", "2. count_late",
-                                      "3. say how many items are late"]
+    assert lm.history == []
+    assert call.args == {} and call.plan == "" and [p.name for p in call.phases] == ["sections", "late"]

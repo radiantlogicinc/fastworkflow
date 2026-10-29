@@ -64,16 +64,12 @@ def _resolve_planning_command_name(workflow_folderpath: str, name: str) -> str |
 def _planning_command_refusal_output(
     qualified_name: str,
     *,
-    direct_or_assistant: bool,
     workflow: fastworkflow.Workflow | None = None,
 ) -> CommandOutput:
-    if direct_or_assistant:
-        message = f"{qualified_name} is a planning command; it runs in agent mode."
-    else:
-        message = (
-            f"{qualified_name} is a planning command; "
-            "it cannot be called as a step yet."
-        )
+    """The refusal for a planning command reached outside agent mode: assistant-mode
+    ``/`` commands and the direct and MCP paths. In agent mode a planning command's
+    steps run it (WorkflowExecutionContext.run_planning_command)."""
+    message = f"{qualified_name} is a planning command; it runs in agent mode."
     command_output = CommandOutput(
         command_response=fastworkflow.CommandResponse(response=message, success=False),
         command_name=qualified_name,
@@ -305,17 +301,18 @@ class CommandExecutor(CommandExecutorInterface):
         command: str,
     ) -> fastworkflow.CommandOutput:
         app_workflow = chat_session.get_active_workflow()
-        if app_workflow is not None:
+        # Assistant mode refuses a planning command by its name, before any extraction.
+        # In agent mode the name goes through the extraction hop below and runs as a
+        # planning command (run_planning_command).
+        if app_workflow is not None and (
+            "is_assistant_mode_command" in chat_session.cme_workflow._context
+        ):
             token = _command_name_token(command)
             if planning_name := _resolve_planning_command_name(
                 app_workflow.folderpath, token
             ):
-                assistant_path = (
-                    "is_assistant_mode_command" in chat_session.cme_workflow._context
-                )
                 return _planning_command_refusal_output(
                     planning_name,
-                    direct_or_assistant=assistant_path,
                     workflow=app_workflow,
                 )
 
@@ -344,16 +341,22 @@ class CommandExecutor(CommandExecutorInterface):
         if planning_name := _resolve_planning_command_name(
             workflow.folderpath, command_name
         ):
-            assistant_path = (
-                "is_assistant_mode_command" in chat_session.cme_workflow._context
-            )
             if "is_assistant_mode_command" in chat_session.cme_workflow._context:
                 del chat_session.cme_workflow._context["is_assistant_mode_command"]
-            return _planning_command_refusal_output(
-                planning_name,
-                direct_or_assistant=assistant_path,
-                workflow=workflow,
+                return _planning_command_refusal_output(
+                    planning_name,
+                    workflow=workflow,
+                )
+            # Agent mode: the step's arguments were extracted above; the planning command
+            # runs them as a nested frame. Its output is the step's observation.
+            planning_output = chat_session.run_planning_command(
+                planning_name, input_obj, command
             )
+            planning_output.workflow_name = workflow.folderpath.split("/")[-1]
+            planning_output.context = workflow.current_command_context_displayname
+            planning_output.command_name = planning_name
+            planning_output.command_parameters = input_obj or None
+            return planning_output
 
         command_routing_definition = fastworkflow.RoutingRegistry.get_definition(
             workflow.folderpath
@@ -436,7 +439,6 @@ class CommandExecutor(CommandExecutorInterface):
             ):
                 return _planning_command_refusal_output(
                     planning_name,
-                    direct_or_assistant=True,
                     workflow=workflow,
                 )
         

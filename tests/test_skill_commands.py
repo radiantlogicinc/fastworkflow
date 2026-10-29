@@ -196,7 +196,11 @@ def test_a_skill_without_params_is_read_as_its_fixed_steps(tmp_path):
         ("close", "Close an account.", ("close it",)),
         ("leaver", "Someone is leaving. One job per person.", ("find {them} [if asked]", "[repeat x]", "@close")),
     )
-    assert workflow_agent.load_skill_commands(folder) == {}
+    # Both skills are commands too (a call of one runs its steps through the phase runner).
+    commands = workflow_agent.load_skill_commands(folder)
+    assert commands.keys() == {"close", "leaver"}
+    assert all(sc.fixed_steps(command) for command in commands.values())
+    assert commands["leaver"].template == ("find {them} [if asked]", "[repeat x]", "@close")
 
 
 # ---------------------------------------------------------------- expansion
@@ -453,15 +457,16 @@ def test_without_a_skill_command_the_planner_is_unchanged(workflow_env):
 
 
 def test_one_match_gives_the_template_and_the_command_of_a_skill_with_params(tmp_path, monkeypatch):
-    folder = _write(tmp_path, {"lookup": LOOKUP, "leaver": "Someone is leaving.\nfind them\n"})
+    folder = _write(tmp_path, {"lookup": LOOKUP, "leaver": _plain("Someone is leaving.", ["find them"])})
     monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: {"": _fake_matcher("lookup", 0.9)})
     template, command = workflow_agent.planner_skill_for("Who is in Payroll?", folder)
     assert command is workflow_agent.load_skill_commands(folder)["lookup"]
     assert template.startswith("A job like this is usually done as:\n- open_directory\n- <find_group or find_feed")
-    # a skill without params: the template only, as before
+    # a skill without params: its command too, so its call runs through the phase runner
     monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: {"": _fake_matcher("leaver", 0.9)})
-    assert workflow_agent.planner_skill_for("Ann Lee is leaving", folder) == (
-        workflow_agent.plan_template_for("Ann Lee is leaving", folder), None)
+    template, command = workflow_agent.planner_skill_for("Ann Lee is leaving", folder)
+    assert command is workflow_agent.load_skill_commands(folder)["leaver"]
+    assert template == workflow_agent.plan_template_for("Ann Lee is leaving", folder)
 
 
 def test_the_execution_context_passes_the_matched_command_except_to_a_continuation(workflow_env, monkeypatch):

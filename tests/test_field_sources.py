@@ -279,7 +279,7 @@ class Signature:
 
 class PlanGenerator:
     def steps(self, input):
-        return [f"open_book book_uid={input.book_uid}", "show_book"]
+        return [f"open_book book_uid={input.book_uid}", "say the book"]
 '''
     folder = _build_workflow(
         tmp_path,
@@ -992,6 +992,59 @@ class PlanGenerator:
     code, stdout = _preview_check(folder, out_dir, capsys)
     assert code == 1
     assert "int does not match" in stdout
+
+
+def test_a_from_naming_a_callee_of_its_own_steps_is_an_error_that_asks_for_a_description(tmp_path):
+    """fix-3rsq.5.7: a producer the command's steps run is run by the steps, so the agent
+    cannot be told to run it first; the Input must carry a description. A producer the
+    steps do not call stays a valid ``from_``."""
+    calls_producer = '''import fastworkflow
+from fastworkflow import from_
+from pydantic import BaseModel, Field
+
+
+class Signature:
+    """Say how many books a title matches, from the count its find gives."""
+
+    class Input(BaseModel):
+        title: str = Field(description="the book's title")
+        total: int = from_("find_book.total", description="how many books match")
+
+
+class PlanGenerator:
+    def steps(self, input):
+        return [f"find_book query={input.title}", "say the count"]
+'''
+    described = calls_producer.replace(
+        'from_("find_book.total", description="how many books match")',
+        'Field(description="how many books match")')
+    runs_other_producer = calls_producer.replace(
+        'from_("find_book.total", description="how many books match")',
+        'from_("find_member.total", description="how many members match")')
+    folder = _build_workflow(
+        tmp_path,
+        "wf_callee_from",
+        extra_skills={"Library/plan_calls_find": calls_producer,
+                      "Library/plan_described": described,
+                      "Library/plan_other_producer": runs_other_producer},
+    )
+    res = skill_commands.resolve_field_sources(folder)
+    assert [p.message for p in res.errors if p.command == "Library/plan_described"] == []
+    assert [p.message for p in res.errors if p.command == "Library/plan_other_producer"] == []
+    assert [p.message for p in res.errors if p.command == "Library/plan_calls_find"] == [
+        "Input.total (from 'find_book.total') tells the agent to run Library/find_book "
+        "first, but this command's own steps call Library/find_book. To describe the value, "
+        "write Field(description=...) instead"]
+
+
+def test_library_planning_commands_resolve_without_source_errors_and_with_their_callees():
+    """The real library: no field-source error on any planning command (the phase checker
+    reads an earlier phase's steps on placeholder facts, not as empty), and the callee graph
+    of book_loans, which calls a planning command and an execution command."""
+    res = skill_commands.resolve_field_sources(LIBRARY)
+    assert [p.format() for p in res.errors] == []
+    assert res.callees["Library/book_loans"] == frozenset({"Book/list_loans", "Library/book_by_title"})
+    assert skill_commands.call_depth("Library/book_loans", res) == 2
 
 
 def test_target_command_whose_file_fails_to_import_is_reported(tmp_path):

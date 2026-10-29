@@ -333,6 +333,10 @@ class ChatSession:
         """Delegate ask_user entry creation to the core (duck-typed by workflow_agent)."""
         return self._core.append_ask_user_entry(question)
 
+    def run_planning_command(self, qualified_name: str, params, step_text: str) -> fastworkflow.CommandOutput:
+        """Delegate a planning command's run to the core (command_executor dispatches to it)."""
+        return self._core.run_planning_command(qualified_name, params, step_text)
+
     def complete_ask_user_entry(self, answer: str) -> None:
         """Delegate ask_user answer fill to the core (duck-typed by workflow_agent)."""
         self._core.complete_ask_user_entry(answer)

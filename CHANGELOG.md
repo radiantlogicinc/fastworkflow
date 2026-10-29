@@ -27,7 +27,7 @@
 - **`fact_from("<command>.<field>")`** (fix-ajir.15, `docs/skill_phases.md`):
   the field of a facts model copied from a command field,
   `Field(json_schema_extra={"from": ...}, **kwargs)`, in place of the `_from`
-  helper each skill file wrote. `fastworkflow skill preview --check` now fails
+  helper each skill file wrote. `fastworkflow command preview --check` now fails
   on a `"from"` naming a command or field the workflow does not have (at load
   it stays a warning, so a command's `Output` can come later).
 
@@ -89,7 +89,7 @@
   `record_issues`.
 - **Skill previews and a skill-file layout convention** (fix-553q,
   `fastworkflow.skill_preview`, `docs/skill_file_layout.md`).
-  `fastworkflow skill preview <workflow_folder> [--out <dir>] [--check]` loads
+  `fastworkflow command preview <workflow_folder> [--out <dir>] [--check]` loads
   every skill with the skill loader and writes `<dir>/<skill>.md` (default
   `<workflow_folder>/../docs/skill_previews`): description, inputs (type,
   default, sample value, `verify` / `subject` flags, description, other
@@ -614,7 +614,7 @@
   file whose declaration is malformed (or whose name is not an identifier) is
   logged as an error and skipped, as one that does not import already was; the
   workflow's other skills load, and the result is kept for the process instead
-  of every skill being imported again on each turn. `fastworkflow skill preview`
+  of every skill being imported again on each turn. `fastworkflow command preview`
   (with or without `--check`) fails naming each skipped file and its error.
 
 - **Command modules that import other command modules load safely from

@@ -46,7 +46,7 @@ def _example(tmp_path, text: str = EXAMPLE) -> sc.SkillCommand:
 
 def _load_error(folder: str, skill: str = "bad") -> str:
     """Why *skill* does not load: the loader skips it (the workflow's other skills still load)
-    and ``fastworkflow skill preview`` fails, naming it and its error."""
+    and ``fastworkflow command preview`` fails, naming it and its error."""
     assert skill not in {name for name, _, _ in workflow_agent.load_skills(folder)}
     with pytest.raises(skill_preview.PreviewError) as info:
         skill_preview.render_previews(folder)
@@ -90,7 +90,10 @@ def test_load_skills_gives_the_description_and_template_and_a_plain_skill_its_st
         "list_members (only when person is empty)",
         "assess_risk (only when include_risk)",
         "open member 1", "open member 2")
-    assert workflow_agent.load_skill_commands(folder).keys() == {"show_record"}
+    # a plain skill is a command too: a call of it runs its steps through the phase runner
+    commands = workflow_agent.load_skill_commands(folder)
+    assert commands.keys() == {"show_record", "close_out"}
+    assert sc.fixed_steps(commands["close_out"]) and not sc.fixed_steps(commands["show_record"])
     assert "- close_out: Close out a record" in workflow_agent._job_types_for(folder)
 
 

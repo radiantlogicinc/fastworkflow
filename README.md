@@ -305,8 +305,8 @@ This is what lets small models stay accurate as your app grows — and what keep
 When a family of requests is answered by the same few commands in a known order (find a record, open it, read it, answer), write that job once as a **skill**: a Python file `_skills/<name>.py` next to `_commands/`. Its `Signature` describes the job and declares typed inputs; `steps(input)` builds the steps as text, or `plan(input)` splits them into phases that pass facts to each other in code. The planner fills the inputs from the request and the steps become the agent's plan; code runs the mechanical steps itself.
 
 ```sh
-fastworkflow skill preview <workflow_dir>           # one markdown preview per skill
-fastworkflow skill preview <workflow_dir> --check   # CI: fails on stale previews or a broken skill
+fastworkflow command preview <workflow_dir>           # one markdown preview per skill
+fastworkflow command preview <workflow_dir> --check   # CI: fails on stale previews or a broken skill
 ```
 
 Coding agents: use the wheel-shipped [author-workflow-skills](fastworkflow/skills_for_coding_fastworkflows/author-workflow-skills/SKILL.md) skill (file shape, input rules, phases, and the step wording the framework reads). Full reference: [`docs/skill_file_layout.md`](docs/skill_file_layout.md) and [`docs/skill_phases.md`](docs/skill_phases.md).

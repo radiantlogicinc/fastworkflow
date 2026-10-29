@@ -178,6 +178,7 @@ def context_commands(app_workflow, cme_workflow_folderpath: str) -> list[str]:
         subject_workflow_path=app_workflow.folderpath,
         cme_workflow_path=cme_workflow_folderpath,
         active_context_name=app_workflow.current_command_context_name,
+        include_planning=False,
     )
     return [cmd["name"] for cmd in meta.get("commands", [])
             if not cmd["qualified_name"].startswith("IntentDetection/")]

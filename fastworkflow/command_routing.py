@@ -86,6 +86,29 @@ class RoutingDefinition(BaseModel):
             commands = [cmd for cmd in commands if cmd != 'wildcard']
         return commands
 
+    def get_planning_command_names(self, context: str) -> list[str]:
+        """The planning commands runnable in *context*, inherited as its execution commands are:
+        its own, then each base's in ``context_model`` order, a simple name an earlier scope
+        already gives left out. A global planning command (no context folder) belongs to ``*``.
+
+        Kept apart from ``contexts``, which routing and training read for execution commands only.
+        """
+        planning = sorted(
+            name for name, metadata in self.command_directory.map_command_2_metadata.items()
+            if metadata.is_planning
+        )
+        if not planning:
+            return []
+        names: list[str] = []
+        taken: set[str] = set()
+        for scope in (context, *self.context_model.ordered_base_contexts(context)):
+            for name in planning:
+                owner, _, simple = name.rpartition("/")
+                if (owner or "*") == scope and simple not in taken:
+                    taken.add(simple)
+                    names.append(name)
+        return names
+
     def get_command_class(self, command_name: str, module_type: ModuleType) -> Optional[Type[Any]]:
         """
         Retrieves a command's implementation class from the cache or loads it.

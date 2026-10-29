@@ -133,6 +133,9 @@ class fastWorkflowReAct(Module):
         self.step_floor: Callable[[], int] | None = None
         self.on_iteration: Callable[[], bool] | None = None
         self._suspended: dict[str, Any] | None = None
+        # The CodeSteps the last run was given, kept for the phase run that reads its count
+        # after a resume. In-process only, like the code of a suspended step.
+        self.last_code: Any = None
         # True when the most recent _run_loop ended because max_iters was
         # reached without the agent selecting the `finish` tool.
         self._exhausted_last_run = False
@@ -260,12 +263,23 @@ class fastWorkflowReAct(Module):
         idx = input_args.pop("first_step", 0)
         exception_count = 0
         source, self.code_steps = self.code_steps, None
+        self.last_code = source
 
         if source is not None:
             # Code runs the leading steps it can (see _run_loop); the loop goes on after them.
-            self._run_loop(self.trajectory, idx, input_args, max_iters, exception_count,
-                           code=source)
+            suspended = self._run_loop(self.trajectory, idx, input_args, max_iters,
+                                       exception_count, code=source)
+            if suspended is not None:
+                return suspended
             idx = self._next_idx(max(_step_indexes(self.trajectory), default=idx - 1))
+        return self._finish_run(source, idx, input_args, max_iters, exception_count)
+
+    def _finish_run(self, source, idx: int, input_args: dict[str, Any], max_iters: int,
+                    exception_count: int):
+        """The run's end once code has run its leading steps (*source*; None when it ran none).
+
+        Returns the suspended Prediction when the loop suspends, else the run's prediction.
+        """
         go_on = source is None or source.stop != "stopped"
         if go_on and source is not None and source.finished and not source.answers:
             # Every step ran by code and the run's answer is not shown: it ends here with
@@ -292,8 +306,14 @@ class fastWorkflowReAct(Module):
             trajectory=self.trajectory, exhausted=self._exhausted_last_run, **extract
         )
 
-    def resume(self, observation: str):
-        """Resume a suspended run after the user answered an ask_user clarification."""
+    def resume(self, observation: str, *, completes_step: bool = False):
+        """Resume a suspended run after the user answered an ask_user clarification.
+
+        With *completes_step* the observation is instead the run of a nested command the
+        step was waiting on, and the step completes as one that returned normally does: its
+        completion hook archives the runs it holds, its verdict can end the run, it counts
+        toward the turn-wide budget, and the code that ran it is told of it.
+        """
         if self._suspended is None:
             raise NoSuspendedAgentStateError(
                 "No suspended ReAct state to resume"
@@ -304,6 +324,8 @@ class fastWorkflowReAct(Module):
         idx = stash["idx"]
         input_args = stash["input_args"]
         max_iters = stash["max_iters"]
+        code = stash.get("code")
+        self.last_code = code
 
         # Keep self.inputs pointing at the active run's arg dict so any mid-run refresh
         # (e.g. available_commands re-scoping after a context switch) mutates the same
@@ -311,13 +333,36 @@ class fastWorkflowReAct(Module):
         self.inputs = input_args
 
         self.trajectory[f"observation_{idx}"] = observation
+        keep_going = True
+        if completes_step:
+            # The end-of-step hook (the repeat guard's) is not run: this step's own command has
+            # not returned, so it set nothing for that hook to end. The held runs are archived
+            # with the step (compaction is what takes them).
+            on_step_complete = getattr(self, "_on_step_complete", None)
+            if on_step_complete:
+                keep_going = bool(on_step_complete(idx, self.trajectory))
+        if code is not None:
+            if keep_going:
+                code.ran(idx, observation)
+            else:
+                code.stop = "stopped"
         idx = self._next_idx(idx)
         self.iteration_counter += 1
         self._suspended = None
 
-        suspended = self._run_loop(self.trajectory, idx, input_args, max_iters, 0)
-        if suspended is not None:
-            return suspended
+        on_iteration = getattr(self, "on_iteration", None)
+        if completes_step and on_iteration is not None and not on_iteration():
+            # The turn-wide budget for nested commands is spent (as _run_loop reads it).
+            logger.warning("Nested step budget spent")
+            self._exhausted_last_run = True
+        elif keep_going:
+            if code is not None:
+                suspended = self._run_loop(self.trajectory, idx, input_args, max_iters, 0,
+                                           code=code)
+                if suspended is not None:
+                    return suspended
+                idx = self._next_idx(max(_step_indexes(self.trajectory), default=idx - 1))
+            return self._finish_run(code, idx, input_args, max_iters, 0)
 
         extract = self._extract_prediction(self.trajectory, **input_args)
         return dspy.Prediction(
@@ -463,12 +508,15 @@ class fastWorkflowReAct(Module):
                 if folded is not None:
                     step_attributes["folded_command"] = folded
             except AskUserSuspend as err:
+                # The code that ran the step stays in-process: a restored run has none, and
+                # its step is the model's.
                 self._suspended = {
                     "trajectory": trajectory,
                     "idx": idx,
                     "input_args": input_args,
                     "max_iters": max_iters,
                     "clarification": err.clarification_request,
+                    "code": code,
                 }
                 # The step really did end here — the human wait that follows is
                 # fw.ask_user's to record, and this span must not stay open
@@ -537,9 +585,15 @@ class fastWorkflowReAct(Module):
             self.iteration_counter += 1
             on_iteration = getattr(self, "on_iteration", None)
             keep_going = on_iteration() if on_iteration is not None else True
+            if not keep_going:
+                # The turn-wide budget for nested commands is spent (run_planning_command).
+                # Not a step cap: no hand-off follows, the frame returns to its parent.
+                logger.warning("Nested step budget spent")
+                self._exhausted_last_run = True
+                break
             # The cap is a hand-off signal: the caller summarises progress and
             # runs a fresh executor to continue the same sub-task.
-            if not keep_going or self.iteration_counter >= max_iters:
+            if self.iteration_counter >= max_iters:
                 logger.warning("Max iterations reached")
                 self._exhausted_last_run = True
                 break

@@ -171,6 +171,9 @@ class _App:
     def get_command_names(self, context):
         return self.contexts[context]
 
+    def get_planning_command_names(self, context):
+        return []
+
 
 class _Cme:
     def get_command_names(self, context):

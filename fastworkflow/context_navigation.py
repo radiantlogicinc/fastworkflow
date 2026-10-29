@@ -320,14 +320,16 @@ def unavailable_command_message(
 def home_contexts(workflow, token: str) -> list[str]:
     """The most specific contexts that define the command ``token`` (short or qualified).
 
-    A context another home context inherits from is a base, not somewhere to
+    Planning commands count as commands here, as they do for the agent: a planning
+    command is refused from a context it is not runnable in, and named by the same
+    refusal. A context another home context inherits from is a base, not somewhere to
     navigate to, so only the most specific ones are named.
     """
     app = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
     wanted = token.lower()
     homes = {context for context, names in app.contexts.items()
              if any(wanted == (name if "/" in token else name.split("/")[-1]).lower()
-                    for name in names)}
+                    for name in (*names, *app.get_planning_command_names(context)))}
     inherited = set().union(*(app.context_model.inherited_base_contexts(c) for c in homes))
     return sorted(homes - inherited)
 

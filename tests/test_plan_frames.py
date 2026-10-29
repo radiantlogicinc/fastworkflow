@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 import fastworkflow
+from fastworkflow import plan_frame as plan_frame_module
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.observation_offloading.state import (
     archive_for_path,
@@ -93,9 +94,13 @@ def warnings_logged():
 
 @pytest.fixture
 def no_turn_budget_env(monkeypatch):
-    """No FW_TURN_MAX_STEPS from the process environment or the workflow's env file."""
+    """No FW_TURN_MAX_STEPS from the process environment or the workflow's env file.
+
+    Also starts with no bad value already warned about: the warn-once record is per
+    process, so an earlier test's warning would hide this test's."""
     monkeypatch.delenv(TURN_MAX_STEPS_ENV, raising=False)
     monkeypatch.delitem(fastworkflow._env_vars, TURN_MAX_STEPS_ENV, raising=False)
+    monkeypatch.setattr(plan_frame_module, "_warned_turn_max_steps", set())
 
 
 # ----------------------------------------------------------------------
@@ -108,7 +113,11 @@ def test_a_planning_frame_round_trips_every_serialised_field():
         kind="planning", command_name="Library/find_book", depth=1, alias="/find_book#1",
         subtasks=["find Dune"], origins=[2], subtask_index=1, subtask_answers=["Dune is b1"],
         subtask_exhausted=True, phase_run={"phase": 2, "runs": [{"command": "find_book"}]},
-        child_step_ranges=[[3, 5]], invoking_step=2, fast_path=True,
+        child_step_ranges=[[3, 5]], invoking_step=2, first_step=3,
+        ran_in_clause="Library/book_by_title", ran_in_context_name="Library",
+        call_args={"title": "Dune"}, command_text="book_by_title title=Dune",
+        folded_note="\n(Ran as: book_by_title title=Dune -- parameters go inside the command string.)",
+        fast_path=True,
         # Not serialised, so they must not appear in the state and must not come back.
         evidence_floors={0: 4}, initial_plan_text="1. look up", phase_live=("cmd", []),
         phased_skill_call=("cmd", None), agent=object(),
@@ -121,7 +130,11 @@ def test_a_planning_frame_round_trips_every_serialised_field():
         "alias": "/find_book#1", "subtasks": ["find Dune"], "origins": [2], "subtask_index": 1,
         "subtask_answers": ["Dune is b1"], "subtask_exhausted": True,
         "phase_run": {"phase": 2, "runs": [{"command": "find_book"}]},
-        "child_step_ranges": [[3, 5]], "invoking_step": 2, "fast_path": True,
+        "child_step_ranges": [[3, 5]], "invoking_step": 2, "first_step": 3,
+        "ran_in_clause": "Library/book_by_title", "ran_in_context_name": "Library",
+        "call_args": {"title": "Dune"}, "command_text": "book_by_title title=Dune",
+        "folded_note": "\n(Ran as: book_by_title title=Dune -- parameters go inside the command string.)",
+        "fast_path": True,
     }
     restored = PlanFrame.from_state(json.loads(json.dumps(state)))
     assert restored.to_state() == state

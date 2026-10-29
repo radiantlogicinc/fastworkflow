@@ -297,11 +297,11 @@ def add_run_parser(subparsers):
     )
     parser_run.set_defaults(func=lambda args: run_with_defaults(args))
 
-def add_skill_parser(subparsers):
-    """Add the 'skill' command group: 'skill preview' renders a workflow's skills to markdown."""
-    parser_skill = subparsers.add_parser("skill", help="Work with a workflow's skills (_skills/<name>.py).")
-    skill_subparsers = parser_skill.add_subparsers(dest="action", required=True)
-    parser_preview = skill_subparsers.add_parser(
+def add_command_parser(subparsers):
+    """Add the 'command' group: 'command preview' renders a workflow's planning commands to markdown."""
+    parser_command = subparsers.add_parser("command", help="Work with a workflow's planning commands (_skills/<name>.py).")
+    command_subparsers = parser_command.add_subparsers(dest="action", required=True)
+    parser_preview = command_subparsers.add_parser(
         "preview",
         help="Write one markdown preview per skill (inputs, phases, facts, steps for sample inputs).",
     )
@@ -599,7 +599,7 @@ def main():
     add_run_parser(subparsers)
     add_run_fastapi_mcp_parser(subparsers)
     add_run_chatbot_parser(subparsers)
-    add_skill_parser(subparsers)
+    add_command_parser(subparsers)
 
     try:
         args = parser.parse_args()

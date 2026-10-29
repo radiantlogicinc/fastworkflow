@@ -399,8 +399,9 @@ def todo(initialized_fastworkflow, todo_workflow_path, monkeypatch):
     # Toy commands (scripted in `workflow.scripted`) for what the todo workflow lacks:
     # their parameters classes, and their names among the commands a plan is read with.
     real_classes = skill_phases.parameter_classes
-    monkeypatch.setattr(skill_phases, "parameter_classes", lambda routing: (
-        lambda name: [state.toys[name]] if name in state.toys else real_classes(routing)(name)))
+    monkeypatch.setattr(skill_phases, "parameter_classes", lambda routing, planning=None: (
+        lambda name: [state.toys[name]] if name in state.toys
+        else real_classes(routing, planning)(name)))
     real_names = ctx._phase_command_names
 
     def names():

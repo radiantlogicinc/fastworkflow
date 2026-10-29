@@ -78,16 +78,6 @@ part, or adapts its steps. `JEV_API_KEY`, in `fastworkflow.passwords.env`, is op
 it, the Jev decision model tells the planner which planning command fits first, and sends the
 request and the planning commands' descriptions to TypeSafe.
 
-To see the template the planner sees for each planning command:
-
-```sh
-fastworkflow command preview ./examples/library --out /tmp/library_previews
-```
-
-To see what code does with one call, with no model:
-
-```sh
-fastworkflow command run-code ./examples/library Library/book_by_title --input '{"title": "Dune"}'
-```
-
-It runs the workflow's real commands, against this sample's in-memory library.
+The preview of these planning commands, which shows the template the planner sees for each one,
+comes with a later release. `fastworkflow command preview` still reads planning commands from
+`_skills/`, and this library has none.

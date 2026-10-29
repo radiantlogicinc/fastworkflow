@@ -4,13 +4,13 @@ Every tutorial page marks what it shows with an HTML comment right above a fence
 
 - ``<!-- file: tests/skill_tutorial_workflow/_skills/x.py -->``: the block is that file;
 - ``<!-- template: x -->``: the block is skill x's template, the steps the planner sees;
-- ``<!-- preview: x -->``: the block is part of x's ``fastworkflow skill preview``;
+- ``<!-- preview: x -->``: the block is part of x's ``fastworkflow command preview``;
 - ``<!-- dry-run: x {"arg": "value"} -->``: the block is ``dry_run("x", {...})``;
 - ``<!-- refusal: x {...} -->``: the block is the refusal a call of x with those arguments gets;
 - ``<!-- doctest -->``: the block runs as a doctest;
 - ``<!-- broken: x -->`` then ``<!-- load-error -->``, ``<!-- check-error -->`` or
   ``<!-- template-line -->``: the first block, saved as ``_skills/x.py`` in a copy of the
-  tutorial workflow, gives that load error, ``skill preview --check`` problem, or template line.
+  tutorial workflow, gives that load error, ``command preview --check`` problem, or template line.
 
 ``dry_run`` runs a skill call offline, with no model: each phase's steps as the runtime
 writes them, the leading steps code runs (``skill_phases.plan_code_steps``, ``pick_listing``
@@ -33,9 +33,11 @@ import pytest
 
 from fastworkflow import ModuleType, skill_commands, skill_preview, workflow_agent
 from fastworkflow import skill_phases as sp
+from fastworkflow.observation_offloading.finish_check import plain_command_name
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORKFLOW = os.path.join(ROOT, "tests", "skill_tutorial_workflow")
+LIBRARY = os.path.join(ROOT, "fastworkflow", "examples", "library")
 PAGES = os.path.join(ROOT, "docs", "tutorials", "skills")
 PREVIEWS = os.path.join(PAGES, "previews")
 CORE = ["go_up", "reset_context"]
@@ -67,8 +69,11 @@ def _run(routing, command: str):
 def dry_run(skill: str, args: dict, folder: str = WORKFLOW) -> str:
     """What a call of *skill* with *args* runs, phase by phase, offline (see the module doc)."""
     routing = _routing(folder)
-    parameters = sp.parameter_classes(routing)
-    commands = sorted(n for n in routing.routing_definition_map if n != "wildcard" and "/" not in n)
+    planning = skill_commands.resolve_field_sources(folder).planning_commands
+    parameters = sp.parameter_classes(routing, planning)
+    planning_names = {plain_command_name(name).lower() for name in planning}
+    commands = sorted({n for n in routing.routing_definition_map if n != "wildcard" and "/" not in n}
+                      | {plain_command_name(name) for name in planning})
     command = workflow_agent.load_skill_commands(folder)[skill]
     args = {p.name: p.default for p in command.params if not p.required} | args
     phases = skill_commands.call_phases(command, args)
@@ -92,6 +97,11 @@ def dry_run(skill: str, args: dict, folder: str = WORKFLOW) -> str:
             if run is None:
                 lines.append(f"  step {step.number} is open: the agent runs it and the rest "
                              "(the dry run stops here)")
+                open_step = True
+                break
+            if run.split()[0].lower() in planning_names:
+                lines.append(f"  step {step.number} runs planning command {run.split()[0]}: "
+                             "the dry run does not run planning commands (the dry run stops here)")
                 open_step = True
                 break
             given, output = _run(routing, run)
@@ -326,6 +336,17 @@ def test_a_skill_with_no_inputs_runs_its_two_phases():
     assert [line for line in text.splitlines() if line.startswith("Phase")] == [
         "Phase branches", "Phase overdue"]
     assert "code runs: list_branches" in text and "code runs: count_overdue" in text
+
+
+def test_a_planning_step_is_read_against_its_input_model_on_the_library():
+    """The reading dry_run uses for planning commands (Phase 5): the library's planning
+    commands from resolve_field_sources, each read against its Input model."""
+    planning = skill_commands.resolve_field_sources(LIBRARY).planning_commands
+    assert {"Library/book_loans", "Library/book_by_title"} <= set(planning)
+    parameters = sp.parameter_classes(_routing(LIBRARY), planning)
+    [(step, run, _)] = sp.plan_code_steps("1. book_by_title title=Dune", ["book_by_title"], CORE,
+                                          parameters)
+    assert run == "book_by_title title=Dune"
 
 
 if __name__ == "__main__":

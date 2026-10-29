@@ -80,6 +80,7 @@ class FastWorkflowMCPServer:
             subject_workflow_path=workflow_folderpath,
             cme_workflow_path=cme_path,
             active_context_name=active_ctx_name,
+            include_planning=False,
         )
         meta_by_fq = {m.get("qualified_name"): m for m in enhanced_meta.get("commands", [])}
 

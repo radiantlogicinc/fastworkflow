@@ -66,8 +66,9 @@ class PlanGenerator:
   `book.found` is false and `loans` skips itself.
 - **`full_list("list_loans")`** names no book. The callee left the workflow on the book it
   opened (page 5), so `list_loans` runs on that book. The observation of the
-  `book_by_title` step ends with the note `now in context 'Book' and Dune b1`, as it would
-  after `open_book`.
+  `book_by_title` step carries the note `now in context 'Book'`, as it would after
+  `open_book`. The library's `Book` context declares no instance label, so the note names the
+  context alone.
 - **`__result__`** reads both phases: `book` for the title as the library has it, `loans`
   for the borrowers, and `None` for `loans` when it was skipped.
 
@@ -89,10 +90,11 @@ callee that runs out of steps gives the caller a failed step with the reason, an
 caller carries on. A nested call never hands the turn off.
 
 **A command never calls itself, even through others.** A cycle in the steps the templates
-name (`a` calls `b`, `b` calls `a`) fails the load. A step written in open words at run
-time can still name a command that is already running; that step is refused with
-`book_loans is already running; call its steps directly.` and the agent carries on with
-execution commands.
+name (`a` calls `b`, `b` calls `a`) is a load error for each command on it: the load reports
+it, and `command preview --check` fails. The commands still load. A step written in open
+words at run time can still name a command that is already running; that step is refused
+with `Library/book_loans is already running; call its steps directly.` and the agent carries
+on with execution commands.
 
 **Nested calls share one step budget per turn.** Every model step taken inside a nested
 call counts against `FW_TURN_MAX_STEPS` (optional; 400 by default), in

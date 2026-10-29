@@ -24,6 +24,7 @@ from fastworkflow.utils.fuzzy_match import find_best_matches
 from fastworkflow.utils import dspy_utils
 from fastworkflow.utils.dspy_logger import DSPyForward
 from fastworkflow.command_directory import CommandDirectory
+from fastworkflow import skill_commands
 
 MISSING_INFORMATION_ERRMSG = None
 INVALID_INFORMATION_ERRMSG = None
@@ -592,6 +593,29 @@ class DatabaseValidator:
         return False, None, []
 
 
+def _planning_command_of(app_workflow, subject_command_name: str):
+    """The loaded planning command *subject_command_name* of *app_workflow*, or None."""
+    folderpath = getattr(app_workflow, "folderpath", None)
+    if not folderpath:
+        return None
+    directory = fastworkflow.RoutingRegistry.get_definition(folderpath).command_directory
+    metadata = directory.map_command_2_metadata.get(subject_command_name)
+    if metadata is None or not metadata.is_planning:
+        return None
+    return skill_commands.planning_command(folderpath, subject_command_name)
+
+
+def _unfilled_required(planning, cmd_parameters: BaseModel) -> List[str]:
+    """The required arguments of a planning command that hold no value (missing)."""
+    unfilled = []
+    for param in planning.params:
+        value = getattr(cmd_parameters, param.name, None)
+        if param.required and (value is None or value == NOT_FOUND
+                               or (isinstance(value, str) and not value.strip())):
+            unfilled.append(param.name)
+    return unfilled
+
+
 class InputForParamExtraction(BaseModel):
     """Extract parameters from a user query using step-by-step reasoning.
 Today's date is {today}.
@@ -797,6 +821,44 @@ Today's date is {today}.
         # object in-place without any validation.
         return model_class.model_construct(**param_dict)  # type: ignore[arg-type]
     
+    def _check_planning_arguments(self, planning, cmd_parameters: BaseModel,
+                                  diagnostics: Optional[Dict[str, Any]]) -> Optional[str]:
+        """The arguments of planning command *planning*, checked against the request (self.command).
+
+        ``check_verdicts`` (one classifier call per ``verify`` field, when a Jev LM is set) and then
+        ``check_arguments``' guards; the guarded values are written back onto *cmd_parameters*.
+        Returns the refusal's text, or None when every guard passes.
+        """
+        # workflow_agent imports this module (through command_executor), so it is read at call time.
+        from fastworkflow.workflow_agent import _jev_lm
+
+        raw = {param.name: getattr(cmd_parameters, param.name, None) for param in planning.params}
+        try:
+            verdicts = skill_commands.check_verdicts(_jev_lm(), planning, self.command)
+            args, notes = skill_commands.check_arguments(planning, raw, self.command, verdicts)
+        except skill_commands.SkillCallError as refusal:
+            if diagnostics is not None:
+                diagnostics["argument_refusal"] = str(refusal)
+            return str(refusal)
+        if diagnostics is not None and notes:
+            diagnostics["argument_notes"] = list(notes)
+        for name, value in args.items():
+            setattr(cmd_parameters, name, value)
+        return None
+
+    def _check_planning_input(self, planning, cmd_parameters: BaseModel, app_workflow) -> Optional[str]:
+        """The refusal text of planning command *planning*'s ``Input`` rules, or None.
+
+        The rules read the request (self.command) and the workflow from the validation context,
+        as the turn frame's call does (``skill_commands.check_input``).
+        """
+        args = {param.name: getattr(cmd_parameters, param.name, None) for param in planning.params}
+        try:
+            skill_commands.check_input(planning, args, self.command, app_workflow)
+        except skill_commands.SkillCallError as refusal:
+            return str(refusal)
+        return None
+
     def validate_parameters(self,
                             app_workflow: fastworkflow.Workflow,
                             subject_command_name: str,
@@ -1202,13 +1264,19 @@ Today's date is {today}.
                     all_suggestions[field_name] = field_suggestions
                     is_valid = False
 
-        if is_valid:
-            if not (
-                self.input_for_param_extraction_class and \
-                            hasattr(self.input_for_param_extraction_class, 'validate_extracted_parameters')
-            ):
-                return (True, "All required parameters are valid.", {}, [])
+        planning = _planning_command_of(app_workflow, subject_command_name)
+        if is_valid and planning is not None:
+            unfilled = _unfilled_required(planning, cmd_parameters)
+            if unfilled:
+                missing_fields.extend(unfilled)
+                is_valid = False
+        if is_valid and planning is not None:
+            guard_refusal = self._check_planning_arguments(planning, cmd_parameters, diagnostics)
+            if guard_refusal is not None:
+                return (False, guard_refusal, {}, [])
 
+        if is_valid and self.input_for_param_extraction_class and \
+                hasattr(self.input_for_param_extraction_class, 'validate_extracted_parameters'):
             try:
                 hook = self.input_for_param_extraction_class.validate_extracted_parameters
                 # The command text goes only to a hook that declares `command_text`,
@@ -1242,9 +1310,15 @@ Today's date is {today}.
                     }
                 return (False, message, {}, [])
 
-            if is_valid:
-                return (True, "All required parameters are valid.", {}, [])
-            return (False, message, {}, [])
+            if not is_valid:
+                return (False, message, {}, [])
+
+        if is_valid and planning is not None:
+            input_refusal = self._check_planning_input(planning, cmd_parameters, app_workflow)
+            if input_refusal is not None:
+                return (False, input_refusal, {}, [])
+        if is_valid:
+            return (True, "All required parameters are valid.", {}, [])
 
         if diagnostics is not None:
             diagnostics["missing_fields"] = list(missing_fields)

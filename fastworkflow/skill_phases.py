@@ -1927,16 +1927,27 @@ def pick_step(step: Any, lookup: Any, output: Any,
     return command, "only row" if len(output[uid_col]) == 1 else "exact match"
 
 
-def parameter_classes(routing: Any) -> Callable[[str], list]:
+def parameter_classes(routing: Any, planning: Optional[Mapping[str, Any]] = None
+                      ) -> Callable[[str], list]:
     """``command name -> its parameters classes`` (one per context that defines it, None
-    for one with no parameters) in the routing definition *routing*."""
+    for one with no parameters) in the routing definition *routing*.
+
+    *planning* is the workflow's planning commands (qualified name -> ``SkillCommand``, as
+    ``skill_commands.resolve_field_sources(folder).planning_commands``): routing does not hold
+    them, and a step that names one is read against its ``Input`` model (its one parameters class).
+    """
     from fastworkflow import ModuleType
     from fastworkflow.observation_offloading.finish_check import plain_command_name
 
+    planning = planning or {}
+
     def classes(command: str) -> list:
-        return [routing.get_command_class(name, ModuleType.COMMAND_PARAMETERS_CLASS)
-                for name in routing.routing_definition_map
-                if name != "wildcard" and plain_command_name(name).lower() == command.lower()]
+        found = [routing.get_command_class(name, ModuleType.COMMAND_PARAMETERS_CLASS)
+                 for name in routing.routing_definition_map
+                 if name != "wildcard" and plain_command_name(name).lower() == command.lower()]
+        found += [skill.input_model for name, skill in planning.items()
+                  if plain_command_name(name).lower() == command.lower()]
+        return found
 
     return classes
 
@@ -2080,13 +2091,16 @@ class CodeSteps:
     def __init__(self, plan_text: str, *, workflow: Callable[[], Any],
                  runs: Callable[[int], list], commands: Iterable[str],
                  core_commands: Iterable[str], own_steps: int, answers: bool,
-                 call_runs: Optional[Callable[[], list]] = None):
+                 call_runs: Optional[Callable[[], list]] = None,
+                 planning: Optional[Mapping[str, Any]] = None):
         import fastworkflow
 
         self.workflow, self.runs, self.answers = workflow, runs, answers
         self.call_runs = call_runs
         routing = fastworkflow.RoutingRegistry.get_definition(workflow().folderpath)
-        self._parameters = parameter_classes(routing)
+        # A step naming a planning command is a command step too: code runs it through the
+        # agent's command tool, with the planning command's Input as its parameters (3.5).
+        self._parameters = parameter_classes(routing, planning)
         read = plan_code_steps(plan_text, commands, core_commands, self._parameters)
         self.items = read[:own_steps]
         # The first planner-written step after the phase's own that runs anything.

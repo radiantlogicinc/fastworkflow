@@ -90,11 +90,11 @@ provides (and no default) or that names no such phase in any call, a malformed `
 method that fails while its template is built or writes `None` into a step, and a step that
 names a command the workflow lacks or a parameter its `Signature.Input` lacks
 (`skill_commands.check_step_commands`) fail the load: the skill is logged as an error and
-skipped, and `fastworkflow skill preview` fails naming it. Each output model is then checked
+skipped, and `fastworkflow command preview` fails naming it. Each output model is then checked
 against the workflow's command signatures (`check_fact_sources`): a `"from"` naming a
 command or field the workflow does not have is logged as a warning and the skill still
 loads, so a workflow can add a command's `Output` after the skill that reads it;
-`fastworkflow skill preview --check` fails on it. A plain command name that several
+`fastworkflow command preview --check` fails on it. A plain command name that several
 contexts define passes when some context resolves every field of the model; at run time it
 resolves against the context of the phase's record.
 
@@ -120,9 +120,11 @@ sub-task runs its phases in order instead of one executor run on the whole list.
    (its executor gets only those steps, framed as one part); the extra steps that name
    no command (`say ...`) stay with the last phase, which stays answer-only. That phase's
    answer is added after the job's answer. It is rebuilt with the plan after a restore.
-2. **A sub-plan.** The phase runs as a fresh executor run with a step budget of
+2. **A sub-plan.** The phase runs as a fresh executor run. Its step budget is
    `FW_SKILL_PHASE_MAX_STEPS` (default 15; read from the workflow's env file, then the
-   process environment). Its step numbers continue the turn's, so observation aliases
+   process environment) when the call runs several phases; a call that runs one phase has
+   the executor's own cap instead (`max_iters`, 25; see "Steps run by code"). Its step
+   numbers continue the turn's, so observation aliases
    stay unique. The executor of a phase other than the last gets only that phase's
    steps, framed as "part N of M of a larger job: do only these steps, then finish;
    later parts will do the rest". The request itself is left out of its input, not
@@ -133,7 +135,10 @@ sub-task runs its phases in order instead of one executor run on the whole list.
    the executor's model takes a step (see "Steps run by code" below).
    Nested planning-command calls of one turn share a second budget, `FW_TURN_MAX_STEPS`
    (optional; default 400; read the same way, and a value that is not a positive integer
-   logs a warning and the default applies). It is read but not yet enforced.
+   logs a warning and the default applies; the warning is logged once per distinct value).
+   It is enforced: each model step of a planning-command call counts against it, and once
+   it is spent a further nested call is refused, and a nested call's remaining phases do
+   not start. The turn's own phases are not bounded by it.
 3. **Finish check per phase.** The finish check reads the phase's own steps against the
    outputs archived from the phase's first step on. In a phase it also compares a step's
    concrete argument values (`values=True`, the rule facts use below): a run of
@@ -141,9 +146,9 @@ sub-task runs its phases in order instead of one executor run on the whole list.
    check of a run that is not a phase does not compare values.
 4. **No hand-off.** A phase that reaches its budget just ends; its output is still filled
    from what it ran. A phased skill never uses the step-cap hand-off (progress summary
-   plus a fresh plan), nor does a skill without phases (one phase with the executor's
-   25-step cap, see "Steps run by code"). Sub-tasks that are not skill calls keep the
-   hand-off and the 25-step cap unchanged.
+   plus a fresh plan), nor does a call that runs one phase (it has the executor's 25-step
+   cap, see "Steps run by code"). Sub-tasks that are not skill calls keep the hand-off and
+   the 25-step cap unchanged.
 5. **Facts.** After the run, the phase's `output` is filled in code
    (`facts_from_runs`), with no model call, from the command runs archived during **this
    phase** (`runs_for_facts`). Runs of earlier phases never count.
@@ -590,13 +595,16 @@ pages; step 3 reads page 1 only.", `skill_phases.code_step_pages`), so a note su
 **A skill without phases runs as one phase** (fix-6llp.11). A skill call with no
 `plan()`, or whose `plan()` returns no phases for its input, runs through the same
 runner as one phase named after the skill, whose steps are `steps(input)`
-(`skill_commands.call_phases`). Code runs its leading mechanical steps and picks as
-above; the agent runs the rest and answers the request. Its step budget is the
-executor's own cap (`max_iters`, 25), not `FW_SKILL_PHASE_MAX_STEPS`, and, as for any
-phase, there is no step-cap hand-off: a run that reaches the cap just ends. Planner
-steps before and after the skill's own are handled as in a phased call (a phase of their
-own before; after, left to the agent). Suspended on ask_user and restored, the phase is
-rebuilt from the skill and resumes. Nothing changes for the app developer.
+(`skill_commands.call_phases`). A skill with no parameters and no `plan()` (fixed steps)
+takes the same path: its one phase reads nothing, and a call of it makes no planner model
+call. Code runs its leading mechanical steps and picks as above; the agent runs the rest
+and answers the request. A call that runs one phase gets the executor's own cap
+(`max_iters`, 25), not `FW_SKILL_PHASE_MAX_STEPS`; a call that runs several phases gives
+each phase `FW_SKILL_PHASE_MAX_STEPS`. As for any phase, there is no step-cap hand-off:
+a run that reaches the cap just ends. Planner steps before and after the skill's own are
+handled as in a phased call (a phase of their own before; after, left to the agent).
+Suspended on ask_user and restored, the phase is rebuilt from the skill and resumes.
+Nothing changes for the app developer.
 
 **Writing steps for code.**
 

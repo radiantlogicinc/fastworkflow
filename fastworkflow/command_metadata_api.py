@@ -58,6 +58,7 @@ class CommandMetadataAPI:
         subject_workflow_path: str,
         cme_workflow_path: str,
         active_context_name: str,
+        include_planning: bool = True,
     ) -> Dict[str, Any]:
         """
         Get enhanced command information for a given workflow and context.
@@ -66,6 +67,8 @@ class CommandMetadataAPI:
             subject_workflow_path: Path to the subject workflow
             cme_workflow_path: Path to the Command Metadata Extraction workflow
             active_context_name: Name of the active command context
+            include_planning: Whether the context's planning commands are listed too
+                (MCP and the capability answer leave them out)
 
         Returns:
             Structured dictionary with context and command details
@@ -75,17 +78,14 @@ class CommandMetadataAPI:
 
         cme_command_names = cme_crd.get_command_names('IntentDetection')
         subject_command_names = subject_crd.get_command_names(active_context_name)
+        planning_names = (set(subject_crd.get_planning_command_names(active_context_name))
+                          if include_planning else set())
 
-        candidate_commands = set(cme_command_names) | set(subject_command_names)
-
-        directory = CommandDirectory.load(subject_workflow_path)
+        candidate_commands = set(cme_command_names) | set(subject_command_names) | planning_names
 
         commands = []
         for fq_cmd in candidate_commands:
             if fq_cmd == "wildcard":
-                continue
-            cmd_meta = directory.map_command_2_metadata.get(fq_cmd)
-            if cmd_meta is not None and cmd_meta.is_planning:
                 continue
 
             utterance_meta = (
@@ -93,7 +93,7 @@ class CommandMetadataAPI:
                 cme_crd.command_directory.get_utterance_metadata(fq_cmd)
             )
 
-            if not utterance_meta:
+            if not utterance_meta and fq_cmd not in planning_names:
                 continue
 
             cmd_name = fq_cmd.split("/")[-1]
@@ -243,6 +243,20 @@ class CommandMetadataAPI:
         if type_str.startswith("<class '") and type_str.endswith("'>"):
             return type_str[len("<class '"):-2]
         return type_str
+
+    @staticmethod
+    def _planning_template(subject_workflow_path: str, qualified_name: str) -> tuple[str, ...]:
+        """The template steps of a planning command (``skill_commands.planning_command``), the
+        ones a call of it runs; empty for an execution command."""
+        # inline import avoids circular import: skill_commands -> observation_offloading -> command_metadata_api
+        from fastworkflow import skill_commands
+        command = skill_commands.planning_command(subject_workflow_path, qualified_name)
+        return command.template if command is not None else ()
+
+    @staticmethod
+    def _context_command_names(crd: RoutingDefinition, context_name: str) -> list[str]:
+        """The execution commands of *context_name* (``crd.contexts``) and its planning commands."""
+        return [*crd.contexts.get(context_name, ()), *crd.get_planning_command_names(context_name)]
 
     @staticmethod
     def _prune_empty(value: Any, remove_keys: set[str] | None = None) -> Any:
@@ -565,6 +579,7 @@ class CommandMetadataAPI:
         active_context_name: str,
         for_agents: bool = False,
         exclude: frozenset[str] = frozenset(),
+        with_templates: bool = False,
     ) -> str:
         """
         Return a YAML-like display text for commands in the given context.
@@ -572,6 +587,7 @@ class CommandMetadataAPI:
         - Calls get_enhanced_command_info to retrieve raw command metadata
         - Removes empty fields/lists and the 'default' field
         - Includes input 'pattern' only when for_agents=True
+        - Adds a planning command's template steps only when with_templates=True
         """
         meta = CommandMetadataAPI.get_enhanced_command_info(
             subject_workflow_path=subject_workflow_path,
@@ -623,6 +639,7 @@ class CommandMetadataAPI:
                 active_context_name=active_context_name,
                 qualified_command_name=fq,
                 for_agents=for_agents,
+                with_template=with_templates,
             ):
                 parts.append(part)
 
@@ -665,11 +682,12 @@ class CommandMetadataAPI:
             cme_workflow_path=cme_workflow_path,
             active_context_name=active_context_name,
             for_agents=for_agents,
+            with_templates=True,
         )
 
         try:
             crd = fastworkflow.RoutingRegistry.get_definition(subject_workflow_path)
-            already_listed = set(crd.contexts.get(active_context_name, ()))
+            already_listed = set(CommandMetadataAPI._context_command_names(crd, active_context_name))
 
             # Order sections shallowest-first so the command
             # that ENTERS a context is introduced before the context that requires it.
@@ -693,7 +711,7 @@ class CommandMetadataAPI:
                     continue
                 new_commands = [
                     qualified_name
-                    for qualified_name in sorted(crd.contexts.get(context_name, ()))
+                    for qualified_name in sorted(CommandMetadataAPI._context_command_names(crd, context_name))
                     if qualified_name not in already_listed
                     and qualified_name.split("/")[-1] != "wildcard"
                 ]
@@ -844,6 +862,10 @@ class CommandMetadataAPI:
         lines = [f"- {short_name}"]
         if doc_string:
             lines.append(f"  {doc_string}")
+        if template := CommandMetadataAPI._planning_template(
+                subject_workflow_path, target_cmd.get("qualified_name", "")):
+            lines.append("  template:")
+            lines.extend(f"  - {step}" for step in template)
         if steps is None:
             follow = "no declared navigation path"
         elif steps == "":
@@ -915,13 +937,15 @@ class CommandMetadataAPI:
         for_agents: bool = False,
         omit_command_name: bool = False,
         include_parameters: bool = True,
+        with_template: bool = False,
     ) -> str:
         """
         Return a YAML-like display text for a single command in the given context.
 
         Mirrors get_command_display_text but filters to a specific command only.
         When *include_parameters* is False, only the command name and doc_string
-        are shown (for planner maps of contexts not yet entered).
+        are shown (for planner maps of contexts not yet entered). When *with_template*
+        is True, a planning command's template steps are shown after its parameters.
         """
         meta = CommandMetadataAPI.get_enhanced_command_info(
             subject_workflow_path=subject_workflow_path,
@@ -1022,6 +1046,10 @@ class CommandMetadataAPI:
 
         if utter := target_cmd.get("plain_utterances", []) or []:
             new_cmd["plain_utterances"] = utter[:2]
+
+        if with_template and (template := CommandMetadataAPI._planning_template(
+                subject_workflow_path, target_cmd.get("qualified_name", ""))):
+            new_cmd["template"] = list(template)
 
         display_obj: Dict[str, Any] = {
             "context": context_info,

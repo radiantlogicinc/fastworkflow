@@ -17,8 +17,17 @@ from pydantic import BaseModel, Field, model_validator
 
 import fastworkflow
 from fastworkflow import skill_commands
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.capability_answer import context_commands
+from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError
+from fastworkflow.command_metadata_api import CommandMetadataAPI
+from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.context_navigation import home_contexts
+from fastworkflow.mcp_server import FastWorkflowMCPServer
+from fastworkflow.model_pipeline_training import trained_command_labels
+from fastworkflow.workflow_agent import _explicit_agent_command, _parameter_fields, _what_can_i_do
+from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from fastworkflow.examples.library._commands.Book.list_loans import Signature as ListLoans
+from fastworkflow.examples.library._commands.Library.book_loans import Signature as BookLoans
 from fastworkflow.examples.library._commands.Library.book_by_title import Signature as BookByTitle
 from fastworkflow.examples.library._commands.Library.find_book import Signature as FindBook
 from fastworkflow.examples.library._commands.Library.find_member import Signature as FindMember
@@ -30,6 +39,7 @@ from fastworkflow.turn import TurnStatus, reset_missing_declared_output_warnings
 from fastworkflow.utils import python_utils
 
 from tests.test_field_sources import _build_workflow
+from tests.test_skill_code_steps import Model
 from tests.test_step_helpers import (
     FoundBooks,
     LibraryRunner,
@@ -40,6 +50,8 @@ from tests.test_step_helpers import (
     _real_planning_command,
     library_env,
     library_proof_env,
+    script_command_extraction,
+    script_every_agent,
 )
 
 
@@ -1001,9 +1013,6 @@ PLANNING_CMD = "Library/count_books"
 ASSISTANT_PLANNING_REFUSAL = (
     f"{PLANNING_CMD} is a planning command; it runs in agent mode."
 )
-AGENT_STEP_PLANNING_REFUSAL = (
-    f"{PLANNING_CMD} is a planning command; it cannot be called as a step yet."
-)
 
 
 @pytest.fixture
@@ -1080,15 +1089,24 @@ def test_perform_mcp_tool_call_refuses_planning_command(planning_dispatch_librar
     assert ASSISTANT_PLANNING_REFUSAL in result.content[0].text
 
 
-def test_agent_step_refuses_planning_command(planning_dispatch_library):
+def test_agent_step_runs_planning_command(planning_dispatch_library, monkeypatch):
+    # Was a refusal ("it cannot be called as a step yet") before run_planning_command: an
+    # agent step now extracts the arguments and runs the planning command as a nested frame.
     from fastworkflow.workflow_agent import _execute_workflow_query
 
     ctx = planning_dispatch_library.ctx
-    text = _execute_workflow_query("count_books how many", ctx)
-    assert text == AGENT_STEP_PLANNING_REFUSAL
+    script_command_extraction(monkeypatch, planning_dispatch_library.wf)
+    model = Model(None)
+    script_every_agent(monkeypatch, model)
+    text = _execute_workflow_query("count_books query=Jane Austen", ctx)
+    assert "Jane Austen matches 2 books." in text
+    assert ASSISTANT_PLANNING_REFUSAL not in text
+    out = next(o for o in ctx._turn_outputs if o.command_name == PLANNING_CMD)
+    assert out.success is True
+    assert ctx._frame_stack()[1:] == []
 
 
-def test_planning_command_absent_from_executor_and_planner_catalogs(
+def test_planning_command_in_executor_and_planner_catalogs_of_its_context(
     planning_dispatch_library,
 ):
     ctx = planning_dispatch_library.ctx
@@ -1096,7 +1114,7 @@ def test_planning_command_absent_from_executor_and_planner_catalogs(
     cme_path = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
 
     executor_text = planning_dispatch_library.what_can_i_do(ctx)
-    assert "count_books" not in executor_text
+    assert "- count_books\n" in executor_text
     assert "find_book" in executor_text
 
     planner_text = planning_dispatch_library.api.get_all_contexts_command_display_text(
@@ -1104,7 +1122,7 @@ def test_planning_command_absent_from_executor_and_planner_catalogs(
         cme_workflow_path=cme_path,
         active_context_name=wf.current_command_context_name,
     )
-    assert "count_books" not in planner_text
+    assert "- count_books\n" in planner_text
     assert "find_book" in planner_text
 
 
@@ -1113,6 +1131,186 @@ def test_planning_command_absent_from_mcp_list_tools(planning_dispatch_library):
     tool_names = {tool["name"] for tool in tools}
     assert "count_books" not in tool_names
     assert "find_book" in tool_names
+
+
+# ----------------------------------------------------------------------
+# Phase 5 step 3: planning commands in the executor's and planner's catalogs
+# (design 3.4 "Catalogs"). The library sample's planning commands, plus a
+# test-only planning command in the Record base that Book and Member inherit.
+# ----------------------------------------------------------------------
+
+_LIBRARY_PLANNING_FILES = (
+    "_commands/Library/book_by_title.py",
+    "_commands/Library/book_loans.py",
+    "_commands/Library/_wording.py",
+    "_commands/Book/loan_report.py",
+)
+
+_RECORD_PLANNING_SOURCE = '''"""record_notes: the notes on the open record, as one planned step."""
+from fastworkflow.planning import run
+
+
+class Signature:
+    """Show the notes on the open record."""
+
+
+class PlanGenerator:
+    def notes(self):
+        return [run("show_notes")]
+'''
+
+_BOOK_LOANS_EXECUTOR_ENTRY = (
+    "- book_loans\n"
+    "  Say who has a book on loan, given its title.\n"
+    "  inputs:\n"
+    "  - the book's title. Copy it exactly as the request writes it., type: str\n"
+)
+
+_BOOK_LOANS_PLANNER_ENTRY = (
+    f"{_BOOK_LOANS_EXECUTOR_ENTRY}"
+    "  template:\n"
+    "  - book_by_title title=<title>\n"
+    "  - list_loans (full list) (only when book.found)\n"
+)
+
+
+@pytest.fixture
+def planning_catalog_library(tmp_path, initialized_fastworkflow):
+    """Library copy with Library/book_by_title, Library/book_loans, Book/loan_report and
+    Record/record_notes; the startup command leaves the workflow in Library."""
+    folder = _library_workflow(tmp_path, extra_commands=_LIBRARY_PLANNING_FILES)
+    Path(folder, "_commands", "Record", "record_notes.py").write_text(
+        _RECORD_PLANNING_SOURCE, encoding="utf-8"
+    )
+    RoutingRegistry.clear_registry()
+    RoutingRegistry.get_definition(folder, load_cached=False)
+    wf = fastworkflow.Workflow.create(folder, workflow_id_str=f"pc_{uuid.uuid4().hex[:8]}")
+    ctx = WorkflowExecutionContext(run_as_agent=True)
+    ctx.bind_app_workflow(wf)
+    ctx.push_active_workflow(wf)
+    LibraryRunner(wf)(ctx, "startup")
+    state = SimpleNamespace(
+        ctx=ctx,
+        wf=wf,
+        folder=folder,
+        mcp=FastWorkflowMCPServer(ctx),
+        cme_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
+    )
+    yield state
+    ctx.pop_active_workflow()
+
+
+def test_library_planning_commands_listed_in_executor_catalog_with_signature(
+    planning_catalog_library,
+):
+    text = _what_can_i_do(planning_catalog_library.ctx)
+
+    assert _BOOK_LOANS_EXECUTOR_ENTRY in text
+    assert (
+        "- book_by_title\n"
+        "  Show who wrote a book, and how many copies the library owns, given its title.\n"
+        "  inputs:\n"
+        "  - the book's title. Copy it exactly as the request writes it., type: str\n"
+        "  outputs:\n"
+    ) in text
+    assert "template:" not in text
+
+
+def test_planning_commands_of_other_contexts_not_in_executor_catalog(planning_catalog_library):
+    folder = planning_catalog_library.folder
+    cme_path = planning_catalog_library.cme_path
+
+    book = CommandMetadataAPI.get_command_display_text(
+        subject_workflow_path=folder, cme_workflow_path=cme_path, active_context_name="Book")
+    assert "- loan_report\n" in book
+    assert "- record_notes\n" in book
+    assert "book_loans" not in book
+    assert "book_by_title" not in book
+
+    member = CommandMetadataAPI.get_command_display_text(
+        subject_workflow_path=folder, cme_workflow_path=cme_path, active_context_name="Member")
+    assert "- record_notes\n" in member
+    assert "loan_report" not in member
+    assert "book_loans" not in member
+
+
+def test_library_planning_command_in_planner_catalog_of_its_context_with_template(
+    planning_catalog_library,
+):
+    wf = planning_catalog_library.wf
+    text = CommandMetadataAPI.get_all_contexts_command_display_text(
+        subject_workflow_path=wf.folderpath,
+        cme_workflow_path=planning_catalog_library.cme_path,
+        active_context_name=wf.current_command_context_name,
+        navigation_workflow=wf,
+    )
+
+    deferred_start = text.index("Commands available after entering the * context")
+    assert text.index(_BOOK_LOANS_PLANNER_ENTRY) < deferred_start
+    assert "- library_hours\n" in text[deferred_start:]
+
+
+def test_deferred_planning_commands_in_planner_catalog_show_their_template(
+    planning_catalog_library,
+):
+    wf = planning_catalog_library.wf
+    text = CommandMetadataAPI.get_all_contexts_command_display_text(
+        subject_workflow_path=wf.folderpath,
+        cme_workflow_path=planning_catalog_library.cme_path,
+        active_context_name=wf.current_command_context_name,
+        navigation_workflow=wf,
+    )
+
+    book_section = text[text.index("Commands available after entering the Book context"):]
+    assert (
+        "- loan_report\n"
+        "  Say who has this book on loan and when each loan is due back.\n"
+    ) in book_section
+    assert (
+        "  template:\n"
+        "  - list_loans (full list)\n"
+        "  Before executing loan_report, navigate to Book as follows: "
+        "open_book <book_uid> (needs book_uid)\n"
+    ) in book_section
+    assert (
+        "- record_notes\n"
+        "  Show the notes on the open record.\n"
+        "  template:\n"
+        "  - show_notes\n"
+    ) in book_section
+
+
+def test_library_planning_commands_absent_from_mcp_list_tools_and_capability_answer(
+    planning_catalog_library,
+):
+    names = {tool["name"] for tool in planning_catalog_library.mcp.list_tools()}
+    assert "find_book" in names
+    assert "book_loans" not in names
+    assert "book_by_title" not in names
+
+    listed = context_commands(planning_catalog_library.wf, planning_catalog_library.cme_path)
+    assert "find_book" in listed
+    assert "book_loans" not in listed
+    assert "book_by_title" not in listed
+
+
+def test_routing_contexts_keep_execution_commands_only(planning_catalog_library):
+    crd = RoutingRegistry.get_definition(planning_catalog_library.folder)
+    assert crd.get_planning_command_names("Library") == [
+        "Library/book_by_title",
+        "Library/book_loans",
+    ]
+    assert crd.get_planning_command_names("Book") == ["Book/loan_report", "Record/record_notes"]
+    assert crd.get_planning_command_names("Member") == ["Record/record_notes"]
+    assert "Library/book_loans" not in crd.contexts["Library"]
+
+
+def test_library_planning_commands_not_among_trained_labels(planning_catalog_library):
+    crd = RoutingRegistry.get_definition(planning_catalog_library.folder, load_cached=False)
+    labels = trained_command_labels("Library", crd)
+    assert "Library/find_book" in labels
+    assert "Library/book_loans" not in labels
+    assert "Library/book_by_title" not in labels
 
 
 # ----------------------------------------------------------------------
@@ -1187,3 +1385,126 @@ def test_param_example_training_list_excludes_planning_commands(library_training
     assert "find_book" in commands
     assert "count_books" not in commands
     assert "loan_report" not in commands
+
+
+# ------------------------------------------------------------------
+# fix-3rsq.5.7: the call graph of planning commands and its cycles
+# ------------------------------------------------------------------
+
+_CYCLE_COPIES = (
+    "_commands/Library/_wording.py",
+    "_commands/Library/book_loans.py",
+    "_commands/Library/book_by_title.py",
+    "_commands/Library/count_books.py",
+)
+_BOOK_BY_TITLE_FIND = 'return [run("find_book", query=input.title)]'
+_COUNT_BOOKS_FIND = 'return [run("find_book", query=input.query)]'
+
+
+def _library_text_with_step(rel: str, old: str, new: str) -> str:
+    """The library's *rel* text with one step line swapped for another, the swap asserted."""
+    library = Path(fastworkflow.__file__).parent / "examples" / "library"
+    text = (library / rel).read_text(encoding="utf-8")
+    assert text.count(old) == 1, rel
+    return text.replace(old, new)
+
+
+def test_a_library_copy_whose_commands_call_each_other_names_every_command_on_the_cycle(tmp_path):
+    """book_by_title calls book_loans, which calls book_by_title; count_books calls itself.
+    Each planning command on a cycle is a load error that names the path; the other commands
+    of the library copy load without one."""
+    folder = _library_workflow(
+        tmp_path,
+        extra_commands=_CYCLE_COPIES,
+        command_texts={
+            "_commands/Library/book_by_title.py": _library_text_with_step(
+                "_commands/Library/book_by_title.py", _BOOK_BY_TITLE_FIND,
+                'return [run("find_book", query=input.title), '
+                'run("book_loans", title=input.title)]'),
+            "_commands/Library/count_books.py": _library_text_with_step(
+                "_commands/Library/count_books.py", _COUNT_BOOKS_FIND,
+                'return [run("find_book", query=input.query), '
+                'run("count_books", query=input.query)]'),
+        },
+    )
+    res = skill_commands.resolve_field_sources(folder)
+
+    def cycle_messages(command: str) -> list[str]:
+        return [p.message for p in res.errors
+                if p.command == command and "cannot call itself" in p.message]
+
+    assert cycle_messages("Library/book_by_title") == [
+        "a planning command cannot call itself, even through others: "
+        "Library/book_by_title -> Library/book_loans -> Library/book_by_title"]
+    assert cycle_messages("Library/book_loans") == [
+        "a planning command cannot call itself, even through others: "
+        "Library/book_loans -> Library/book_by_title -> Library/book_loans"]
+    assert cycle_messages("Library/count_books") == [
+        "a planning command cannot call itself: Library/count_books -> Library/count_books"]
+    assert {p.command for p in res.errors if "cannot call itself" in p.message} == {
+        "Library/book_by_title", "Library/book_loans", "Library/count_books"}
+
+
+def _refusal(workflow, command: str) -> str:
+    """The refusal the agent tool gives a command name, as its message."""
+    with pytest.raises(CommandNotFoundError) as refused:
+        _explicit_agent_command(command, workflow)
+    return str(refused.value)
+
+
+def test_a_planning_command_is_available_only_where_it_is_runnable(planning_catalog_library):
+    """Phase 5 step 1: a planning command follows its context as an execution command does. Startup
+    leaves the workflow in Library, where loan_report (Book) and record_notes (Record, a base of
+    Book and Member) are out of context. Opening a book makes it a Book, where both are in context,
+    and book_by_title (Library) is not."""
+    wf = planning_catalog_library.wf
+    assert home_contexts(wf, "loan_report") == ["Book"]
+    assert home_contexts(wf, "record_notes") == ["Book", "Member"]
+    assert "It is available in: 'Book'." in _refusal(wf, "loan_report")
+    assert "It is available in: 'Book', 'Member'." in _refusal(wf, "record_notes")
+
+    LibraryRunner(wf)(planning_catalog_library.ctx, "open_book book_uid=b1")
+    assert wf.current_command_context_name == "Book"
+    assert _explicit_agent_command("loan_report", wf) == "loan_report"
+    assert _explicit_agent_command("record_notes", wf) == "record_notes"
+    assert "It is available in: 'Library'." in _refusal(wf, "book_by_title")
+
+
+def test_an_out_of_context_planning_command_gets_the_execution_refusal_text(planning_catalog_library):
+    """The refusal of a planning command out of its context is the refusal an execution command
+    of another context gets: the same text with the name changed."""
+    wf = planning_catalog_library.wf
+    execution = _refusal(wf, "list_loans")
+    planning = _refusal(wf, "loan_report")
+
+    assert execution.startswith(
+        "Command 'list_loans' is not available in the current context 'Library'. "
+        "It is available in: 'Book'.")
+    assert planning == execution.replace("'list_loans'", "'loan_report'")
+
+
+def test_planning_command_parameter_fields_and_utterances_follow_the_planner_hint(
+        planning_catalog_library):
+    wf = planning_catalog_library.wf
+    folder = planning_catalog_library.folder
+    assert _parameter_fields("book_loans title=Dune", wf) == frozenset(BookLoans.Input.model_fields)
+    # loan_report is out of context in Library: no fields are read for it there.
+    assert _parameter_fields("loan_report", wf) is None
+
+    # A planning command's utterances come from its Signature, as an execution command's do, and
+    # they reach the words the planner's catalog text is matched on.
+    utterances = skill_commands.command_utterances(folder)
+    assert utterances["book_loans"] == ["who has borrowed Dune", "is anyone reading Emma right now"]
+    assert utterances["loan_report"] == ["who has this book", "when is it due back"]
+    catalog = _what_can_i_do(planning_catalog_library.ctx)
+    texts = skill_commands.command_texts(catalog, folder)
+    desc_only = skill_commands.command_texts(catalog)
+    # The hint is the union: the description's words (what it had before its utterances were read)
+    # plus the words that recur in its texts. Utterances add words; they never take one away.
+    assert desc_only["book_loans"] == "book given loan say title"
+    assert texts["book_loans"] == "book given loan say title"
+    assert set(desc_only["book_loans"].split()) <= set(texts["book_loans"].split())
+    # book_by_title's two utterances both say "Dune", so that word joins its hint.
+    assert set(desc_only["book_by_title"].split()) <= set(texts["book_by_title"].split())
+    assert "dune" in texts["book_by_title"].split()
+    assert "dune" not in desc_only["book_by_title"].split()

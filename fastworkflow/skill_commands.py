@@ -7,8 +7,10 @@ the text planner read) and whose pydantic ``Input`` declares typed parameters, a
 skill's steps for one set of arguments (``fastworkflow.skill``). The planner fills the
 parameters from the request (one typed dspy call), the arguments are checked, and the
 ``PlanGenerator`` expands them into the numbered plan. A skill without parameters and
-without phases gives fixed steps the text planner adapts (see ``workflow_agent.load_skills``);
-one without parameters that has phases is a skill call with no arguments (its one plan).
+without phases gives fixed steps: a call of it runs those steps as its one phase, with no
+planning call, and its steps are also the template the text planner reads for a request
+it matches (see ``workflow_agent.load_skills``); one without parameters that has phases is a
+skill call with no arguments (its phases, with no planning call).
 
 The ``_skills`` folder is laid out as ``_commands`` is: a root skill is the file
 ``_skills/<name>.py`` whose name is the file stem, and a context skill in
@@ -159,7 +161,7 @@ A skill file::
   method's template call must succeed (``SkillFormatError`` otherwise); every command step
   must name a workflow command and only parameters of its ``Signature.Input``
   (``check_step_commands``: the skill is skipped at load, logged as an error, and
-  ``fastworkflow skill preview --check`` fails); a ``"from"`` naming a command or field the
+  ``fastworkflow command preview --check`` fails); a ``"from"`` naming a command or field the
   workflow lacks is a logged warning (``check_phase_sources``), not a load failure.
 - ``validate_extracted_parameters`` (optional, the signature of a command's): called with
   the checked arguments as an ``Input`` (``validate_call``); ``(False, message)`` refuses the
@@ -211,6 +213,7 @@ import json
 import os
 import re
 import sys
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from types import UnionType
@@ -249,6 +252,7 @@ from fastworkflow.skill_phases import (
     is_flat_plan,
     is_from_source,
     phase_steps,
+    placeholder_steps,
 )
 from fastworkflow.utils import python_utils
 from fastworkflow.workflow_inheritance_model import (
@@ -318,8 +322,9 @@ class Param:
 
 @dataclass(frozen=True)
 class SkillCommand:
-    """A skill called with typed arguments (a skill with parameters, or with phases: its
-    ``params`` may then be empty): its signature and its ``steps()``."""
+    """A skill called with typed arguments: its signature and its ``steps()``. Every skill
+    file has one; a skill without parameters or ``plan()`` (``fixed_steps``) has no
+    parameters to fill and its one phase reads nothing."""
 
     name: str
     description: str
@@ -532,18 +537,23 @@ def _spec_from_field(name: str, info, where: str) -> dict:
 
 @dataclass(frozen=True)
 class SkillFile:
-    """What a skill file declares: its description and either a parsed command (a skill with
-    params or phases) or its fixed steps (a skill without either, ``command`` None)."""
+    """What a skill file declares: its description, its parsed command, and its template
+    text (``steps``: the steps the planner adapts, and for a fixed-steps skill the steps it runs)."""
 
     description: str
     steps: tuple[str, ...]
-    command: SkillCommand | None
+    command: SkillCommand
     #: ``Signature.plain_utterances``: example requests for the skill (with or without params).
     plain_utterances: tuple[str, ...] = ()
-    #: The single phase method's name for a fixed-steps skill (``command`` None).
-    phase_name: str = ""
     #: The skill file's path.
     path: str = ""
+
+
+def fixed_steps(command: SkillCommand) -> bool:
+    """Whether *command* is a skill with fixed steps: no parameters and no ``plan()``. Its one
+    phase reads nothing, so every call of it is the same plan (the phase runner runs it as
+    one phase)."""
+    return not command.params and command.plan_fn is None
 
 
 def _absent_as_none(command: SkillCommand, args: dict) -> dict:
@@ -1164,15 +1174,13 @@ def command_from_module(name: str, module, path: str) -> SkillFile:
         steps_fn, plan_fn = skill_api.skill_parts(plan_cls)
     except PhaseError as exc:
         raise SkillFormatError(f"{path}: {exc}") from None
-    methods = skill_api.phase_methods(plan_cls)
-    phase_name = methods[0][0] if len(methods) == 1 else ""
     _plan_generator_inherits_foreign(plan_cls, path)
     return skill_from_parts(name, signature, path, steps_fn=steps_fn, plan_fn=plan_fn,
-                            phase_name=phase_name, plan_cls=plan_cls)
+                            plan_cls=plan_cls)
 
 
 def skill_from_parts(name: str, signature, path: str, *, steps_fn: Callable | None = None,
-                     plan_fn: Callable | None = None, phase_name: str = "",
+                     plan_fn: Callable | None = None,
                      plan_cls: type | None = None) -> SkillFile:
     """The skill a ``Signature`` and its behaviour define: a flat ``steps_fn(input)`` or a
     ``plan_fn(input) -> list[Phase]`` (or both: a plan that may return no phases runs flat,
@@ -1216,9 +1224,12 @@ def skill_from_parts(name: str, signature, path: str, *, steps_fn: Callable | No
             raise SkillFormatError(str(exc)) from None
         if not lines:
             raise SkillFormatError(f"{path}: steps() returns no steps")
-        return SkillFile(description=description, steps=tuple(lines), command=None,
-                         plain_utterances=tuple(utterances),
-                         phase_name=phase_name or name, path=path)
+        command = SkillCommand(name=name, description=description, params=(), path=path,
+                               input_model=input_model, steps_fn=steps_fn, validate=validate,
+                               plain_utterances=tuple(utterances), plan_cls=plan_cls,
+                               template=tuple(lines))
+        return SkillFile(description=description, steps=tuple(lines), command=command,
+                         plain_utterances=tuple(utterances), path=path)
 
     command = SkillCommand(name=name, description=description, params=tuple(params.values()), path=path, input_model=input_model, steps_fn=steps_fn, validate=validate,
                            plain_utterances=tuple(utterances), plan_fn=plan_fn,
@@ -1242,8 +1253,7 @@ def skill_from_parts(name: str, signature, path: str, *, steps_fn: Callable | No
     if not template:
         raise SkillFormatError(f"{path}: a skill needs steps")
     return SkillFile(description=description, steps=tuple(template), command=replace(command, template=tuple(template)),
-                     plain_utterances=tuple(utterances),
-                     phase_name=phase_name, path=path)
+                     plain_utterances=tuple(utterances), path=path)
 
 
 def _concatenated_steps_fn(plan_fn: Callable) -> Callable:
@@ -1423,6 +1433,11 @@ class FieldSourceResolution:
     command_files: Mapping[str, str]
     import_errors: Mapping[str, str]
     base_contexts: Mapping[str, tuple[str, ...]]
+    #: The planning commands (``_commands/`` with ``PlanGenerator``) that loaded, by
+    #: qualified name: what run_planning_command runs and a restored call rebuilds from.
+    planning_commands: Mapping[str, SkillCommand] = field(default_factory=dict)
+    #: ``callees[name]``: the qualified names the steps of each planning command call (3.7).
+    callees: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
     @property
     def errors(self) -> tuple[FieldSourceProblem, ...]:
@@ -1765,6 +1780,21 @@ def resolve_signature_field_sources(
                 ))
                 continue
 
+            # A producer edge on a planning command's Input must not name one of its own
+            # callees: the edge sends the agent to run the target first, and the steps run it anyway (3.3).
+            if target_qname in resolution.callees.get(command_name, frozenset()):
+                field_ok = False
+                problems.append(FieldSourceProblem(
+                    file=file_path,
+                    message=(f"Input.{field_name} (from {entry!r}) tells the agent to run "
+                             f"{target_qname} first, but this command's own steps call "
+                             f"{target_qname}. To describe the value, write "
+                             "Field(description=...) instead"),
+                    severity="error",
+                    command=command_name,
+                ))
+                continue
+
             target_sig = resolution.signatures.get(target_qname)
             target_out = getattr(target_sig, "Output", None)
             target_in = getattr(target_sig, "Input", None)
@@ -1880,8 +1910,10 @@ def _typed_phase_output_problems(
                 try:
                     lines = phase_steps(phase, {"input": inst})
                 except PhaseError:
+                    # An earlier phase's facts are not there at load: the phase's steps on
+                    # placeholder facts are the ones it can run (a callee's step, read as the template has it).
                     try:
-                        lines = phase_steps(phase, {})
+                        lines = placeholder_steps(phase)
                     except PhaseError:
                         lines = []
                 step_cmds = [name for name, _ in step_commands(lines, known)]
@@ -1965,10 +1997,9 @@ def _resolve_field_sources_cached(folder: str, _source_fingerprint: str) -> Fiel
         if is_planning and getattr(module, "PlanGenerator", None) is not None:
             try:
                 parsed = command_from_module(qname, module, fpath)
-                if parsed.command is not None:
-                    planning_commands[qname] = parsed.command
-                    if parsed.command.phase_outputs:
-                        skill_phase_outputs[qname] = parsed.command.phase_outputs
+                planning_commands[qname] = parsed.command
+                if parsed.command.phase_outputs:
+                    skill_phase_outputs[qname] = parsed.command.phase_outputs
             except SkillFormatError as exc:
                 msg = str(exc)
                 prefix = f"{fpath}: "
@@ -1991,7 +2022,14 @@ def _resolve_field_sources_cached(folder: str, _source_fingerprint: str) -> Fiel
         command_files={q: f for q, (f, _, _) in all_files.items()},
         import_errors=import_errors,
         base_contexts=base_contexts,
+        planning_commands=planning_commands,
     )
+
+    # The callee graph and its cycles (3.7) are built before the from_ checks, which read it.
+    resolution = replace(resolution, callees=_callee_graph(planning_commands, resolution))
+    cycle_problems = _cycle_problems(planning_commands, resolution.callees)
+    problems.extend(cycle_problems)
+    skipped.update(p.command for p in cycle_problems)
 
     for qname in sorted(signatures):
         fpath = all_files[qname][0]
@@ -2015,6 +2053,12 @@ def _resolve_field_sources_cached(folder: str, _source_fingerprint: str) -> Fiel
         problems=tuple(problems),
         skipped_commands=frozenset(skipped),
     )
+
+
+def planning_command(workflow_folderpath: str, qualified_name: str) -> SkillCommand | None:
+    """The loaded planning command *qualified_name* of a workflow, or None when it has none
+    (not a planning command, or its module does not load)."""
+    return resolve_field_sources(workflow_folderpath).planning_commands.get(qualified_name)
 
 
 def _clear_field_sources_cache() -> None:
@@ -2099,15 +2143,11 @@ def _note_condition_problem(path: str, phase: str, step_text,
             "for the agent to decide")
 
 
-def check_step_commands(command: SkillCommand, signatures: dict) -> list[str]:
-    """Problems with the commands a skill's steps name: each command step of its template
-    (every placeholder combination; ``step_commands``) and each ``pick`` must name a
-    command of the workflow (*signatures*: ``facts.workflow_signatures``), and each
-    parameter it passes must be a field of that command's ``Signature.Input``, the schema a
-    command call is checked against. Returned as messages: the skill fails its load
-    (``workflow_agent``) and ``fastworkflow skill preview --check`` fails."""
-    from fastworkflow import skill as skill_api
-
+def _command_steps(command: SkillCommand, signatures: dict) -> tuple[dict, list[tuple[str, tuple[str, ...]]]]:
+    """The workflow's command fields (*signatures* by name, and by the name's last part) and
+    each command step of *command*'s template as ``(command, parameters)``: every placeholder
+    combination's ``step_commands``, and each ``run``/``full_list`` and ``pick`` call. The parse
+    that ``check_step_commands`` checks and the callee graph (``_callee_graph``) both read."""
     with skill_api.command_inputs_for_steps(signatures, collect=True) as (fields_map, steps):
         fields = fields_map or {}
         known = set(fields)
@@ -2122,6 +2162,17 @@ def check_step_commands(command: SkillCommand, signatures: dict) -> list[str]:
             for found in (step_commands(lines, known) + list(steps)
                           + [(c, (p,) if p else ()) for c, p in picks]):
                 seen.setdefault(found)
+    return fields, list(seen)
+
+
+def check_step_commands(command: SkillCommand, signatures: dict) -> list[str]:
+    """Problems with the commands a skill's steps name: each command step of its template
+    (every placeholder combination; ``step_commands``) and each ``pick`` must name a
+    command of the workflow (*signatures*: ``facts.workflow_signatures``), and each
+    parameter it passes must be a field of that command's ``Signature.Input``, the schema a
+    command call is checked against. Returned as messages: the skill fails its load
+    (``workflow_agent``) and ``fastworkflow command preview --check`` fails."""
+    fields, seen = _command_steps(command, signatures)
     problems = []
     for name, args in seen:
         if name not in fields:
@@ -2138,6 +2189,83 @@ def check_step_commands(command: SkillCommand, signatures: dict) -> list[str]:
     return problems
 
 
+def _callee_graph(planning_commands: Mapping[str, SkillCommand],
+                  resolution: FieldSourceResolution) -> dict[str, frozenset[str]]:
+    """``callees[name]`` for each planning command (3.7): the qualified names its steps call.
+
+    The steps are read by ``_command_steps``, the parse ``check_step_commands`` checks, fixed
+    steps included. A step's name resolves from the command's own context as a producer's does
+    (``_resolve_producer_target``). A name off that path that exactly one command of the
+    workflow has resolves to it: a step runs in the context an earlier callee left open
+    (``book_loans`` runs ``list_loans`` on the book ``book_by_title`` opened). An ambiguous or
+    unknown name is no edge; the cycle guard at run time refuses a cycle the graph cannot see.
+    """
+    known = set(resolution.signatures)
+    graph: dict[str, frozenset[str]] = {}
+    for qname, command in sorted(planning_commands.items()):
+        _, seen = _command_steps(command, resolution.signatures)
+        targets: set[str] = set()
+        for name, _ in seen:
+            ref_context, _, ref_cmd = name.rpartition("/")
+            target, candidates = _resolve_producer_target(
+                ref_context or None, ref_cmd, qname.rpartition("/")[0], known, resolution.base_contexts)
+            if target is None and len(candidates) == 1:
+                target = candidates[0]
+            if target is not None:
+                targets.add(target)
+        graph[qname] = frozenset(targets)
+    return graph
+
+
+def _cycle_through(start: str, callees: Mapping[str, frozenset[str]]) -> list[str] | None:
+    """The shortest call path from *start* back to *start* (``[start, ..., start]``), or None
+    when *start* is on no cycle."""
+    came_from: dict[str, str] = {}
+    queue = deque([start])
+    while queue:
+        node = queue.popleft()
+        for callee in sorted(callees.get(node, ())):
+            if callee == start:
+                chain = [node]
+                while chain[-1] != start:
+                    chain.append(came_from[chain[-1]])
+                return list(reversed(chain)) + [start]
+            if callee not in came_from:
+                came_from[callee] = node
+                queue.append(callee)
+    return None
+
+
+def _cycle_problems(planning_commands: Mapping[str, SkillCommand],
+                    callees: Mapping[str, frozenset[str]]) -> list[FieldSourceProblem]:
+    """A load error for every planning command on a call cycle, a self-call included (3.7).
+    Each names the cycle, so the log says which commands form it."""
+    problems = []
+    for qname in sorted(planning_commands):
+        cycle = _cycle_through(qname, callees)
+        if cycle is None:
+            continue
+        path = " -> ".join(cycle)
+        message = (f"a planning command cannot call itself: {path}" if len(cycle) == 2
+                   else f"a planning command cannot call itself, even through others: {path}")
+        problems.append(FieldSourceProblem(
+            file=planning_commands[qname].path, message=message, severity="error", command=qname,
+        ))
+    return problems
+
+
+def call_depth(name: str, resolution: FieldSourceResolution, _path: frozenset[str] = frozenset()) -> int:
+    """The ``Depth:`` of planning command *name* (3.7): the longest chain of planning commands
+    from it, itself counted, an execution command counting 0. A cycle is a load error; the
+    guard keeps the walk finite."""
+    if name in _path:
+        return 0
+    below = [call_depth(callee, resolution, _path | {name})
+             for callee in sorted(resolution.callees.get(name, ()))
+             if callee in resolution.planning_commands]
+    return 1 + max(below, default=0)
+
+
 def _grid_phase_steps(skill: SkillCommand | SkillFile,
                       signatures: dict) -> tuple[str, list[tuple[str, object]]]:
     """*skill*'s path and each ``(phase, step line)`` of its placeholder grid (3.13 checks)."""
@@ -2145,30 +2273,25 @@ def _grid_phase_steps(skill: SkillCommand | SkillFile,
 
     with skill_api.command_inputs_for_steps(signatures, collect=True) as (_, steps):
         seen_steps: list[tuple[str, object]] = []
-        if isinstance(skill, SkillFile) and skill.command is None:
-            path = skill.path
-            for step_line in skill.steps:
-                seen_steps.append((skill.phase_name or "steps", step_line))
-        else:
-            command = skill.command if isinstance(skill, SkillFile) else skill
-            path = command.path
-            for env in _template_grid(command):
-                steps.clear()
-                with skill_api.steps_by_phase_noted() as by_phase:
-                    try:
-                        lines = _call_steps(command.steps_fn, input_instance(command, env), command.path)
-                    except Exception:  # noqa: BLE001 - the template build reports it
-                        continue
-                items = by_phase or [
-                    (command.name,
-                     skill_api.Step(without_condition_note(line), line.helper)
-                     if isinstance(line, skill_api.Step) else without_condition_note(line))
-                    for line in lines
-                ]
-                for phase_name, step_line in items:
-                    key = (phase_name, str(step_line), getattr(step_line, "helper", None))
-                    if key not in {(p, str(s), getattr(s, "helper", None)) for p, s in seen_steps}:
-                        seen_steps.append((phase_name, step_line))
+        command = skill.command if isinstance(skill, SkillFile) else skill
+        path = command.path
+        for env in _template_grid(command):
+            steps.clear()
+            with skill_api.steps_by_phase_noted() as by_phase:
+                try:
+                    lines = _call_steps(command.steps_fn, input_instance(command, env), command.path)
+                except Exception:  # noqa: BLE001 - the template build reports it
+                    continue
+            items = by_phase or [
+                (command.name,
+                 skill_api.Step(without_condition_note(line), line.helper)
+                 if isinstance(line, skill_api.Step) else without_condition_note(line))
+                for line in lines
+            ]
+            for phase_name, step_line in items:
+                key = (phase_name, str(step_line), getattr(step_line, "helper", None))
+                if key not in {(p, str(s), getattr(s, "helper", None)) for p, s in seen_steps}:
+                    seen_steps.append((phase_name, step_line))
         return path, seen_steps
 
 
@@ -2873,14 +2996,16 @@ def command_descriptions(available_commands: str) -> dict[str, str]:
 
 def command_utterances(workflow_folderpath: str) -> dict[str, list[str]]:
     """``{name: plain_utterances}`` of the workflow's commands, from its routing definition
-    (a name in several contexts gets the utterances of each). Empty when the definition
-    cannot be read; never raises."""
+    (a name in several contexts gets the utterances of each). Planning commands count too:
+    their utterances come from their ``Signature``, as an execution command's do. Empty when
+    the definition cannot be read; never raises."""
     from fastworkflow.command_routing import RoutingRegistry
 
     out: dict[str, list[str]] = {}
     try:
         crd = RoutingRegistry.get_definition(workflow_folderpath)
-        qualified = {q for names in crd.contexts.values() for q in names}
+        qualified = {q for context, names in crd.contexts.items()
+                     for q in (*names, *crd.get_planning_command_names(context))}
         for q in sorted(qualified):
             try:
                 meta = crd.command_directory.get_utterance_metadata(q)
@@ -2901,11 +3026,15 @@ def command_texts(available_commands: str, workflow_folderpath: str | None = Non
     A word one utterance happens to use ("check", "whether", "full picture") says nothing
     of what the command is about; a word several do ("invoices" in "show every invoice
     this customer has" and "which invoices are still open") does. A command with one text only
-    gives that text's words."""
-    sentences = {name: [desc] for name, desc in command_descriptions(available_commands).items()}
+    gives that text's words. A planning command that no execution command shares keeps every
+    word of its description too, so its utterances can add words to its hint but never take one away."""
+    descriptions = command_descriptions(available_commands)
+    sentences = {name: [desc] for name, desc in descriptions.items()}
+    planning_only: set[str] = set()
     if workflow_folderpath:
         for name, utterances in command_utterances(workflow_folderpath).items():
             sentences.setdefault(name, []).extend(utterances)
+        planning_only = _planning_only_names(workflow_folderpath)
     out = {}
     for name, texts in sentences.items():
         words = [_content_words(t) for t in texts]
@@ -2914,8 +3043,28 @@ def command_texts(available_commands: str, workflow_folderpath: str | None = Non
             for stem in {_stem(w) for w in ws}:
                 counts[stem] = counts.get(stem, 0) + 1
         least = 2 if len(texts) > 1 else 1
-        out[name] = " ".join(sorted({w for ws in words for w in ws if counts[_stem(w)] >= least}))
+        found = {w for ws in words for w in ws if counts[_stem(w)] >= least}
+        if name in planning_only:
+            # A planning command's utterances only add to the words its description gave it:
+            # the hint it had before its utterances were read is kept whole.
+            found |= _content_words(descriptions.get(name, ""))
+        out[name] = " ".join(sorted(found))
     return out
+
+
+def _planning_only_names(workflow_folderpath: str) -> set[str]:
+    """The simple names of the workflow's planning commands that no execution command shares.
+    Empty when the routing definition cannot be read."""
+    from fastworkflow.command_routing import RoutingRegistry
+
+    try:
+        crd = RoutingRegistry.get_definition(workflow_folderpath)
+    except Exception:  # noqa: BLE001 - without the definition no name is known to be planning
+        return set()
+    execution = {q.split("/")[-1] for names in crd.contexts.values() for q in names}
+    planning = {q.split("/")[-1] for context in crd.contexts
+                for q in crd.get_planning_command_names(context)}
+    return planning - execution
 
 
 def filter_extra_steps(extra, expanded: list[str], names: frozenset[str], skill_name: str,
@@ -3093,9 +3242,19 @@ class SkillCallPlan:
     steps_after: list[str] = field(default_factory=list)
 
 
+def no_argument_call(command: SkillCommand) -> SkillCallPlan:
+    """The call of a skill with no parameters: nothing for a typed planning call to fill, so no
+    model call is made. Its phases are ``call_phases``'s (always at least one); it has no
+    steps before or after, as those are steps the request needs around a call with arguments."""
+    return SkillCallPlan(plan="", args={}, notes=[], prediction=None,
+                         phases=call_phases(command, {}))
+
+
 def plan_skill_call(command: SkillCommand, request: str, available_commands: str,
                     check_lm=None, workflow=None) -> SkillCallPlan:
     """Plan ``request`` as a call of ``command``: the typed call, the guards, the expansion.
+
+    A skill with no parameters is not planned with a model call (``no_argument_call``).
 
     Runs under the caller's dspy context (the planner LM and adapter); ``available_commands``
     reaches the adapter as extra input, as for the text planner. With ``check_lm`` (a
@@ -3109,6 +3268,8 @@ def plan_skill_call(command: SkillCommand, request: str, available_commands: str
     Raises on any other failure, or a second refusal (the caller falls back to the template
     path).
     """
+    if not command.params:
+        return no_argument_call(command)
     import dspy
 
     def typed_call(query: str):

@@ -19,7 +19,13 @@ from fastworkflow import skill_commands, skill_phases, skill_preview, tracing, w
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     ParameterExtraction,
 )
-from fastworkflow.command_executor import CommandExecutor, call_response_generator
+from fastworkflow import command_executor as command_executor_module
+from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.command_executor import (
+    CommandExecutor,
+    _resolve_planning_command_name,
+    call_response_generator,
+)
 from fastworkflow.examples.library._commands.Record.add_note import Signature as AddNote
 from fastworkflow.observation_offloading import finish_check
 from fastworkflow.observation_offloading.facts import workflow_signatures
@@ -44,7 +50,8 @@ from fastworkflow.skill_commands import SkillCallPlan, SkillFormatError, call_ph
 from fastworkflow.skill_phases import Placeholder, step_paging
 from fastworkflow.turn import TurnStatus
 from fastworkflow.utils import python_utils
-from fastworkflow.workflow_agent import initialize_workflow_tool_agent
+from fastworkflow.utils.react import fastWorkflowReAct
+from fastworkflow.workflow_agent import core_command_names, initialize_workflow_tool_agent
 from tests.test_skill_code_steps import Model
 from tests.test_skill_phases import RecordingSink
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures
@@ -90,8 +97,13 @@ def _library_workflow(
     tmp_path,
     extra_skills: dict[str, str] | None = None,
     extra_commands: tuple[str, ...] = (),
+    command_texts: dict[str, str] | None = None,
 ) -> str:
-    """Build a runnable copy of the library workflow in *tmp_path*."""
+    """Build a runnable copy of the library workflow in *tmp_path*.
+
+    *command_texts* maps a library command file (relative to the library folder) to the text
+    the copy holds in its place: a test copy of a library command with a change in it.
+    """
     folder = tmp_path / "library_wf"
     folder.mkdir(parents=True, exist_ok=True)
     shutil.copy2(os.path.join(LIBRARY, "__init__.py"), folder / "__init__.py")
@@ -104,11 +116,15 @@ def _library_workflow(
         os.path.join(LIBRARY, "_commands", "context_inheritance_model.json"),
         commands_dir / "context_inheritance_model.json",
     )
-    for rel in (*_COPIED_CONTEXT_CLASSES, *_COPIED_COMMANDS, *extra_commands):
+    for rel in dict.fromkeys((*_COPIED_CONTEXT_CLASSES, *_COPIED_COMMANDS, *extra_commands,
+                              *(command_texts or {}))):
         src = os.path.join(LIBRARY, rel)
         dst = folder / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
+        if rel in (command_texts or {}):
+            dst.write_text(command_texts[rel], encoding="utf-8")
+        else:
+            shutil.copy2(src, dst)
 
     skills_dir = folder / "_skills"
     skills_dir.mkdir(parents=True, exist_ok=True)
@@ -672,6 +688,110 @@ class LibraryRunner:
         return out
 
 
+def script_every_agent(monkeypatch, model) -> None:
+    """Send every agent's model calls to *model*, the nested frames' agents included.
+
+    A planning command's frame builds its agent when the call runs, so no agent exists to
+    patch in advance. The class method is patched instead, and *model* is told which agent
+    asks (``model.agent``) before each call, so its scripted steps read that agent's modules.
+    """
+    def call(agent, *args, **kwargs):
+        model.agent = agent
+        return model(*args, **kwargs)
+
+    monkeypatch.setattr(fastWorkflowReAct, "_call_with_potential_trajectory_truncation", call)
+
+
+def script_command_extraction(monkeypatch, wf, extracted: dict[str, dict] | None = None) -> None:
+    """Stand in for the command-extraction hop (the CME's ``wildcard`` action) on a copy.
+
+    A copy has no trained intent models, so the NLU cannot run there. This takes the
+    command name and its ``name key=value`` arguments the way the NLU's extraction would
+    hand them over, and the rest of the dispatch is real: ``_invoke_command_impl`` decides
+    what the name is (planning or execution) and what runs. The arguments then go through
+    the CME's one validation step, ``InputForParamExtraction.validate_parameters``; a refusal
+    comes back as the failed output the CME gives. *extracted* maps a qualified command name
+    to the values the extraction returned in place of the parsed ones (a value the step does
+    not write, for one). Every other action is passed through to
+    ``CommandExecutor.perform_action`` unchanged.
+    """
+    original = CommandExecutor.perform_action
+
+    def extract(cls, workflow, action):
+        if action.command_name != "wildcard":
+            return original(workflow, action)
+        name = action.command.split()[0].lstrip("/")
+        # Planning commands are not in the routing map (_qualified finds execution commands only).
+        qualified = (_resolve_planning_command_name(wf.folderpath, name)
+                     or _qualified(wf, name))
+        if qualified is None:
+            return fastworkflow.CommandOutput(
+                command_response=fastworkflow.CommandResponse(
+                    response=f"Unknown command {name}", success=False),
+                command_handled=True,
+            )
+        if qualified in core_command_names():
+            # A core command (go_up, reset_context) is not routed to the app workflow: the
+            # wildcard runs it on the CME workflow, which holds app_workflow in its context, and
+            # hands the executor its output as handled (wildcard.py, the startup_action path).
+            core = original(workflow, fastworkflow.Action(command_name=qualified,
+                                                          command=action.command))
+            core.command_response.artifacts["command_handled"] = True
+            return core
+        # What the CME's wildcard command does for a routed command: the context the
+        # response generator reads is the one the workflow is on.
+        wf.command_context_for_response_generation = wf.current_command_context
+        routing = fastworkflow.RoutingRegistry.get_definition(wf.folderpath)
+        cls_params = routing.get_command_class(
+            qualified, fastworkflow.ModuleType.COMMAND_PARAMETERS_CLASS)
+        params = None
+        if cls_params is not None:
+            params = (
+                ParameterExtraction._extract_parameters_from_key_values(
+                    action.command, cls_params, name, code_written=False)
+                or ParameterExtraction._extract_parameters_from_bare(action.command, cls_params, name)
+            )
+            for field_name, value in (extracted or {}).get(qualified, {}).items():
+                setattr(params, field_name, value)
+            if params is not None:
+                is_valid, error_msg, _, _ = InputForParamExtraction.create(
+                    wf, qualified, action.command).validate_parameters(wf, qualified, params)
+                if not is_valid:
+                    return fastworkflow.CommandOutput(
+                        command_name=qualified,
+                        command_response=fastworkflow.CommandResponse(
+                            response=f"PARAMETER EXTRACTION ERROR FOR COMMAND '{qualified}'\n{error_msg}",
+                            success=False),
+                    )
+        return fastworkflow.CommandOutput(
+            command_response=fastworkflow.CommandResponse(
+                response="",
+                artifacts={"command_name": qualified, "cmd_parameters": params,
+                           "command": action.command},
+            ),
+            success=True,
+            command_handled=False,
+        )
+
+    monkeypatch.setattr(CommandExecutor, "perform_action", classmethod(extract))
+
+    # The library's ResponseGenerators return their Signature.Output, which the executor
+    # does not take (it wants a CommandOutput). LibraryRunner wraps it the same way; here
+    # the wrap sits at the executor's call site, so the rest of the dispatch is unchanged.
+    def as_command_output(response_generator, *args):
+        raw = call_response_generator(response_generator, *args)
+        if isinstance(raw, fastworkflow.CommandOutput):
+            return raw
+        if isinstance(raw, BaseModel):
+            return fastworkflow.CommandOutput(
+                command_response=fastworkflow.CommandResponse(
+                    response=raw.model_dump_json(), output=raw))
+        return fastworkflow.CommandOutput(
+            command_response=fastworkflow.CommandResponse(response=str(raw)))
+
+    monkeypatch.setattr(command_executor_module, "call_response_generator", as_command_output)
+
+
 @pytest.fixture
 def library_env(tmp_path, initialized_fastworkflow, monkeypatch):
     """A runnable library workflow in *tmp_path* driven through the real phase runner."""
@@ -753,10 +873,31 @@ def _make_library_runner_env(
     extra_skills: dict[str, str] | None = None,
     extra_commands: tuple[str, ...] = (),
     args: dict | None = None,
+    real_dispatch: bool = False,
+    command_texts: dict[str, str] | None = None,
+    extracted: dict[str, dict] | None = None,
+    real_folder: bool = False,
 ):
-    """Like ``library_env``, on a copy that may include extra commands or skills."""
+    """Like ``library_env``, on a copy that may include extra commands or skills.
+
+    With *real_folder* the library folder itself runs (no copy; *extra_skills*,
+    *extra_commands* and *command_texts* must be empty), so the caller keeps its state root
+    outside the folder.
+
+    With *real_dispatch* the executor's own dispatch runs every command: the extraction
+    hop is scripted (``script_command_extraction``, which takes *extracted*) and the nested
+    frames' agents answer from ``state.nested`` (``script_every_agent``); ``state.runner``
+    then only starts the library. Without it, ``LibraryRunner`` stands in for
+    ``CommandExecutor.invoke_command``. *command_texts* replaces library command files in
+    the copy (``_library_workflow``).
+    """
     monkeypatch.delenv(skill_phases.PHASE_MAX_STEPS_ENV, raising=False)
-    folder = _library_workflow(tmp_path, extra_skills=extra_skills, extra_commands=extra_commands)
+    if real_folder:
+        assert not (extra_skills or extra_commands or command_texts), "the real folder is not a copy"
+        folder = LIBRARY
+    else:
+        folder = _library_workflow(tmp_path, extra_skills=extra_skills,
+                                   extra_commands=extra_commands, command_texts=command_texts)
     ctx, wf = _make_agent_ctx(folder, monkeypatch)
     sink = RecordingSink()
     ctx.set_trace_sink(sink)
@@ -769,11 +910,16 @@ def _make_library_runner_env(
     _set_agents(ctx, agent)
     model = Model(agent)
     monkeypatch.setattr(agent, "_call_with_potential_trajectory_truncation", model)
-    monkeypatch.setattr(
-        CommandExecutor,
-        "invoke_command",
-        classmethod(lambda cls, session, command: runner(session, command)),
-    )
+    nested = Model(None)
+    if real_dispatch:
+        script_command_extraction(monkeypatch, wf, extracted)
+        script_every_agent(monkeypatch, nested)
+    else:
+        monkeypatch.setattr(
+            CommandExecutor,
+            "invoke_command",
+            classmethod(lambda cls, session, command: runner(session, command)),
+        )
 
     state = SimpleNamespace(
         ctx=ctx,
@@ -781,6 +927,7 @@ def _make_library_runner_env(
         sink=sink,
         agent=agent,
         model=model,
+        nested=nested,
         runner=runner,
         skill=None,
         args=args or {},
@@ -1250,6 +1397,12 @@ def test_library_planning_commands_load_inventory():
             assert hand == [], qname
         if not expect_load:
             assert phase
+    # Phase 5 (fix-3rsq.5.10): the folder loads with no field-source error, and every row that
+    # loads is a planning command the runtime can run (Library/book_loans calls book_by_title).
+    res = skill_commands.resolve_field_sources(LIBRARY)
+    assert res.errors == ()
+    loaded = {qname for qname, _, expect_load, _, _ in _LIBRARY_PLANNING_INVENTORY if expect_load}
+    assert loaded <= set(res.planning_commands)
 
 
 def test_library_overdue_summary_from_real_module_runs_code_steps(library_proof_env):

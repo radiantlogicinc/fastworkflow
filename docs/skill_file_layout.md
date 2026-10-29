@@ -3,7 +3,7 @@
 A skill file (`_skills/<name>.py`; reference: the `fastworkflow.skill` module documentation;
 the runtime: [skill_phases.md](skill_phases.md)) is a command file for a whole job. It is read
 far more often than it is written, so every skill file has one form, the same few idioms as a
-command file, read top to bottom in the same order. `fastworkflow skill preview` (below)
+command file, read top to bottom in the same order. `fastworkflow command preview` (below)
 renders what each call of it runs. A step-by-step tutorial, on a toy workflow:
 [tutorials/skills](tutorials/skills/README.md).
 
@@ -82,7 +82,7 @@ as `if not <what the phase needs>: return []`, and put wording that tests facts 
 **Checked at load** (else the skill is not loaded): a method without `self`, a parameter
 that names no earlier phase, an annotation that is not a model, a method that fails on
 unknown facts or writes `None` into a step, a step naming a command the workflow lacks or a
-parameter its `Signature.Input` lacks. `fastworkflow skill preview <workflow>` shows every
+parameter its `Signature.Input` lacks. `fastworkflow command preview <workflow>` shows every
 call's phases, facts, steps and who writes the answer; `--check` fails when one is stale.
 
 ## The order
@@ -128,7 +128,7 @@ class Input(BaseModel):
 
 ## Previews
 
-`fastworkflow skill preview <workflow_folder> [--out <dir>] [--check]` writes one markdown
+`fastworkflow command preview <workflow_folder> [--out <dir>] [--check]` writes one markdown
 file per skill, `<dir>/<skill>.md`, generated from the skill files with the skill loader
 (`fastworkflow.skill_preview`). The default `<dir>` is `docs/skill_previews` next to the
 workflow folder (`<workflow_folder>/../docs/skill_previews`), which for a workflow package
