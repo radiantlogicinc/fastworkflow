@@ -186,3 +186,11 @@ that catches the second — one of those eight was the largest item on the board
 
 Verify by reading the file, not by trusting the command's output. Full detail in
 `.cursor/skills/beads-workflow/SKILL.md`.
+
+## Do not use grep for searching
+- **Go with mgrep if you are exploring an unfamiliar architecture or monorepo**. Its retrieval quality is much stronger at pulling together conceptual overviews, handling fuzzy documentation queries, and synthesizing disparate text assets (like a mix of YAML configs, Markdown files, and codebase PDFs).
+- **Go with ColGrep if you need absolute precision inside raw code lines**. Its capability to maintain token name exactness while performing semantic abstractions makes it the superior choice for tracking down bugs, handling heavy refactors, and pinpointing exact functional lines.
+
+## Repowise: semantic search via colgrep
+
+Repowise's own embedder is `mock` (semantic search off), so its `search_codebase` and the semantic half of `get_answer` only match keywords. For meaning-based code search, use colgrep (`colgrep`) instead of Repowise's search. Use Repowise's MCP tools (`get_overview`, `get_context`, `get_risk`, `get_why`) for architecture, ownership, and change-risk questions.

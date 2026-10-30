@@ -268,3 +268,6 @@ rejected_examples.json
 # example stay tracked. The beads export stays tracked.
 docs/unified_command_architecture.md
 docs/unified_command_architecture/
+
+# Repowise local index and cache.
+.repowise/
