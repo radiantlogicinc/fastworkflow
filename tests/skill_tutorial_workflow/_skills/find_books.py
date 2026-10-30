@@ -10,8 +10,7 @@ class Signature:
     plain_utterances = ["find books by Jane Austen", "do you have Dune"]
 
     class Input(BaseModel):
-        query: str = Field(description="the title or author words exactly as the request "
-                                       "writes them")
+        query: str = Field(description="the title or author words")
 
 
 class PlanGenerator:

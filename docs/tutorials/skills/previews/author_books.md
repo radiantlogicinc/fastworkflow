@@ -13,7 +13,7 @@ Depth: 1 (lower bound; open steps name no command)
 
 | input | type | default | sample | verify | subject | description |
 |---|---|---|---|---|---|---|
-| `author` | str | required | `<author>` |  |  | the author's name exactly as the request writes it |
+| `author` | str | required | `<author>` |  |  | the author's name |
 
 ## Example requests
 

@@ -13,7 +13,7 @@ Depth: 1 (lower bound; open steps name no command)
 
 | input | type | default | sample | verify | subject | description |
 |---|---|---|---|---|---|---|
-| `query` | str | required | `<query>` |  |  | the title or author words exactly as the request writes them |
+| `query` | str | required | `<query>` |  |  | the title or author words |
 
 ## Example requests
 

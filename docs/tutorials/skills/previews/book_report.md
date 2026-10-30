@@ -13,7 +13,7 @@ Depth: 1 (lower bound; open steps name no command)
 
 | input | type | default | sample | verify | subject | description |
 |---|---|---|---|---|---|---|
-| `title` | str | required | `<title>` |  |  | the book's title exactly as the request writes it |
+| `title` | str | required | `<title>` |  |  | the book's title |
 | `loans` | bool | false | false |  |  | the request asks who has the book on loan |
 | `brief` | bool | false | false |  |  | the request only asks whether the library has the book |
 

@@ -13,7 +13,7 @@ Depth: 1 (lower bound; open steps name no command)
 
 | input | type | default | sample | verify | subject | description |
 |---|---|---|---|---|---|---|
-| `member` | str | required | `<member>` |  |  | the member's name exactly as the request writes it |
+| `member` | str | required | `<member>` |  |  | the member's name |
 
 ## Example requests
 

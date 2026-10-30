@@ -14,7 +14,7 @@ class Signature:
     plain_utterances = ["who wrote Dune", "how many copies of Dune Messiah are there"]
 
     class Input(BaseModel):
-        title: str = Field(description="the book's title exactly as the request writes it")
+        title: str = Field(description="the book's title")
 
 
 class PlanGenerator:

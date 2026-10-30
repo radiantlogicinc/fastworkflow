@@ -13,7 +13,7 @@ Depth: 1 (lower bound; open steps name no command)
 
 | input | type | default | sample | verify | subject | description |
 |---|---|---|---|---|---|---|
-| `name` | str | required | `<name>` |  |  | the name exactly as the request writes it |
+| `name` | str | required | `<name>` |  |  | the name to look for |
 | `kind` | one of book, member | `book` | `book` |  |  | whether the request is about a book or a member |
 
 ## Example requests

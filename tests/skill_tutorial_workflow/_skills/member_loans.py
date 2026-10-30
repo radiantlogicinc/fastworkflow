@@ -16,7 +16,7 @@ class Signature:
     plain_utterances = ["what has Ann Lee borrowed", "which books does Raj Patel have out"]
 
     class Input(BaseModel):
-        member: str = Field(description="the member's name exactly as the request writes it")
+        member: str = Field(description="the member's name")
 
     @staticmethod
     def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
