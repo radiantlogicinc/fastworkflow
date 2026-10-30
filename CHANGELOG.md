@@ -453,6 +453,22 @@
   one of its own callees is also a load error; the message says to write
   `Field(description=...)` instead.
 
+- **A refused planning-command call is asked as a question** (fix-3rsq.6,
+  `fastworkflow/workflow_agent.py`). When the planner's typed call of a
+  matched planning command is refused, an attended turn that has not yet asked
+  or run a command puts the refusal to the user, e.g. "I can't run member
+  report yet: your request does not say which member to use. Which member
+  should I use?", and suspends on it; the reply completes the call. An
+  unattended turn plans from the command's template as before. The planner
+  span records `skill_refusal_asked`.
+
+- **`fastworkflow train` writes the workflow's vocabulary** (fix-3rsq.6,
+  `fastworkflow/utils/workflow_vocabulary.py`). `___command_info/
+  workflow_vocabulary.json` is a top-level, unversioned file derived from
+  command metadata (kind words, field names, kind selectors), keyed by a source
+  fingerprint. The runtime reads it while the fingerprint matches and derives
+  it in memory otherwise. Intent detection and the DSPy examples do not read it.
+
 ### Removed
 
 - **Skill `repeat()` / `REPEAT_LIMIT` and `@<skill>` include lines**
@@ -623,6 +639,32 @@
   `ask_user` waits for the reply returns "A question is waiting for the user's
   answer; reply to it before running an action." The suspended turn is left as
   it was; the user's reply resumes it.
+
+- **The typed planning call is shown a trimmed list of commands** (fix-3rsq.6,
+  `fastworkflow/workflow_agent.py`). Each command appears with its name, the
+  first sentence of its description and its `parameters:` line, which cut the
+  call's prompt by about 79% with no measured loss. The text planner still
+  sees the full list.
+
+- **Parameter extraction treats placeholder values as not given**
+  (fix-3rsq.6, `fastworkflow/utils/signatures.py`). A value that is the name
+  of a command (the called one's, or another's in identifier form), the string
+  `None`, or a free-text value that is only a pronoun or only a kind word or
+  field name of the workflow counts as missing, so the missing-parameter path
+  asks for it. A field whose description lists its choices ("One of: ...") or
+  whose labeled examples hold kind words is exempt from the word screen.
+  `fw.nlu.param_extraction` records `command_name_values` and
+  `word_screen_values`.
+
+- **A planning command typed by name is matched by name** (fix-3rsq.6,
+  `fastworkflow/_workflows/command_metadata_extraction/intent_detection.py`).
+  Planning command names join the exact-match set and the cross-context
+  inventory, so they no longer fall to the classifier, which has no labels for
+  them.
+
+- **Span contract v30** (fix-3rsq.6, `fastworkflow/tracing.py`):
+  `fw.planner.plan` / `fw.planner.replan` v8, `fw.agent.execute` v3 and
+  `fw.nlu.param_extraction` v7.
 
 ### Fixed
 
