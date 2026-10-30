@@ -227,6 +227,12 @@ class WorkflowExecutionContext:
         self._awaiting_user = False
         self._suspended_user_message: Optional[str] = None
         self._pending_clarification_request: Optional[str] = None
+        # A refused skill call put to the user (the planner's SkillInputError, workflow_agent):
+        # the question the planner left for _call_agent_for_query, whether the suspension
+        # waiting on the reply is one of these, and whether this turn already put one.
+        self._skill_refusal: Optional[str] = None
+        self._skill_refusal_pending = False
+        self._skill_refusal_answered = False
         self._next_step = 0
         # Model steps taken by nested planning-command frames this turn (design 3.5).
         self._turn_steps_used = 0
@@ -644,6 +650,8 @@ class WorkflowExecutionContext:
         self._turn_started_at = datetime.now(timezone.utc)
         self._turn_user_message = user_message
         self._turn_unattended = bool(unattended)
+        self._skill_refusal_pending = False
+        self._skill_refusal_answered = False
         self._turn_refined_message = None
         self._turn_suspended_ms = 0
         self._suspend_began_at = None
@@ -1078,6 +1086,8 @@ class WorkflowExecutionContext:
             "awaiting_user": self._awaiting_user,
             "suspended_user_message": self._suspended_user_message,
             "pending_clarification_request": self._pending_clarification_request,
+            "skill_refusal_pending": self._skill_refusal_pending,
+            "skill_refusal_answered": self._skill_refusal_answered,
             "subtasks": list(turn.subtasks),
             "subtask_origins": list(turn.origins),
             "subtask_index": turn.subtask_index,
@@ -1146,6 +1156,9 @@ class WorkflowExecutionContext:
         self._pending_clarification_request = state.get(
             "pending_clarification_request"
         )
+        # Absent from blobs written before a refused skill call could suspend a turn.
+        self._skill_refusal_pending = bool(state.get("skill_refusal_pending"))
+        self._skill_refusal_answered = bool(state.get("skill_refusal_answered"))
         # Absent from blobs written before sub-task splitting; the defaults mean "not split".
         turn = self._turn_frame()
         turn.subtasks = list(state.get("subtasks") or [])
@@ -1943,6 +1956,7 @@ class WorkflowExecutionContext:
         self._awaiting_user = False
         self._suspended_user_message = None
         self._pending_clarification_request = None
+        self._skill_refusal_pending = False
         # A suspended nested frame (run_planning_command) is dropped with the suspension;
         # what is cleared below belongs to the turn frame, the only frame left.
         del self._frame_stack()[1:]
@@ -2126,6 +2140,12 @@ class WorkflowExecutionContext:
             plan_template=plan_template or None,
             skill_command=skill_command,
         )
+        refusal, self._skill_refusal = self._skill_refusal, None
+        if refusal is not None:
+            # A refused skill call the user is asked about: the turn suspends on the question as
+            # an ask_user does (no plan, no run); the reply re-runs it (_rerun_after_skill_refusal).
+            self._skill_refusal_pending = True
+            return dspy.Prediction(suspended=True, clarification=refusal, exhausted=False)
         phased, self._phased_skill_call = getattr(self, "_phased_skill_call", None), None
         if phased is not None:
             # A skill call: its phases run as sub-plans, with no hand-off.
@@ -2571,7 +2591,6 @@ class WorkflowExecutionContext:
             call_args=json.loads(json.dumps(args, default=str)),
             command_text=execute_call.get("command", ""),
             folded_note=execute_call.get("folded_note", ""),
-            fast_path=False,
         )
         frames.append(frame)
         self._attach_nested_agent(frame)
@@ -3222,6 +3241,10 @@ class WorkflowExecutionContext:
             return result.command_output
 
         agent_result = self._run_agent(message)
+        return self._settle_agent_result(message, agent_result)
+
+    def _settle_agent_result(self, message: str, agent_result) -> fastworkflow.CommandOutput:
+        """The turn's output for one agent run: its suspension (the turn awaits the user), or its answer."""
         self._turn_agent_result = agent_result
         if getattr(agent_result, "suspended", None) is True:
             self._awaiting_user = True
@@ -3232,8 +3255,23 @@ class WorkflowExecutionContext:
         self._reset_agent_suspension()
         return self._finalize_agent_output(message, agent_result)
 
+    def _rerun_after_skill_refusal(self, reply: str) -> fastworkflow.CommandOutput:
+        """The reply to a refused skill call's question: the turn runs once more from its request,
+        with the reply after it, so the planner's typed call sees the value the user gave (its
+        guards read the request). The question's exchange is completed here. Nothing ran before
+        the question (``_skill_refusal_may_ask``), so nothing is run twice."""
+        message = f"{self._suspended_user_message}\n{reply}"
+        self._note_agent_resume()
+        self.complete_ask_user_entry(reply)
+        self._skill_refusal_pending = False
+        self._skill_refusal_answered = True
+        self._reset_agent_suspension()
+        return self._settle_agent_result(message, self._run_agent(message))
+
     def _resume_agent_message(self, user_answer: str) -> fastworkflow.CommandOutput:
         self._ensure_agent_initialized()
+        if self._skill_refusal_pending:
+            return self._rerun_after_skill_refusal(user_answer)
         # Catch awaiting_user/_suspended desync before any LLM work: resume()
         # consumes _suspended at entry, so a second request (or a restore that
         # lost the react blob) must not become a bare 500.

@@ -14,6 +14,7 @@ Layout
         command_directory.json          <- workflow-scoped, NOT versioned
         routing_definition.json         <- workflow-scoped, NOT versioned
         <command>_param_labeled.json    <- workflow-scoped, NOT versioned
+        workflow_vocabulary.json        <- workflow-scoped, NOT versioned (utils/workflow_vocabulary)
         current.json                    <- authoritative pointer (this module)
         versions/
             README.md                   <- "these cost hours to rebuild" warning

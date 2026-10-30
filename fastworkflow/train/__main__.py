@@ -13,7 +13,7 @@ from colorama import Fore, Style
 
 import fastworkflow
 from fastworkflow.utils.logging import logger
-from fastworkflow.utils import python_utils
+from fastworkflow.utils import python_utils, workflow_vocabulary
 from fastworkflow import ModuleType
 from fastworkflow.model_pipeline_training import (
     CommandRouter,
@@ -605,6 +605,10 @@ def _generate_dspy_examples_helper(workflow):
                 json.dump(examples_data, f, indent=2)
         else:
             None
+
+    # The workflow's vocabulary: a top-level, unversioned snapshot derived from command metadata.
+    # The runtime reads it while its fingerprint matches and derives it in memory otherwise.
+    workflow_vocabulary.write_workflow_vocabulary(workflow.folderpath)
 
 def _prune_stale_artifacts(workflow_path: str):
     """Remove orphaned per-command and per-context training artifacts.

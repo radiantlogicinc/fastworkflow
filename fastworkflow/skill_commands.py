@@ -214,6 +214,7 @@ import os
 import re
 import sys
 from collections import deque
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from types import UnionType
@@ -227,6 +228,9 @@ from fastworkflow.skill_json_schema_internal import (
     HAND_WRITTEN_AVAILABLE_FROM_KEY as _HAND_WRITTEN_AVAILABLE_FROM_KEY,
     SKILL_JSON_SCHEMA_EXTRA_INTERNAL_KEYS as _SKILL_JSON_SCHEMA_EXTRA_INTERNAL_KEYS,
 )
+from fastworkflow.utils.workflow_vocabulary import (
+    KIND_WORD_WHY, WorkflowVocabulary, description_kind_options, is_kind_word, is_pronoun_phrase,
+    load_workflow_vocabulary)
 from fastworkflow.observation_offloading.facts import FactSourceError, fact_sources
 from fastworkflow.observation_offloading.finish_check import (
     KIND_COMMAND,
@@ -255,6 +259,7 @@ from fastworkflow.skill_phases import (
     placeholder_steps,
 )
 from fastworkflow.utils import python_utils
+from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_inheritance_model import (
     WorkflowInheritanceModel,
     WorkflowInheritanceModelError,
@@ -298,6 +303,127 @@ class SkillInputError(SkillCallError):
     ``check_arguments`` refused one of the planner's arguments (missing, not a valid value, not
     written in the request). The message says what to fix; ``plan_skill_call`` gives it to the
     planner for one more typed call."""
+
+
+#: The refusal of one argument: ``name=<value repr> <why>`` (see ``check_arguments``).
+_ARGUMENT_REFUSAL = re.compile(r"^(?P<name>[A-Za-z_]\w*)=(?P<value>.*?) (?P<why>(?:is|names) .*)$")
+_MISSING_ARGUMENT = re.compile(r"^missing required argument (?P<name>[A-Za-z_]\w*)$")
+
+
+#: The refusals of a free-text value that ``refusal_question`` asks for without quoting the value:
+#: a template token or an invented name, a pronoun the request does not tie to one subject, a
+#: word of the workflow's own vocabulary (a kind of record, a field name, a declared choice).
+PLACEHOLDER_WHY = "is a placeholder, not a value"
+PRONOUN_WHY = "is a pronoun the request does not tie to a single subject"
+#: Words of an invented example value ("John Doe"): a closed list, as PRONOUNS is.
+PLACEHOLDER_WORDS = frozenset({
+    "john", "jane", "doe", "smith", "foo", "bar", "baz", "example", "placeholder", "unknown",
+    "unspecified", "tbd", "todo", "n/a", "none", "null"})
+#: A template token written as is: brackets and braces, an upper-case ``NAME_1``, "unspecified_x".
+_PLACEHOLDER_SHAPE = re.compile(r"[<>{}]|\b[A-Z][A-Z_]*_\d+\b|(?i:\bunspecified\w*|\bplaceholder\b)")
+
+
+def _placeholder_like(text: str, folded_request: str) -> bool:
+    """A template token or an invented example value. The example words count only when the
+    request does not itself write the value (a real person named "John Doe" passes)."""
+    if _PLACEHOLDER_SHAPE.search(text):
+        return True
+    words = re.findall(r"[a-z/]+", text.lower())
+    return bool(words) and any(w in PLACEHOLDER_WORDS for w in words) and text.lower() not in folded_request
+
+
+def _role_fits(request: str, value: str, p: "Param") -> bool:
+    """Whether the request writes *p*'s role just before *value*: the input's name, as words, among
+    the four words before the value's first occurrence in the request."""
+    folded = _fold(request).lower()
+    at = folded.find(_fold(value).lower())
+    if at < 0:
+        return False
+    words = re.findall(r"[a-z0-9_]+", folded[:at].replace("_", " "))[-4:]
+    role = p.name.lower().replace("_", " ")
+    return re.search(rf"\b{re.escape(role)}s?\b", " ".join(words)) is not None
+
+
+def _skills_workflow_root(path: str) -> str | None:
+    """The workflow folder of a skill file: the parent of the ``_skills`` folder it sits in."""
+    for parent in Path(path).parents:
+        if parent.name == "_skills":
+            return str(parent.parent)
+    return None
+
+
+def _vocabulary_for(command: "SkillCommand") -> WorkflowVocabulary | None:
+    """The vocabulary of the workflow the skill belongs to (the stored file when fresh, else
+    derived in memory); None when the skill has no workflow folder or the derivation fails."""
+    root = _skills_workflow_root(command.path) if command.path else None
+    if root is None:
+        return None
+    try:
+        return load_workflow_vocabulary(root)
+    except Exception:  # noqa: BLE001 - the workflow's own code; the screens are skipped, not the call
+        logger.warning(f"could not derive the vocabulary of {root}", exc_info=True)
+        return None
+
+
+def _kind_selector_options(p: Param, vocabulary: WorkflowVocabulary | None) -> frozenset[str]:
+    """The kind words a kind-selector argument lists in its description (the same rule the
+    command parameter screen applies, ``description_kind_options``). A skill has no labeled
+    examples of its own, so only its description can make it one."""
+    if vocabulary is None:
+        return frozenset()
+    return description_kind_options(p.desc, vocabulary.kind_words)
+
+
+def missing_argument_question(command: SkillCommand, name: str) -> str:
+    """The question put to the user for a required argument the request does not give.
+
+    The same words for every route that finds the argument missing: a skill call's refusal
+    (``refusal_question``), whatever its check found.
+    """
+    task = command.name.replace("_", " ")
+    label = name.replace("_", " ")
+    return (f"I can't run {task} yet: your request does not say which {label} to use. "
+            f"Which {label} should I use?")
+
+
+def refusal_question(command: SkillCommand, refusal: SkillInputError) -> str:
+    """The question put to the user when a refused skill call cannot be filled from the request.
+
+    It names the recipe's input and says what is wrong with it, in plain words: the request
+    does not say it, the value the planner took is not in the request, or it is not one of the
+    allowed values. A refusal that names no input (a rule the skill's own hook or Input raised)
+    is put in its own words.
+    """
+    task = command.name.replace("_", " ")
+    text = str(refusal)
+    if match := _MISSING_ARGUMENT.match(text):
+        return missing_argument_question(command, match["name"])
+    match = _ARGUMENT_REFUSAL.match(text)
+    param = next((p for p in command.params if match and match["name"] == p.name), None)
+    if param is not None:
+        label = param.name.replace("_", " ")
+        value, why = match["value"], match["why"]
+        if why in (PLACEHOLDER_WHY, PRONOUN_WHY, KIND_WORD_WHY):
+            return missing_argument_question(command, param.name)
+        if why.startswith("is also the value of "):
+            other = why.removeprefix("is also the value of ").replace("_", " ")
+            return (f"I can't run {task} yet: {value} is the {other} in your request, not the {label}. "
+                    f"Which {label} should I use?")
+        if why.startswith("is not written in the request"):
+            wrong = f"the {label} {value} is not in your request"
+        elif why.startswith("names no record of the request"):
+            wrong = f"{value} does not match anything in your request"
+        elif why.startswith("is not one of "):
+            wrong = f"the {label} must be one of: {', '.join(param.values)}"
+        elif why.startswith("is not an integer"):
+            wrong = f"the {label} must be a whole number"
+        elif why.startswith("is not true or false"):
+            wrong = f"the {label} must be yes or no"
+        else:
+            wrong = f"the {label} {value} is not valid"
+        return f"I can't run {task} yet: {wrong}. Which {label} should I use?"
+    detail = re.sub(r"^(?:validate_extracted_parameters|the arguments break a rule of \S+): ", "", text)
+    return f"I can't run {task} yet: {detail}. What should I change?"
 
 
 # ---------------------------------------------------------------- the parsed skill
@@ -1216,7 +1342,6 @@ def skill_from_parts(name: str, signature, path: str, *, steps_fn: Callable | No
 
     params = {n: _parse_param(n, _spec_from_field(n, info, path), path)
               for n, info in input_model.model_fields.items()}
-    _apply_extraction_field_descriptions(input_model, params)
     if not params and plan_fn is None:
         try:
             lines = _call_steps(steps_fn, input_model(), path)
@@ -2471,6 +2596,21 @@ def check_input(command: SkillCommand, args: dict, request: str, workflow=None) 
         raise SkillInputError(f"the arguments break a rule of {command.name}: {_validation_text(exc)}") from None
 
 
+def _check_roles(command: SkillCommand, args: dict, request: str) -> None:
+    """The same value for two required free-text inputs: the one whose role the request does not
+    write just before the value is refused (``_role_fits``); when both fit or neither does, the
+    first is refused. Raises SkillInputError."""
+    required = [p for p in command.params if p.type == "str" and p.required and not p.values]
+    for i, p in enumerate(required):
+        for q in required[i + 1:]:
+            value = str(args[p.name])
+            if not value or value.lower() != str(args[q.name]).lower():
+                continue
+            fits_p, fits_q = _role_fits(request, value, p), _role_fits(request, value, q)
+            loser, other = (q, p) if fits_p and not fits_q else (p, q)
+            raise SkillInputError(f"{loser.name}={args[loser.name]!r} is also the value of {other.name}")
+
+
 def validate_call(command: SkillCommand, args: dict, request: str, workflow=None,
                   notes: list[str] | None = None) -> dict:
     """``args`` after the skill's ``validate_extracted_parameters`` hook (a skill file's), as for
@@ -2483,6 +2623,7 @@ def validate_call(command: SkillCommand, args: dict, request: str, workflow=None
         if checked[p.name] != args.get(p.name) and notes is not None:
             notes.append(f"{p.name}={args.get(p.name)!r} -> {checked[p.name]!r} (validate_extracted_parameters)")
     check_input(command, checked, request, workflow)
+    _check_roles(command, checked, request)
     return checked
 
 
@@ -2728,29 +2869,53 @@ def _screen(command: SkillCommand, raw: dict, request: str) -> tuple[dict, dict[
     return {n: getattr(values, n) for n in names}, refused
 
 
-IN_REQUEST_STR_SENTENCE = "Copy it exactly as the request writes it."
+# The rule sentences of design 3.4 (Descriptions), one per option the check below enforces. The
+# CME parameter extractor reads each after the description of a field that carries the option, and
+# nothing else reads them: not the preview, nor the listings (``fastworkflow.utils.signatures``
+# appends them through ``extraction_sentences_for``).
+IN_REQUEST_STR_SENTENCE = "Copy it exactly as the request writes it."   # in_request on a str
+IN_REQUEST_INT_SENTENCE = "A number the request writes."                # in_request on an int
+SUBJECT_SENTENCE = "Copy it exactly as the request writes it. It must name a record the request names."  # subject
+VERIFY_BOOL_SENTENCE = "True only when the request asks for it."       # verify on a bool
 
 
-def extraction_field_description(p: Param) -> str:
-    """Field description the CME parameter extractor reads for *p*, with the ``in_request`` str
-    rule sentence appended when applicable (3.4, Descriptions)."""
-    desc = (p.desc or p.name).rstrip(". ")
-    if p.in_request and p.type == "str":
-        return f"{desc}. {IN_REQUEST_STR_SENTENCE}"
-    return p.desc or p.name
+def extraction_sentences(p: Param) -> tuple[str, ...]:
+    """The rule sentences of the options *p* carries, as ``check_arguments`` enforces them
+    (3.4, Descriptions). A subject field's sentence already says what ``in_request`` says, so it
+    stands alone: the extractor reads each rule once."""
+    sentences: list[str] = []
+    if p.subject:
+        sentences.append(SUBJECT_SENTENCE)
+    elif p.in_request:
+        sentences.append(IN_REQUEST_STR_SENTENCE if p.type == "str" else IN_REQUEST_INT_SENTENCE)
+    if p.verify and p.type == "bool":
+        sentences.append(VERIFY_BOOL_SENTENCE)
+    return tuple(sentences)
 
 
-def _apply_extraction_field_descriptions(input_model: type, params: dict[str, Param]) -> None:
-    for name, p in params.items():
-        if not p.in_request or p.type != "str":
-            continue
-        info = input_model.model_fields.get(name)
-        if info is not None:
-            info.description = extraction_field_description(p)
+def extraction_sentences_for(workflow_folderpath: str | None, qualified_name: str | None) -> dict[str, tuple[str, ...]]:
+    """``{field: sentences}`` the CME parameter extractor appends to the descriptions of planning
+    command *qualified_name*'s fields, for the fields whose options have a sentence. Empty for an
+    execution command, or without a workflow (3.4, Descriptions)."""
+    if not workflow_folderpath or not qualified_name:
+        return {}
+    command = planning_command(workflow_folderpath, qualified_name)
+    if command is None:
+        return {}
+    return {p.name: sentences for p in command.params if (sentences := extraction_sentences(p))}
+
+
+def verify_field_names(workflow_folderpath: str) -> tuple[str, ...]:
+    """``<command>.<field>`` for each planning command's field that carries ``verify``: the checks
+    that need ``JEV_API_KEY`` (the INFO line at load, design 3.9)."""
+    commands = resolve_field_sources(workflow_folderpath).planning_commands
+    return tuple(f"{qname}.{p.name}" for qname, command in sorted(commands.items())
+                 for p in command.params if p.verify)
 
 
 def check_arguments(command: SkillCommand, raw: dict, request: str,
-                    verdicts: dict | None = None) -> tuple[dict, list[str]]:
+                    verdicts: dict | None = None,
+                    vocabulary: WorkflowVocabulary | None = None) -> tuple[dict, list[str]]:
     """The guarded, complete arguments of a skill call; ``(args, notes)``.
 
     - a one-element list given for an argument (``["Payroll"]``, or that list written as JSON
@@ -2791,7 +2956,10 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
     notes: list[str] = []
     args: dict = {}
     folded = _fold(request).lower()
-    subjects = _request_subjects(command, request) if any(p.subject for p in command.params) else []
+    subjects = _request_subjects(command, request)
+    named = {subject.lower() for subject in subjects}
+    if vocabulary is None:
+        vocabulary = _vocabulary_for(command)
     kinds = frozenset(v.lower() for p in command.params if p.type == "enum" for v in p.values)
     single = {**raw, **{p.name: _single(raw.get(p.name)) for p in command.params}}
     screened, refused = _screen(command, single, request)
@@ -2853,6 +3021,28 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
             args[p.name] = text
         else:
             text = _strip_words(_clean_str(value), p.strip)
+            if text.strip() == "None":
+                # the missing-value marker, not a value: the argument is absent (as the parameter
+                # screen treats it), so a required one is missing and an optional one takes its default
+                if p.required:
+                    raise SkillInputError(f"missing required argument {p.name}")
+                args[p.name] = p.default
+                continue
+            if text and text.lower() not in named:
+                # the free-text screens: a template token, a pronoun, a word of the workflow's own
+                # vocabulary. A value the request names as a record (a subject) always passes.
+                if _placeholder_like(text, folded):
+                    refuse(p, shown, PLACEHOLDER_WHY)
+                    continue
+                if is_pronoun_phrase(text):
+                    if len(subjects) != 1:
+                        refuse(p, shown, PRONOUN_WHY)
+                        continue
+                    notes.append(f"{p.name}={shown!r} -> {subjects[0]!r} (the request's one subject)")
+                    text = subjects[0]
+                elif is_kind_word(text, p.name, vocabulary, _kind_selector_options(p, vocabulary)):
+                    refuse(p, shown, KIND_WORD_WHY)
+                    continue
             at = folded.find(_fold(text).lower()) if text else -1
             if at < 0:
                 if p.required:
@@ -2989,7 +3179,8 @@ def command_descriptions(available_commands: str) -> dict[str, str]:
     out: dict[str, list[str]] = {}
     for name, body in _CATALOG_ENTRY.findall(available_commands or ""):
         first = body.strip().splitlines()[0].strip() if body.strip() else ""
-        if first and not first.endswith(":"):
+        # A ``parameters:`` line is the typed call's listing (typed_planner_commands_text), not a description.
+        if first and not first.endswith(":") and not first.startswith("parameters:"):
             out.setdefault(name, []).append(re.split(r"(?<=[.!?])\s", first, maxsplit=1)[0])
     return {name: " ".join(texts) for name, texts in out.items()}
 

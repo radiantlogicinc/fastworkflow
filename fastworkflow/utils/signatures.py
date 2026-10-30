@@ -6,7 +6,7 @@ import dspy
 import os
 from contextlib import suppress
 from dataclasses import dataclass, field as dataclass_field
-from typing import Optional, Tuple, Union, Dict, Any, Type, List, get_args, get_origin
+from typing import Literal, Optional, Tuple, Union, Dict, Any, Type, List, get_args, get_origin
 from enum import Enum
 from datetime import date
 import re
@@ -25,6 +25,8 @@ from fastworkflow.utils import dspy_utils
 from fastworkflow.utils.dspy_logger import DSPyForward
 from fastworkflow.command_directory import CommandDirectory
 from fastworkflow import skill_commands
+from fastworkflow.utils.workflow_vocabulary import (
+    KIND_WORD_WHY, WorkflowVocabulary, is_kind_word, is_pronoun_phrase, load_workflow_vocabulary)
 
 MISSING_INFORMATION_ERRMSG = None
 INVALID_INFORMATION_ERRMSG = None
@@ -215,6 +217,21 @@ _PLACEHOLDER_QUALIFIERS = frozenset({
 })
 
 
+def _is_declared_choice(annotation: Any, value: Any) -> bool:
+    """Whether str *value* is one of the choices *annotation* declares: a member of a ``Literal``,
+    or the value of an ``Enum``, alone or inside an ``Optional``. A declared choice is a value
+    whatever word it is: ``code`` for ``Literal["code", "name"]`` is never a placeholder."""
+    if not isinstance(value, str):
+        return False
+    options = get_args(annotation) if get_origin(annotation) is Union else (annotation,)
+    for option in options:
+        if get_origin(option) is Literal and value in get_args(option):
+            return True
+        if isinstance(option, type) and issubclass(option, Enum) and value in {m.value for m in option}:
+            return True
+    return False
+
+
 def is_ungrounded_placeholder(value: Any, field_name: str,
                               request_text: Optional[str]) -> bool:
     """Whether str *value* is placeholder-shaped and *request_text* never writes it.
@@ -241,6 +258,142 @@ def is_ungrounded_placeholder(value: Any, field_name: str,
     if len(words) >= 2 and words[0] in _PLACEHOLDER_QUALIFIERS:
         return bool(set(words[1:]) & known)
     return set(words) <= known
+
+
+# --- A command's name written as a value -----------------------------------------------
+#
+# An extractor sometimes copies a command's name into a parameter: a skill's own name as
+# its ``application``, or another command's name as the ``query`` of a lookup, because it
+# has just been reading that name. No real value is a command name, so such a value is
+# treated as not given. Only the identifier form counts (``orphan_login_review``,
+# ``Directory/find_group``, in any case); a name written with spaces is a value, so an
+# entity called "Tag Record" is never refused. A declared Literal or enum choice is never
+# refused, whatever word it is.
+
+def command_name_index(app_workflow, subject_command_name: str) -> Dict[str, str]:
+    """Identifier form (lowercase) of each command name of *app_workflow* -> the name as written.
+
+    Names come from the workflow's command directory: each qualified key (``Directory/find_group``)
+    and its bare name (``find_group``). Empty when the workflow has no folder path.
+    """
+    names = set()
+    folderpath = getattr(app_workflow, "folderpath", None)
+    if folderpath:
+        directory = fastworkflow.RoutingRegistry.get_definition(folderpath).command_directory
+        for key in directory.map_command_2_metadata:
+            names.add(key)
+            if "/" in key:
+                names.add(key.split("/", 1)[1])
+    index: Dict[str, str] = {}
+    for name in sorted(names):
+        index.setdefault(name.lower(), name)
+    return index
+
+
+def _is_declared_choice_of(annotation: Any, value: Any) -> bool:
+    """``_is_declared_choice`` for a field, and for the items of a list field."""
+    if _is_declared_choice(annotation, value):
+        return True
+    options = get_args(annotation) if get_origin(annotation) is Union else (annotation,)
+    return any(
+        get_origin(option) in (list, List) and get_args(option)
+        and _is_declared_choice(get_args(option)[0], value)
+        for option in options
+    )
+
+
+def command_name_refusals(cmd_parameters: BaseModel, subject_command_name: str,
+                          index: Dict[str, str], skip: Any) -> Dict[str, Tuple[Any, str]]:
+    """Fields whose str value (or one str item of a list) is a command name.
+
+    Returns ``{field: (value, wording)}``. The name is the called command's own (its
+    qualified or bare name) or any other command's name in *index*. Fields in *skip* were
+    already refused by ``screen_parameter_values`` and are left alone.
+    """
+    own_forms = {name.strip().lower() for name in
+                 (subject_command_name or "", (subject_command_name or "").split("/")[-1]) if name}
+    refused: Dict[str, Tuple[Any, str]] = {}
+    for field_name, field_info in type(cmd_parameters).model_fields.items():
+        if field_name in skip:
+            continue
+        value = getattr(cmd_parameters, field_name, None)
+        for item in (value if isinstance(value, list) else [value]):
+            if not isinstance(item, str) or isinstance(item, Enum):
+                continue
+            if _is_declared_choice_of(field_info.annotation, item):
+                continue
+            form = item.strip().lower()
+            if form in own_forms:
+                wording = (f"{field_name} {item!r} is the name of this command, not a value: "
+                           f"pass the real {field_name} the request names.")
+            elif form in index:
+                wording = (f"{field_name} {item!r} is the name of the command {index[form]!r}, "
+                           f"not a value: pass the real {field_name} the request names.")
+            else:
+                continue
+            refused[field_name] = (item, wording)
+            break
+    return refused
+
+
+# --- A free-text value that is only a word of the workflow ---------------------------
+#
+# A planner that fills a free-text (``str``) input can write a word that names the kind of
+# record or a field name rather than a record (``query='right_name'``, ``query='department'``),
+# or a pronoun (``query='Her'``). The workflow's own vocabulary
+# (``fastworkflow.utils.workflow_vocabulary``) and the closed pronoun list decide. Only a value
+# that is exactly such a word is refused; a value that merely contains one passes. A declared
+# choice (a Literal or an Enum field) is never screened, whatever word it is. A kind-selector
+# field (its description or labeled examples name the kinds it takes, ``kind_options``) is exempt
+# from the kind-word refusal for the values it lists; the pronoun refusal still applies to it.
+# The text ``None`` is the missing-value marker and is never a kind word (``default_unfilled_optional_strs``).
+
+PRONOUN_WHY = "is a pronoun, not a value"
+
+
+def _workflow_vocabulary(app_workflow) -> Optional[WorkflowVocabulary]:
+    """The workflow's vocabulary (the stored file when fresh, else derived in memory); None when
+    the workflow has no folder path or the derivation fails. The pronoun screen still runs then."""
+    folderpath = getattr(app_workflow, "folderpath", None)
+    if not folderpath:
+        return None
+    try:
+        return load_workflow_vocabulary(folderpath)
+    except Exception:  # noqa: BLE001 - the workflow's own code: the screens are skipped, not the call
+        logger.warning(f"could not derive the vocabulary of {folderpath}", exc_info=True)
+        return None
+
+
+def word_screen_refusals(cmd_parameters: BaseModel, vocabulary: Optional[WorkflowVocabulary],
+                         skip: Any, command_name: Optional[str]) -> Dict[str, Tuple[Any, str]]:
+    """Free-text ``str`` fields whose value is only a pronoun or only a kind word or field name.
+
+    Returns ``{field: (value, wording)}``. A ``str`` or ``Optional[str]`` field only; the
+    fields in *skip* were already refused by an earlier screen and are left alone. A kind-selector
+    field (``WorkflowVocabulary.kind_options``) is exempt from the kind-word refusal only: a value
+    it lists is a kind it takes. The pronoun refusal still applies.
+    """
+    refused: Dict[str, Tuple[Any, str]] = {}
+    for field_name, field_info in type(cmd_parameters).model_fields.items():
+        if field_name in skip:
+            continue
+        if field_info.annotation is not str and not is_optional_str_field(field_info):
+            continue
+        value = getattr(cmd_parameters, field_name, None)
+        if not isinstance(value, str) or isinstance(value, Enum):
+            continue
+        text = value.strip()
+        if not text:
+            continue
+        options = vocabulary.kind_options(command_name, field_name) if vocabulary is not None else frozenset()
+        if is_pronoun_phrase(text):
+            why = PRONOUN_WHY
+        elif is_kind_word(text, field_name, vocabulary, options):
+            why = KIND_WORD_WHY
+        else:
+            continue
+        refused[field_name] = (value, f"{field_name} {value!r} {why}: pass the real {field_name} the request names.")
+    return refused
 
 
 # --- Numbers out of any sane range ---------------------------------------------------
@@ -360,8 +513,10 @@ def default_unfilled_optional_strs(cmd_parameters: BaseModel, not_found: Optiona
     """Give each ``Optional[str]`` field holding ``not_found`` or ``"None"`` its default.
 
     Returns the names of the fields changed. The default is the field's declared one
-    (a factory is called), or None when it declares none. Required fields are left
-    alone, so a missing one is still reported and asked for.
+    (a factory is called), or None when it declares none. A required ``str`` field holding
+    ``"None"`` is set to None, the missing value: the literal text ``None`` is the extractor's
+    "not given" marker, not a value, so the missing check reports the field as missing. A
+    required field holding ``not_found`` is left alone (that check already counts it missing).
     """
     markers = {"None"} | ({not_found} if not_found else set())
     changed: List[str] = []
@@ -369,10 +524,13 @@ def default_unfilled_optional_strs(cmd_parameters: BaseModel, not_found: Optiona
         value = getattr(cmd_parameters, field_name, None)
         if not isinstance(value, str) or isinstance(value, Enum) or value.strip() not in markers:
             continue
-        if not is_optional_str_field(field_info):
+        if is_optional_str_field(field_info):
+            default = field_info.get_default(call_default_factory=True)
+            setattr(cmd_parameters, field_name, None if default is PydanticUndefined else default)
+        elif value.strip() == "None":
+            setattr(cmd_parameters, field_name, None)
+        else:
             continue
-        default = field_info.get_default(call_default_factory=True)
-        setattr(cmd_parameters, field_name, None if default is PydanticUndefined else default)
         changed.append(field_name)
     return changed
 
@@ -447,8 +605,12 @@ def screen_parameter_values(cmd_parameters: BaseModel, quote_texts: Optional[str
             quoted_fields[field_name] = original_value
         if field_value is not original_value:
             setattr(cmd_parameters, field_name, field_value)
+        # A declared Literal or Enum choice is never ungrounded: it is the field's own vocabulary,
+        # and a choice that looks like a placeholder word (``code``) is not one. A bracketed
+        # placeholder (``<code>``) is still refused: it is not the choice itself.
         if kind == "placeholder" or (
             kind == "unchanged"
+            and not _is_declared_choice(field_info.annotation, field_value)
             and is_ungrounded_placeholder(field_value, field_name, grounding_text)
         ):
             placeholder_fields[field_name] = field_value
@@ -661,13 +823,16 @@ Today's date is {today}.
     
     @staticmethod
     def create_signature_from_pydantic_model(
-        pydantic_model: Type[BaseModel]
+        pydantic_model: Type[BaseModel],
+        sentences: Optional[Dict[str, Tuple[str, ...]]] = None,
     ) -> Type[dspy.Signature]:
         """
         Create a DSPy Signature class from a Pydantic model with type annotations.
         
         Args:
             pydantic_model: The Pydantic model class to convert
+            sentences: ``{field: rule sentences}`` appended after that field's description
+                (``skill_commands.extraction_sentences_for``); nothing else reads them
             
         Returns:
             A DSPy Signature class
@@ -707,6 +872,10 @@ Today's date is {today}.
                 default_value = attribute_metadata.default
 
             info_text = attribute_metadata.description or f"The {attribute_name}"
+            if rule_sentences := (sentences or {}).get(attribute_name):
+                # the rule sentences of the field's options (3.4, Descriptions), after its description;
+                # the ". This field is ..." below ends the last one
+                info_text = f"{info_text.rstrip('. ')}. {' '.join(s.rstrip('.') for s in rule_sentences)}"
 
             if attribute_name != "query": 
                 steps.append(f"Step {field_num}: Identify the {attribute_name} ({info_text}).")
@@ -766,7 +935,9 @@ Today's date is {today}.
         if model_class is None:
             raise ValueError("No model class provided")
         
-        params_signature = self.create_signature_from_pydantic_model(model_class)
+        params_signature = self.create_signature_from_pydantic_model(
+            model_class,
+            skill_commands.extraction_sentences_for(workflow_folderpath, subject_command_name))
         
         class ParamExtractor(dspy.Module):
             def __init__(self, signature):
@@ -918,6 +1089,20 @@ Today's date is {today}.
             is_valid = False
 
         refused_fields = screen.refused_fields
+        # A command's name written as a value is treated as not given: the field is cleared
+        # (to its default when it has one), so the missing check reports a required one.
+        command_name_fields = command_name_refusals(
+            cmd_parameters, subject_command_name, command_name_index(app_workflow, subject_command_name),
+            refused_fields)
+        # A free-text value that is only a pronoun, or only a word of the workflow's vocabulary, is
+        # treated the same way (see word_screen_refusals).
+        word_fields = word_screen_refusals(
+            cmd_parameters, _workflow_vocabulary(app_workflow), {**refused_fields, **command_name_fields},
+            subject_command_name)
+        for field_name in {**command_name_fields, **word_fields}:
+            field_info = type(cmd_parameters).model_fields[field_name]
+            default = field_info.get_default(call_default_factory=True)
+            setattr(cmd_parameters, field_name, None if default is PydanticUndefined else default)
         if diagnostics is not None:
             def _as_text(fields: Dict[str, Any]) -> Dict[str, str]:
                 return {name: str(value) for name, value in fields.items()}
@@ -931,6 +1116,12 @@ Today's date is {today}.
                 diagnostics["defaulted_sentinel_values"] = _as_text(defaulted_fields)
             if out_of_range_fields:
                 diagnostics["out_of_range_values"] = _as_text(out_of_range_fields)
+            if command_name_fields:
+                diagnostics["command_name_values"] = {
+                    name: str(value) for name, (value, _) in command_name_fields.items()}
+            if word_fields:
+                diagnostics["word_screen_values"] = {
+                    name: str(value) for name, (value, _) in word_fields.items()}
 
         for field_name, field_info in type(cmd_parameters).model_fields.items():
                 if field_name in refused_fields:
@@ -952,10 +1143,11 @@ Today's date is {today}.
                         def build_type_suggestion() -> List[str]:
                             examples = getattr(field_info, "examples", []) or []
                             example = examples[0] if examples else None
-                            # Enum suggestions list valid values
+                            # Enum and Literal suggestions list valid values
                             enum_types = [t for t in candidate_types if isinstance(t, type) and issubclass(t, Enum)]
-                            if enum_types:
-                                opts = [f"'{opt.value}'" for t in enum_types for opt in t]
+                            literal_values = [v for t in candidate_types if get_origin(t) is Literal for v in get_args(t)]
+                            if enum_types or literal_values:
+                                opts = [f"'{opt.value}'" for t in enum_types for opt in t] + [f"'{v}'" for v in literal_values]
                                 return [f"Please provide a value matching the expected type/format. Valid values: {', '.join(opts)}"]
                             # List suggestions
                             def _is_list_type(tt):
@@ -1102,6 +1294,17 @@ Today's date is {today}.
                                         return True, member
                             return False, None
 
+                        def _try_coerce_literal(literal_type: Any, val: Any) -> Tuple[bool, Optional[str]]:
+                            # A member as written, else the one member it matches in any case (as an enum's name)
+                            members = get_args(literal_type)
+                            if val in members:
+                                return True, val
+                            if isinstance(val, str):
+                                folded = [m for m in members if isinstance(m, str) and m.lower() == val.lower()]
+                                if len(folded) == 1:
+                                    return True, folded[0]
+                            return False, None
+
                         for t in candidate_types:
                             # list[...] and typing.List[...] support
                             if _is_list_type(t):
@@ -1121,6 +1324,13 @@ Today's date is {today}.
                                 ok, enum_val = _try_coerce_enum(t, field_value)
                                 if ok:
                                     corrected_value = enum_val
+                                    valid_by_type = True
+                                    break
+                            # Literal (a skill's choice of text values): a member, as an enum's value
+                            if get_origin(t) is Literal:
+                                ok, literal_val = _try_coerce_literal(t, field_value)
+                                if ok:
+                                    corrected_value = literal_val
                                     valid_by_type = True
                                     break
 
@@ -1349,6 +1559,12 @@ Today's date is {today}.
 
         for field, value in placeholder_fields.items():
             message += placeholder_value_message(field, value) + "\n"
+
+        for _, wording in command_name_fields.values():
+            message += wording + "\n"
+
+        for _, wording in word_fields.values():
+            message += wording + "\n"
 
         for field, value in out_of_range_fields.items():
             message += out_of_range_value_message(field, value, out_of_range_problems[field]) + "\n"

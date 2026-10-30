@@ -173,6 +173,9 @@ def _raising_registry(monkeypatch, exc_factory):
         def get_command_names(self, context):
             return ["fail"]
 
+        def get_planning_command_names(self, context):
+            return []
+
     monkeypatch.setattr(
         fastworkflow.RoutingRegistry, "get_definition", lambda _: RaisingCRD()
     )
@@ -457,6 +460,9 @@ def test_a_cme_hop_failure_reaches_the_failure_output_and_the_error_span(monkeyp
         # detection raises before the name is resolved to a class.
         def get_command_names(self, context):
             return ["anything"]
+
+        def get_planning_command_names(self, context):
+            return []
 
     monkeypatch.setattr(
         fastworkflow.RoutingRegistry, "get_definition", lambda _: CRD()

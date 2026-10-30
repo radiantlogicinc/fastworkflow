@@ -16,7 +16,10 @@ import logging
 import re
 from dataclasses import dataclass
 
+from typing import Iterable
+
 import fastworkflow
+from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.entry_declarations import declared_entry_commands, declared_occupiable
 
@@ -95,6 +98,40 @@ def live_context_chain(workflow) -> tuple[str, ...]:
     if names[-1] != "*":
         names.append("*")
     return tuple(names)
+
+
+def lookup_scopes(workflow_folderpath: str, context_names: Iterable[str]) -> tuple[str, ...]:
+    """The skill scopes of the lookup path (3.9) that visits *context_names*, in order.
+
+    Each context is followed by its bases in ``CommandContextModel`` order, transitively; a scope
+    already on the path is skipped; ``""`` (the root) ends it. Without a readable model the
+    bases are none. ``workflow_agent.skill_scopes`` reads the path here.
+    """
+    base_contexts: dict[str, tuple[str, ...]] = {}
+    if workflow_folderpath:
+        try:
+            base_contexts = CommandContextModel.load_base_contexts(workflow_folderpath)
+        except Exception as error:  # noqa: BLE001 - carry on without bases
+            logger.warning(f"skill_scopes: could not load CommandContextModel for {workflow_folderpath}: "
+                           f"{type(error).__name__}: {error}")
+    scopes: list[str] = []
+    seen: set[str] = set()
+
+    def add_with_bases(ctx_name: str) -> None:
+        if not ctx_name or ctx_name == "*":
+            return
+        if ctx_name not in seen:
+            seen.add(ctx_name)
+            scopes.append(ctx_name)
+        for base in base_contexts.get(ctx_name, ()):
+            if base and base != "*" and base not in seen:
+                seen.add(base)
+                scopes.append(base)
+
+    for name in context_names:
+        add_with_bases(name)
+    scopes.append("")
+    return tuple(scopes)
 
 
 def plan_navigation(

@@ -179,6 +179,11 @@ class _InventoryRoutingDefinition:
             raise ValueError(f"Context '{context}' not found in the workflow.")
         return [c for c in self.contexts[context] if c != "wildcard"]
 
+    def get_planning_command_names(self, context: str) -> list[str]:
+        # The captured inventory holds execution commands only; a workflow with no
+        # planning commands has none to add to the candidate set or the inventory.
+        return []
+
 
 @pytest.fixture(scope="module")
 def inventory_contexts() -> dict[str, list[str]]:

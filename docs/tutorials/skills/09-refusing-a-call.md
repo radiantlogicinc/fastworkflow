@@ -65,34 +65,47 @@ EVERYONE = {"everyone", "everybody", "all", "all members", "every member"}
 
 ## How the arguments arrive
 
-A planning command's arguments arrive one way, wherever the call comes from, and it is the
-way an execution command's do:
+A planning command's arguments arrive one of two ways, and the same checks run on both:
 
-1. **The step that calls the command is extracted.** For a request the command covers, the
-   agent writes that step in its plan, from the request or from the part of it the command
-   covers: "what has Ann Lee borrowed" becomes the step that calls `member_report` (page 14). A
-   planning command that another one names is called by that line of the plan (page 12). A
-   step written `member_report member=Ann Lee loans=true` is bound in code; a step in words
-   goes to the parameter extractor, which reads the field descriptions and the sentences of
-   their options (page 2).
-2. **The checks run**, in this order, for either kind of command: the field options' checks
-   (here, that `member` is written in the request), then this hook, once, then the `Input`'s
-   validators.
-3. **The `PlanGenerator` is called** with the checked `Input`.
+1. **A typed call.** When `JEV_API_KEY` is set and the command fits the request (or the part
+   of it the command covers), the planner fills the command's `Input` as a typed call: "what
+   has Ann Lee borrowed" becomes `member=Ann Lee` (page 14).
+2. **A step.** A planning command that a plan or another command names is called by that step
+   (page 12). A step written `member_report member=Ann Lee loans=true` is bound in code; a
+   step in words goes to the parameter extractor, which reads the field descriptions and the
+   sentences of their options (page 2), as it does for an execution command.
 
-The request the checks read is the step's text, with one exception: when the agent wrote the
-step, as it does in its plan for a request the command covers, its arguments are checked
-against the user's request and what the turn's earlier steps found, not the agent's own
-words, so a value the agent made up is refused (page 14).
+Then **the checks run**, in this order, for either kind of command: the field options' checks
+(here, that `member` is written in the request), then this hook, once, then the `Input`'s
+validators. Last, **the `PlanGenerator` is called** with the checked `Input`.
 
-**Who gets a refusal.** The agent that ran the step, as a failed step whose text is the
-message. It can rewrite the step, run another command first, or tell the user.
+The request the checks read is the user's request for a typed call. For a step, it is the
+step's text, with one exception: when the planner wrote the step, its arguments are checked
+against the user's request and what the turn's earlier steps found, not the plan's own
+words, so a value the planner made up is refused (page 14).
+
+**Who gets a refusal.** For a typed call, the planner, which fills the call once more with
+the message in front of it; refused again, the call is not made (see below). For a step, the
+agent that ran it, as a failed step whose text is the message. It can rewrite the step, run
+another command first, or tell the user.
 
 ## A missing argument
 
-"Tell me about the member" names no member. The extractor cannot fill `member`, and the
-step's observation is the message any command gets for a missing argument. It names the
-field, and the commands a producer `from_` points it to, when the field has one:
+"Tell me about the member" names no member, so `member` cannot be filled.
+
+**On a typed call**, an attended turn asks the user, in a question code writes from the
+command and the field:
+
+```text
+I can't run member report yet: your request does not say which member to use. Which member should I use?
+```
+
+The reply is the next message, and it completes the call. An unattended turn never asks: the
+planner plans the request from the command's template instead.
+
+**On a step**, the step's observation is the message any command gets for a missing
+argument. It names the field, and the commands a producer `from_` points it to, when the
+field has one:
 
 ```text
 Missing parameter values: member
@@ -105,9 +118,8 @@ The agent then finds the value, with the producer the message named, or asks the
 own words with `ask_user`, and runs the step again with the answer. An unattended turn never
 asks: the agent goes on without the value, or says what it could not do.
 
-So a missing argument works the same for both kinds of command, and nothing about it is
-declared. The field's description is what the agent reads when it decides what to ask,
-which is one more reason to write it for a person.
+Nothing about a missing argument is declared. The field's description is what the question
+and the agent are written from, which is one more reason to write it for a person.
 
 ## At run time
 
@@ -121,8 +133,9 @@ validate_extracted_parameters: member is 'everyone', which names no one member; 
 
 ## What you learned
 
-A planning command's arguments are filled and checked the way any command's are: by the
-options their fields carry (`in_request`, `subject`, `strip`, `verify`, `means`), then
-`validate_extracted_parameters`, once, then the `Input`'s validators;
+A planning command's arguments are checked the way any command's are, whether a typed call or
+a step filled them: by the options their fields carry (`in_request`, `subject`, `strip`,
+`verify`, `means`), then `validate_extracted_parameters`, once, then the `Input`'s validators;
 `raise fastworkflow.Refused(...)` sends the caller back with what to fix. A missing argument
+on a typed call is asked for in a question code writes, in an attended turn; on a step it
 comes back as the same message an execution command's does, and the agent asks for it.

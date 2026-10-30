@@ -21,18 +21,18 @@ from dspy.experimental import Choice, TypeSafe
 import fastworkflow
 from fastworkflow import tracing
 from fastworkflow import skill_commands
-from fastworkflow.skill_commands import SkillCommand, SkillFormatError, plan_skill_call
+from fastworkflow.skill_commands import (
+    SkillCommand, SkillFormatError, SkillInputError, plan_skill_call, refusal_question)
 from fastworkflow.split_merge import (
     definite_descriptions, merge_subtasks, request_subjects, subjects_in, unnamed_subjects, with_referent)
 from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
-from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.command_directory import CommandDirectory, _handle_command_field_source_errors
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_executor import AlreadyInContextError, CommandNotFoundError
 from fastworkflow.context_navigation import (
-    enters_current_context, render_already_in_context, unavailable_command_message)
+    enters_current_context, lookup_scopes, render_already_in_context, unavailable_command_message)
 from fastworkflow.context_navigation import home_contexts as context_homes
 from fastworkflow.utils.react import AskUserSuspend
 from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
@@ -809,6 +809,35 @@ def _apply_reply_intent(agent, intent: str) -> None:
         agent.disabled_tools = set(agent.tools) - {"finish"}
 
 
+def _refusal_may_ask_attended(chat_session_obj) -> bool:
+    """Whether a refusal may be put to the user as a question that suspends the turn (Topology B):
+    ask_user is available to the turn (attended, no queue-based blocking ask), and the turn has
+    not already been put a refusal question (the reply gets one re-run, no second question).
+
+    The callers add their own check that nothing ran yet in the turn (a re-run would repeat its
+    side effects): a skill call's refusal checks the whole turn, a fast-path call its own outputs.
+    """
+    return (
+        getattr(chat_session_obj, "_turn_unattended", True) is False
+        and getattr(chat_session_obj, "user_message_queue", True) is None
+        and not getattr(chat_session_obj, "_skill_refusal_answered", True)
+    )
+
+
+def _skill_refusal_may_ask(chat_session_obj) -> bool:
+    """Whether a refused skill call may be put to the user, suspending the turn (Topology B).
+
+    Only when ask_user is available to the turn (attended, no queue-based blocking ask), no
+    run has happened yet in the turn (a re-run would repeat its side effects), and the turn has
+    not already been put a refusal question (the reply gets one re-run, no second question).
+    Every other case keeps the text planner's fallback.
+    """
+    return (
+        _refusal_may_ask_attended(chat_session_obj)
+        and not getattr(chat_session_obj, "_turn_outputs", True)
+    )
+
+
 def _post_ask_user_response(
     clarification_request: str,
     user_response: str,
@@ -839,7 +868,6 @@ def _post_ask_user_response(
         chat_session_obj.workflow_tool_agent,
         classify_user_reply(user_response, clarification_request),
     )
-
     planner_lm = getattr(chat_session_obj, '_current_planner_lm', None)
     return build_query_with_next_steps(
         user_response,
@@ -1552,29 +1580,7 @@ def skill_scopes(workflow) -> tuple[str, ...]:
     if workflow is None:
         return ("",)
     folder = getattr(workflow, "folderpath", None)
-    base_contexts: dict[str, tuple[str, ...]] = {}
-    if folder:
-        try:
-            base_contexts = CommandContextModel.load_base_contexts(folder)
-        except Exception as error:  # noqa: BLE001 - carry on without bases
-            logger.warning(f"skill_scopes: could not load CommandContextModel for {folder}: "
-                           f"{type(error).__name__}: {error}")
-    scopes: list[str] = []
-    seen: set[str] = set()
-
-    def add_with_bases(ctx_name: str) -> None:
-        if not ctx_name or ctx_name == "*":
-            return
-        if ctx_name not in seen:
-            seen.add(ctx_name)
-            scopes.append(ctx_name)
-        for base in base_contexts.get(ctx_name, ()):
-            if base and base != "*" and base not in seen:
-                seen.add(base)
-                scopes.append(base)
-
-    current = getattr(workflow, "current_command_context_name", "*")
-    add_with_bases(current)
+    names = [getattr(workflow, "current_command_context_name", "*")]
     obj = getattr(workflow, "current_command_context", None)
     root = getattr(workflow, "root_command_context", None)
     visited_objs: set[int] = {id(obj)} if obj is not None else set()
@@ -1587,12 +1593,11 @@ def skill_scopes(workflow) -> tuple[str, ...]:
         if parent is None or id(parent) in visited_objs:
             break
         visited_objs.add(id(parent))
-        add_with_bases(fastworkflow.Workflow.get_command_context_name(parent))
+        names.append(fastworkflow.Workflow.get_command_context_name(parent))
         if parent is root:
             break
         obj = parent
-    scopes.append("")
-    return tuple(scopes)
+    return lookup_scopes(folder, names)
 
 
 #: The skill matcher shows at most this many of a skill's ``plain_utterances`` (its first
@@ -1621,26 +1626,117 @@ def _matcher_job_types(workflow_folderpath: str, examples: int = MATCHER_EXAMPLE
 #: probability (measured offline: at 0.5, 96.6% of sub-tasks get a template, 1.1% a wrong one).
 SKILL_MATCH_THRESHOLD = 0.5
 
+#: The planner's instructions (the planner signatures use them as their docstring unchanged).
+PLANNER_INSTRUCTIONS = """
+    Carefully review the user_query and generate a next steps sequence based only on available commands.
+    Walk the graph of commands based on the 'available_from' hints to build the most appropriate command sequence.
+    Use names and values exactly as written in the user_query; never abbreviate or reword them.
+
+    IMPORTANT: 9 times out of 10 information can be found via available commands. However, when generating the plan:
+    - If required information is missing and cannot be found via commands, explicitly specify in the plan that the user needs to be consulted
+    - If confirmation is needed before proceeding, explicitly specify in the plan that user confirmation is required
+    """
+
+
+def planner_commands_text(current_workflow) -> str:
+    """The planner's listing: every context's commands, each planning command with its template."""
+    return CommandMetadataAPI.get_all_contexts_command_display_text(
+        subject_workflow_path=current_workflow.folderpath,
+        cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
+        active_context_name=current_workflow.current_command_context_name,
+        navigation_workflow=current_workflow,
+    )
+
+
+#: A section header of the planner's listing: the active context's, or the one a command enters.
+_LISTING_SECTION = re.compile(
+    r"^Commands available (?:in the current context\b|after entering the (?P<context>\S+) context\b)")
+#: A command's own line in the planner's listing (its block starts here).
+_LISTING_COMMAND = re.compile(r"^- ([A-Za-z_][A-Za-z0-9_]*)\s*$")
+
+
+def typed_planner_commands_text(current_workflow) -> str:
+    """The typed planning call's listing (design 3.4): the planner's listing with each command's
+    block cut to its name, the first sentence of its description and its parameter names.
+
+    The section headers and the order of the commands are the planner listing's (so every command
+    it names is named here, once per section), and each block's description and parameters are
+    those of the context the section is for: a command listed in several contexts keeps what it
+    does in each. A planning command's parameters are its skill's typed fields.
+    """
+    full = planner_commands_text(current_workflow)
+    folderpath = current_workflow.folderpath
+    active = current_workflow.current_command_context_name
+    cme_path = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
+    crd = fastworkflow.RoutingRegistry.get_definition(folderpath)
+    # (context, name) -> (description, parameter names), from every context's metadata; and the
+    # first entry of each name, for a block whose section is not one of the contexts.
+    by_context: dict[tuple[str, str], tuple[str, list[str]]] = {}
+    by_name: dict[str, tuple[str, list[str]]] = {}
+    for context in crd.contexts:
+        info = CommandMetadataAPI.get_enhanced_command_info(
+            subject_workflow_path=folderpath, cme_workflow_path=cme_path, active_context_name=context)
+        for cmd in info.get("commands", []):
+            name = cmd.get("name")
+            if not name:
+                continue
+            doc = " ".join(str(cmd.get("doc_string") or "").split())
+            params = [str(i.get("name")) for i in cmd.get("inputs", []) or [] if i.get("name")]
+            by_context.setdefault((context, name), (doc, params))
+            by_name.setdefault(name, (doc, params))
+    for skill_name, skill in load_skill_commands(folderpath).items():
+        name = skill_name.rpartition("/")[2]
+        params = [p.name for p in skill.params]
+        for key, (doc, _) in list(by_context.items()):
+            if key[1] == name:
+                by_context[key] = (doc or skill.description, params)
+        if name in by_name:
+            doc, _ = by_name[name]
+            by_name[name] = (doc or skill.description, params)
+        else:
+            by_name[name] = (skill.description, params)
+    out: list[str] = []
+    context = active
+    for line in full.split("\n"):
+        section = _LISTING_SECTION.match(line)
+        if section:
+            context = section["context"] or active
+            out.append(line)
+            continue
+        command = _LISTING_COMMAND.match(line)
+        if command is None:
+            continue
+        name = command.group(1)
+        doc, params = by_context.get((context, name)) or by_name.get(name, ("", []))
+        out.append(f"- {name}")
+        sentence = re.split(r"(?<=[.!?])\s", doc, maxsplit=1)[0] if doc else ""
+        if sentence:
+            out.append(f"  {sentence}")
+        if params:
+            out.append(f"  parameters: {', '.join(params)}")
+    return "\n".join(out)
+
 
 @functools.lru_cache(maxsize=None)
 def _jev_lm():
     """The Jev (dspy.experimental TypeSafe) LM, or None without a JEV_API_KEY."""
-    key = fastworkflow.get_env_var("JEV_API_KEY", default=None)
+    # default="" (not None): get_env_var warns about a variable that is missing and has no default,
+    # and the missing key is the INFO line of 3.9, not a warning.
+    key = fastworkflow.get_env_var("JEV_API_KEY", default="")
     return TypeSafe(api_key=key, cache=True) if key else None
 
 
 @functools.lru_cache(maxsize=None)
 def _warn_missing_jev_key(workflow_folderpath: str) -> None:
-    """Warn once per workflow folder per process when a workflow has planning commands
-    (``_skills``) and ``JEV_API_KEY`` is not set.
-
-    Phase 6 replaces this warning with an INFO line once the agent chooses planning
-    commands as it plans.
+    """The INFO line of design 3.9, once per workflow folder per process, when a workflow has
+    planning commands (``_skills``) and ``JEV_API_KEY`` is not set: the agent chooses and adapts
+    them as it plans, and the ``verify`` checks of the fields it names are inactive.
     """
-    logger.warning(
-        f"{workflow_folderpath} has planning commands, but JEV_API_KEY is not set: "
-        "no request will be matched to one; they run only when a plan or the agent "
-        "names one in a step."
+    fields = skill_commands.verify_field_names(workflow_folderpath)
+    checks = f" and the verify checks of {', '.join(fields)}" if fields else ""
+    logger.info(
+        f"{workflow_folderpath}: planning commands are chosen and adapted by the agent as it plans; "
+        f"set JEV_API_KEY to add Jev's choice{checks}."
     )
 
 
@@ -2012,18 +2108,13 @@ def build_query_with_next_steps(user_query: str,
             without parameters makes no planner call); Jev, when configured, checks the
             skill's ``verify`` parameters against the request. The call's phases are then
             run by the execution context (``_phased_skill_call``). Any failure falls back to
-            the text planner with ``plan_template``. Ignored on a replan.
+            the text planner with ``plan_template``, except a refusal of the arguments
+            (SkillInputError) on a turn that may ask (``_skill_refusal_may_ask``): its question
+            is left on ``chat_session_obj._skill_refusal``, no plan is made, and the execution
+            context suspends the turn on it. Ignored on a replan.
     """
     current_workflow = chat_session_obj.get_active_workflow()
-    base_docstring = """
-    Carefully review the user_query and generate a next steps sequence based only on available commands.
-    Walk the graph of commands based on the 'available_from' hints to build the most appropriate command sequence.
-    Use names and values exactly as written in the user_query; never abbreviate or reword them.
-
-    IMPORTANT: 9 times out of 10 information can be found via available commands. However, when generating the plan:
-    - If required information is missing and cannot be found via commands, explicitly specify in the plan that the user needs to be consulted
-    - If confirmation is needed before proceeding, explicitly specify in the plan that user confirmation is required
-    """
+    base_docstring = PLANNER_INSTRUCTIONS
     # The plain-text planner.
     class TaskPlannerTextSignature(dspy.Signature):
         __doc__ = base_docstring
@@ -2046,12 +2137,7 @@ def build_query_with_next_steps(user_query: str,
         )
         next_steps: str = dspy.OutputField(desc="task descriptions as a numbered list of short sentences separated by line breaks")
 
-    available_commands = CommandMetadataAPI.get_all_contexts_command_display_text(
-        subject_workflow_path=current_workflow.folderpath,
-        cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
-        active_context_name=current_workflow.current_command_context_name,
-        navigation_workflow=current_workflow,
-    )
+    available_commands = planner_commands_text(current_workflow)
 
     # Use provided planner_lm if available (distillation mode), else build from env
     if planner_lm is None:
@@ -2108,31 +2194,50 @@ def build_query_with_next_steps(user_query: str,
     skill_args = None
     skill_notes = None
     skill_fallback = None
+    prediction = None
+    # The question to put to the user when the skill call is refused and the turn may ask (see
+    # _skill_refusal_may_ask); None when the text planner takes over as before.
+    refusal_ask = None
     if initial_plan:
         # A phased skill call (skill_phases): the runner reads it after this plan.
         chat_session_obj._phased_skill_call = None
+        # A refused skill call the turn asks the user about (set below; read by the execution context).
+        chat_session_obj._skill_refusal = None
     try:
         with dspy.context(lm=planner_lm, adapter=agent_adapter):
             if skill_command is not None and initial_plan:
                 try:
-                    call = plan_skill_call(skill_command, request_text, available_commands, check_lm=_jev_lm(),
-                                           workflow=current_workflow)
+                    # The typed planning call gets the trimmed listing (design 3.4); the text planner keeps the full one.
+                    call = plan_skill_call(skill_command, request_text, typed_planner_commands_text(current_workflow),
+                                           check_lm=_jev_lm(), workflow=current_workflow)
                     prediction, plan_text, skill_args = call.prediction, call.plan, call.args
                     skill_notes = list(call.notes) or None
                     plan_source = "skill_call"
                     chat_session_obj._phased_skill_call = (skill_command, call)
                     logger.info(f"skill call {skill_command.name}{call.args}"
                                 + (f" ({'; '.join(call.notes)})" if call.notes else ""))
+                except SkillInputError as exc:  # asked of the user, or the text planner takes over
+                    skill_fallback = f"{type(exc).__name__}: {exc}"[:500]
+                    if _skill_refusal_may_ask(chat_session_obj):
+                        refusal_ask = refusal_question(skill_command, exc)
+                        logger.info(f"skill call {skill_command.name} refused, asking the user: {refusal_ask!r}")
+                    else:
+                        logger.info(f"skill call {skill_command.name} failed, planning from its template: {skill_fallback}")
                 except Exception as exc:  # noqa: BLE001 - the text planner with the template takes over
                     skill_fallback = f"{type(exc).__name__}: {exc}"[:500]
                     logger.info(f"skill call {skill_command.name} failed, planning from its template: {skill_fallback}")
-            if plan_source is None:
+            if plan_source is None and refusal_ask is None:
                 prediction = plan_with()
                 plan_text = prediction.next_steps or ""
                 plan_source = "text" if plan_text else "none"
     except BaseException:
         tracing.end_span(chat_session_obj, span, status=tracing.STATUS_ERROR)
         raise
+    if refusal_ask is not None:
+        # No plan for the refused call: the turn waits on the user, and the execution context
+        # reads the question and suspends (_call_agent_for_query).
+        chat_session_obj._skill_refusal = refusal_ask
+        plan_source = "none"
     tracing.end_span(
         chat_session_obj,
         span,
@@ -2143,6 +2248,7 @@ def build_query_with_next_steps(user_query: str,
             "skill_args": skill_args,
             "skill_notes": skill_notes,
             "skill_fallback": skill_fallback,
+            "skill_refusal_asked": True if refusal_ask is not None else None,
         },
     )
 

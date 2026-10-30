@@ -118,13 +118,13 @@ class PlanGenerator:
 - **A plain string is the agent's.** `"say how many ..."` names no command, so the agent
   does it: here, writing the answer.
 
-## What the agent plans from
+## What the planner plans from
 
-Before the agent runs a request, it writes a plan for it, as the first step of its run (page
-14). It writes the plan from its list of commands, which shows this command's *template*,
-every phase's steps joined, beside its `Signature`. It uses the template to call the command
-for a request the command covers, to call it with other steps for one it covers in part, or
-to adapt its steps.
+Before the agent runs a request, the planner writes a plan for it (page 14). It writes the
+plan from its list of commands, which shows this command's *template*, every phase's steps
+joined, beside its `Signature`. A request the command covers is planned as a call of it, one
+it covers in part as the call with other steps, and when the call cannot be made the planner
+adapts its steps.
 
 ```text
 list_branches
@@ -174,10 +174,9 @@ place the depth is shown; nothing in the runtime depends on it.
 
 ## At run time
 
-When a request is one this command covers, the agent's plan for it (or for the part of it
-the command covers) is the one step that calls it, and the runtime runs that step itself,
-right after the plan (page 14). With no inputs there is nothing to fill, so every call runs
-the steps above:
+When a request is one this command covers, the plan for it (or for the part of it the
+command covers) is a call of it, and the agent runs its steps (page 14). With no inputs there
+is nothing to fill, so every call runs the steps above:
 
 ```text
 Phase branches

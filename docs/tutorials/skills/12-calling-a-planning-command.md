@@ -157,8 +157,8 @@ book matches Ulysses.
 
 Planning commands are listed beside the execution commands of their context, with their
 `Signature`, on every list of commands the agent is given, and with their template too on the
-list it plans from (page 14), so the agent can write a step that names one, in its plan or
-later in its run. They are not offered as MCP tools, and a direct action call
+list the planner plans from (page 14), so a step that names one can be written in the plan or
+later in the agent's run. They are not offered as MCP tools, and a direct action call
 (`perform_action`, an MCP tool call) that names one is refused: such a call runs one
 command, with no agent to run a plan. Their results still reach the workflow's clients:
 every call is an entry of the turn's `command_outputs`, with its `Output` (page 11).

@@ -462,7 +462,9 @@ class CommandNamePrediction:
         Read from the same `RoutingDefinition` the per-context candidate set is
         built from (`RoutingRegistry` caches it per workflow folder), so there
         is no second source of truth to drift: this is that definition read
-        across every context instead of one.
+        across every context instead of one. Planning commands are read from
+        `get_planning_command_names`, the same accessor the per-context set uses,
+        so a planning name owned by another context is guarded like a routed one.
         """
         if self._command_inventory is None:
             app_crd = fastworkflow.RoutingRegistry.get_definition(
@@ -470,6 +472,12 @@ class CommandNamePrediction:
             owners: dict[str, set[str]] = {}
             for context_name, qualified_names in app_crd.contexts.items():
                 for qualified_name in qualified_names:
+                    simple_name = qualified_name.split('/')[-1]
+                    if is_non_routable(simple_name):
+                        continue
+                    owners.setdefault(simple_name.lower(), set()).add(context_name)
+            for context_name in app_crd.contexts:
+                for qualified_name in app_crd.get_planning_command_names(context_name):
                     simple_name = qualified_name.split('/')[-1]
                     if is_non_routable(simple_name):
                         continue
@@ -566,9 +574,13 @@ class CommandNamePrediction:
                 NLUPipelineStage.INTENT_DETECTION, NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION):
             app_crd = fastworkflow.RoutingRegistry.get_definition(
                 self.app_workflow_folderpath)
+            # A planning command is typed by name like a routed one: its name must be in
+            # this exact-match set, or its words fall to the classifier, which has no
+            # planning labels (training excludes them). Never added to the classifier path.
             valid_command_names = (
-                set(cme_command_names) | 
-                set(app_crd.get_command_names(command_context_name))
+                set(cme_command_names) |
+                set(app_crd.get_command_names(command_context_name)) |
+                set(app_crd.get_planning_command_names(command_context_name))
             )
 
         command_name_dict = {

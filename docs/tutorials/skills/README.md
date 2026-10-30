@@ -109,18 +109,17 @@ of their context: eight in `_commands/Library/` and two in `_commands/Book/`.
 
 ## Who reads a planning command
 
-A planning command is read by code and by the agent, and the agent reads it at two moments.
-The pages say which reading each line is for:
+A planning command is read by code, by the planner and by the agent. The pages say which
+reading each line is for:
 
-- **the agent, as it plans** (a model). Every part of a request gets a run of the agent, and
-  the run's first step is a plan the agent writes, from its list of commands. On that list it
-  reads the command's `Signature` and its *template*: the steps written with every value
-  unknown. For a request the command covers, its plan is the one step that calls it; for one
-  it covers in part, the call with steps before or after it; and when the request needs some
-  of its steps dropped or changed, an adapted copy of them. Code checks the plan against what
-  the workflow declares, and the agent reads the notes (page 14). The command's arguments are
-  then filled the way any command's are, by the parameter extractor, from the step that calls
-  it (page 9).
+- **the planner** (a model). Every part of a request gets a plan, which the planner writes
+  before the agent runs it. With `JEV_API_KEY` set, a command that fits the part is a typed
+  call: the planner fills its `Input`, code checks the values and writes its steps, and the
+  planner adds steps before or after it for what the request asks beyond it. Otherwise the
+  planner plans from its list of commands, where it reads the command's `Signature` and its
+  *template*, the steps written with every value unknown, and calls the command or adapts a
+  copy of its steps (page 14). A step that calls the command has its arguments filled the way
+  any command's are, by the parameter extractor (page 9).
 - **code** (the framework, no model) runs every step a helper wrote that it can run
   mechanically, fills each phase's facts from the commands' outputs, and runs `__result__`.
 - **the agent, as it runs** the command's phases: it does what code cannot, a plain string, a

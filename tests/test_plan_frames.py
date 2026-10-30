@@ -117,7 +117,6 @@ def test_a_planning_frame_round_trips_every_serialised_field():
         ran_in_clause="Library/book_by_title", ran_in_context_name="Library",
         call_args={"title": "Dune"}, command_text="book_by_title title=Dune",
         folded_note="\n(Ran as: book_by_title title=Dune -- parameters go inside the command string.)",
-        fast_path=True,
         # Not serialised, so they must not appear in the state and must not come back.
         evidence_floors={0: 4}, initial_plan_text="1. look up", phase_live=("cmd", []),
         phased_skill_call=("cmd", None), agent=object(),
@@ -134,7 +133,6 @@ def test_a_planning_frame_round_trips_every_serialised_field():
         "ran_in_clause": "Library/book_by_title", "ran_in_context_name": "Library",
         "call_args": {"title": "Dune"}, "command_text": "book_by_title title=Dune",
         "folded_note": "\n(Ran as: book_by_title title=Dune -- parameters go inside the command string.)",
-        "fast_path": True,
     }
     restored = PlanFrame.from_state(json.loads(json.dumps(state)))
     assert restored.to_state() == state
@@ -172,7 +170,7 @@ def test_from_state_of_an_empty_dict_is_the_turn_frame_default():
     assert frame.alias == "" and frame.subtasks == [] and frame.origins == []
     assert frame.subtask_index == 0 and frame.subtask_answers == [] and frame.subtask_exhausted is False
     assert frame.phase_run is None and frame.child_step_ranges == []
-    assert frame.invoking_step is None and frame.fast_path is False
+    assert frame.invoking_step is None
 
 
 def test_absent_origins_are_each_entry_its_own_origin():

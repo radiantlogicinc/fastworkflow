@@ -347,9 +347,8 @@ written in open words can still name a running command at run time; it is refuse
 **The step budget.** `The step budget for nested commands is spent; continue with the
 remaining steps directly.` means the nested calls of one turn used `FW_TURN_MAX_STEPS`
 model steps (400 by default). Raise it in `fastworkflow.env` if your heaviest planning
-command needs more; the steps of a planning command that is the whole plan for a request do
-not count, the calls it makes do, and so do the steps of one the agent's plan called with
-other steps (page 14).
+command needs more; the steps of a planning command matched as a typed call do not count,
+the calls it makes do, and so do the steps of one a plan calls as a step (page 14).
 
 ## At run time, with no error
 

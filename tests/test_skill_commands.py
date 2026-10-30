@@ -398,7 +398,8 @@ def test_a_failed_skill_call_falls_back_to_the_template_path(tmp_path, workflow_
     workflow_env()
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
-    ctx._begin_turn("show my todo items")
+    # An unattended turn has no one to ask, so a refusal falls back as it always did.
+    ctx._begin_turn("show my todo items", unattended=True)
     # "Billing" is not in the request: the guard refuses the call twice, the text planner plans
     lm = DummyLM([_typed_answer(name="Billing"), _typed_answer(name="Billing"), _text_answer()])
 
@@ -429,6 +430,9 @@ def test_an_exception_in_the_skill_call_falls_back_too(tmp_path, workflow_env, m
     span = _plan_span(sink)
     assert span.attributes["plan_source"] == "text"
     assert span.attributes["skill_fallback"] == "RuntimeError: provider down"
+    # Only a refusal of the arguments is put to the user; any other failure is never asked about.
+    assert span.attributes["skill_refusal_asked"] is None
+    assert ctx._skill_refusal is None
 
 
 def test_a_replan_ignores_the_skill_command(tmp_path, workflow_env):
@@ -1103,7 +1107,7 @@ def test_a_second_refusal_falls_back_to_the_template_path(tmp_path, workflow_env
     workflow_env()
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
-    ctx._begin_turn(PAIR_REQUEST)
+    ctx._begin_turn(PAIR_REQUEST, unattended=True)  # attended, this refusal is put to the user
     lm = DummyLM([_pair_answer(second="Payroll"), _pair_answer(first="Billing"), _text_answer()])
 
     _plan_pair(ctx, wf, lm, _command(tmp_path, PAIR, "pair"))
@@ -1136,7 +1140,7 @@ def test_a_second_guard_refusal_falls_back_to_the_template_path(tmp_path, workfl
     workflow_env()
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
-    ctx._begin_turn(PAIR_REQUEST)
+    ctx._begin_turn(PAIR_REQUEST, unattended=True)  # attended, this refusal is put to the user
     lm = DummyLM([_pair_answer(second="Finance"), _pair_answer(second="Finance"), _text_answer()])
 
     _plan_pair(ctx, wf, lm, _command(tmp_path, PAIR, "pair"))

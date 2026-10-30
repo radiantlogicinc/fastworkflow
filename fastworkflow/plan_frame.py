@@ -66,7 +66,7 @@ class PlanFrame:
     subtask_answers: list[str] = field(default_factory=list)
     subtask_exhausted: bool = False
     evidence_floors: dict[int, int] = field(default_factory=dict)   # not serialised (as today)
-    initial_plan_text: str = ""          # not serialised (as today); goes in Phase 6: a run's plan is its latest plan step (3.6)
+    initial_plan_text: str = ""          # not serialised (as today); stays: the planner writes the run's plan (Phase 6 decision 2026-10-30)
     phase_run: Optional[dict[str, Any]] = None
     phase_live: Optional[tuple[Any, list[Any]]] = None   # not serialised (as today)
     phased_skill_call: Any = None        # not serialised (as today)
@@ -85,7 +85,6 @@ class PlanFrame:
     command_text: str = ""
     folded_note: str = ""
     agent: Any = None                    # per-frame fastWorkflowReAct, built lazily
-    fast_path: bool = False              # the whole plan of its sub-task (3.6)
     #: How many planning-command calls this frame has made, per command stem: the
     #: ``n`` of a child's alias (``<alias>/<stem>#<n>``). Not serialised, so a restored
     #: frame counts from its restore; alias numbers are for tracing, and step indexes
@@ -122,7 +121,6 @@ class PlanFrame:
             "call_args": copy.deepcopy(self.call_args),
             "command_text": self.command_text,
             "folded_note": self.folded_note,
-            "fast_path": self.fast_path,
         }
 
     @classmethod
@@ -149,7 +147,6 @@ class PlanFrame:
             call_args=copy.deepcopy(d.get("call_args") or {}),
             command_text=str(d.get("command_text") or ""),
             folded_note=str(d.get("folded_note") or ""),
-            fast_path=bool(d.get("fast_path")),
         )
 
 

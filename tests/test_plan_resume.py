@@ -171,6 +171,22 @@ def test_a_step_stopped_at_parameter_extraction_replans(llm, channel_id):
     ctx.close()
 
 
+def test_a_parameter_extraction_error_replan_carries_the_error_in_its_trajectory(llm, channel_id):
+    llm.answers["next_steps"] = ADD_PLAN_TEXT
+    llm.agent_steps = [
+        ("execute_workflow_query", {"command": ADD_ONE}),
+        ("execute_workflow_query", {"command": "go_up"}),
+        ("execute_workflow_query", {"command": ADD_BOTH}),
+        ("finish", {}),
+    ]
+    ctx = _context(HELLO_WORKFLOW, channel_id)
+    ctx.process_turn("add 5 and 3")
+    # The replan is the planner call with a trajectory: it is sent the extraction error the run went on from.
+    replans = [p for p in llm.prompts if "agent_trajectory" in p]
+    assert replans and "PARAMETER EXTRACTION ERROR" in replans[-1]
+    ctx.close()
+
+
 def _replan_request(llm: LlmStub) -> str:
     prompt = [p for p in llm.prompts if "user_response" in p and "agent_trajectory" in p][-1]
     return prompt[prompt.rfind("[[ ## agent_inputs ## ]]"):]

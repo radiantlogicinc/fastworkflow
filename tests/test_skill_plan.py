@@ -3,18 +3,24 @@ how the planner's template renders unknown facts (and the tests made on them), t
 step check, fastworkflow.Refused and the default generate_utterances. Offline,
 workflow-neutral."""
 import inspect
+import shutil
 import types
+import uuid
+from pathlib import Path
 
 import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import command_directory, skill_commands
+from fastworkflow import command_directory, skill_commands, workflow_agent
 from fastworkflow.command_executor import call_response_generator
+from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from fastworkflow.skill import (StepFormError, count, fact_from, listed, num, phase, pick,
                                 picks_noted, planned, skill_parts)
 from fastworkflow.skill_phases import (Placeholder, check_bindings, concatenated_steps,
                                        phase_steps, runs_now, stops_after)
+from tests.test_planning_commands import HOURS_RECIPE, _match_only, recipe_env  # noqa: F401 - recipe_env is a fixture
+from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - shared fixture
 
 
 class Found(BaseModel):
@@ -649,3 +655,73 @@ def test_a_no_input_phased_skill_call_has_no_arguments():
                                               "list_sections: x\ncount_late: y")
     assert lm.history == []
     assert call.args == {} and call.plan == "" and [p.name for p in call.phases] == ["sections", "late"]
+
+
+def test_planner_keeps_instructions_and_the_adapt_template(request, monkeypatch):
+    assert workflow_agent.PLANNER_INSTRUCTIONS.strip().startswith("Carefully review the user_query")
+
+    folder = request.getfixturevalue("recipe_env").wf.folderpath
+    _match_only(monkeypatch, "", HOURS_RECIPE)
+    template, command = workflow_agent.planner_skill_for("When are the branches open?", folder)
+    assert template == (
+        "A job like this is usually done as:\n- library_hours\n- say when the branches are open\n"
+        "Adapt this to the request: drop steps it does not need and add steps it asks for.")
+    assert command is workflow_agent.load_skill_commands(folder)[HOURS_RECIPE]
+
+
+EXAMPLE_TODO = str(Path(__file__).resolve().parent / "example_workflow")
+
+
+def _listing_headers(listing: str) -> list[str]:
+    return [line for line in listing.split("\n") if line.startswith("Commands available")]
+
+
+def test_the_typed_listing_is_the_planner_listing_cut_to_names_sentences_and_parameters(request):
+    # The typed call (design 3.4) reads a shorter listing; the text planner keeps the full one.
+    workflow = request.getfixturevalue("recipe_env").ctx.get_active_workflow()
+    full = workflow_agent.planner_commands_text(workflow)
+    trimmed = workflow_agent.typed_planner_commands_text(workflow)
+
+    assert len(trimmed) < len(full)
+    assert _listing_headers(trimmed) == _listing_headers(full)
+    assert skill_commands.command_names(trimmed) == skill_commands.command_names(full)
+    assert "  inputs:" in full and "parameters:" not in full
+    assert "- book_loans\n  Say who has a book on loan, given its title.\n  parameters: title\n" in trimmed
+    assert "- library_hours\n  Say when the library's branches are open, or one branch's hours.\n" \
+        "  parameters: branch\n" in trimmed
+    # A command with no parameters has no parameters line.
+    assert "- go_up\n  Change context to the parent of the current context.\n- list_branches\n" in trimmed
+
+
+@pytest.mark.usefixtures("initialized_fastworkflow")
+def test_a_command_in_two_contexts_keeps_each_contexts_description(tmp_path):
+    # set_properties is in TodoItem and TodoList; each context's Signature gives it its own description.
+    folder = tmp_path / "todo_wf"
+    shutil.copytree(EXAMPLE_TODO, folder)
+    nouns = (("TodoItem", "item"), ("TodoList", "list"))
+    for context, noun in nouns:
+        path = folder / "_commands" / context / "set_properties.py"
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace(
+            "class Signature:\n", f'class Signature:\n    """Set the properties of the open {noun}."""\n\n', 1),
+            encoding="utf-8")
+    workflow = fastworkflow.Workflow.create(str(folder), workflow_id_str=f"todo_{uuid.uuid4().hex[:8]}")
+    ctx = WorkflowExecutionContext(run_as_agent=True)
+    ctx.bind_app_workflow(workflow)
+    ctx.push_active_workflow(workflow)
+    try:
+        trimmed = workflow_agent.typed_planner_commands_text(workflow)
+    finally:
+        ctx.pop_active_workflow()
+
+    for context, noun in nouns:
+        section = f"Commands available after entering the {context} context (not callable until then):\n"
+        block = trimmed.split(section, 1)[1].split("\nCommands available", 1)[0]
+        assert (f"- set_properties\n  Set the properties of the open {noun}.\n"
+                "  parameters: description, assign_to, status\n") in block
+
+
+def test_a_parameters_line_is_not_read_as_a_command_description():
+    # The typed listing gives a command with no description only its parameters line.
+    listing = "Commands:\n- open_book\n  parameters: book_uid\n- go_up\n  Change context.\n"
+    assert skill_commands.command_descriptions(listing) == {"go_up": "Change context."}

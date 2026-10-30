@@ -1,9 +1,9 @@
 # 14. Where a request finds its command
 
-**Goal:** know which commands a request can reach from where the workflow stands, how the
-agent plans it, with a planning command that covers it or without one, and how code checks
-that plan. Contexts exist so that each model that matches a request chooses among few
-commands, and that holds for both kinds of command.
+**Goal:** know which commands a request can reach from where the workflow stands, and how it
+is planned, with a planning command that covers it or without one. Contexts exist so that
+each model that matches a request chooses among few commands, and that holds for both kinds
+of command.
 
 ## What you declare
 
@@ -142,72 +142,61 @@ command's seeds retrains only its own; `fastworkflow train --regenerate-utteranc
 the seeds again. A workflow trained by a release before scoped lookup does not load, and
 says to retrain with `fastworkflow train`.
 
-## How the agent plans a request
+## How a request is planned
 
 In agent mode a request is split into its parts, and each part gets a run of the agent of
-its own. **The run's first step is the agent's plan**: it calls its `plan` tool with the
-steps it means to run, and until it has, the only other thing it can do is ask the user a
-question. The plan is a step like any other, so it is in the turn's trace with the steps it
-led to, and the agent revises it with another `plan` when a step fails or the user's answer
+its own. **Before the run, the planner writes its plan**: a numbered list of steps, written
+from the list of commands described below. The agent then runs those steps. The plan is in
+the turn's trace (`fw.planner.plan`), and the planner writes the rest of it again
+(`fw.planner.replan`) when a step's arguments are refused or the user's answer to a question
 changes what is needed.
 
-For a planning command that matches a part, the agent writes one of three plans:
+With `JEV_API_KEY` set, Jev first decides whether a planning command fits the part, one
+scope at a time along the lookup path above. A confident match is planned in one of two ways:
 
-- **The one step that calls it**, when it covers the whole part. "Who wrote Dune?" is the
-  plan `book_by_title title=Dune`. The runtime runs that step itself, right after the plan,
-  and the answer `__result__` writes is the answer the user reads, as written. Every page so
-  far runs this way.
-- **The call with steps before or after it**, when it covers only some of the part. "Who
-  wrote Dune, and which branch holds it?" is `book_by_title title=Dune`, then `show_book`,
-  which runs on Dune because the call left the workflow there (page 5). The call runs with
-  its own phases, checks and `__result__`; the agent runs `show_book`, and writes the answer
-  from both.
-- **An adapted copy of its steps**, when the request needs some of them dropped or changed.
-  "Open Raj Patel's record" can be the first two steps of `member_report`'s template,
+- **A typed call**, the usual way. The planner fills the command's typed inputs from the
+  request, reading a shorter list in which each command is its name, the first sentence of
+  its description and its parameter names. Code checks the values and expands the command's
+  steps for them, so the planner never rewrites them. When the request asks for more than the
+  command does, the planner adds steps before or after the command's own. "Who wrote Dune?"
+  is the call `book_by_title title=Dune` alone. "Who wrote Dune, and which branch holds it?"
+  is the same call with `show_book` after it, which runs on Dune because the call left the
+  workflow there (page 5). The call runs with its own phases, checks and `__result__`; when
+  it is the whole plan, the answer `__result__` writes is the answer the user reads, as
+  written. Every page so far runs this way.
+- **Its template, adapted**, when the typed call fails. The planner gets the request with
+  the command's template after it (`A job like this is usually done as: ... Adapt this to
+  the request: drop steps it does not need and add steps it asks for.`) and writes ordinary
+  steps. "Open Raj Patel's record" can be the first two steps of `member_report`'s template,
   `find_member query=Raj Patel` and `open_member with the uid of the Raj Patel match`, with
-  the rest left out. The agent runs the copy as ordinary steps, so `member_report`'s phases
-  and `__result__` do not run.
+  the rest left out. The agent runs them as ordinary steps, so `member_report`'s phases and
+  `__result__` do not run.
 
-The agent prefers the first plan, then the second: both run the command's own code. In
-each, the command's arguments arrive as any command's do (page 9).
+In each, the command's arguments arrive as any command's do (page 9).
 
-## The checks on a plan
+**A value the request does not give is asked for.** When the checks refuse an argument of
+the typed call (one the request does not name, or a placeholder, a pronoun or a kind of
+record standing in for a name), an attended turn stops on a question and runs no step:
+`I can't run member report yet: your request does not say which member to use. Which member
+should I use?` The reply runs the call again with the value. An unattended turn never asks:
+the planner plans from the template instead.
 
-Code checks every plan the agent writes against what your workflow declares, and puts its
-notes in the plan step's result, for the agent to read. A note never stops a plan: the agent
-revises it with another `plan`, or goes on. There are three checks:
+Without `JEV_API_KEY` no planning command is matched first: the planner plans every part from
+the full list, where each planning command is shown with its template, and may call one as a
+step or copy its steps. An INFO line naming `JEV_API_KEY` says so, once per workflow.
 
-- **A producer that no earlier step runs.** `open_member`'s `member_uid` names its producer,
-  `find_member` (page 5), so a plan that opens Raj Patel's record before it has looked him up
-  gets `Step 1 runs open_member, whose member_uid comes from find_member; no earlier step
-  runs find_member.`
-- **A context the plan does not reach.** Code follows the plan from where the workflow
-  stands, moving it where each step's `descends_to` says (page 5). A step whose command
-  cannot run where the plan then stands gets a note that names the command entering its
-  context: `Step 2 runs list_member_loans while the plan is in Library; enter a member first
-  (open_member).`
-- **A matched planning command's steps left out.** When Jev matched a planning command and
-  the plan neither calls it nor runs each of its steps, the note names the steps the plan
-  lacks: `This request matches member_report. The plan neither calls it nor runs its steps
-  list_member_loans and show_notes: call member_report, or add the steps the request needs.`
-  For "what has Ann Lee borrowed" the agent adds `list_member_loans` and leaves out
-  `show_notes`, which `member_report` runs only when notes are asked for. Code names the
-  steps; only the agent can tell which of them the request needs.
+So the declarations of page 5 tell the planner and the agent where values and contexts come
+from: a `from_` or a `descends_to` you leave out is a path neither of them is shown.
 
-So the declarations of page 5 do two jobs: they tell the agent where values and contexts come
-from, and they check its plans. A `from_` or a `descends_to` you leave out is a check that
-never runs.
+## What the planner is shown
 
-## What the agent is shown
-
-The agent writes each plan from the list of commands its run is shown: for a part of a
+The planner writes each plan from the list of commands it is shown: for a part of a
 request a planning command covers, as above, and for one no planning command covers, from
-execution commands alone. No plan is kept for the next request. The agent keeps the same list
-while it runs the plan.
+execution commands alone. No plan is kept for the next request.
 
 **While the workflow is small, the list holds every command.** The library's commands fit
 whole, so for "list Mia Chen's loans and note that she was reminded", which `member_report`
-covers only in part, the agent is shown every command of the workflow in full, each planning
+covers only in part, the planner is shown every command of the workflow in full, each planning
 command with its template, and writes the plan:
 
 ```text
@@ -219,8 +208,8 @@ say which books Mia Chen has on loan, and that the note was added
 `member_report` leaves the workflow on Mia Chen (page 5), so `add_note` runs on her record.
 
 **A larger workflow gets a shortlist.** Past a fixed size, listing every command in full makes
-the prompt of every step of the run long and the agent's choices worse, so the run gathers a
-shortlist for the request instead. For the same request it would hold:
+the planner's prompt long and its choices worse, so the planner is shown a shortlist for the
+request instead. For the same request it would hold:
 
 1. **The commands that match**, in every scope on the path and in every context the library
    can navigate into through a declared `descends_to` (`Book`, `Member`, and their base
@@ -231,26 +220,26 @@ shortlist for the request instead. For the same request it would hold:
    `find_member`); the commands that navigate to their contexts (`open_member` enters
    `Member`); the callees of each planning command on the list; and the core commands.
 
-The agent sees the shortlist in full, each planning command on it with its template, and
+The planner sees the shortlist in full, each planning command on it with its template, and
 every other context as one line. The templates count toward the size at which the shortlist
 starts. The list follows the workflow: when a step moves it into another context, the list
 is shown again from there, and a later plan gathers the shortlist again.
 
-So in a large workflow, **the edges you declare decide what the agent's plan can reach**: a
+So in a large workflow, **the edges you declare decide what the plan can reach**: a
 producer `from_` on an input brings its producer onto the shortlist, and a `descends_to` on
 a navigation command brings in the way to its context. A navigation command that moves the
 workflow without declaring `descends_to` is reported the first time it does it (page 5). A
 command neither edge reaches is still listed, as one line under its context, and the agent
 sees it in full once its run enters that context.
 
-When the agent writes a planning command as a step, that command's arguments are checked
-against the request and what the turn's earlier steps found, not against the step the agent
-wrote: a value the agent made up is in neither, and is refused.
+When a plan has a planning command as a step, that command's arguments are checked against
+the request and what the turn's earlier steps found, not against the step as written: a value
+the planner made up is in neither, and is refused.
 
-If the agent keeps writing the same plan for one kind of request, that is the hint to write a
+If the planner keeps writing the same plan for one kind of request, that is the hint to write a
 command for it: an execution command if code can decide every step, and a planning command if
-the agent should run, judge or recover part of it (page 1). Its plans are the plan steps in
-the turn's trace, so they are there to read.
+the agent should run, judge or recover part of it (page 1). Its plans are the `fw.planner.plan`
+spans in the turn's trace, so they are there to read.
 
 ## Assistant mode
 
@@ -264,11 +253,12 @@ to agent mode, never handed to the agent silently, and naming one gets
 A request is matched one scope at a time: the current context, its bases, each enclosing
 record and its bases, then the global commands; the first scope that recognises it wins, and
 the command runs on that scope's object. Planning commands belong to contexts like execution
-commands. Every part of a request gets a run of the agent, whose first step is its plan,
-written from a list that shows each planning command with its template: the agent calls one
-whole for a request it covers, with other steps for one it covers in part, or adapts a copy
-of its steps, with no key needed; `JEV_API_KEY` lets Jev show it first the one that fits. A
-request no planning command covers is planned from execution commands alone. Code checks
-each plan against your producer `from_` and `descends_to` declarations, and the agent reads
-the notes. The list holds every command while the workflow is small, and a shortlist that the
-same declarations complete once it is large.
+commands. Every part of a request gets a plan from the planner, then a run of the agent that
+carries it out. With `JEV_API_KEY` set, a planning command that fits the part is a typed call:
+the planner fills its inputs, code checks them and writes its steps, and the planner adds the
+steps the request asks for beyond it; a value the request leaves out is asked for in an
+attended turn. When the call fails, the planner adapts the command's template. Without the key,
+or for a part no planning command covers, the planner plans from the list of commands, which
+shows each planning command with its template. The list holds every command while the workflow
+is small, and a shortlist that your producer `from_` and `descends_to` declarations complete
+once it is large.

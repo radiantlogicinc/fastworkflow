@@ -296,7 +296,37 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # It is an envelope attribute, stamped by the emission machinery rather than declared by
 # an emitter, so no per-emitter version moved for it. fw.skill.phase v6 (fix-3rsq.4.10)
 # declares `uses_result`, which it has written since Phase 3 without declaring it.
-SPAN_CONTRACT_VERSION = 24
+#
+# v25: fw.planner.plan / fw.planner.replan v6 (Phase 6 arm selector, fix-3rsq.6.7) --
+# `experiment_arm` (the measurement arm in force: "A" today's path, "B" the fast path)
+# and `fast_path` (this initial plan is one planning-command call the fast path runs), and
+# `recipe_choice` (arm B: the planner's yes or no on whether a matched recipe covers the request;
+# None when no check ran). All three are logged on every planner span; a span recorded before
+# this carries none of them.
+#
+# v26: fw.planner.plan / fw.planner.replan v7 -- `skill_refusal_asked`: a refused skill call's
+# question was put to the user, and the turn suspends on it (see the contract's v7 note). A span
+# recorded before this carries no such key, which reads as "not asked".
+#
+# v27: fw.nlu.param_extraction v6 (command-name guard) -- `command_name_values`: a parameter value
+# that was the name of a command (the called command's own, or another's in identifier form) and
+# was treated as not given. A span recorded before this carries no such key.
+#
+# v28: fw.agent.execute v2 -- `fast_path_refusal_asked`: the fast path's one planning-command call
+# (arm B) was refused for a missing argument, and the question was put to the user, so the run
+# suspends on it instead of the agent going on from its plan. The fast path has no span of its
+# own: its planner span closes before the run, so the run's executor span carries the fact. A span
+# recorded before this carries no such key, which reads as "not asked".
+#
+# v29: fw.nlu.param_extraction v7 (word screens) -- `word_screen_values`: a free-text value that was
+# only a pronoun or only a kind word or field name of the workflow, and was treated as not given. A
+# span recorded before this carries no such key.
+#
+# v30: fw.planner.plan / fw.planner.replan v8 and fw.agent.execute v3 -- the Phase 6 arms were removed
+# by owner decision 2026-10-30. `experiment_arm`, `fast_path` and `recipe_choice` (the v25 keys of the
+# planner span) and `fast_path_refusal_asked` (the v28 key of the executor span) are no longer declared
+# or written. A span recorded before this carries them as it wrote them; nothing reads them as a live path.
+SPAN_CONTRACT_VERSION = 30
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -494,8 +524,11 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
             }
         ),
     ),
+    # v2: `fast_path_refusal_asked` (SPAN_CONTRACT_VERSION v28): the fast path's refused call's
+    # question was put to the user, and the run suspended on it. None otherwise.
+    # v3: `fast_path_refusal_asked` is withdrawn with the Phase 6 arms (SPAN_CONTRACT_VERSION v30).
     SPAN_AGENT_EXECUTE: SpanContract(
-        version=1,
+        version=3,
         attributes=frozenset(
             {
                 "agent_input",
@@ -629,15 +662,27 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # skill call fell back to the text planner.
     # v5: `skill_notes`, the notes of a skill call (``SkillCallPlan.notes``: an argument
     # a guard or a sure verify verdict replaced, dropped extra steps); None otherwise.
+    # v6: `experiment_arm`, `fast_path` and `recipe_choice` (SPAN_CONTRACT_VERSION v25; Phase 6 arm
+    # selector). `plan_source` may be "recipe_choice" (arm B: the recipe covers the request, so the
+    # plan is its one call).
+    # v7: `skill_refusal_asked` (SPAN_CONTRACT_VERSION v26): True when the planner's refusal of a
+    # skill call's arguments was put to the user, so the turn suspends on the question instead of
+    # falling back to the text planner; `plan_source` is then "none" and `skill_fallback` still
+    # says why. None otherwise.
+    # v8: the v6 keys `experiment_arm`, `fast_path` and `recipe_choice` are withdrawn: the Phase 6
+    # arms were removed by owner decision 2026-10-30 (SPAN_CONTRACT_VERSION v30). A span recorded at
+    # v6 or v7 still carries them.
     SPAN_PLANNER_PLAN: SpanContract(
-        version=5,
+        version=8,
         attributes=frozenset({"model", "replan_trigger", "plan", "plan_source",
-                              "skill", "skill_args", "skill_notes", "skill_fallback"}),
+                              "skill", "skill_args", "skill_notes", "skill_fallback",
+                              "skill_refusal_asked"}),
     ),
     SPAN_PLANNER_REPLAN: SpanContract(
-        version=5,
+        version=8,
         attributes=frozenset({"model", "replan_trigger", "plan", "plan_source",
-                              "skill", "skill_args", "skill_notes", "skill_fallback"}),
+                              "skill", "skill_args", "skill_notes", "skill_fallback",
+                              "skill_refusal_asked"}),
     ),
     # One distillation pass. `fw.pass` is the membership stamp every descendant
     # inherits through ancestry; the rest is the pass's OWN content, recorded
@@ -714,7 +759,13 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         # after the command name and every field defaulted; absent for XML tags), and
         # `unbound_value` is a lone value that bound to no field and was
         # refused. Absent on earlier versions.
-        version=5,
+        # v6 (command-name guard): `command_name_values` records a parameter value
+        # that was the name of a command (the called command's own, or another's in
+        # identifier form) and was treated as not given. Absent on earlier versions.
+        # v7 (word screens): `word_screen_values` records a free-text value that was
+        # only a pronoun or only a kind word or field name of the workflow and was
+        # treated as not given. Absent on earlier versions.
+        version=7,
         attributes=frozenset(
             {
                 "command_name",
@@ -734,6 +785,8 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "validation_hook",
                 "decision_uncertainty",
                 "parameters_valid",
+                "command_name_values",
+                "word_screen_values",
             }
         ),
     ),

@@ -1,0 +1,253 @@
+"""A refused skill call in an attended turn is put to the user, and the reply runs the call.
+
+No stand-ins here: the skills are the tutorial workflow's own (``tests/skill_tutorial_workflow``),
+the argument guards and the question are the real functions, and the tests that need the
+planner's typed call run against the configured planner LLM. Those skip without a usable key,
+as the other ``requires_llm_key`` tests do.
+"""
+from __future__ import annotations
+
+import queue
+from pathlib import Path
+
+import dspy
+import pytest
+from dotenv import dotenv_values
+from dspy.utils.exceptions import LMTransportError
+
+import fastworkflow
+from fastworkflow import skill_commands as sc
+from fastworkflow import workflow_agent
+from fastworkflow.turn import TurnStatus
+from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from tests.llm_credentials import syndata_llm_available
+from tests.test_text_planner_and_split import RecordingTraceSink, _session, workflow_env  # noqa: F401 - workflow_env is a fixture
+
+ROOT = Path(__file__).resolve().parent.parent
+SKILLS = str(Path(__file__).resolve().parent / "skill_tutorial_workflow")
+EXAMPLES = ROOT / "fastworkflow" / "examples"
+REQUEST = "Which books does that member have on loan?"
+AUTHOR_REQUEST = "Which books did the author of that one write?"  # names no author, no proper noun
+MEMBER_QUESTION = ("I can't run member loans yet: your request does not say which member to use. "
+                   "Which member should I use?")
+
+
+def _skill(name: str) -> sc.SkillCommand:
+    return workflow_agent.load_skill_commands(SKILLS)[name]
+
+
+def _raw(command: sc.SkillCommand, **values) -> dict:
+    """The planner's raw values for every param of the skill: the given ones, None for the rest."""
+    return {p.name: values.get(p.name) for p in command.params}
+
+
+def _planner_settings() -> dict:
+    """The model settings of a real run: the examples' files, then the repo's own env/ and
+    passwords/ files override them (the resolution order test_personas uses)."""
+    settings = {**dotenv_values(EXAMPLES / "fastworkflow.env"),
+                **dotenv_values(EXAMPLES / "fastworkflow.passwords.env")}
+    for name in ("env/.env", "passwords/.env"):
+        settings.update(dotenv_values(ROOT / name))
+    return {key: value for key, value in settings.items() if value is not None}
+
+
+def _planner_llm_configured() -> bool:
+    # The credential gate the other requires_llm_key tests use, applied to the planner role.
+    settings = _planner_settings()
+    return syndata_llm_available({"LLM_SYNDATA_GEN": settings.get("LLM_PLANNER"),
+                                  "LITELLM_API_KEY_SYNDATA_GEN": settings.get("LITELLM_API_KEY_PLANNER")})
+
+
+needs_planner_llm = pytest.mark.skipif(
+    not _planner_llm_configured(),
+    reason="No usable LLM credentials for LLM_PLANNER; cannot run the planner's typed call.")
+
+
+# ---------------------------------------------------------------- no model: real guards, real question
+
+@pytest.mark.parametrize("skill, values, asked_in, question", [
+    ("member_loans", {"member": ""}, REQUEST, MEMBER_QUESTION),
+    ("find_record", {"name": "Dune", "kind": "film"}, "Is Dune a film?",
+     "I can't run find record yet: the kind must be one of: book, member. Which kind should I use?"),
+    ("find_books", {"query": "Dune"}, "which books by Asimov",
+     "I can't run find books yet: the query 'Dune' is not in your request. Which query should I use?"),
+], ids=["missing", "not-one-of", "not-written"])
+def test_a_refused_call_of_a_tutorial_skill_is_put_as_a_question_naming_its_input(skill, values, asked_in, question):
+    command = _skill(skill)
+    with pytest.raises(sc.SkillInputError) as refused:
+        sc.check_arguments(command, _raw(command, **values), asked_in)
+
+    assert sc.refusal_question(command, refused.value) == question
+
+
+def test_a_refusal_from_a_skills_own_rule_is_put_in_its_own_words():
+    command = _skill("member_loans")
+    with pytest.raises(sc.SkillInputError) as refused:
+        sc.validate_call(command, {"member": "everyone"}, "Which books does everyone have on loan?", None)
+
+    assert sc.refusal_question(command, refused.value) == (
+        "I can't run member loans yet: member is 'everyone', which names no one member; this skill "
+        "reads one member's loans: give that member's name. What should I change?")
+
+
+def test_refused_skill_call_gets_the_refusal_question(request):
+    request.getfixturevalue("workflow_env")()
+    command = workflow_agent.load_skill_commands(SKILLS)["member_loans"]
+
+    question = sc.missing_argument_question(command, "member")
+
+    assert question == MEMBER_QUESTION
+    assert question == sc.refusal_question(command, sc.SkillInputError("missing required argument member"))
+
+
+def test_a_refusal_is_asked_in_an_attended_turn_that_has_not_asked_or_run(workflow_env):
+    workflow_env()
+    ctx, _wf = _session(RecordingTraceSink(), folder=SKILLS)
+    ctx._begin_turn(REQUEST)
+
+    assert workflow_agent._skill_refusal_may_ask(ctx) is True
+
+
+def test_a_refusal_is_not_asked_in_an_unattended_turn(workflow_env):
+    workflow_env()
+    ctx, _wf = _session(RecordingTraceSink(), folder=SKILLS)
+    ctx._begin_turn(REQUEST, unattended=True)
+
+    assert workflow_agent._skill_refusal_may_ask(ctx) is False
+
+
+def test_a_refusal_is_not_asked_when_a_message_queue_blocks_the_turn(workflow_env):
+    workflow_env()
+    ctx, _wf = _session(RecordingTraceSink(), folder=SKILLS)
+    ctx.set_transport_queues(user_message_queue=queue.Queue())  # the CLI driver's wiring
+    ctx._begin_turn(REQUEST)
+
+    assert workflow_agent._skill_refusal_may_ask(ctx) is False
+
+
+def test_a_refusal_is_not_asked_once_the_turn_has_asked_one(workflow_env):
+    workflow_env()
+    ctx, _wf = _session(RecordingTraceSink(), folder=SKILLS)
+    ctx._begin_turn(REQUEST)
+    ctx._skill_refusal_answered = True  # the reply to the first question has been run
+
+    assert workflow_agent._skill_refusal_may_ask(ctx) is False
+
+
+def test_a_refusal_is_not_asked_once_a_command_has_run_in_the_turn(workflow_env):
+    workflow_env()
+    ctx, _wf = _session(RecordingTraceSink(), folder=SKILLS)
+    ctx._begin_turn(REQUEST)
+    ctx._turn_outputs.append(fastworkflow.CommandOutput(
+        command_name="find_member", command_response=fastworkflow.CommandResponse(response="Ann Lee")))
+
+    assert workflow_agent._skill_refusal_may_ask(ctx) is False
+
+
+def test_the_refusal_flags_survive_a_save_and_restore(workflow_env):
+    workflow_env()
+    sink = RecordingTraceSink()
+    ctx, _wf = _session(sink, folder=SKILLS)
+    ctx._skill_refusal_pending = True
+    ctx._skill_refusal_answered = True
+    state = ctx.serialize_state(channel_id="refusal-flags")
+
+    restored, _wf = _session(sink, folder=SKILLS)
+    restored.apply_serialized_state(state)
+
+    assert restored._skill_refusal_pending is True
+    assert restored._skill_refusal_answered is True
+
+
+def test_a_save_from_before_the_refusal_flags_restores_them_as_unset(workflow_env):
+    workflow_env()
+    sink = RecordingTraceSink()
+    ctx, _wf = _session(sink, folder=SKILLS)
+    older = {key: value for key, value in ctx.serialize_state(channel_id="older-save").items()
+             if key not in ("skill_refusal_pending", "skill_refusal_answered")}
+
+    restored, _wf = _session(sink, folder=SKILLS)
+    restored._skill_refusal_pending = True
+    restored._skill_refusal_answered = True
+    restored.apply_serialized_state(older)
+
+    assert restored._skill_refusal_pending is False
+    assert restored._skill_refusal_answered is False
+
+
+def test_a_failure_that_is_not_a_refusal_is_never_put_to_the_user(workflow_env):
+    workflow_env()
+    sink = RecordingTraceSink()
+    ctx, wf = _session(sink, folder=SKILLS)
+    ctx._begin_turn(REQUEST)  # attended: a refusal would be asked
+    # The planner's model is unreachable: the typed call fails with a connection error, which is
+    # not a refusal of the arguments. The text planner uses the same model, so the turn raises.
+    unreachable = dspy.LM("openai/unreachable-planner", api_base="http://127.0.0.1:9/v1",
+                          api_key="unused", num_retries=0)
+    ctx.push_active_workflow(wf)
+    try:
+        with pytest.raises(LMTransportError):
+            workflow_agent.build_query_with_next_steps(REQUEST, ctx, planner_lm=unreachable,
+                                                       skill_command=_skill("member_loans"))
+    finally:
+        ctx.pop_active_workflow()
+
+    assert ctx._skill_refusal is None
+    assert ctx._skill_refusal_pending is False
+
+
+# ---------------------------------------------------------------- planner LLM: the typed call is real
+
+@pytest.mark.slow
+@pytest.mark.requires_llm_key
+@needs_planner_llm
+@pytest.mark.xfail(strict=False, reason=(
+    "Depends on the planner model's typed extraction: with 'that one' the planner refused the author "
+    "in 2 of 5 fresh-cache runs. The second turn also needs the tutorial's trained intent models "
+    "(threshold.json is absent in this environment)."))
+def test_an_attended_turn_asks_for_the_missing_author_and_the_reply_completes_the_call(workflow_env):
+    workflow_env(**_planner_settings())
+    sink = RecordingTraceSink()
+    ctx, _wf = _session(sink, folder=SKILLS)
+
+    first = ctx.process_turn(AUTHOR_REQUEST)
+
+    assert first.status == TurnStatus.AWAITING_USER
+    assert first.answer.startswith("I can't run author books yet:")
+    assert first.answer.endswith("Which author should I use?")
+
+    # The question survives a save and restore, as it does between two requests in production.
+    state = ctx.serialize_state(channel_id="missing-author")
+    restored = WorkflowExecutionContext(run_as_agent=True, trace_sink=sink)
+    restored.bind_app_workflow(fastworkflow.Workflow.create(SKILLS, workflow_id_str="missing-author-restored"))
+    restored.apply_serialized_state(state)
+
+    second = restored.process_turn("The author is Frank Herbert.")
+
+    assert second.status == TurnStatus.COMPLETED
+    call = sink.named("fw.planner.plan")[-1]
+    assert call.attributes["skill"] == "author_books"
+    assert call.attributes["skill_args"]["author"] == "Frank Herbert"
+
+
+@pytest.mark.slow
+@pytest.mark.requires_llm_key
+@needs_planner_llm
+def test_an_unattended_turn_never_asks_about_a_refused_call(workflow_env):
+    workflow_env(**_planner_settings())
+    sink = RecordingTraceSink()
+    ctx, wf = _session(sink, folder=SKILLS)
+    ctx._begin_turn(AUTHOR_REQUEST, unattended=True)
+
+    ctx.push_active_workflow(wf)
+    try:
+        workflow_agent.build_query_with_next_steps(AUTHOR_REQUEST, ctx, skill_command=_skill("author_books"))
+    finally:
+        ctx.pop_active_workflow()
+
+    # Whether the model refuses or guesses a value the request writes, an unattended turn is never
+    # put a question: a refusal falls back to the text planner, and no question is recorded.
+    span = sink.named("fw.planner.plan")[-1]
+    assert span.attributes["skill_refusal_asked"] is None
+    assert ctx._skill_refusal is None
+    assert span.attributes["plan_source"] in ("text", "skill_call")

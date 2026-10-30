@@ -16,7 +16,7 @@ from dotenv import dotenv_values
 from pydantic import BaseModel, Field, model_validator
 
 import fastworkflow
-from fastworkflow import skill_commands
+from fastworkflow import skill_commands, skill_preview, workflow_agent
 from fastworkflow.capability_answer import context_commands
 from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError
 from fastworkflow.command_metadata_api import CommandMetadataAPI
@@ -24,7 +24,14 @@ from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.context_navigation import home_contexts
 from fastworkflow.mcp_server import FastWorkflowMCPServer
 from fastworkflow.model_pipeline_training import trained_command_labels
-from fastworkflow.workflow_agent import _explicit_agent_command, _parameter_fields, _what_can_i_do
+from fastworkflow.plan_frame import TURN_MAX_STEPS_ENV
+from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.workflow_agent import (
+    _explicit_agent_command,
+    _parameter_fields,
+    _what_can_i_do,
+    planner_commands_text,
+)
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from fastworkflow.examples.library._commands.Book.list_loans import Signature as ListLoans
 from fastworkflow.examples.library._commands.Library.book_loans import Signature as BookLoans
@@ -39,7 +46,9 @@ from fastworkflow.turn import TurnStatus, reset_missing_declared_output_warnings
 from fastworkflow.utils import python_utils
 
 from tests.test_field_sources import _build_workflow
+from tests.test_skill_contexts import LIBRARY_SKILL, ROOT_SKILL, RULE_CHECK, _with_rule_check
 from tests.test_skill_code_steps import Model
+from tests.test_text_planner_and_split import _fake_matcher
 from tests.test_step_helpers import (
     FoundBooks,
     LibraryRunner,
@@ -997,16 +1006,19 @@ def test_in_request_str_must_be_written_in_the_request(tmp_path):
         skill_commands.check_arguments(command, {"title": "Emma"}, request)
 
 
-def test_in_request_str_field_description_carries_the_rule_sentence(tmp_path):
+def test_in_request_str_rule_sentence_is_for_the_extractor_not_the_field_description(tmp_path):
     folder = _library_workflow(tmp_path)
     path = os.path.join(folder, "_commands", "Library", "by_title.py")
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(IN_REQUEST_TITLE)
     mod = python_utils.get_module(path, folder)
     command = skill_commands.command_from_module("Library/by_title", mod, path).command
+    # The field's own description says what the value is; the rule sentence is the extractor's (3.4).
     desc = command.input_model.model_fields["title"].description
-    assert skill_commands.IN_REQUEST_STR_SENTENCE in desc
-    assert desc.startswith("the book's title")
+    assert desc == "the book's title"
+    assert skill_commands.IN_REQUEST_STR_SENTENCE not in desc
+    assert skill_commands.extraction_sentences(command.param("title")) == (
+        skill_commands.IN_REQUEST_STR_SENTENCE,)
 
 
 PLANNING_CMD = "Library/count_books"
@@ -1163,7 +1175,7 @@ _BOOK_LOANS_EXECUTOR_ENTRY = (
     "- book_loans\n"
     "  Say who has a book on loan, given its title.\n"
     "  inputs:\n"
-    "  - the book's title. Copy it exactly as the request writes it., type: str\n"
+    "  - the book's title, type: str\n"
 )
 
 _BOOK_LOANS_PLANNER_ENTRY = (
@@ -1210,7 +1222,7 @@ def test_library_planning_commands_listed_in_executor_catalog_with_signature(
         "- book_by_title\n"
         "  Show who wrote a book, and how many copies the library owns, given its title.\n"
         "  inputs:\n"
-        "  - the book's title. Copy it exactly as the request writes it., type: str\n"
+        "  - the book's title, type: str\n"
         "  outputs:\n"
     ) in text
     assert "template:" not in text
@@ -1508,3 +1520,130 @@ def test_planning_command_parameter_fields_and_utterances_follow_the_planner_hin
     assert set(desc_only["book_by_title"].split()) <= set(texts["book_by_title"].split())
     assert "dune" in texts["book_by_title"].split()
     assert "dune" not in desc_only["book_by_title"].split()
+
+
+# ---------------------------------------------------------------------------
+# The rule sentences and the planner's listing of a recipe's steps (design 3.4, 3.6)
+# ---------------------------------------------------------------------------
+
+ALL_RULE_SENTENCES = (
+    skill_commands.IN_REQUEST_STR_SENTENCE,
+    skill_commands.IN_REQUEST_INT_SENTENCE,
+    skill_commands.SUBJECT_SENTENCE,
+    skill_commands.VERIFY_BOOL_SENTENCE,
+)
+TUTORIAL_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skill_tutorial_workflow")
+
+
+def test_each_rule_sentence_reaches_only_the_extractor_of_the_field_whose_check_states_it(
+        tmp_path, initialized_fastworkflow):
+    folder = _with_rule_check(tmp_path)
+
+    # The sentences by field: each option's own, on the fields whose checks state them.
+    assert skill_commands.extraction_sentences_for(folder, RULE_CHECK) == {
+        "title": (skill_commands.SUBJECT_SENTENCE,),
+        "copies": (skill_commands.IN_REQUEST_INT_SENTENCE,),
+        "loaned": (skill_commands.VERIFY_BOOL_SENTENCE,),
+    }
+    assert skill_commands.extraction_sentences_for(folder, "Library/book_by_title") == {
+        "title": (skill_commands.IN_REQUEST_STR_SENTENCE,)}
+    # An execution command's fields get none (until Phase 11).
+    assert skill_commands.extraction_sentences_for(folder, "Library/find_book") == {}
+
+    # The extractor's descriptions: the field's own, then its sentences (built as extract_parameters builds them).
+    command = skill_commands.planning_command(folder, RULE_CHECK)
+    signature = InputForParamExtraction.create_signature_from_pydantic_model(
+        command.input_model, skill_commands.extraction_sentences_for(folder, RULE_CHECK))
+    described = {name: field.json_schema_extra["desc"]
+                 for name, field in signature.output_fields.items()}
+    assert described["title"].startswith(
+        "the book's title. Copy it exactly as the request writes it. "
+        "It must name a record the request names. This field is Required.")
+    assert described["copies"].startswith(
+        "how many copies the request asks about. A number the request writes. This field is Required.")
+    assert described["loaned"].startswith(
+        "whether the request asks about loans. True only when the request asks for it. "
+        "This field is Required.")
+    # The field's own description, which the listings read, carries none of them.
+    assert command.input_model.model_fields["title"].description == "the book's title"
+
+    # The preview of the pinned tutorial workflow shows none of them.
+    rendered = skill_preview.render_previews(TUTORIAL_FOLDER)
+    assert "the book's title" in "\n".join(map(str, rendered.values()))
+    assert not any(s in str(text) for text in rendered.values() for s in ALL_RULE_SENTENCES)
+
+    # The run's listings show none of them: the executor's (each command's inputs, in the context it
+    # is in, here Library) and the planner's (the templates of every context).
+    workflow = fastworkflow.Workflow.create(folder, workflow_id_str=f"rc_{uuid.uuid4().hex[:8]}")
+    ctx = WorkflowExecutionContext(run_as_agent=True)
+    ctx.bind_app_workflow(workflow)
+    ctx.push_active_workflow(workflow)
+    try:
+        LibraryRunner(workflow)(ctx, "startup")
+        executor_listing = _what_can_i_do(ctx)
+    finally:
+        ctx.pop_active_workflow()
+    planner_listing = planner_commands_text(workflow)
+    assert "- rule_check\n" in executor_listing
+    assert "how many copies the request asks about, type: int" in executor_listing
+    for listing in (executor_listing, planner_listing):
+        assert not any(s in listing for s in ALL_RULE_SENTENCES)
+
+
+HOURS_RECIPE = "hours_overview"
+DUNE_RECIPE = "Library/dune_search"
+#: The library's book_loans planning command and its helpers (the files of
+#: ``test_nested_planning_commands.NESTED_COMMANDS``, repeated here because that module imports this one).
+RECIPE_COMMANDS = (
+    "_commands/Library/book_by_title.py",
+    "_commands/Library/book_loans.py",
+    "_commands/Library/_wording.py",
+)
+
+
+def _start(tmp_path, initialized, monkeypatch, *, extra_skills=None):
+    """A library copy with the real dispatch, the turn planner unscripted, and no planner model."""
+    monkeypatch.delenv(TURN_MAX_STEPS_ENV, raising=False)
+    _purge_library_wf_sys_modules()
+    return _make_library_runner_env(
+        tmp_path,
+        initialized,
+        monkeypatch,
+        extra_skills=extra_skills,
+        extra_commands=RECIPE_COMMANDS,
+        real_dispatch=True,
+    )
+
+
+#: The real planner_skill_for, captured before any test stubs it (_make_library_runner_env does).
+REAL_PLANNER_SKILL_FOR = workflow_agent.planner_skill_for
+
+
+def use_the_real_planner_skill_for(monkeypatch) -> None:
+    """Undo the stub the library harness puts on ``planner_skill_for`` for its whole test."""
+    monkeypatch.setattr(workflow_agent, "planner_skill_for", REAL_PLANNER_SKILL_FOR)
+
+
+@pytest.fixture
+def recipe_env(tmp_path, initialized_fastworkflow, monkeypatch):
+    """A library copy with a root skill (hours_overview) and a Library skill (dune_search)."""
+    state = _start(tmp_path, initialized_fastworkflow, monkeypatch,
+                   extra_skills={HOURS_RECIPE: ROOT_SKILL, DUNE_RECIPE: LIBRARY_SKILL})
+    use_the_real_planner_skill_for(monkeypatch)
+    yield state
+    state.ctx.pop_active_workflow()
+
+
+def _match_only(monkeypatch, scope: str, value: str) -> None:
+    """Jev's match, stubbed: the request asks for skill *value*, confidently, along *scope*."""
+    monkeypatch.setattr(workflow_agent, "_skill_matcher",
+                        lambda folder: {scope: _fake_matcher(value, 0.9)})
+
+
+def test_the_matched_skills_are_on_the_planner_listing(recipe_env):
+    # The one-step call of a recipe resolves only if the planner lists it: its name and template.
+    listing = planner_commands_text(recipe_env.ctx.get_active_workflow())
+    assert "- hours_overview\n" in listing
+    assert "  template:\n  - library_hours\n  - say when the branches are open\n" in listing
+    assert "- dune_search\n" in listing
+    assert "  template:\n  - find_book query=Dune\n  - say how many books match\n" in listing

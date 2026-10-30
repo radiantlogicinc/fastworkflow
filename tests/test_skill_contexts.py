@@ -8,6 +8,8 @@ import json
 import logging
 import os
 import shutil
+import sys
+from pathlib import Path
 
 import pytest
 from dotenv import dotenv_values
@@ -540,24 +542,26 @@ def no_jev_env(monkeypatch):
         workflow_agent._skill_matcher.cache_clear()
 
 
-def test_missing_jev_key_warns_once_per_workflow_folder(tmp_path, caplog, no_jev_env):
+def test_missing_jev_key_logs_an_info_line_once_per_workflow_folder(tmp_path, caplog, no_jev_env):
     folder = _library_workflow(tmp_path)
     workflow_agent._jev_lm.cache_clear()
     workflow_agent._skill_matcher.cache_clear()
 
     caplog.clear()
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         workflow_agent.warm_skills(folder)
         workflow_agent.warm_skills(folder)
         assert workflow_agent.match_skill("anything", folder) is None
 
+    # 3.9's INFO line; this library's planning commands have no verify field, so none is named.
     expected = (
-        f"{folder} has planning commands, but JEV_API_KEY is not set: "
-        "no request will be matched to one; they run only when a plan or the agent "
-        "names one in a step."
+        f"{folder}: planning commands are chosen and adapted by the agent as it plans; "
+        "set JEV_API_KEY to add Jev's choice."
     )
-    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert warnings.count(expected) == 1
+    infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert infos.count(expected) == 1
+    assert not any(r.levelno >= logging.WARNING and "JEV_API_KEY" in r.getMessage()
+                   for r in caplog.records)
 
 
 def test_missing_jev_key_does_not_warn_without_planning_commands(tmp_path, caplog, no_jev_env):
@@ -569,7 +573,7 @@ def test_missing_jev_key_does_not_warn_without_planning_commands(tmp_path, caplo
         workflow_agent._jev_lm.cache_clear()
         workflow_agent._skill_matcher.cache_clear()
         caplog.clear()
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.INFO):
             workflow_agent.warm_skills(folder)
             workflow_agent.warm_skills(folder)
             assert workflow_agent.match_skill("anything", folder) is None
@@ -600,5 +604,75 @@ def test_passwords_template_has_commented_jev_api_key():
     assert "JEV_API_KEY" not in parsed
 
 
+# ---------------------------------------------------------------------------
+# The rule sentences (design 3.4, Descriptions) and a run without JEV_API_KEY (3.9)
+# ---------------------------------------------------------------------------
+
+RULE_CHECK = "Library/rule_check"
+RULE_CHECK_FILE = "_commands/Library/rule_check.py"
+#: A planning command with a field for each option that has a rule sentence: a subject str, an int
+#: with in_request, a bool with verify. It loads without JEV_API_KEY.
+RULE_CHECK_SOURCE = '''"""rule_check: how many copies of a book the request asks about, and whether it is on loan.
+
+A fixture for the rule sentences (design 3.4): one field for each option that has a sentence.
+"""
+from pydantic import BaseModel, Field
+
+from fastworkflow.planning import run
+
+from .find_book import Signature as FindBook
 
 
+class Signature:
+    """Say how many copies of a book the request asks about, and whether it is on loan."""
+
+    class Input(BaseModel):
+        title: str = Field(description="the book's title",
+                           json_schema_extra={"subject": True})
+        copies: int = Field(default=1, description="how many copies the request asks about",
+                            json_schema_extra={"in_request": True})
+        loaned: bool = Field(default=False, description="whether the request asks about loans",
+                             json_schema_extra={"verify": True})
+
+
+class PlanGenerator:
+    def find(self, input) -> FindBook.Output:
+        return [run("find_book", query=input.title)]
+
+    def __result__(self, input, find):
+        return f"{input.title}: {input.copies} asked about."
+'''
+
+
+def _with_rule_check(tmp_path) -> str:
+    """A library copy with the rule_check planning command, loaded as a workflow's commands are."""
+    # Every library test copy is a library_wf package; a stale one left in sys.modules by an
+    # earlier test poisons the relative imports of this copy (see test_planning_commands).
+    for key in list(sys.modules):
+        if key == "library_wf" or key.startswith("library_wf."):
+            del sys.modules[key]
+    folder = _library_workflow(tmp_path)
+    # The Library planning command the rule test reads (its extraction sentences), and its helper.
+    for rel in ("_commands/Library/_wording.py", "_commands/Library/book_by_title.py"):
+        shutil.copy2(os.path.join(LIBRARY, rel), Path(folder, rel))
+    Path(folder, RULE_CHECK_FILE).write_text(RULE_CHECK_SOURCE, encoding="utf-8")
+    fastworkflow.RoutingRegistry.clear_registry()
+    fastworkflow.RoutingRegistry.get_definition(folder, load_cached=False)
+    return folder
+
+
+def test_the_jev_info_line_names_the_verify_fields_and_is_logged_once_per_folder(
+        tmp_path, no_jev_env, caplog):
+    folder = _with_rule_check(tmp_path)
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        workflow_agent._warn_missing_jev_key(folder)
+        workflow_agent._warn_missing_jev_key(folder)
+
+    expected = (f"{folder}: planning commands are chosen and adapted by the agent as it plans; "
+                f"set JEV_API_KEY to add Jev's choice and the verify checks of {RULE_CHECK}.loaned.")
+    infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert infos.count(expected) == 1
+    assert not any(r.levelno >= logging.WARNING and "JEV_API_KEY" in r.getMessage()
+                   for r in caplog.records)

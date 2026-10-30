@@ -551,6 +551,14 @@ def check(plan_text: str, rows: Sequence[Mapping[str, Any]], commands: Iterable[
 # Runtime: the archive read
 # ---------------------------------------------------------------------------
 
+def run_rows(store, scope, floor: int) -> tuple[list[dict], list[dict]]:
+    """The archived rows of a run (step index >= *floor*) and of the steps before it (the earlier rows)."""
+    stored = store.list(scope, timeout=2.0)
+    rows = [r for r in stored if int(r.get("step_index") or 0) >= int(floor or 0)]
+    earlier = [r for r in stored if int(r.get("step_index") or 0) < int(floor or 0)]
+    return rows, earlier
+
+
 def review_finish(*, plan_text: str, floor: int, iters_left: int,
                   commands: Iterable[str], core_commands: Iterable[str] = (),
                   resolved: Optional[Mapping[str, str]] = None,
@@ -579,9 +587,7 @@ def review_finish(*, plan_text: str, floor: int, iters_left: int,
             # Nothing to read the runs from: every step would look not run.
             event["reason"] = "no archive"
             return None
-        stored = store.list(scope, timeout=2.0)
-        rows = [r for r in stored if int(r.get("step_index") or 0) >= int(floor or 0)]
-        earlier = [r for r in stored if int(r.get("step_index") or 0) < int(floor or 0)]
+        rows, earlier = run_rows(store, scope, floor)
         result = check(plan_text, rows, commands, core_commands=core_commands,
                        earlier_rows=earlier, resolved=resolved, values=values)
         event.update({

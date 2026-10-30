@@ -469,7 +469,9 @@ def test_a_skill_file_is_planned_as_a_call_and_its_hook_refusal_falls_back(tmp_p
 
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
-    ctx._begin_turn(request)
+    # Unattended: an attended turn would put a refusal to the user (Topology B) instead of falling
+    # back, and this test pins the fallback to the text planner.
+    ctx._begin_turn(request, unattended=True)
     # the hook's refusal is shown to the planner once; refused again, the text planner plans
     lm = DummyLM([_typed(person="Ann Lee", include_risk=True), _typed(person="Ann Lee", include_risk=True),
                   _text_answer()])
