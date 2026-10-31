@@ -52,11 +52,11 @@ class PlanGenerator:
 '''
 
 
-def test_skills_planning_command_registered_with_qualified_name_and_is_planning(tmp_path):
+def test_planning_commands_planning_command_registered_with_qualified_name_and_is_planning(tmp_path):
     folder = _minimal_workflow(tmp_path)
-    lib_skills = os.path.join(folder, "_commands", "Library")
-    os.makedirs(lib_skills, exist_ok=True)
-    with open(os.path.join(lib_skills, "my_plan.py"), "w", encoding="utf-8") as handle:
+    lib_planning_commands = os.path.join(folder, "_commands", "Library")
+    os.makedirs(lib_planning_commands, exist_ok=True)
+    with open(os.path.join(lib_planning_commands, "my_plan.py"), "w", encoding="utf-8") as handle:
         handle.write(_PLAN_CMD)
 
     directory = CommandDirectory.load(folder)
@@ -87,43 +87,43 @@ def test_context_with_only_planning_commands_loads(tmp_path):
     assert "Library/only_plan" in directory.get_commands()
 
 
-def test_adding_skill_file_changes_commands_source_fingerprint(tmp_path):
+def test_adding_planning_command_file_changes_commands_source_fingerprint(tmp_path):
     folder = _minimal_workflow(tmp_path)
     fp_before = compute_commands_source_fingerprint(folder)
-    lib_skills = os.path.join(folder, "_commands", "Library")
-    os.makedirs(lib_skills, exist_ok=True)
-    with open(os.path.join(lib_skills, "new_skill.py"), "w", encoding="utf-8") as handle:
+    lib_planning_commands = os.path.join(folder, "_commands", "Library")
+    os.makedirs(lib_planning_commands, exist_ok=True)
+    with open(os.path.join(lib_planning_commands, "new_planning_command.py"), "w", encoding="utf-8") as handle:
         handle.write(_PLAN_CMD)
     fp_after = compute_commands_source_fingerprint(folder)
     assert fp_after != fp_before
 
 
-def test_skill_collision_with_command_raises_same_error(tmp_path):
+def test_planning_command_collision_with_command_raises_same_error(tmp_path):
     # Phase 7 (one tree): a planning command and an execution command cannot share a file, so the
     # cross-tree collision error is retired. The one file is the planning command, and it is registered
     # as planning (not as a second command of that name).
     folder = _minimal_workflow(tmp_path)
-    lib_skills = os.path.join(folder, "_commands", "Library")
-    os.makedirs(lib_skills, exist_ok=True)
-    skill_path = os.path.join(lib_skills, "dup_name.py")
-    with open(skill_path, "w", encoding="utf-8") as handle:
+    lib_planning_commands = os.path.join(folder, "_commands", "Library")
+    os.makedirs(lib_planning_commands, exist_ok=True)
+    planning_command_path = os.path.join(lib_planning_commands, "dup_name.py")
+    with open(planning_command_path, "w", encoding="utf-8") as handle:
         handle.write(_PLAN_CMD)
 
-    assert CommandDirectory.check_skill_path("Library/dup_name", skill_path) is None
+    assert CommandDirectory.check_planning_command_path("Library/dup_name", planning_command_path) is None
     directory = CommandDirectory.load(folder, hydrate_utterances=False)
     assert directory.get_command_metadata("Library/dup_name").is_planning
 
 
-def test_unknown_skill_context_raises_same_error(tmp_path):
+def test_unknown_planning_command_context_raises_same_error(tmp_path):
     # Phase 7 (one tree): a _commands/<Context>/ folder is itself the context, so there is no unknown-context
     # error; the planning command in it is a command of that context.
     folder = _minimal_workflow(tmp_path)
     nowhere = os.path.join(folder, "_commands", "Nowhere")
     os.makedirs(nowhere, exist_ok=True)
-    skill_path = os.path.join(nowhere, "orphan.py")
-    with open(skill_path, "w", encoding="utf-8") as handle:
+    planning_command_path = os.path.join(nowhere, "orphan.py")
+    with open(planning_command_path, "w", encoding="utf-8") as handle:
         handle.write(_PLAN_CMD)
 
-    assert CommandDirectory.check_skill_path("Nowhere/orphan", skill_path) is None
+    assert CommandDirectory.check_planning_command_path("Nowhere/orphan", planning_command_path) is None
     directory = CommandDirectory.load(folder, hydrate_utterances=False)
     assert directory.get_command_metadata("Nowhere/orphan").is_planning

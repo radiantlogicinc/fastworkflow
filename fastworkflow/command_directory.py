@@ -244,7 +244,7 @@ class CommandDirectory(BaseModel):
 
         # A retired _skills/ folder (here or in a base) is a load error: its planning commands are not read
         for path in (*base_paths, workflow_folderpath):
-            check_no_skills_folder(path)
+            check_no_planning_commands_folder(path)
         
         # Step 2: Process base workflows first (in order of precedence)
         for base_path in base_paths:
@@ -329,18 +329,18 @@ class CommandDirectory(BaseModel):
                     cls._register_context_class(command_directory, context_name, context_dir, path)
     
     @staticmethod
-    def check_skill_path(name: str, path: str) -> None:
+    def check_planning_command_path(name: str, path: str) -> None:
         """Validate a planning command's file name before load: its stem is a Python identifier.
 
-        Raises :class:`fastworkflow.skill_commands.SkillFormatError` when it is not.
+        Raises :class:`fastworkflow.planning_commands.PlanningCommandFormatError` when it is not.
         """
-        # skill_commands imports command_directory at load (via command_context_model); import here to break the cycle
-        from fastworkflow.skill_commands import SkillFormatError
+        # planning_commands imports command_directory at load (via command_context_model); import here to break the cycle
+        from fastworkflow.planning_commands import PlanningCommandFormatError
 
         _context, _, stem = name.rpartition("/")
         if not stem.isidentifier():
-            raise SkillFormatError(
-                f"{path}: a skill's name is its file name, a Python identifier "
+            raise PlanningCommandFormatError(
+                f"{path}: a planning command's name is its file name, a Python identifier "
                 f"(snake_case): rename it to {re.sub(r'[^0-9A-Za-z_]', '_', stem)}.py"
             )
 
@@ -763,15 +763,15 @@ def _ensure_workflow_field_sources_resolved(
     if _RESOLVED_COMMAND_SIGNATURES.get(cache_key) is signature_cls:
         return True
 
-    from fastworkflow import skill_commands  # circular import: skill_commands -> command_context_model -> command_directory
+    from fastworkflow import planning_commands  # circular import: planning_commands -> command_context_model -> command_directory
 
     _RESOLVING_FIELD_SOURCES_WORKFLOWS.add(wf_abs)
     try:
-        resolution = skill_commands.resolve_field_sources(wf_abs)
+        resolution = planning_commands.resolve_field_sources(wf_abs)
     finally:
         _RESOLVING_FIELD_SOURCES_WORKFLOWS.discard(wf_abs)
 
-    cmd_problems = skill_commands.resolve_signature_field_sources(
+    cmd_problems = planning_commands.resolve_signature_field_sources(
         command_name, signature_cls, module_path, resolution
     )
     _RESOLVED_COMMAND_SIGNATURES[cache_key] = signature_cls
@@ -835,21 +835,21 @@ def _lazy_hydrate_metadata(module_path: str, metadata: CommandMetadata, director
 _CONTEXT_MODEL_BASENAMES = ("context_inheritance_model.json",)
 
 
-#: The load error for a workflow that still has a ``_skills/`` folder (see ``check_no_skills_folder``).
-SKILLS_FOLDER_RETIRED = (
+#: The load error for a workflow that still has a ``_skills/`` folder (see ``check_no_planning_commands_folder``).
+PLANNING_COMMANDS_FOLDER_RETIRED = (
     "_skills/ is no longer read; move these files into _commands/ (first make sure any script "
-    "that regenerates _commands/ preserves them; see docs/unified_command_architecture/3.8)"
+    "that regenerates _commands/ preserves them; see docs/migrating_skills_to_commands.md)"
 )
 
 
-def check_no_skills_folder(workflow_folderpath: str) -> None:
+def check_no_planning_commands_folder(workflow_folderpath: str) -> None:
     """Raise ValueError when the workflow folder still has a retired ``_skills/`` folder.
 
     Planning commands are read from ``_commands/`` (as are execution commands), so a workflow
     that keeps its planning commands in ``_skills/`` must move them before it loads.
     """
     if os.path.isdir(os.path.join(workflow_folderpath, "_skills")):
-        raise ValueError(SKILLS_FOLDER_RETIRED)
+        raise ValueError(PLANNING_COMMANDS_FOLDER_RETIRED)
 
 
 def _command_kind_from_ast(command_file_path: Path) -> tuple[str, bool]:
@@ -969,7 +969,7 @@ def get_cached_command_directory(workflow_folderpath: str) -> CommandDirectory:
 
     workflow_folderpath = str(Path(workflow_folderpath).resolve())
     # Checked before the fast path: a snapshot written before a _skills/ folder appeared still matches the fingerprint
-    check_no_skills_folder(workflow_folderpath)
+    check_no_planning_commands_folder(workflow_folderpath)
 
     cache_folder = Path(CommandDirectory.get_commandinfo_folderpath(workflow_folderpath))
     cache_file = cache_folder / "command_directory.json"

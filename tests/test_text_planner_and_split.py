@@ -293,12 +293,12 @@ def test_identifier_patterns_come_from_the_workflows_split_file(tmp_path):
     ("Signature = 'text'\n", "Signature must be a class"),
 ])
 def test_a_malformed_split_file_fails_the_load(tmp_path, text, match):
-    from fastworkflow.skill_commands import SkillFormatError
-    from fastworkflow.workflow_agent import load_skills
+    from fastworkflow.planning_commands import PlanningCommandFormatError
+    from fastworkflow.workflow_agent import load_planning_commands
 
     folder = _split_file(tmp_path, text)
-    with pytest.raises(SkillFormatError, match=match):
-        load_skills(folder)   # the skills carry the identifier patterns, so the split file loads with them
+    with pytest.raises(PlanningCommandFormatError, match=match):
+        load_planning_commands(folder)   # the skills carry the identifier patterns, so the split file loads with them
 
 
 def test_the_merge_gets_the_workflows_identifier_patterns(tmp_path, monkeypatch):
@@ -586,7 +586,7 @@ def test_a_reply_is_cut_off_by_its_finish_reason_or_by_reaching_max_tokens():
     assert not reply_cut_off(SimpleNamespace(kwargs={}), call, SimpleNamespace(usage={"completion_tokens": 9}))
 
 
-def skill_file(text: str) -> str:
+def planning_command_file(text: str) -> str:
     """The skill file (``_commands/<name>.py``) of a skill without params: ``text``'s first line is its description,
     every other non-empty line one step."""
     description, *steps = [line.strip() for line in text.splitlines() if line.strip()]
@@ -594,15 +594,15 @@ def skill_file(text: str) -> str:
             f"    def steps(self):\n        return {steps!r}\n")
 
 
-def test_skills_without_params_give_their_steps_and_all_are_shown(tmp_path):
-    from fastworkflow.workflow_agent import _job_types_for, load_skills
+def test_planning_commands_without_params_give_their_steps_and_all_are_shown(tmp_path):
+    from fastworkflow.workflow_agent import _job_types_for, load_planning_commands
 
     (tmp_path / "_commands").mkdir()
     for name, text in {"leaver_sweep": "One person is leaving: their reach. One job per person.\nfind them\nopen them",
                        "unit_walk": "Walk a whole unit roster. The unit is one job.\nopen the unit"}.items():
-        (tmp_path / "_commands" / f"{name}.py").write_text(skill_file(text))
+        (tmp_path / "_commands" / f"{name}.py").write_text(planning_command_file(text))
 
-    assert load_skills(str(tmp_path))[0] == (
+    assert load_planning_commands(str(tmp_path))[0] == (
         "leaver_sweep", "One person is leaving: their reach. One job per person.", ("find them", "open them"))
     assert _job_types_for(str(tmp_path)).splitlines() == [
         "- leaver_sweep: One person is leaving: their reach. One job per person.",
@@ -611,24 +611,24 @@ def test_skills_without_params_give_their_steps_and_all_are_shown(tmp_path):
     assert _job_types_for(str(tmp_path / "missing")) == "(none)"
 
 
-def _write_skills(tmp_path, skills):
+def _write_planning_commands(tmp_path, planning_commands):
     (tmp_path / "_commands").mkdir(parents=True)
-    for name, text in skills.items():
-        (tmp_path / "_commands" / f"{name}.py").write_text(skill_file(text))
+    for name, text in planning_commands.items():
+        (tmp_path / "_commands" / f"{name}.py").write_text(planning_command_file(text))
     return str(tmp_path)
 
 
-def test_the_planner_template_gets_the_skills_steps(tmp_path, monkeypatch):
+def test_the_planner_template_gets_the_planning_commands_steps(tmp_path, monkeypatch):
     from fastworkflow import workflow_agent
 
-    folder = _write_skills(tmp_path, {"leaver": "Someone is leaving.\nfind them\nclose it\n"})
-    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: {"": _fake_matcher("leaver", 0.9)})
-    assert workflow_agent.match_skill("Pat is leaving", folder) == ("leaver", ("find them", "close it"))
+    folder = _write_planning_commands(tmp_path, {"leaver": "Someone is leaving.\nfind them\nclose it\n"})
+    monkeypatch.setattr(workflow_agent, "_planning_command_matcher", lambda f: {"": _fake_matcher("leaver", 0.9)})
+    assert workflow_agent.match_planning_command("Pat is leaving", folder) == ("leaver", ("find them", "close it"))
     assert "- find them\n- close it\n" in workflow_agent.plan_template_for("Pat is leaving", folder)
 
 
 def test_the_split_files_signature_docstring_replaces_the_default_instructions(tmp_path):
-    from fastworkflow.workflow_agent import SplitIntoSubtasks, _split_signature, load_skills
+    from fastworkflow.workflow_agent import SplitIntoSubtasks, _split_signature, load_planning_commands
 
     folder = _split_file(tmp_path, 'class Signature:\n    """Split it my way.\n\n    - one rule\n    """\n')
     other = tmp_path / "other"
@@ -638,11 +638,11 @@ def test_the_split_files_signature_docstring_replaces_the_default_instructions(t
     assert _split_signature(folder).fields["job_types"].json_schema_extra["desc"] == \
         SplitIntoSubtasks.fields["job_types"].json_schema_extra["desc"]
     assert _split_signature(str(other)).instructions == SplitIntoSubtasks.instructions
-    assert load_skills(folder) == ()   # _split.py is not a skill
+    assert load_planning_commands(folder) == ()   # _split.py is not a skill
 
 
 def test_the_split_files_input_and_output_describe_the_splitter_fields(tmp_path):
-    from fastworkflow.skill_commands import SkillFormatError
+    from fastworkflow.planning_commands import PlanningCommandFormatError
     from fastworkflow.workflow_agent import SplitIntoSubtasks, _split_signature
 
     folder = _split_file(tmp_path / "ok", (
@@ -665,13 +665,13 @@ def test_the_split_files_input_and_output_describe_the_splitter_fields(tmp_path)
         "class Signature:\n"
         "    class Input(BaseModel):\n"
         "        request: str\n"))
-    with pytest.raises(SkillFormatError, match="Signature.Input.request is not a splitter input"):
+    with pytest.raises(PlanningCommandFormatError, match="Signature.Input.request is not a splitter input"):
         _split_signature(bad)
 
 
-def _skill_folder(tmp_path):
+def _planning_command_folder(tmp_path):
     (tmp_path / "_commands").mkdir(parents=True)
-    (tmp_path / "_commands" / "leaver.py").write_text(skill_file("Someone is leaving.\nfind them\nopen them\n"))
+    (tmp_path / "_commands" / "leaver.py").write_text(planning_command_file("Someone is leaving.\nfind them\nopen them\n"))
     return str(tmp_path)
 
 
@@ -685,34 +685,34 @@ def _fake_matcher(value, probability):
     return predict, DummyLM([])
 
 
-def test_a_plan_template_is_the_matched_skill_steps_in_a_fixed_format(monkeypatch):
+def test_a_plan_template_is_the_matched_planning_command_steps_in_a_fixed_format(monkeypatch):
     from fastworkflow import workflow_agent
 
-    monkeypatch.setattr(workflow_agent, "match_skill", lambda text, folder, **_: ("leaver", ("find them", "open them")))
+    monkeypatch.setattr(workflow_agent, "match_planning_command", lambda text, folder, **_: ("leaver", ("find them", "open them")))
     assert workflow_agent.plan_template_for("Two people are leaving", "unused") == (
         "A job like this is usually done as:\n- find them\n- open them\n"
         "Adapt this to the request: drop steps it does not need and add steps it asks for.")
-    monkeypatch.setattr(workflow_agent, "match_skill", lambda text, folder, **_: None)
+    monkeypatch.setattr(workflow_agent, "match_planning_command", lambda text, folder, **_: None)
     assert workflow_agent.plan_template_for("What is the weather in Paris?", "unused") == ""
 
 
-def test_match_skill_only_returns_a_confident_skill_pick(tmp_path, monkeypatch):
+def test_match_planning_command_only_returns_a_confident_planning_command_pick(tmp_path, monkeypatch):
     from fastworkflow import workflow_agent
 
-    folder = _skill_folder(tmp_path)
-    match = lambda: workflow_agent.match_skill("Two people are leaving", folder)  # noqa: E731
+    folder = _planning_command_folder(tmp_path)
+    match = lambda: workflow_agent.match_planning_command("Two people are leaving", folder)  # noqa: E731
 
-    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: {"": _fake_matcher("leaver", 0.9)})
+    monkeypatch.setattr(workflow_agent, "_planning_command_matcher", lambda f: {"": _fake_matcher("leaver", 0.9)})
     assert match() == ("leaver", ("find them", "open them"))
-    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: {"": _fake_matcher("none", 0.9)})
+    monkeypatch.setattr(workflow_agent, "_planning_command_matcher", lambda f: {"": _fake_matcher("none", 0.9)})
     assert match() is None
-    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: {"": _fake_matcher("leaver", 0.49)})
+    monkeypatch.setattr(workflow_agent, "_planning_command_matcher", lambda f: {"": _fake_matcher("leaver", 0.49)})
     assert match() is None
 
     def broken(folder):
         raise RuntimeError("provider down")
 
-    monkeypatch.setattr(workflow_agent, "_skill_matcher", broken)
+    monkeypatch.setattr(workflow_agent, "_planning_command_matcher", broken)
     assert match() is None
 
 
@@ -721,8 +721,8 @@ def test_no_jev_key_means_no_matcher_and_no_template(tmp_path, workflow_env, mon
 
     monkeypatch.delenv("JEV_API_KEY", raising=False)
     workflow_env()
-    folder = _skill_folder(tmp_path)
-    assert workflow_agent._skill_matcher(folder) is None
+    folder = _planning_command_folder(tmp_path)
+    assert workflow_agent._planning_command_matcher(folder) is None
     assert workflow_agent.plan_template_for("Two people are leaving", folder) == ""
 
 

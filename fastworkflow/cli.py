@@ -303,12 +303,12 @@ def add_command_parser(subparsers):
     command_subparsers = parser_command.add_subparsers(dest="action", required=True)
     parser_preview = command_subparsers.add_parser(
         "preview",
-        help="Write one markdown preview per skill (inputs, phases, facts, steps for sample inputs).",
+        help="Write one markdown preview per planning command (inputs, phases, facts, steps for sample inputs).",
     )
     parser_preview.add_argument("workflow_folder", help="Path to the workflow folder")
     parser_preview.add_argument(
         "--out", default=None,
-        help="Folder for the previews (default: docs/skill_previews next to the workflow folder)",
+        help="Folder for the previews (default: docs/planning_command_previews next to the workflow folder)",
     )
     parser_preview.add_argument(
         "--check", action="store_true",
@@ -317,7 +317,7 @@ def add_command_parser(subparsers):
 
     # Lazy-import the preview generator only if the user actually invokes the command
     def _preview_main_wrapper(args):
-        from .skill_preview import preview_main
+        from .command_preview import preview_main
         code = preview_main(args)
         if code:
             sys.exit(code)

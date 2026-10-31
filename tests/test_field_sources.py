@@ -20,15 +20,15 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import ModuleType, from_, skill_commands, skill_preview, workflow_agent
+from fastworkflow import ModuleType, from_, planning_commands, command_preview, workflow_agent
 from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.observation_offloading.facts import facts_from_runs
-from fastworkflow.skill import fact_from
-from fastworkflow.skill import from_ as skill_from_
-from fastworkflow.skill_phases import fill_output
-from fastworkflow.skill_phases import from_ as phases_from_
+from fastworkflow.planning import fact_from
+from fastworkflow.planning import from_ as planning_from_
+from fastworkflow.planning_phases import fill_output
+from fastworkflow.planning_phases import from_ as phases_from_
 from fastworkflow.utils.signatures import InputForParamExtraction
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -54,7 +54,7 @@ _COPIED_CONTEXT_CLASSES = (
     "_commands/Record/_Record.py",
 )
 
-ROOT_SKILL = '''
+ROOT_PLANNING_COMMAND = '''
 class Signature:
     """Say when the library's branches are open."""
 
@@ -69,7 +69,7 @@ def _build_workflow(
     tmp_path,
     name: str = "wf",
     extra_commands: dict[str, str] | None = None,
-    extra_skills: dict[str, str] | None = None,
+    extra_planning_commands: dict[str, str] | None = None,
     extra_inheritance: dict[str, dict] | None = None,
 ) -> str:
     """Build an isolated workflow folder in *tmp_path* with real ``_commands/`` and ``_commands/``."""
@@ -103,35 +103,35 @@ def _build_workflow(
             cmd_path.parent.mkdir(parents=True, exist_ok=True)
             cmd_path.write_text(code, encoding="utf-8")
 
-    skills_dir = folder / "_commands"
-    skills_dir.mkdir(parents=True, exist_ok=True)
-    skills = {"hours_overview": ROOT_SKILL, **(extra_skills or {})}
-    for skill_name, code in skills.items():
-        skill_path = skills_dir / f"{skill_name}.py"
-        skill_path.parent.mkdir(parents=True, exist_ok=True)
-        skill_path.write_text(code, encoding="utf-8")
+    planning_commands_dir = folder / "_commands"
+    planning_commands_dir.mkdir(parents=True, exist_ok=True)
+    planning_commands = {"hours_overview": ROOT_PLANNING_COMMAND, **(extra_planning_commands or {})}
+    for planning_command_name, code in planning_commands.items():
+        planning_command_path = planning_commands_dir / f"{planning_command_name}.py"
+        planning_command_path.parent.mkdir(parents=True, exist_ok=True)
+        planning_command_path.write_text(code, encoding="utf-8")
 
     return str(folder)
 
 
 def _preview_check(folder: str, out_dir: str, capsys) -> tuple[int, str]:
-    code = skill_preview.preview_main(
+    code = command_preview.preview_main(
         argparse.Namespace(workflow_folder=folder, out=out_dir, check=True)
     )
     return code, capsys.readouterr().out
 
 
 # ------------------------------------------------------------------
-# Step 1: from_ and its exports, SKILL_FIELD_KEYS, fact_from
+# Step 1: from_ and its exports, PLANNING_COMMAND_FIELD_KEYS, fact_from
 # ------------------------------------------------------------------
 
 
 def test_from_exports_and_field_construction():
-    assert from_ is skill_from_
+    assert from_ is planning_from_
     assert from_ is phases_from_
     assert fastworkflow.from_ is from_
-    assert "from" in skill_commands.SKILL_FIELD_KEYS
-    assert "available_from" in skill_commands.SKILL_FIELD_KEYS
+    assert "from" in planning_commands.PLANNING_COMMAND_FIELD_KEYS
+    assert "available_from" in planning_commands.PLANNING_COMMAND_FIELD_KEYS
 
     class SampleInput(BaseModel):
         uid: str = from_(
@@ -189,8 +189,8 @@ def test_fact_from_and_copy_edges_keep_existing_behaviour(tmp_path):
     assert filled.total == 2
 
     # Phased skill using fact_from loads cleanly without triggering from_ error on facts model
-    phased_skill = '''from pydantic import BaseModel
-from fastworkflow.skill import fact_from
+    phased_planning_command = '''from pydantic import BaseModel
+from fastworkflow.planning import fact_from
 
 
 class Signature:
@@ -211,10 +211,10 @@ class PlanGenerator:
     def answer(self, input, find):
         return [f"say that found {find.titles}"]
 '''
-    folder = _build_workflow(tmp_path, "wf_fact_from", extra_skills={"Library/find_titles": phased_skill})
-    res = skill_commands.resolve_field_sources(folder)
+    folder = _build_workflow(tmp_path, "wf_fact_from", extra_planning_commands={"Library/find_titles": phased_planning_command})
+    res = planning_commands.resolve_field_sources(folder)
     assert res.errors == ()
-    loaded = workflow_agent.load_skill_commands(folder)
+    loaded = workflow_agent.load_planning_command_map(folder)
     assert "Library/find_titles" in loaded
     cmd = loaded["Library/find_titles"]
     assert len(cmd.phase_outputs) == 1
@@ -261,7 +261,7 @@ class ResponseGenerator:
                  command_parameters: Signature.Input) -> Signature.Output:
         return Signature.Output(book_uid=command_parameters.book_uid, title="Dune")
 '''
-    skill_with_from = '''from typing import Optional
+    planning_command_with_from = '''from typing import Optional
 from pydantic import BaseModel
 from fastworkflow import from_
 
@@ -285,9 +285,9 @@ class PlanGenerator:
         tmp_path,
         "wf_valid",
         extra_commands={"Library/open_book": open_book_cmd},
-        extra_skills={"Library/inspect_book": skill_with_from},
+        extra_planning_commands={"Library/inspect_book": planning_command_with_from},
     )
-    res = skill_commands.resolve_field_sources(folder)
+    res = planning_commands.resolve_field_sources(folder)
     assert res.errors == ()
     assert len(res.infos) == 2
     info_msgs = [i.message for i in res.infos]
@@ -320,7 +320,7 @@ class PlanGenerator:
 
     # preview --check succeeds (exit 0) and prints the info line
     out_dir = str(tmp_path / "previews")
-    skill_preview.write_previews(folder, out_dir)
+    command_preview.write_previews(folder, out_dir)
     code, stdout = _preview_check(folder, out_dir, capsys)
     assert code == 0
     assert "info:" in stdout
@@ -351,7 +351,7 @@ class PlanGenerator:
         "wf_planning_commands_from",
         extra_commands={"Library/plan_bad_from": planning_cmd},
     )
-    res = skill_commands.resolve_field_sources(folder)
+    res = planning_commands.resolve_field_sources(folder)
     assert any(
         "Input.book_uid (from 'find_book.uids'): Library/find_book has no Output field 'uids'"
         in e.message
@@ -416,7 +416,7 @@ class ResponseGenerator:
             "Book/bad_qualified": bad_qualified_cmd,
         },
     )
-    res = skill_commands.resolve_field_sources(folder)
+    res = planning_commands.resolve_field_sources(folder)
     assert "Book/check_book" not in res.skipped_commands
     assert "Book/bad_qualified" in res.skipped_commands
     sig = res.signatures["Book/check_book"]
@@ -486,7 +486,7 @@ class ResponseGenerator:
             "Book/reserve_for": bad_book_cmd,
         },
     )
-    res = skill_commands.resolve_field_sources(folder)
+    res = planning_commands.resolve_field_sources(folder)
     messages = [e.message for e in res.errors]
     assert any(
         "Input.member_uid (from 'find_member.member_uids'): no command find_member in Book, "
@@ -547,7 +547,7 @@ class ResponseGenerator:
             "Library/use_book": consumer_cmd,
         },
     )
-    res = skill_commands.resolve_field_sources(folder)
+    res = planning_commands.resolve_field_sources(folder)
     assert res.errors == ()
     sig = res.signatures["Library/use_book"]
     assert sig.Input.model_fields["book_uid"].json_schema_extra["available_from"] == [
@@ -579,7 +579,7 @@ class ResponseGenerator:
         "wf_input_only",
         extra_commands={"Library/count_books": bad_cmd},
     )
-    res = skill_commands.resolve_field_sources(folder)
+    res = planning_commands.resolve_field_sources(folder)
     assert len(res.errors) == 1
     assert res.errors[0].message == (
         "Input.query (from 'find_book.query'): find_book's query is an Input field; "
@@ -611,7 +611,7 @@ class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters=None):
         return Signature.Output(author="Herbert")
 '''
-    bad_output_skill = '''from pydantic import BaseModel
+    bad_output_planning_command = '''from pydantic import BaseModel
 from fastworkflow import from_
 
 
@@ -647,7 +647,7 @@ class ResponseGenerator:
             command_response=fastworkflow.CommandResponse(response="ok")
         )
 '''
-    bad_facts_skill = '''from pydantic import BaseModel
+    bad_facts_planning_command = '''from pydantic import BaseModel
 from fastworkflow import from_
 
 
@@ -675,27 +675,27 @@ class PlanGenerator:
             "Library/bad_output": bad_output_cmd,
             "Library/bad_missing": bad_missing_field_cmd,
         },
-        extra_skills={
-            "Book/bad_output_skill": bad_output_skill,
-            "Book/shelf_report": bad_facts_skill,
+        extra_planning_commands={
+            "Book/bad_output_planning_command": bad_output_planning_command,
+            "Book/shelf_report": bad_facts_planning_command,
         },
     )
     with caplog.at_level(logging.ERROR):
-        loaded_skills = workflow_agent.load_skill_commands(folder)
+        loaded_planning_commands = workflow_agent.load_planning_command_map(folder)
     # Rule changed by owner decision 2026-10-28 (fix-3rsq.3.8): from_ errors load; --check fails.
-    assert "Book/bad_output_skill" in loaded_skills
-    assert "Book/shelf_report" in loaded_skills
-    assert "skipping skill 'Book/bad_output_skill'" not in caplog.text
-    assert "skipping skill 'Book/shelf_report'" not in caplog.text
+    assert "Book/bad_output_planning_command" in loaded_planning_commands
+    assert "Book/shelf_report" in loaded_planning_commands
+    assert "skipping planning command 'Book/bad_output_planning_command'" not in caplog.text
+    assert "skipping planning command 'Book/shelf_report'" not in caplog.text
 
-    res = skill_commands.resolve_field_sources(folder)
+    res = planning_commands.resolve_field_sources(folder)
     messages = [e.message for e in res.errors]
     output_errors = [
         e for e in res.errors
         if "Signature.Output.author: an Output field cannot declare from_; build the value in __result__"
         in e.message
     ]
-    assert {e.command for e in output_errors} == {"Library/bad_output", "Book/bad_output_skill"}
+    assert {e.command for e in output_errors} == {"Library/bad_output", "Book/bad_output_planning_command"}
     assert any(
         "Input.book_uid (from 'find_book.uids'): Library/find_book has no Output field 'uids'" in m
         for m in messages
@@ -707,7 +707,7 @@ class PlanGenerator:
     )
     assert {
         "Library/bad_output",
-        "Book/bad_output_skill",
+        "Book/bad_output_planning_command",
         "Library/bad_missing",
         "Book/shelf_report",
     } <= res.skipped_commands
@@ -716,7 +716,7 @@ class PlanGenerator:
     out_dir = str(tmp_path / "previews_err_rows")
     code, stdout = _preview_check(folder, out_dir, capsys)
     assert code == 1
-    assert "Book/bad_output_skill" in stdout
+    assert "Book/bad_output_planning_command" in stdout
     assert "Book/shelf_report" in stdout
 
     # When only execution commands have errors (skills are valid), preview --check still fails on each error
@@ -747,7 +747,7 @@ class ResponseGenerator:
         },
     )
     out_exec = str(tmp_path / "previews_exec_errs")
-    skill_preview.write_previews(folder_exec_errs, out_exec)
+    command_preview.write_previews(folder_exec_errs, out_exec)
     code_exec, stdout_exec = _preview_check(folder_exec_errs, out_exec, capsys)
     assert code_exec == 1
     assert "Signature.Output.author: an Output field cannot declare from_" in stdout_exec
@@ -828,7 +828,7 @@ class ResponseGenerator:
             "Library/open_book": invalid_consumer,
         },
     )
-    res = skill_commands.resolve_field_sources(folder)
+    res = planning_commands.resolve_field_sources(folder)
     assert len(res.errors) == 1
     assert res.errors[0].command == "Library/open_book"
     assert res.errors[0].message == (
@@ -859,7 +859,7 @@ class ResponseGenerator:
             command_response=fastworkflow.CommandResponse(response="ok")
         )
 '''
-    hand_skill = '''from pydantic import BaseModel, Field
+    hand_planning_command = '''from pydantic import BaseModel, Field
 
 
 class Signature:
@@ -877,24 +877,24 @@ class PlanGenerator:
         tmp_path,
         "wf_hand_af",
         extra_commands={"Library/get_order": hand_cmd},
-        extra_skills={"Library/hand_skill": hand_skill},
+        extra_planning_commands={"Library/hand_planning_command": hand_planning_command},
     )
     with caplog.at_level(logging.ERROR):
-        loaded_skills = workflow_agent.load_skill_commands(folder)
+        loaded_planning_commands = workflow_agent.load_planning_command_map(folder)
     # Rule changed by owner decision 2026-10-28 (fix-3rsq.3.8): planning commands with from_ /
-    # available_from errors stay matchable; the error is logged once, not via "skipping skill".
-    assert "Library/hand_skill" in loaded_skills
-    assert "skipping skill 'Library/hand_skill'" not in caplog.text
-    hand_skill_logs = [
+    # available_from errors stay matchable; the error is logged once, not via "skipping planning command".
+    assert "Library/hand_planning_command" in loaded_planning_commands
+    assert "skipping planning command 'Library/hand_planning_command'" not in caplog.text
+    hand_planning_command_logs = [
         rec for rec in caplog.records
-        if "command 'Library/hand_skill':" in rec.getMessage()
+        if "command 'Library/hand_planning_command':" in rec.getMessage()
     ]
-    assert len(hand_skill_logs) == 1
-    assert "available_from is written by from_" in hand_skill_logs[0].getMessage()
+    assert len(hand_planning_command_logs) == 1
+    assert "available_from is written by from_" in hand_planning_command_logs[0].getMessage()
 
-    res = skill_commands.resolve_field_sources(folder)
-    assert {"Library/get_order", "Library/hand_skill"} <= res.skipped_commands
-    hand_sig = res.signatures["Library/hand_skill"]
+    res = planning_commands.resolve_field_sources(folder)
+    assert {"Library/get_order", "Library/hand_planning_command"} <= res.skipped_commands
+    hand_sig = res.signatures["Library/hand_planning_command"]
     assert "available_from" not in (hand_sig.Input.model_fields["book_uid"].json_schema_extra or {})
     messages = [e.message for e in res.errors]
     assert any(
@@ -929,16 +929,16 @@ class PlanGenerator:
     assert param_cls is not None
 
     out_dir = str(tmp_path / "previews_exec")
-    skill_preview.write_previews(folder_exec_only, out_dir)
-    problems = skill_preview.check_previews(folder_exec_only, out_dir)
+    command_preview.write_previews(folder_exec_only, out_dir)
+    problems = command_preview.check_previews(folder_exec_only, out_dir)
     assert any("available_from is written by from_" in p for p in problems)
     code, stdout = _preview_check(folder_exec_only, out_dir, capsys)
     assert code == 1
     assert "available_from is written by from_" in stdout
 
     out_dir_both = str(tmp_path / "previews_both")
-    skill_preview.write_previews(folder, out_dir_both)
-    problems_both = skill_preview.check_previews(folder, out_dir_both)
+    command_preview.write_previews(folder, out_dir_both)
+    problems_both = command_preview.check_previews(folder, out_dir_both)
     assert any("available_from is written by from_" in p for p in problems_both)
     code_both, stdout_both = _preview_check(folder, out_dir_both, capsys)
     assert code_both == 1
@@ -948,7 +948,7 @@ class PlanGenerator:
 def test_planning_command_with_from_error_loads_matchable_logs_once_and_preview_check_fails(
     tmp_path, caplog, capsys,
 ):
-    """Planning skill with a bad ``from_`` stays in the registry and ``load_skill_commands``."""
+    """Planning skill with a bad ``from_`` stays in the registry and ``load_planning_command_map``."""
     bad_planning = '''import fastworkflow
 from fastworkflow import from_
 from pydantic import BaseModel
@@ -968,26 +968,26 @@ class PlanGenerator:
     folder = _build_workflow(
         tmp_path,
         "wf_plan_from_err",
-        extra_skills={"Library/bad_plan": bad_planning},
+        extra_planning_commands={"Library/bad_plan": bad_planning},
     )
     caplog.clear()
     with caplog.at_level(logging.ERROR):
-        loaded = workflow_agent.load_skill_commands(folder)
+        loaded = workflow_agent.load_planning_command_map(folder)
     assert "Library/bad_plan" in loaded
-    assert "skipping skill 'Library/bad_plan'" not in caplog.text
+    assert "skipping planning command 'Library/bad_plan'" not in caplog.text
     plan_logs = [
         rec for rec in caplog.records if "command 'Library/bad_plan':" in rec.getMessage()
     ]
     assert len(plan_logs) == 1
     assert "int does not match" in plan_logs[0].getMessage()
 
-    res = skill_commands.resolve_field_sources(folder)
+    res = planning_commands.resolve_field_sources(folder)
     bad_sig = res.signatures["Library/bad_plan"]
     assert "available_from" not in (bad_sig.Input.model_fields["book_uid"].json_schema_extra or {})
 
     out_dir = str(tmp_path / "previews_plan")
-    skill_preview.write_previews(folder, out_dir)
-    problems = skill_preview.check_previews(folder, out_dir)
+    command_preview.write_previews(folder, out_dir)
+    problems = command_preview.check_previews(folder, out_dir)
     assert any("int does not match" in p for p in problems)
     code, stdout = _preview_check(folder, out_dir, capsys)
     assert code == 1
@@ -1024,11 +1024,11 @@ class PlanGenerator:
     folder = _build_workflow(
         tmp_path,
         "wf_callee_from",
-        extra_skills={"Library/plan_calls_find": calls_producer,
+        extra_planning_commands={"Library/plan_calls_find": calls_producer,
                       "Library/plan_described": described,
                       "Library/plan_other_producer": runs_other_producer},
     )
-    res = skill_commands.resolve_field_sources(folder)
+    res = planning_commands.resolve_field_sources(folder)
     assert [p.message for p in res.errors if p.command == "Library/plan_described"] == []
     assert [p.message for p in res.errors if p.command == "Library/plan_other_producer"] == []
     assert [p.message for p in res.errors if p.command == "Library/plan_calls_find"] == [
@@ -1041,10 +1041,10 @@ def test_library_planning_commands_resolve_without_source_errors_and_with_their_
     """The real library: no field-source error on any planning command (the phase checker
     reads an earlier phase's steps on placeholder facts, not as empty), and the callee graph
     of book_loans, which calls a planning command and an execution command."""
-    res = skill_commands.resolve_field_sources(LIBRARY)
+    res = planning_commands.resolve_field_sources(LIBRARY)
     assert [p.format() for p in res.errors] == []
     assert res.callees["Library/book_loans"] == frozenset({"Book/list_loans", "Library/book_by_title"})
-    assert skill_commands.call_depth("Library/book_loans", res) == 2
+    assert planning_commands.call_depth("Library/book_loans", res) == 2
 
 
 def test_target_command_whose_file_fails_to_import_is_reported(tmp_path):
@@ -1076,7 +1076,7 @@ class ResponseGenerator:
             "Library/consumer": consumer,
         },
     )
-    res = skill_commands.resolve_field_sources(folder)
+    res = planning_commands.resolve_field_sources(folder)
     assert "Library/broken_cmd" in res.import_errors
     assert len(res.errors) == 1
     assert "target command 'Library/broken_cmd' could not be imported" in res.errors[0].message
@@ -1131,7 +1131,7 @@ class ResponseGenerator:
             "Library/valid_cmd": valid_cmd,
         },
     )
-    res = skill_commands.resolve_field_sources(folder)
+    res = planning_commands.resolve_field_sources(folder)
     assert "Library/both_cmd" in res.skipped_commands
     assert "Library/valid_cmd" not in res.skipped_commands
     assert len(res.errors) == 1
@@ -1144,7 +1144,7 @@ class ResponseGenerator:
     # Re-running resolve_signature_field_sources on an already-resolved Signature is idempotent
     valid_sig = res.signatures["Library/valid_cmd"]
     valid_path = res.command_files["Library/valid_cmd"]
-    rerun_problems = skill_commands.resolve_signature_field_sources(
+    rerun_problems = planning_commands.resolve_signature_field_sources(
         "Library/valid_cmd", valid_sig, valid_path, res
     )
     assert rerun_problems == []
@@ -1162,7 +1162,7 @@ def test_broken_context_or_workflow_inheritance_models_are_reported_as_problems(
     with open(inh_model_path, "w", encoding="utf-8") as fh:
         fh.write('{"base": ["nonexistent_base_workflow_pkg_xyz"]}')
 
-    res = skill_commands.resolve_field_sources(folder)
+    res = planning_commands.resolve_field_sources(folder)
     files_with_errors = {e.file for e in res.errors}
     assert ctx_model_path in files_with_errors
     assert inh_model_path in files_with_errors
@@ -1176,7 +1176,7 @@ def test_broken_context_or_workflow_inheritance_models_are_reported_as_problems(
         fh.write('{"base": ["nonexistent_base_workflow_pkg_xyz"]}')
     with pytest.raises(fastworkflow.workflow_inheritance_model.WorkflowInheritanceModelValidationError):
         fastworkflow.command_context_model.CommandContextModel.load_base_contexts(folder_inh_only)
-    res_inh_only = skill_commands.resolve_field_sources(folder_inh_only)
+    res_inh_only = planning_commands.resolve_field_sources(folder_inh_only)
     assert {e.file for e in res_inh_only.errors} == {inh_only_path}
 
     # Inheritance cycle and unknown base in context_inheritance_model.json are also reported
@@ -1188,7 +1188,7 @@ def test_broken_context_or_workflow_inheritance_models_are_reported_as_problems(
             "Member": {"base": ["Book"]},
         },
     )
-    res_cycle = skill_commands.resolve_field_sources(folder_cycle)
+    res_cycle = planning_commands.resolve_field_sources(folder_cycle)
     assert any(
         e.file == os.path.join(folder_cycle, "_commands", "context_inheritance_model.json")
         and "Inheritance cycle detected" in e.message
@@ -1200,7 +1200,7 @@ def test_broken_context_or_workflow_inheritance_models_are_reported_as_problems(
         "wf_unknown_base_model",
         extra_inheritance={"Book": {"base": ["NoSuchBaseContext"]}},
     )
-    res_unknown = skill_commands.resolve_field_sources(folder_unknown_base)
+    res_unknown = planning_commands.resolve_field_sources(folder_unknown_base)
     assert any(
         e.file == os.path.join(folder_unknown_base, "_commands", "context_inheritance_model.json")
         and "Context 'NoSuchBaseContext' not found in model" in e.message
@@ -1237,7 +1237,7 @@ class ResponseGenerator:
             "Book/inspect_notes": book_cmd,
         },
     )
-    res = skill_commands.resolve_field_sources(folder)
+    res = planning_commands.resolve_field_sources(folder)
     assert "Library/broken_planning_cmd" in res.import_errors
     assert "No module named 'non_existent_planning_module_xyz'" in res.import_errors["Library/broken_planning_cmd"]
     assert res.base_contexts["Book"] == ("Record",)
@@ -1289,7 +1289,7 @@ class ResponseGenerator:
         return found
 
     before = snapshot_non_pycache(folder)
-    res = skill_commands.resolve_field_sources(folder)
+    res = planning_commands.resolve_field_sources(folder)
     after = snapshot_non_pycache(folder)
 
     assert res.errors == ()
@@ -1416,19 +1416,19 @@ class ResponseGenerator:
         extra_commands={"Library/open_book": open_book_cmd},
     )
     RoutingRegistry.clear_registry()
-    info_before = skill_commands.resolve_field_sources.cache_info()
+    info_before = planning_commands.resolve_field_sources.cache_info()
 
     cmd_dir = CommandDirectory.load(folder)
     # Hydrate multiple commands; resolve_field_sources must run only once for the workflow
     for cmd_name in cmd_dir.get_commands():
         cmd_dir.ensure_command_hydrated(cmd_name)
 
-    info_after = skill_commands.resolve_field_sources.cache_info()
+    info_after = planning_commands.resolve_field_sources.cache_info()
     assert info_after.misses - info_before.misses == 1
     assert info_after.hits > info_before.hits
 
-    res1 = skill_commands.resolve_field_sources(os.path.abspath(folder))
-    res2 = skill_commands.resolve_field_sources(os.path.abspath(folder))
+    res1 = planning_commands.resolve_field_sources(os.path.abspath(folder))
+    res2 = planning_commands.resolve_field_sources(os.path.abspath(folder))
     assert res1 is res2
 
 
@@ -1489,7 +1489,7 @@ class ResponseGenerator:
     ]) == 1
 
     # Clearing resolve_field_sources cache also clears the per-command Signature cache
-    skill_commands.resolve_field_sources.cache_clear()
+    planning_commands.resolve_field_sources.cache_clear()
     with caplog.at_level(logging.ERROR):
         routing_def.command_directory.ensure_command_hydrated("Library/bad_open")
     assert len([

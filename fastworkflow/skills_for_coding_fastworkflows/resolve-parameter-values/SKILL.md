@@ -127,7 +127,7 @@ The key set is the whole design decision.
 
 ## When not to use it
 
-- The parameter is an **opaque handle** the user never types. Use `available_from` to point at the
+- The parameter is an **opaque handle** the user never types. Use `from_` to point at the
   command that produces it — see the `declare-parameter-producers` skill.
 - The valid values are a **fixed vocabulary**. Use an `Enum`, which the framework already coerces and
   reports valid values for.

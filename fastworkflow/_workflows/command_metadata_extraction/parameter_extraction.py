@@ -805,7 +805,7 @@ class ParameterExtraction:
           validate, and the only errors allowed are fields that were not given
           and are required (validation later reports those as missing).
 
-        With *code_written* (``skill_phases.code_step`` and ``pick_step``), the examples
+        With *code_written* (``planning_phases.code_step`` and ``pick_step``), the examples
         guard is skipped and a quoted value is taken whole, with nothing inside it read
         as a key, a placeholder or a note (3.13). Without it, any doubt -- a ``word=``
         that is not a field, an XML tag, a placeholder (``<...>``), an example value, an

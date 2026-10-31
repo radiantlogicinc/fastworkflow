@@ -10,7 +10,7 @@ change. This page covers three things:
 - the metrics to report and how to compute each one.
 
 Span and attribute names below come from `fastworkflow/tracing.py` (`SPAN_CONTRACTS`, span contract
-23) and `fastworkflow/skill_phases.py`. Check them against the installed version, because these
+23) and `fastworkflow/planning_phases.py`. Check them against the installed version, because these
 contracts are versioned. The full attribute catalogue is in the
 [debug-workflow-conversations reference](../debug-workflow-conversations/reference.md#span-catalog).
 
@@ -62,7 +62,7 @@ model call) record no span of their own. You see them two ways:
   `fw.planner.plan` carries the sub-task text in its `module_input` as `user_query`. In an unphased
   run, the sub-task's `fw.agent.execute` `agent_input` starts with that text. In a phased run, it
   does not: every phase except the last gets only its own steps, framed as "This is part k of N
-  (…) of a larger job" (`skill_phases.phase_query`). Only the **last** phase's `agent_input`
+  (…) of a larger job" (`planning_phases.phase_query`). Only the **last** phase's `agent_input`
   starts with the sub-task. Judge the split from these sources, never from the splitter's raw
   output, because the code merge changes it.
 - **What the model proposed** is the turn-level `fw.llm.call` (parent `fw.turn`) whose
@@ -109,7 +109,7 @@ own tasks and where it was picked by mistake.
 - `replan_trigger` on replans.
 
 The planner can add steps of its own around a skill (`steps_before` / `steps_after` in
-`skill_commands.py`), and code filters them. Where they run (`skill_phases.py`):
+`planning_commands.py`), and code filters them. Where they run (`planning_phases.py`):
 
 - `steps_before` runs in a phase of its own before the first phase. Its span has `code_stop`
   `off`.
@@ -130,12 +130,12 @@ The planner can add steps of its own around a skill (`steps_before` / `steps_aft
 Each phase run is one `fw.skill.phase` span with:
 
 - `skill`, `phase`, `phase_index` / `phase_count`;
-- `steps`, `steps_used`, `step_budget` (`FW_SKILL_PHASE_MAX_STEPS`, default 15), `exhausted`;
+- `steps`, `steps_used`, `step_budget` (`PHASE_MAX_STEPS`, default 15), `exhausted`;
 - `record` (what its facts were filled on), and `facts` or `facts_error` (status `error` when the
   phase failed);
 - `skipped` (its `when` was false);
 - for a fan-out item: `item`, `item_index` of `item_count`, and `items_total` (more than
-  `item_count` means the cap cut items: `max_items`, else `FW_SKILL_FANOUT_MAX_ITEMS`, default 10),
+  `item_count` means the cap cut items: `max_items`, else `FANOUT_MAX_ITEMS`, default 10),
   plus `stop_condition_met` when `until` ended it;
 - `answer_only` and `answer_by_code` for the last phase.
 

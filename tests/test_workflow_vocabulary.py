@@ -15,7 +15,7 @@ from fastworkflow.train import artifact_versioning
 from fastworkflow.train.__main__ import _prune_stale_artifacts
 from fastworkflow.utils import workflow_vocabulary as wv
 
-TUTORIAL = Path(__file__).resolve().parent / "skill_tutorial_workflow"
+TUTORIAL = Path(__file__).resolve().parent / "planning_tutorial_workflow"
 
 
 @pytest.fixture
@@ -85,8 +85,8 @@ def test_the_loader_derives_in_memory_when_the_stored_file_is_stale_and_leaves_i
     payload["words"] = sorted([*payload["words"], "sentinel_word"])
     _store(tutorial_copy, payload)
     stored_bytes = wv.vocabulary_path(tutorial_copy).read_bytes()
-    skill = Path(tutorial_copy) / "_commands" / "author_books.py"
-    skill.write_text(skill.read_text(encoding="utf-8") + "\n# an edit after the last train\n", encoding="utf-8")
+    planning_command = Path(tutorial_copy) / "_commands" / "author_books.py"
+    planning_command.write_text(planning_command.read_text(encoding="utf-8") + "\n# an edit after the last train\n", encoding="utf-8")
 
     vocabulary = wv.load_workflow_vocabulary(tutorial_copy)
 

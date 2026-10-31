@@ -19,7 +19,7 @@ that changes what a server does per turn:
 Omitted, with the reason, so a reader of the source snapshot knows why the
 fields are missing rather than assuming the port forgot them:
 
-* catalogue fingerprint / skill count: no `skill_catalog` module on 3.3.
+* catalogue fingerprint / planning command count: no `planning_command_catalog` module on 3.3.
 * presented-result cap: no `result_handles` module on 3.3.
 * extraction constants: `utils/react.py` on 3.3 has no `EXTRACT_*`
   constants and no env resolution for them; reporting values it does not

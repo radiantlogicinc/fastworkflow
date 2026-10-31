@@ -46,6 +46,22 @@ Three consequences drive everything below:
   an ambiguity prompt instead, so "escalation" and "routing" trade against each other and must be
   scored separately.
 
+## Planning commands follow the same visibility
+
+A planning command is visible exactly where a command of the same folder is. A file
+`_commands/<Context>/<name>.py` is the planning command `<Context>/<name>`, and it is matched in the
+context it sits in and wherever that context's commands are reachable:
+
+1. the active context;
+2. its bases, from `context_inheritance_model.json` `base`, transitively;
+3. each live ancestor's context, and that ancestor's bases;
+4. the root (`""`), where `_commands/<name>.py` planning commands sit.
+
+`workflow_agent.py` `planning_scopes` gives this order, and the matcher offers each scope's planning
+commands in turn. So a planning command in a base context reaches every context that inherits the
+base, and one in a child context is not offered from a sibling. Moving or renaming a planning command
+changes its qualified name, exactly as for a command, so its `from_` edges and previews move with it.
+
 ## Rule 1 — derive the hierarchy from code, never hand-maintain it
 
 The true `parent` graph is whatever each command constructs and assigns as the current context. Scan
@@ -83,7 +99,7 @@ Inheritance is all-or-nothing per base context, so a context that needs one comm
 take all of them. When a fat base is inherited by several contexts, split it.
 
 The evidence for what a context needs is **not intuition** — it is the parameter-producer hints its
-own commands declare (`available_from`). Collect, per context, the producers named by its commands;
+own commands declare (`from_` edges, which `command preview --check` resolves). Collect, per context, the producers named by its commands;
 that is the minimum base it needs.
 
 Then chain the bases so nothing regresses:

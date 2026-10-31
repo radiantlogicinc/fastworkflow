@@ -65,7 +65,7 @@ PUBLIC = (
     ("contextlib", "module", "contextlib"),
     ("dataclass", "function", "dataclasses"),
     ("datetime", "type", "datetime"),
-    ("from_", "function", "fastworkflow.skill_phases"),
+    ("from_", "function", "fastworkflow.planning_phases"),
     ("get_active_workflow", "function", "fastworkflow.active_workflow"),
     ("get_env_var", "function", "fastworkflow"),
     ("get_fastworkflow_package_path", "function", "fastworkflow"),

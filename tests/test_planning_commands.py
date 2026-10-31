@@ -16,7 +16,7 @@ from dotenv import dotenv_values
 from pydantic import BaseModel, Field, model_validator
 
 import fastworkflow
-from fastworkflow import skill_commands, skill_preview, workflow_agent
+from fastworkflow import planning_commands, command_preview, workflow_agent
 from fastworkflow.capability_answer import context_commands
 from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError
 from fastworkflow.command_metadata_api import CommandMetadataAPI
@@ -40,20 +40,20 @@ from fastworkflow.examples.library._commands.Library.find_book import Signature 
 from fastworkflow.examples.library._commands.Library.find_member import Signature as FindMember
 from fastworkflow.examples.library._commands.Library.open_book import Signature as OpenBook
 from fastworkflow.planning import full_list, pick, run
-from fastworkflow.skill import phase
-from fastworkflow.skill_commands import SkillFormatError
+from fastworkflow.planning import phase
+from fastworkflow.planning_commands import PlanningCommandFormatError
 from fastworkflow.turn import TurnStatus, reset_missing_declared_output_warnings
 from fastworkflow.utils import python_utils
 
 from tests.test_field_sources import _build_workflow
-from tests.test_skill_contexts import LIBRARY_SKILL, ROOT_SKILL, RULE_CHECK, _with_rule_check
-from tests.test_skill_code_steps import Model
+from tests.test_planning_command_contexts import LIBRARY_PLANNING_COMMAND, ROOT_PLANNING_COMMAND, RULE_CHECK, _with_rule_check
+from tests.test_planning_command_code_steps import Model
 from tests.test_text_planner_and_split import _fake_matcher
 from tests.test_step_helpers import (
     FoundBooks,
     LibraryRunner,
     OpenedBook,
-    _build_skill,
+    _build_planning_command,
     _library_workflow,
     _make_library_runner_env,
     _real_planning_command,
@@ -87,7 +87,7 @@ def retail_workflow_path() -> str:
     )
 
 
-def _skill_with_output(build_plan, *, output_fields: dict | None = None):
+def _planning_command_with_output(build_plan, *, output_fields: dict | None = None):
     output_fields = output_fields or {
         "found": (bool, Field(description="whether a book matched")),
     }
@@ -108,14 +108,14 @@ def _skill_with_output(build_plan, *, output_fields: dict | None = None):
     sig_cls = type("Signature", (), {"__doc__": "Look up a book.", "Input": input_cls, "Output": output_cls})
     module = types.ModuleType("book_lookup")
     module.Signature, module.PlanGenerator = sig_cls, plan_cls
-    return skill_commands.command_from_module(
+    return planning_commands.command_from_module(
         "Library/book_lookup", module, "_commands/Library/book_lookup.py"
     ).command
 
 
-def _run_skill(env, skill, args: dict | None = None):
+def _run_planning_command(env, planning_command, args: dict | None = None):
     env.args = dict(args or {"title": "Dune"})
-    env.skill = skill
+    env.planning_command = planning_command
     return env.ctx.process_turn("look up the book")
 
 
@@ -150,12 +150,12 @@ def test_result_str_gives_text_and_no_output(library_env):
         def __result__(self, input, find):
             return f"matches {len(find.book_uids)}"
 
-    skill = _build_skill(Plan)
-    result = _run_skill(library_env, skill)
+    planning_command = _build_planning_command(Plan)
+    result = _run_planning_command(library_env, planning_command)
 
     assert result.status == TurnStatus.COMPLETED
     assert result.answer.startswith("matches ")
-    outputs = [o for o in library_env.ctx._turn_outputs if o.command_name == skill.name]
+    outputs = [o for o in library_env.ctx._turn_outputs if o.command_name == planning_command.name]
     assert len(outputs) == 1
     assert outputs[0].command_response.output is None
 
@@ -171,13 +171,13 @@ def test_missing_output_warning_once_for_planning_command(library_env, caplog):
 
         return Plan
 
-    skill = _skill_with_output(build)
+    planning_command = _planning_command_with_output(build)
     with caplog.at_level(logging.WARNING):
-        _run_skill(library_env, skill)
-        _run_skill(library_env, skill)
+        _run_planning_command(library_env, planning_command)
+        _run_planning_command(library_env, planning_command)
     msgs = [r.message for r in caplog.records if "declares an Output but returned none" in r.message]
     assert len(msgs) == 1
-    assert skill.name in msgs[0]
+    assert planning_command.name in msgs[0]
 
 
 def test_result_output_json_is_the_response(library_env):
@@ -194,14 +194,14 @@ def test_result_output_json_is_the_response(library_env):
 
         return Plan2
 
-    skill = _skill_with_output(build, output_fields={
+    planning_command = _planning_command_with_output(build, output_fields={
         "found": (bool, Field(description="whether a book matched")),
         "title": (str, Field(default="", description="the title")),
     })
-    result = _run_skill(library_env, skill)
+    result = _run_planning_command(library_env, planning_command)
 
     assert result.status == TurnStatus.COMPLETED
-    out = next(o for o in library_env.ctx._turn_outputs if o.command_name == skill.name)
+    out = next(o for o in library_env.ctx._turn_outputs if o.command_name == planning_command.name)
     assert out.command_response.output.found is True
     assert out.command_response.output.title == "Dune"
     assert '"found":true' in out.command_response.response.replace(" ", "")
@@ -218,8 +218,8 @@ def test_with_result_no_phase_agent_writes_the_answer(library_env):
         def __result__(self, input, find):
             return f"count {len(find.book_uids)}"
 
-    skill = _build_skill(Plan)
-    _run_skill(library_env, skill)
+    planning_command = _build_planning_command(Plan)
+    _run_planning_command(library_env, planning_command)
 
     assert library_env.model.asked == []
 
@@ -232,14 +232,14 @@ def test_result_raises_falls_back_to_one_model_call(library_env, caplog):
         def __result__(self, input, find):
             raise RuntimeError("boom")
 
-    skill = _build_skill(Plan)
+    planning_command = _build_planning_command(Plan)
     with caplog.at_level(logging.WARNING):
-        result = _run_skill(library_env, skill)
+        result = _run_planning_command(library_env, planning_command)
 
     assert result.answer == "written"
     assert library_env.model.asked == []
     assert sum(1 for r in caplog.records if "__result__ failed" in r.message) == 1
-    out = next(o for o in library_env.ctx._turn_outputs if o.command_name == skill.name)
+    out = next(o for o in library_env.ctx._turn_outputs if o.command_name == planning_command.name)
     assert out.command_response.output is None
 
 
@@ -254,11 +254,11 @@ def test_skipped_phase_is_none_in_result(library_env):
 
         return Plan2
 
-    skill = _skill_with_output(build)
-    result = _run_skill(library_env, skill, {"title": "NoSuchTitleAtAll"})
+    planning_command = _planning_command_with_output(build)
+    result = _run_planning_command(library_env, planning_command, {"title": "NoSuchTitleAtAll"})
 
     assert result.status == TurnStatus.COMPLETED
-    out = next(o for o in library_env.ctx._turn_outputs if o.command_name == skill.name)
+    out = next(o for o in library_env.ctx._turn_outputs if o.command_name == planning_command.name)
     assert out.command_response.output.found is False
     assert out.success is True
 
@@ -271,8 +271,8 @@ def test_output_without_result_fails_load():
 
         return Plan
 
-    with pytest.raises(SkillFormatError, match="Signature.Output is declared, but nothing builds it"):
-        _skill_with_output(build)
+    with pytest.raises(PlanningCommandFormatError, match="Signature.Output is declared, but nothing builds it"):
+        _planning_command_with_output(build)
 
 
 def test_result_parameter_not_a_phase_fails_load():
@@ -283,8 +283,8 @@ def test_result_parameter_not_a_phase_fails_load():
         def __result__(self, input, found):
             return "x"
 
-    with pytest.raises(SkillFormatError, match="__result__ takes 'found', which is not a phase"):
-        _build_skill(Plan)
+    with pytest.raises(PlanningCommandFormatError, match="__result__ takes 'found', which is not a phase"):
+        _build_planning_command(Plan)
 
 
 def test_plan_generator_subclassing_another_commands_fails_load(tmp_path):
@@ -312,8 +312,8 @@ def test_plan_generator_subclassing_another_commands_fails_load(tmp_path):
     child_module.PlanGenerator = Child
     Child.__module__ = child_module.__name__
 
-    with pytest.raises(SkillFormatError, match="inherits from Library/base_cmd's PlanGenerator"):
-        skill_commands.command_from_module("Library/child", child_module, str(child_path))
+    with pytest.raises(PlanningCommandFormatError, match="inherits from Library/base_cmd's PlanGenerator"):
+        planning_commands.command_from_module("Library/child", child_module, str(child_path))
 
 
 def test_subclassing_a_base_in_underscore_module_loads(tmp_path):
@@ -348,7 +348,7 @@ def test_subclassing_a_base_in_underscore_module_loads(tmp_path):
     child_module.PlanGenerator = Child
     Child.__module__ = child_module.__name__
 
-    parsed = skill_commands.command_from_module("Library/child2", child_module, str(child_path))
+    parsed = planning_commands.command_from_module("Library/child2", child_module, str(child_path))
     assert parsed.command.uses_result is True
 
 
@@ -382,8 +382,8 @@ def test_inherited_result_is_checked(tmp_path):
     child_module.PlanGenerator = Child
     Child.__module__ = child_module.__name__
 
-    with pytest.raises(SkillFormatError, match="takes 'missing', which is not a phase"):
-        skill_commands.command_from_module("Library/child3", child_module, str(child_path))
+    with pytest.raises(PlanningCommandFormatError, match="takes 'missing', which is not a phase"):
+        planning_commands.command_from_module("Library/child3", child_module, str(child_path))
 
 
 _MATCH_RESULT_BASE = '''\
@@ -444,13 +444,13 @@ def test_inherited_result_from_underscore_module_runs_end_to_end(
         handle.write(_TITLE_MATCHES)
 
     python_utils.get_module(base_path, folder)
-    sf = skill_commands.command_from_module(
+    sf = planning_commands.command_from_module(
         "Library/title_matches", python_utils.get_module(child_path, folder), child_path,
     )
     assert sf.command.uses_result is True
 
     try:
-        env.skill = sf.command
+        env.planning_command = sf.command
         result = env.ctx.process_turn("how many books match Dune")
 
         assert result.status == TurnStatus.COMPLETED
@@ -559,12 +559,12 @@ def test_phase_annotated_find_book_output_hands_on_run(library_env):
         def __result__(self, input, find):
             return f"total {find.total}"
 
-    library_env.skill = _build_skill(Plan)
-    result = _run_skill(library_env, library_env.skill)
+    library_env.planning_command = _build_planning_command(Plan)
+    result = _run_planning_command(library_env, library_env.planning_command)
 
     assert result.status == TurnStatus.COMPLETED
     assert result.answer == "total 2"
-    spans = library_env.sink.named(fastworkflow.tracing.SPAN_SKILL_PHASE)
+    spans = library_env.sink.named(fastworkflow.tracing.SPAN_PLANNING_COMMAND_PHASE)
     assert spans[0].attributes["facts"] == {
         "book_uids": ["b1", "b2"],
         "titles": ["Dune", "Dune Messiah"],
@@ -578,13 +578,13 @@ def test_full_list_step_joins_loan_pages(library_proof_env):
             return [full_list("list_loans")]
 
     library_proof_env.runner(library_proof_env.ctx, "open_book book_uid=b1")
-    library_proof_env.skill = _build_skill(Plan)
+    library_proof_env.planning_command = _build_planning_command(Plan)
     library_proof_env.args = {}
     library_proof_env.runner.sent.clear()
     result = library_proof_env.ctx.process_turn("list every loan")
 
     assert result.status == TurnStatus.COMPLETED
-    spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_SKILL_PHASE)
+    spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_PLANNING_COMMAND_PHASE)
     facts = spans[0].attributes["facts"]
     assert facts["total"] == 2
     assert len(facts["borrowers"]) == 2
@@ -603,11 +603,11 @@ def test_fan_out_phase_open_book_output_per_item(library_env):
             titles = [item.title for item in opened]
             return ", ".join(titles)
 
-    library_env.skill = _build_skill(Plan)
-    result = _run_skill(library_env, library_env.skill)
+    library_env.planning_command = _build_planning_command(Plan)
+    result = _run_planning_command(library_env, library_env.planning_command)
 
     assert result.status == TurnStatus.COMPLETED
-    spans = library_env.sink.named(fastworkflow.tracing.SPAN_SKILL_PHASE)
+    spans = library_env.sink.named(fastworkflow.tracing.SPAN_PLANNING_COMMAND_PHASE)
     open_span = next(s for s in spans if s.attributes["phase"] == "opened")
     assert open_span.attributes["item_count"] == 2
     assert open_span.attributes["facts"]["title"] in ("Dune", "Dune Messiah")
@@ -636,8 +636,8 @@ class PlanGenerator:
     path = os.path.join(folder, "_commands", "Library", "bad_typed.py")
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(bad)
-    skill_commands.resolve_field_sources.cache_clear()
-    res = skill_commands.resolve_field_sources(folder)
+    planning_commands.resolve_field_sources.cache_clear()
+    res = planning_commands.resolve_field_sources(folder)
     assert any(
         "phase 'find' hands on find_book's Output, but none of its steps runs find_book"
         in e.message
@@ -669,16 +669,16 @@ def test_union_annotation_hands_on_whichever_member_ran(library_env):
     sig_cls = type("Signature", (), {"__doc__": "Find.", "Input": input_cls})
     module = types.ModuleType("find_union")
     module.Signature, module.PlanGenerator = sig_cls, Plan
-    skill = skill_commands.command_from_module(
+    planning_command = planning_commands.command_from_module(
         "Library/find_union", module, "_commands/Library/find_union.py"
     ).command
 
-    library_env.skill = skill
-    result = _run_skill(library_env, skill, {"name": "Dune", "kind": "book"})
+    library_env.planning_command = planning_command
+    result = _run_planning_command(library_env, planning_command, {"name": "Dune", "kind": "book"})
     assert result.answer == "books 2"
 
     library_env.runner.sent.clear()
-    result = _run_skill(library_env, skill, {"name": "Raj Patel", "kind": "member"})
+    result = _run_planning_command(library_env, planning_command, {"name": "Raj Patel", "kind": "member"})
     assert "members" in result.answer
 
 
@@ -693,11 +693,11 @@ def test_typed_facts_model_fills_output_input_and_optional_none(library_env):
         def __result__(self, input, work):
             return f"{work.found.total}:{work.open_args.book_uid}"
 
-    library_env.skill = _build_skill(Plan)
-    result = _run_skill(library_env, library_env.skill)
+    library_env.planning_command = _build_planning_command(Plan)
+    result = _run_planning_command(library_env, library_env.planning_command)
 
     assert result.status == TurnStatus.COMPLETED
-    spans = library_env.sink.named(fastworkflow.tracing.SPAN_SKILL_PHASE)
+    spans = library_env.sink.named(fastworkflow.tracing.SPAN_PLANNING_COMMAND_PHASE)
     facts = spans[0].attributes["facts"]
     assert facts["found"]["total"] == 2
     assert facts["open_args"]["book_uid"] == "b1"
@@ -710,10 +710,10 @@ def test_typed_facts_validator_refusal_fails_the_phase(library_env):
         def find(self, input) -> Strict:
             return [run("find_book", query=input.title)]
 
-    library_env.skill = _build_skill(Plan, args_fields={
+    library_env.planning_command = _build_planning_command(Plan, args_fields={
         "title": (str, Field(description="the title")),
     })
-    result = _run_skill(library_env, library_env.skill, {"title": "NoSuchTitleAtAllXYZ"})
+    result = _run_planning_command(library_env, library_env.planning_command, {"title": "NoSuchTitleAtAllXYZ"})
 
     assert result.status == TurnStatus.COMPLETED
     assert "This job stopped at its part 'find', which failed:" in result.answer
@@ -747,22 +747,22 @@ class PlanGenerator:
         handle.write(bad)
     mod = python_utils.get_module(path, folder)
     with pytest.raises(
-        SkillFormatError,
+        PlanningCommandFormatError,
         match=r"Shelf\.borrowers is list\[str\]; a facts field is typed with a command's Output or Input",
     ):
-        skill_commands.command_from_module("Book/bad_shelf", mod, path)
+        planning_commands.command_from_module("Book/bad_shelf", mod, path)
 
 
 def test_library_loan_report_result_uses_list_loans_output(library_proof_env):
     sf = _real_planning_command("Book/loan_report", "_commands/Book/loan_report.py")
     library_proof_env.runner(library_proof_env.ctx, "open_book book_uid=b1")
-    library_proof_env.skill = sf.command
+    library_proof_env.planning_command = sf.command
     library_proof_env.args = {}
     library_proof_env.runner.sent.clear()
     result = library_proof_env.ctx.process_turn("who has this book")
 
     assert result.status == TurnStatus.COMPLETED
-    spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_SKILL_PHASE)
+    spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_PLANNING_COMMAND_PHASE)
     assert spans[0].attributes["facts"]["borrowers"] == ["Ann Lee", "Raj Patel"]
     assert "Ann Lee" in result.answer
     out = next(o for o in library_proof_env.ctx._turn_outputs if o.command_name == sf.command.name)
@@ -773,13 +773,13 @@ def test_library_loan_report_result_uses_list_loans_output(library_proof_env):
 def test_library_book_by_title_result_builds_output_from_two_phases(library_proof_env):
     sf = _real_planning_command("Library/book_by_title", "_commands/Library/book_by_title.py")
     title, author, copies_count, book_uid = "Dune", "Frank Herbert", 3, "b1"
-    library_proof_env.skill = sf.command
+    library_proof_env.planning_command = sf.command
     library_proof_env.args = {"title": title}
     library_proof_env.runner.sent.clear()
     result = library_proof_env.ctx.process_turn(f"who wrote {title}")
 
     assert result.status == TurnStatus.COMPLETED
-    spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_SKILL_PHASE)
+    spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_PLANNING_COMMAND_PHASE)
     assert len(spans) >= 2
     assert [s.attributes["phase"] for s in spans[:2]] == ["find", "book"]
     out = next(o for o in library_proof_env.ctx._turn_outputs if o.command_name == sf.command.name)
@@ -798,7 +798,7 @@ def test_library_book_by_title_result_builds_output_from_two_phases(library_proo
 def test_library_book_by_title_skipped_phase_gives_none_and_found_false(library_proof_env):
     sf = _real_planning_command("Library/book_by_title", "_commands/Library/book_by_title.py")
     title = "Zzyzx Nonexistent Volume"
-    library_proof_env.skill = sf.command
+    library_proof_env.planning_command = sf.command
     library_proof_env.args = {"title": title}
     library_proof_env.runner.sent.clear()
     result = library_proof_env.ctx.process_turn(f"look up {title}")
@@ -814,7 +814,7 @@ def test_library_book_by_title_skipped_phase_gives_none_and_found_false(library_
 def test_library_author_books_from_real_module_runs_fan_out(library_proof_env):
     sf = _real_planning_command("Library/author_books", "_commands/Library/author_books.py")
     author = "Frank Herbert"
-    library_proof_env.skill = sf.command
+    library_proof_env.planning_command = sf.command
     library_proof_env.args = {"author": author}
     library_proof_env.runner.sent.clear()
     result = library_proof_env.ctx.process_turn(f"what do you have by {author}")
@@ -834,14 +834,14 @@ def test_library_author_books_from_real_module_runs_fan_out(library_proof_env):
         "go_up",
         "open_book book_uid=b2",
     ]
-    spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_SKILL_PHASE)
+    spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_PLANNING_COMMAND_PHASE)
     assert [s.attributes["phase"] for s in spans[:3]] == ["find", "book", "book"]
 
 
 def test_library_count_books_from_real_module_uses_find_total(library_proof_env):
     sf = _real_planning_command("Library/count_books", "_commands/Library/count_books.py")
     query = "Jane Austen"
-    library_proof_env.skill = sf.command
+    library_proof_env.planning_command = sf.command
     library_proof_env.args = {"query": query}
     library_proof_env.runner.sent.clear()
     result = library_proof_env.ctx.process_turn(f"how many books by {query} do you have")
@@ -859,7 +859,7 @@ def test_library_count_books_from_real_module_uses_find_total(library_proof_env)
 def test_library_member_report_from_real_module_lists_loans_and_notes(library_proof_env):
     sf = _real_planning_command("Library/member_report", "_commands/Library/member_report.py")
     member = "Raj Patel"
-    library_proof_env.skill = sf.command
+    library_proof_env.planning_command = sf.command
     library_proof_env.args = {"member": member, "loans": True, "notes": True}
     library_proof_env.runner.sent.clear()
     result = library_proof_env.ctx.process_turn(
@@ -884,7 +884,7 @@ def test_library_note_member_from_real_module_writes_note_on_member(library_proo
     member, text = "Ann Lee", "card renewed"
     lib = library_proof_env.wf.root_command_context
     before = list(lib.members["m1"].notes)
-    library_proof_env.skill = sf.command
+    library_proof_env.planning_command = sf.command
     library_proof_env.args = {"member": member, "text": text}
     library_proof_env.runner.sent.clear()
     result = library_proof_env.ctx.process_turn(f"add a note to {member}: {text}")
@@ -907,7 +907,7 @@ def test_library_note_member_from_real_module_writes_note_on_member(library_proo
 def test_library_find_record_book_kind_from_real_module(library_proof_env):
     sf = _real_planning_command("Library/find_record", "_commands/Library/find_record.py")
     name = "Emma"
-    library_proof_env.skill = sf.command
+    library_proof_env.planning_command = sf.command
     library_proof_env.args = {"name": name, "kind": "book"}
     library_proof_env.runner.sent.clear()
     result = library_proof_env.ctx.process_turn(f"do you have a book called {name}")
@@ -921,7 +921,7 @@ def test_library_find_record_book_kind_from_real_module(library_proof_env):
     assert out.command_response.response == expected
     assert library_proof_env.runner.sent == [f"find_book query={name}"]
     assert not any(c.startswith("find_member") for c in library_proof_env.runner.sent)
-    spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_SKILL_PHASE)
+    spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_PLANNING_COMMAND_PHASE)
     assert "titles" in spans[0].attributes["facts"]
 
 
@@ -931,7 +931,7 @@ def test_library_find_record_union_return_loads():
     )
     path = os.path.join(lib_root, "_commands", "Library", "find_record.py")
     mod = python_utils.get_module(path, lib_root)
-    sf = skill_commands.command_from_module("Library/find_record", mod, path)
+    sf = planning_commands.command_from_module("Library/find_record", mod, path)
     assert sf.command.phase_outputs
     assert sf.command.plan_fn is not None
 
@@ -961,7 +961,7 @@ def test_in_request_on_a_str_field_loads(tmp_path):
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(IN_REQUEST_TITLE)
     mod = python_utils.get_module(path, folder)
-    sf = skill_commands.command_from_module("Library/by_title", mod, path)
+    sf = planning_commands.command_from_module("Library/by_title", mod, path)
     assert sf.command.param("title").in_request
 
 
@@ -988,8 +988,8 @@ class PlanGenerator:
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(bad)
     mod = python_utils.get_module(path, folder)
-    with pytest.raises(SkillFormatError, match="only a str or int parameter takes in_request"):
-        skill_commands.command_from_module("Library/bad_in_request", mod, path)
+    with pytest.raises(PlanningCommandFormatError, match="only a str or int parameter takes in_request"):
+        planning_commands.command_from_module("Library/bad_in_request", mod, path)
 
 
 def test_in_request_str_must_be_written_in_the_request(tmp_path):
@@ -998,12 +998,12 @@ def test_in_request_str_must_be_written_in_the_request(tmp_path):
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(IN_REQUEST_TITLE)
     mod = python_utils.get_module(path, folder)
-    command = skill_commands.command_from_module("Library/by_title", mod, path).command
+    command = planning_commands.command_from_module("Library/by_title", mod, path).command
     request = "who wrote Dune"
-    args, _ = skill_commands.check_arguments(command, {"title": "Dune"}, request)
+    args, _ = planning_commands.check_arguments(command, {"title": "Dune"}, request)
     assert args["title"] == "Dune"
-    with pytest.raises(skill_commands.SkillInputError, match="title='Emma' is not written in the request"):
-        skill_commands.check_arguments(command, {"title": "Emma"}, request)
+    with pytest.raises(planning_commands.PlanningCommandInputError, match="title='Emma' is not written in the request"):
+        planning_commands.check_arguments(command, {"title": "Emma"}, request)
 
 
 def test_in_request_str_rule_sentence_is_for_the_extractor_not_the_field_description(tmp_path):
@@ -1012,13 +1012,13 @@ def test_in_request_str_rule_sentence_is_for_the_extractor_not_the_field_descrip
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(IN_REQUEST_TITLE)
     mod = python_utils.get_module(path, folder)
-    command = skill_commands.command_from_module("Library/by_title", mod, path).command
+    command = planning_commands.command_from_module("Library/by_title", mod, path).command
     # The field's own description says what the value is; the rule sentence is the extractor's (3.4).
     desc = command.input_model.model_fields["title"].description
     assert desc == "the book's title"
-    assert skill_commands.IN_REQUEST_STR_SENTENCE not in desc
-    assert skill_commands.extraction_sentences(command.param("title")) == (
-        skill_commands.IN_REQUEST_STR_SENTENCE,)
+    assert planning_commands.IN_REQUEST_STR_SENTENCE not in desc
+    assert planning_commands.extraction_sentences(command.param("title")) == (
+        planning_commands.IN_REQUEST_STR_SENTENCE,)
 
 
 PLANNING_CMD = "Library/count_books"
@@ -1439,7 +1439,7 @@ def test_a_library_copy_whose_commands_call_each_other_names_every_command_on_th
                 'run("count_books", query=input.query)]'),
         },
     )
-    res = skill_commands.resolve_field_sources(folder)
+    res = planning_commands.resolve_field_sources(folder)
 
     def cycle_messages(command: str) -> list[str]:
         return [p.message for p in res.errors
@@ -1505,12 +1505,12 @@ def test_planning_command_parameter_fields_and_utterances_follow_the_planner_hin
 
     # A planning command's utterances come from its Signature, as an execution command's do, and
     # they reach the words the planner's catalog text is matched on.
-    utterances = skill_commands.command_utterances(folder)
+    utterances = planning_commands.command_utterances(folder)
     assert utterances["book_loans"] == ["who has borrowed Dune", "is anyone reading Emma right now"]
     assert utterances["loan_report"] == ["who has this book", "when is it due back"]
     catalog = _what_can_i_do(planning_catalog_library.ctx)
-    texts = skill_commands.command_texts(catalog, folder)
-    desc_only = skill_commands.command_texts(catalog)
+    texts = planning_commands.command_texts(catalog, folder)
+    desc_only = planning_commands.command_texts(catalog)
     # The hint is the union: the description's words (what it had before its utterances were read)
     # plus the words that recur in its texts. Utterances add words; they never take one away.
     assert desc_only["book_loans"] == "book given loan say title"
@@ -1527,12 +1527,12 @@ def test_planning_command_parameter_fields_and_utterances_follow_the_planner_hin
 # ---------------------------------------------------------------------------
 
 ALL_RULE_SENTENCES = (
-    skill_commands.IN_REQUEST_STR_SENTENCE,
-    skill_commands.IN_REQUEST_INT_SENTENCE,
-    skill_commands.SUBJECT_SENTENCE,
-    skill_commands.VERIFY_BOOL_SENTENCE,
+    planning_commands.IN_REQUEST_STR_SENTENCE,
+    planning_commands.IN_REQUEST_INT_SENTENCE,
+    planning_commands.SUBJECT_SENTENCE,
+    planning_commands.VERIFY_BOOL_SENTENCE,
 )
-TUTORIAL_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skill_tutorial_workflow")
+TUTORIAL_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "planning_tutorial_workflow")
 
 
 def test_each_rule_sentence_reaches_only_the_extractor_of_the_field_whose_check_states_it(
@@ -1540,20 +1540,20 @@ def test_each_rule_sentence_reaches_only_the_extractor_of_the_field_whose_check_
     folder = _with_rule_check(tmp_path)
 
     # The sentences by field: each option's own, on the fields whose checks state them.
-    assert skill_commands.extraction_sentences_for(folder, RULE_CHECK) == {
-        "title": (skill_commands.SUBJECT_SENTENCE,),
-        "copies": (skill_commands.IN_REQUEST_INT_SENTENCE,),
-        "loaned": (skill_commands.VERIFY_BOOL_SENTENCE,),
+    assert planning_commands.extraction_sentences_for(folder, RULE_CHECK) == {
+        "title": (planning_commands.SUBJECT_SENTENCE,),
+        "copies": (planning_commands.IN_REQUEST_INT_SENTENCE,),
+        "loaned": (planning_commands.VERIFY_BOOL_SENTENCE,),
     }
-    assert skill_commands.extraction_sentences_for(folder, "Library/book_by_title") == {
-        "title": (skill_commands.IN_REQUEST_STR_SENTENCE,)}
+    assert planning_commands.extraction_sentences_for(folder, "Library/book_by_title") == {
+        "title": (planning_commands.IN_REQUEST_STR_SENTENCE,)}
     # An execution command's fields get none (until Phase 11).
-    assert skill_commands.extraction_sentences_for(folder, "Library/find_book") == {}
+    assert planning_commands.extraction_sentences_for(folder, "Library/find_book") == {}
 
     # The extractor's descriptions: the field's own, then its sentences (built as extract_parameters builds them).
-    command = skill_commands.planning_command(folder, RULE_CHECK)
+    command = planning_commands.planning_command(folder, RULE_CHECK)
     signature = InputForParamExtraction.create_signature_from_pydantic_model(
-        command.input_model, skill_commands.extraction_sentences_for(folder, RULE_CHECK))
+        command.input_model, planning_commands.extraction_sentences_for(folder, RULE_CHECK))
     described = {name: field.json_schema_extra["desc"]
                  for name, field in signature.output_fields.items()}
     assert described["title"].startswith(
@@ -1568,7 +1568,7 @@ def test_each_rule_sentence_reaches_only_the_extractor_of_the_field_whose_check_
     assert command.input_model.model_fields["title"].description == "the book's title"
 
     # The preview of the pinned tutorial workflow shows none of them.
-    rendered = skill_preview.render_previews(TUTORIAL_FOLDER)
+    rendered = command_preview.render_previews(TUTORIAL_FOLDER)
     assert "the book's title" in "\n".join(map(str, rendered.values()))
     assert not any(s in str(text) for text in rendered.values() for s in ALL_RULE_SENTENCES)
 
@@ -1601,7 +1601,7 @@ RECIPE_COMMANDS = (
 )
 
 
-def _start(tmp_path, initialized, monkeypatch, *, extra_skills=None):
+def _start(tmp_path, initialized, monkeypatch, *, extra_planning_commands=None):
     """A library copy with the real dispatch, the turn planner unscripted, and no planner model."""
     monkeypatch.delenv(TURN_MAX_STEPS_ENV, raising=False)
     _purge_library_wf_sys_modules()
@@ -1609,38 +1609,38 @@ def _start(tmp_path, initialized, monkeypatch, *, extra_skills=None):
         tmp_path,
         initialized,
         monkeypatch,
-        extra_skills=extra_skills,
+        extra_planning_commands=extra_planning_commands,
         extra_commands=RECIPE_COMMANDS,
         real_dispatch=True,
     )
 
 
-#: The real planner_skill_for, captured before any test stubs it (_make_library_runner_env does).
-REAL_PLANNER_SKILL_FOR = workflow_agent.planner_skill_for
+#: The real planner_planning_command_for, captured before any test stubs it (_make_library_runner_env does).
+REAL_PLANNER_PLANNING_COMMAND_FOR = workflow_agent.planner_planning_command_for
 
 
-def use_the_real_planner_skill_for(monkeypatch) -> None:
-    """Undo the stub the library harness puts on ``planner_skill_for`` for its whole test."""
-    monkeypatch.setattr(workflow_agent, "planner_skill_for", REAL_PLANNER_SKILL_FOR)
+def use_the_real_planner_planning_command_for(monkeypatch) -> None:
+    """Undo the stub the library harness puts on ``planner_planning_command_for`` for its whole test."""
+    monkeypatch.setattr(workflow_agent, "planner_planning_command_for", REAL_PLANNER_PLANNING_COMMAND_FOR)
 
 
 @pytest.fixture
 def recipe_env(tmp_path, initialized_fastworkflow, monkeypatch):
     """A library copy with a root skill (hours_overview) and a Library skill (dune_search)."""
     state = _start(tmp_path, initialized_fastworkflow, monkeypatch,
-                   extra_skills={HOURS_RECIPE: ROOT_SKILL, DUNE_RECIPE: LIBRARY_SKILL})
-    use_the_real_planner_skill_for(monkeypatch)
+                   extra_planning_commands={HOURS_RECIPE: ROOT_PLANNING_COMMAND, DUNE_RECIPE: LIBRARY_PLANNING_COMMAND})
+    use_the_real_planner_planning_command_for(monkeypatch)
     yield state
     state.ctx.pop_active_workflow()
 
 
 def _match_only(monkeypatch, scope: str, value: str) -> None:
     """Jev's match, stubbed: the request asks for skill *value*, confidently, along *scope*."""
-    monkeypatch.setattr(workflow_agent, "_skill_matcher",
+    monkeypatch.setattr(workflow_agent, "_planning_command_matcher",
                         lambda folder: {scope: _fake_matcher(value, 0.9)})
 
 
-def test_the_matched_skills_are_on_the_planner_listing(recipe_env):
+def test_the_matched_planning_commands_are_on_the_planner_listing(recipe_env):
     # The one-step call of a recipe resolves only if the planner lists it: its name and template.
     listing = planner_commands_text(recipe_env.ctx.get_active_workflow())
     assert "- hours_overview\n" in listing

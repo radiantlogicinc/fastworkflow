@@ -24,7 +24,7 @@ from fastworkflow.utils.fuzzy_match import find_best_matches
 from fastworkflow.utils import dspy_utils
 from fastworkflow.utils.dspy_logger import DSPyForward
 from fastworkflow.command_directory import CommandDirectory
-from fastworkflow import skill_commands
+from fastworkflow import planning_commands
 from fastworkflow.utils.workflow_vocabulary import (
     KIND_WORD_WHY, WorkflowVocabulary, is_kind_word, is_pronoun_phrase, load_workflow_vocabulary)
 
@@ -262,7 +262,7 @@ def is_ungrounded_placeholder(value: Any, field_name: str,
 
 # --- A command's name written as a value -----------------------------------------------
 #
-# An extractor sometimes copies a command's name into a parameter: a skill's own name as
+# An extractor sometimes copies a command's name into a parameter: a planning command's own name as
 # its ``application``, or another command's name as the ``query`` of a lookup, because it
 # has just been reading that name. No real value is a command name, so such a value is
 # treated as not given. Only the identifier form counts (``orphan_login_review``,
@@ -535,7 +535,7 @@ def default_unfilled_optional_strs(cmd_parameters: BaseModel, not_found: Optiona
     return changed
 
 
-# --- One pass over a call's values, shared by commands and skill calls -----------------
+# --- One pass over a call's values, shared by commands and planning command calls -----------------
 
 
 @dataclass
@@ -577,8 +577,8 @@ def screen_parameter_values(cmd_parameters: BaseModel, quote_texts: Optional[str
     "not given" marker is left as it is, for the caller to report as missing.
 
     *field_names*, when given, limits the pass to those fields. ``validate_parameters``
-    runs this before any other check of a command's parameters; a skill call runs it on its
-    ``str`` and ``int`` arguments (``fastworkflow.skill_commands.check_arguments``).
+    runs this before any other check of a command's parameters; a planning command call runs it on its
+    ``str`` and ``int`` arguments (``fastworkflow.planning_commands.check_arguments``).
     """
     screen = ParameterScreen()
     placeholder_fields = screen.placeholder_fields
@@ -764,7 +764,7 @@ def _planning_command_of(app_workflow, subject_command_name: str):
     metadata = directory.map_command_2_metadata.get(subject_command_name)
     if metadata is None or not metadata.is_planning:
         return None
-    return skill_commands.planning_command(folderpath, subject_command_name)
+    return planning_commands.planning_command(folderpath, subject_command_name)
 
 
 def _unfilled_required(planning, cmd_parameters: BaseModel) -> List[str]:
@@ -832,7 +832,7 @@ Today's date is {today}.
         Args:
             pydantic_model: The Pydantic model class to convert
             sentences: ``{field: rule sentences}`` appended after that field's description
-                (``skill_commands.extraction_sentences_for``); nothing else reads them
+                (``planning_commands.extraction_sentences_for``); nothing else reads them
             
         Returns:
             A DSPy Signature class
@@ -937,7 +937,7 @@ Today's date is {today}.
         
         params_signature = self.create_signature_from_pydantic_model(
             model_class,
-            skill_commands.extraction_sentences_for(workflow_folderpath, subject_command_name))
+            planning_commands.extraction_sentences_for(workflow_folderpath, subject_command_name))
         
         class ParamExtractor(dspy.Module):
             def __init__(self, signature):
@@ -1005,9 +1005,9 @@ Today's date is {today}.
 
         raw = {param.name: getattr(cmd_parameters, param.name, None) for param in planning.params}
         try:
-            verdicts = skill_commands.check_verdicts(_jev_lm(), planning, self.command)
-            args, notes = skill_commands.check_arguments(planning, raw, self.command, verdicts)
-        except skill_commands.SkillCallError as refusal:
+            verdicts = planning_commands.check_verdicts(_jev_lm(), planning, self.command)
+            args, notes = planning_commands.check_arguments(planning, raw, self.command, verdicts)
+        except planning_commands.PlanningCommandCallError as refusal:
             if diagnostics is not None:
                 diagnostics["argument_refusal"] = str(refusal)
             return str(refusal)
@@ -1021,12 +1021,12 @@ Today's date is {today}.
         """The refusal text of planning command *planning*'s ``Input`` rules, or None.
 
         The rules read the request (self.command) and the workflow from the validation context,
-        as the turn frame's call does (``skill_commands.check_input``).
+        as the turn frame's call does (``planning_commands.check_input``).
         """
         args = {param.name: getattr(cmd_parameters, param.name, None) for param in planning.params}
         try:
-            skill_commands.check_input(planning, args, self.command, app_workflow)
-        except skill_commands.SkillCallError as refusal:
+            planning_commands.check_input(planning, args, self.command, app_workflow)
+        except planning_commands.PlanningCommandCallError as refusal:
             return str(refusal)
         return None
 
@@ -1326,7 +1326,7 @@ Today's date is {today}.
                                     corrected_value = enum_val
                                     valid_by_type = True
                                     break
-                            # Literal (a skill's choice of text values): a member, as an enum's value
+                            # Literal (a planning command's choice of text values): a member, as an enum's value
                             if get_origin(t) is Literal:
                                 ok, literal_val = _try_coerce_literal(t, field_value)
                                 if ok:

@@ -19,13 +19,13 @@ from pydantic import BaseModel, Field
 
 import fastworkflow
 import fastworkflow.workflow_agent as workflow_agent
-from fastworkflow import skill_commands, skill_phases
+from fastworkflow import planning_commands, planning_phases
 from fastworkflow import plan_frame as plan_frame_module
 from fastworkflow import tracing
 from fastworkflow.command_executor import CommandNotFoundError
 from fastworkflow.context_identity import context_class_for
 from fastworkflow.planning import fact_from, run
-from fastworkflow.skill import phase
+from fastworkflow.planning import phase
 from fastworkflow.observation_offloading.facts import MissingFactError, facts_from_archive
 from fastworkflow.observation_offloading.labels import printed_alias
 from fastworkflow.observation_offloading.state import (
@@ -34,7 +34,7 @@ from fastworkflow.observation_offloading.state import (
     scope_for_host,
 )
 from fastworkflow.plan_frame import TURN_MAX_STEPS_ENV, PlanFrame, turn_max_steps
-from fastworkflow.skill_commands import SkillInputError
+from fastworkflow.planning_commands import PlanningCommandInputError
 from fastworkflow.state_serialization import validate_state
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_execution_context import (
@@ -102,14 +102,14 @@ def _run_book_loans(state, title: str = "Dune"):
     """A turn whose planned call is ``book_loans`` for *title*. Code runs every step of its
     phases, including the ``book`` phase's ``book_by_title`` step, which is a nested planning
     command, so no model step is scripted for the turn."""
-    state.skill = _real_planning_command(BOOK_LOANS, "_commands/Library/book_loans.py").command
+    state.planning_command = _real_planning_command(BOOK_LOANS, "_commands/Library/book_loans.py").command
     state.args = {"title": title}
     return state.ctx.process_turn(f"who has {title} on loan")
 
 
-def _phase_spans(state, skill: str):
-    return [s for s in state.sink.named(tracing.SPAN_SKILL_PHASE)
-            if s.attributes.get("skill") == skill]
+def _phase_spans(state, planning_command: str):
+    return [s for s in state.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+            if s.attributes.get("skill") == planning_command]
 
 
 def test_a_agent_step_runs_book_loans_and_its_nested_book_by_title(nested_env):
@@ -124,7 +124,7 @@ def test_a_agent_step_runs_book_loans_and_its_nested_book_by_title(nested_env):
     assert child_output.command_response.output.found is True
     assert child_output.command_response.output.book_uid == "b1"
     # The child's two phases ran in its own frame; the parent's phases ran in the turn frame.
-    child_phases = [s.attributes["phase"] for s in nested_env.sink.named(tracing.SPAN_SKILL_PHASE)
+    child_phases = [s.attributes["phase"] for s in nested_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
                     if s.attributes.get(tracing.ATTR_FRAME_ALIAS) == CHILD_ALIAS]
     assert child_phases == ["find", "book"]
     book_span, loans_span = _phase_spans(nested_env, BOOK_LOANS)
@@ -234,7 +234,7 @@ def test_f_nested_spans_name_their_frame_and_the_root_names_none(nested_env):
     closed_root = roots[-1]
     assert closed_root.end_ns is not None
     assert {r.attributes[tracing.ATTR_FRAME_ALIAS] for r in roots} == {""}
-    child = [s for s in nested_env.sink.named(tracing.SPAN_SKILL_PHASE)
+    child = [s for s in nested_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
              if s.attributes.get(tracing.ATTR_FRAME_ALIAS) == CHILD_ALIAS]
     assert len(child) == 2
     assert all(s.attributes["skill"] == BOOK_BY_TITLE for s in child)
@@ -279,7 +279,7 @@ def budget_env(tmp_path, initialized_fastworkflow, monkeypatch):
         tmp_path,
         initialized_fastworkflow,
         monkeypatch,
-        extra_skills={"Library/title_lookup": TITLE_LOOKUP},
+        extra_planning_commands={"Library/title_lookup": TITLE_LOOKUP},
         extra_commands=NESTED_COMMANDS,
         real_dispatch=True,
     )
@@ -315,7 +315,7 @@ def test_h_the_budget_stops_a_call_partway_and_the_turn_goes_on(budget_env, no_t
     refused = [o for o in ctx._turn_outputs if o.command_name == BOOK_BY_TITLE]
     assert [(o.success, o.command_response.response) for o in refused] == [
         (False, NESTED_BUDGET_SPENT_MESSAGE)]
-    assert not [s for s in state.sink.named(tracing.SPAN_SKILL_PHASE)
+    assert not [s for s in state.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
                 if s.attributes.get(tracing.ATTR_FRAME_ALIAS) == "/book_by_title#1"]
     assert len(ctx._frame_stack()) == 1
 
@@ -438,7 +438,7 @@ def test_i_a_guard_refusal_is_the_invalid_value_response_and_pushes_no_frame(
         # The guard came before the hook and the Input: neither ran, and no frame was pushed.
         assert state.wf.context.get(HOOK_CALLS) is None
         assert entered == []
-        assert not [s for s in state.sink.named(tracing.SPAN_SKILL_PHASE)
+        assert not [s for s in state.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
                     if s.attributes.get(tracing.ATTR_FRAME_ALIAS) == CHILD_ALIAS]
         assert len(state.ctx._frame_stack()) == 1
     finally:
@@ -526,12 +526,12 @@ def test_m_the_input_rule_refuses_the_same_call_at_the_turn_frame(
         command_texts={BOOK_BY_TITLE_FILE: _input_rule_book_by_title()},
     )
     try:
-        command = skill_commands.planning_command(state.wf.folderpath, BOOK_BY_TITLE)
+        command = planning_commands.planning_command(state.wf.folderpath, BOOK_BY_TITLE)
         assert command is not None
-        with pytest.raises(SkillInputError, match="the library does not look up withdrawn books"):
-            skill_commands.validate_call(command, {"title": "Dune"},
+        with pytest.raises(PlanningCommandInputError, match="the library does not look up withdrawn books"):
+            planning_commands.validate_call(command, {"title": "Dune"},
                                          "book_by_title title=Dune withdrawn", state.wf)
-        assert skill_commands.validate_call(
+        assert planning_commands.validate_call(
             command, {"title": "Dune"}, "book_by_title title=Dune", state.wf) == {"title": "Dune"}
     finally:
         state.ctx.pop_active_workflow()
@@ -550,7 +550,7 @@ def test_n_a_verify_field_is_checked_once_on_the_request_before_the_guards(
         return True, 1.0
 
     monkeypatch.setattr(workflow_agent, "_jev_lm", lambda: "classifier")
-    monkeypatch.setattr(skill_commands, "_check_one", fake_check)
+    monkeypatch.setattr(planning_commands, "_check_one", fake_check)
     try:
         result = _turn_calling(state, "book_by_title title=Dune")
 
@@ -575,7 +575,7 @@ def _planning_command(name: str, plan_cls, input_cls=None):
     module = types.ModuleType("test_planning_command")
     module.Signature = type("Signature", (), attributes)
     module.PlanGenerator = plan_cls
-    return skill_commands.command_from_module(name, module, f"_commands/{name}.py").command
+    return planning_commands.command_from_module(name, module, f"_commands/{name}.py").command
 
 
 def test_o_a_planning_command_with_no_input_and_one_phase_runs_through_the_phase_runner(
@@ -584,7 +584,7 @@ def test_o_a_planning_command_with_no_input_and_one_phase_runs_through_the_phase
         def summary(self):
             return ["find_book query=Dune"]
 
-    nested_env.skill = _planning_command("Library/dune_count", Plan)
+    nested_env.planning_command = _planning_command("Library/dune_count", Plan)
     result = nested_env.ctx.process_turn("how many books are called Dune")
 
     assert result.status == TurnStatus.COMPLETED
@@ -602,8 +602,8 @@ def test_p_a_one_phase_call_with_an_annotated_phase_has_the_agents_step_budget(
         def find(self, input) -> FoundBooks:
             return [run("find_book", query=input.title), "say how many books match"]
 
-    monkeypatch.setitem(fastworkflow._env_vars, skill_phases.PHASE_MAX_STEPS_ENV, "7")
-    nested_env.skill = _planning_command("Library/title_find", Plan, TitleInput)
+    monkeypatch.setattr(planning_phases, "PHASE_MAX_STEPS", 7)
+    nested_env.planning_command = _planning_command("Library/title_find", Plan, TitleInput)
     nested_env.args = {"title": "Dune"}
     result = nested_env.ctx.process_turn("how many books are called Dune")
 
@@ -611,12 +611,12 @@ def test_p_a_one_phase_call_with_an_annotated_phase_has_the_agents_step_budget(
     [span] = _phase_spans(nested_env, "Library/title_find")
     assert span.attributes["phase_count"] == 1
     assert span.attributes["step_budget"] == nested_env.ctx._workflow_tool_agent.max_iters
-    assert span.attributes["step_budget"] != skill_phases.phase_step_budget()
+    assert span.attributes["step_budget"] != planning_phases.phase_step_budget()
 
 
 def test_q_each_phase_of_a_two_phase_call_has_the_phase_step_budget(nested_env, monkeypatch):
-    monkeypatch.setitem(fastworkflow._env_vars, skill_phases.PHASE_MAX_STEPS_ENV, "7")
-    assert skill_phases.phase_step_budget() == 7
+    monkeypatch.setattr(planning_phases, "PHASE_MAX_STEPS", 7)
+    assert planning_phases.phase_step_budget() == 7
     result = _run_book_loans(nested_env)
 
     assert result.status == TurnStatus.COMPLETED
@@ -1025,7 +1025,7 @@ def test_ad_facts_from_archive_leaves_out_a_child_range_when_given_it(nested_env
     store = archive_for_path(observability_db_path(ctx))
     scope = scope_for_host(ctx)
     # The child's own steps are its find (1) and its open (2), as its phase spans name them.
-    child_steps = [s.attributes["first_step"] for s in nested_env.sink.named(tracing.SPAN_SKILL_PHASE)
+    child_steps = [s.attributes["first_step"] for s in nested_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
                    if s.attributes.get(tracing.ATTR_FRAME_ALIAS) == CHILD_ALIAS]
     ranges = [[min(child_steps), max(child_steps)]]
 
@@ -1104,7 +1104,7 @@ class PlanGenerator:
         return CommandResponse(response=f"{book.title} is open.",
                                output=Signature.Output(book_uid=book.book_uid, title=book.title))
 '''
-OPEN_BY_UID_SKILL = "Library/open_by_uid"
+OPEN_BY_UID_PLANNING_COMMAND = "Library/open_by_uid"
 
 
 @pytest.fixture
@@ -1114,7 +1114,7 @@ def open_by_uid_env(tmp_path, initialized_fastworkflow, monkeypatch):
         tmp_path,
         initialized_fastworkflow,
         monkeypatch,
-        extra_skills={OPEN_BY_UID_SKILL: OPEN_BY_UID},
+        extra_planning_commands={OPEN_BY_UID_PLANNING_COMMAND: OPEN_BY_UID},
         extra_commands=NESTED_COMMANDS,
         real_dispatch=True,
     )
@@ -1143,7 +1143,7 @@ def test_ae_a_fan_out_item_whose_sub_plan_calls_a_planning_command_is_bound_to_i
             return ", ".join(f"{item.book_uid} {item.title}" for item in opened)
 
     entered = _record_planning_entries(monkeypatch, state.ctx)
-    state.skill = _planning_command("Library/dune_books", Plan, TitleInput)
+    state.planning_command = _planning_command("Library/dune_books", Plan, TitleInput)
     state.args = {"title": "Dune Messiah"}
     result = state.ctx.process_turn("show the book Dune Messiah")
 
@@ -1187,7 +1187,7 @@ def test_ai_a_facts_model_does_not_read_the_find_run_of_the_child_it_calls(neste
         def look(self, input) -> ChildFind:
             return [run("book_by_title", title=input.title)]
 
-    nested_env.skill = _planning_command("Library/look_for_books", Plan, TitleInput)
+    nested_env.planning_command = _planning_command("Library/look_for_books", Plan, TitleInput)
     nested_env.args = {"title": "Dune"}
     result = nested_env.ctx.process_turn("which books are called Dune")
 
@@ -1205,7 +1205,7 @@ def test_aj_the_same_call_fills_a_fact_from_the_child_output_it_names(nested_env
         def look(self, input) -> HeldBook:
             return [run("book_by_title", title=input.title)]
 
-    nested_env.skill = _planning_command("Library/look_for_books", Plan, TitleInput)
+    nested_env.planning_command = _planning_command("Library/look_for_books", Plan, TitleInput)
     nested_env.args = {"title": "Dune"}
     result = nested_env.ctx.process_turn("which book is called Dune")
 
@@ -1238,7 +1238,7 @@ def test_ak_two_fan_out_items_each_open_their_record_with_go_up_between(open_by_
             return ", ".join(f"{item.book_uid} {item.title}" for item in opened)
 
     entered = _record_planning_entries(monkeypatch, state.ctx)
-    state.skill = _planning_command("Library/dune_books", Plan, TitleInput)
+    state.planning_command = _planning_command("Library/dune_books", Plan, TitleInput)
     state.args = {"title": "Dune"}
     result = state.ctx.process_turn("show the books called Dune")
 
@@ -1273,7 +1273,7 @@ def test_an_execution_command_gets_the_same_refusal_as_a_planning_command_from_t
     the same way, with the same navigation sentence: no declared path back to Library. The
     xfail of test_ak is therefore about navigation, not about planning."""
     state = open_by_uid_env
-    state.skill = _planning_command("Library/open_one", _OpenOne)
+    state.planning_command = _planning_command("Library/open_one", _OpenOne)
     result = state.ctx.process_turn("open book b1")
     assert result.status == TurnStatus.COMPLETED
     wf = state.wf
@@ -1345,11 +1345,11 @@ class PlanGenerator:
         "from fastworkflow import from_\n", "")
     folder = _library_workflow(
             tmp_path,
-            extra_skills={"Library/plan_calls_book": calls_child,
+            extra_planning_commands={"Library/plan_calls_book": calls_child,
                           "Library/plan_described_book": described},
             extra_commands=(BOOK_BY_TITLE_FILE, "_commands/Library/_wording.py"),
         )
-    res = skill_commands.resolve_field_sources(folder)
+    res = planning_commands.resolve_field_sources(folder)
 
     assert [p.message for p in res.errors if p.command == "Library/plan_described_book"] == []
     assert [p.message for p in res.errors if p.command == "Library/plan_calls_book"] == [
@@ -1409,14 +1409,14 @@ def test_ao_a_child_that_ends_on_another_record_is_acted_on_there_and_not_restor
 @pytest.mark.xfail(strict=True, reason=(
     "fix-3rsq.5.9 gap, outside Phase 5 by the plan's step 6 (which no longer says the finish check "
     "flags it): the record check flags a run on another record only for fan-out items "
-    "(skill_phases.item_record_issues). A non-fan-out phase whose planning child ended on another "
+    "(planning_phases.item_record_issues). A non-fan-out phase whose planning child ended on another "
     "record gets no flag, and a record check for it is not part of Phase 5."))
 def test_ap_the_finish_check_flags_a_step_run_on_another_record(
         tmp_path, initialized_fastworkflow, monkeypatch):
     state = _nested_state(tmp_path, initialized_fastworkflow, monkeypatch,
                           command_texts={BOOK_BY_TITLE_FILE: _book_by_title_ending_on_b2()})
     try:
-        state.skill = _real_planning_command(BOOK_LOANS, "_commands/Library/book_loans.py").command
+        state.planning_command = _real_planning_command(BOOK_LOANS, "_commands/Library/book_loans.py").command
         state.args = {"title": "Dune"}
         state.ctx.process_turn("who has Dune on loan")
 
@@ -1433,7 +1433,7 @@ def test_ar_a_code_only_phase_makes_no_planner_call_of_its_own(nested_env, monke
     inner = workflow_agent.build_query_with_next_steps
 
     def spy(*args, **kwargs):
-        planner_calls.append(kwargs.get("skill_command") is not None)
+        planner_calls.append(kwargs.get("planning_command") is not None)
         return inner(*args, **kwargs)
 
     monkeypatch.setattr(workflow_agent, "build_query_with_next_steps", spy)
@@ -1442,7 +1442,7 @@ def test_ar_a_code_only_phase_makes_no_planner_call_of_its_own(nested_env, monke
         def summary(self):
             return ["find_book query=Dune"]
 
-    nested_env.skill = _planning_command("Library/dune_count", Plan)
+    nested_env.planning_command = _planning_command("Library/dune_count", Plan)
     result = nested_env.ctx.process_turn("how many books are called Dune")
 
     assert result.status == TurnStatus.COMPLETED
@@ -1490,11 +1490,11 @@ def test_real_library_loads_with_no_error_and_book_loans_runs_book_by_title_nest
     field-source error and no ERROR line, and book_loans' book phase runs book_by_title in a
     frame of its own, held once under its step, with the answer book_loans gives."""
     ctx = real_library_env.ctx
-    res = skill_commands.resolve_field_sources(LIBRARY)
+    res = planning_commands.resolve_field_sources(LIBRARY)
     assert res.errors == ()
     assert {BOOK_LOANS, BOOK_BY_TITLE} <= set(res.planning_commands)
     assert res.callees[BOOK_LOANS] == frozenset({"Book/list_loans", BOOK_BY_TITLE})
-    assert skill_commands.call_depth(BOOK_LOANS, res) == 2
+    assert planning_commands.call_depth(BOOK_LOANS, res) == 2
 
     pushed: list[tuple[str, str]] = []
     original = type(ctx)._attach_nested_agent
@@ -1514,7 +1514,7 @@ def test_real_library_loads_with_no_error_and_book_loans_runs_book_by_title_nest
     assert pushed == [(BOOK_BY_TITLE, CHILD_ALIAS)]
     assert entered == [(BOOK_BY_TITLE, "book_by_title title=Dune")]
     # book_by_title's own phases ran inside that frame; its steps were run by code.
-    child_phases = [s.attributes["phase"] for s in real_library_env.sink.named(tracing.SPAN_SKILL_PHASE)
+    child_phases = [s.attributes["phase"] for s in real_library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
                     if s.attributes.get(tracing.ATTR_FRAME_ALIAS) == CHILD_ALIAS]
     assert child_phases == ["find", "book"]
     book_span, loans_span = _phase_spans(real_library_env, BOOK_LOANS)
@@ -1682,7 +1682,7 @@ def test_a_nested_step_naming_a_planning_command_of_another_context_is_refused_b
     entered = _record_planning_entries(monkeypatch, nested_book_env.ctx)
     wf = nested_book_env.ctx.get_active_workflow()
     expected = _refusal_text(wf, LOAN_REPORT)
-    nested_book_env.skill = _planning_command("Library/probe_loan_report", _PlanRefusedThenInContext)
+    nested_book_env.planning_command = _planning_command("Library/probe_loan_report", _PlanRefusedThenInContext)
     nested_book_env.model.run("book_by_title title=Dune")
     nested_book_env.model.finish()
     nested_book_env.model.finish()
@@ -1706,7 +1706,7 @@ def test_a_global_planning_command_runs_only_from_the_root_context(tmp_path,
     (library_hours), naming the global context; from the root context it is available."""
     state = _make_library_runner_env(
         tmp_path, initialized_fastworkflow, monkeypatch,
-        extra_skills={"dune_total": _GLOBAL_DUNE_TOTAL})
+        extra_planning_commands={"dune_total": _GLOBAL_DUNE_TOTAL})
     wf = state.wf
     assert fastworkflow.RoutingRegistry.get_definition(wf.folderpath).get_planning_command_names(
         "*") == ["dune_total"]

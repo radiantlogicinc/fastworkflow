@@ -91,9 +91,9 @@ class WorkflowMetadata:
 
     command_names: frozenset[str]   # qualified names: "find_member" or "Context/find_member"
     context_names: frozenset[str]
-    field_names: frozenset[str]     # input fields of every command and skill
+    field_names: frozenset[str]     # input fields of every command and planning command
     choice_values: frozenset[str]   # declared Literal / Enum values of those fields
-    #: ``(command, field, description)`` for each input field of a command or skill.
+    #: ``(command, field, description)`` for each input field of a command or planning command.
     field_descriptions: frozenset[tuple[str, str, str]] = frozenset()
     #: ``(command, field, value)`` for each string value a labeled example gives an input field.
     labeled_values: frozenset[tuple[str, str, str]] = frozenset()
@@ -157,7 +157,7 @@ def kind_words_of(metadata: WorkflowMetadata) -> frozenset[str]:
     """The workflow's kind words for kind selectors, lowercase: its context names, the record
     kinds its commands are grouped under (``group``, ``account``). Declared choice values are not
     used: a choice such as ``add``, ``login`` or ``every`` is not a record kind, and admitting it
-    lets an unrelated field (``query``) accept it. A workflow whose commands have no contexts (skills
+    lets an unrelated field (``query``) accept it. A workflow whose commands have no contexts (planning commands
     only) has no kind words, so its kind selectors come from explicit enumerations alone."""
     words = {word.strip().lower() for word in metadata.context_names}
     return frozenset(word for word in words if word and word != "none")
@@ -234,7 +234,7 @@ def _choices(annotation: Any) -> set[str]:
 
 
 def _input_fields(directory: CommandDirectory, name: str) -> dict[str, tuple[Any, str]]:
-    """``{field: (annotation, description)}`` of the command's or skill's ``Signature.Input``;
+    """``{field: (annotation, description)}`` of the command's or planning command's ``Signature.Input``;
     {} when it has none."""
     try:
         directory.ensure_command_hydrated(name)

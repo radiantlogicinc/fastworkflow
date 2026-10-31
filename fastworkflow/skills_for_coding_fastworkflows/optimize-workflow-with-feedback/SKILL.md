@@ -74,7 +74,7 @@ command, extracted parameters, command response and final answer. Typical eviden
 | Evidence | Candidate change |
 |---|---|
 | Wrong command or repeated ambiguity | Context reachability, duplicate capabilities, seeds; use the routing companion skills |
-| Missing handle or unnecessary request for an ID | Producer hints (`available_from`) and lookup visibility |
+| Missing handle or unnecessary request for an ID | Producer edges (`from_`) and lookup visibility |
 | Valid entity rejected or wrong fuzzy correction | `db_lookup` candidates and thresholds |
 | Unusable values reach business logic | Validation hook and actionable correction messages |
 | Correct tools but missing/incorrect final information | Response content, presentation requirements, output limits |

@@ -37,7 +37,7 @@ from fastworkflow.state_serialization import validate_state
 from fastworkflow.turn import TurnStatus
 from fastworkflow.utils.logging import logger as fastworkflow_logger
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
-from tests.test_skill_code_steps import Model
+from tests.test_planning_command_code_steps import Model
 from tests.test_step_helpers import LibraryRunner, _library_workflow
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures
     initialized_fastworkflow,
@@ -119,7 +119,7 @@ def test_a_planning_frame_round_trips_every_serialised_field():
         folded_note="\n(Ran as: book_by_title title=Dune -- parameters go inside the command string.)",
         # Not serialised, so they must not appear in the state and must not come back.
         evidence_floors={0: 4}, initial_plan_text="1. look up", phase_live=("cmd", []),
-        phased_skill_call=("cmd", None), agent=object(),
+        phased_planning_command_call=("cmd", None), agent=object(),
     )
 
     state = frame.to_state()
@@ -137,7 +137,7 @@ def test_a_planning_frame_round_trips_every_serialised_field():
     restored = PlanFrame.from_state(json.loads(json.dumps(state)))
     assert restored.to_state() == state
     assert restored.evidence_floors == {} and restored.initial_plan_text == ""
-    assert restored.phase_live is None and restored.phased_skill_call is None and restored.agent is None
+    assert restored.phase_live is None and restored.phased_planning_command_call is None and restored.agent is None
 
 
 def test_to_state_returns_fresh_containers_that_do_not_change_the_frame():
@@ -343,7 +343,7 @@ def library_sessions(monkeypatch, initialized_fastworkflow):
             lambda user_query, session, **kwargs: user_query,
         )
         monkeypatch.setattr(
-            "fastworkflow.workflow_agent.planner_skill_for",
+            "fastworkflow.workflow_agent.planner_planning_command_for",
             lambda text, folder_path, **_: ("", None),
         )
         monkeypatch.setattr(

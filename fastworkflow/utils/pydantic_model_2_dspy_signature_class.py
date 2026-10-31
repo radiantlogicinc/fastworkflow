@@ -15,7 +15,7 @@ from pydantic_core import PydanticUndefined
 
 from pydantic import Field as _PydanticField
 
-from fastworkflow.skill_json_schema_internal import omit_internal_json_schema_extra
+from fastworkflow.planning_command_json_schema_internal import omit_internal_json_schema_extra
 
 
 def _build_field(field_type: str, desc: str = ""):

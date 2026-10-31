@@ -56,10 +56,13 @@ Anything in `context_hierarchy_model.json` that is not in this inversion is a st
 
 ### Which producers a context needs
 
-Collect the parameter-producer hints declared by each context's own commands:
+Collect the producer edges declared by each context's own commands: the `from_("<command>.<field>")`
+calls on their `Input` fields (`declare-parameter-producers`). Once `command preview` has resolved
+them they are stored as `json_schema_extra["available_from"]`, which is what a script reads from a
+loaded command, so a source scan looks for the `from_` calls:
 
 ```python
-re.finditer(r"'available_from':\s*\[([^\]]*)\]", src)
+re.finditer(r"from_\(\s*(\[[^\]]*\]|['\"][^'\"]*['\"])", src)
 ```
 
 Group by owning context. That is the minimum set of producers the context needs on its surface, and
@@ -145,7 +148,7 @@ Read three fields together:
 A command's qualified name is `<Folder>/<command>`, so moving it is a rename. Update:
 
 - the module's location on disk, and the scaffold or generator that emits it
-- every `available_from` producer hint naming it
+- every `from_` producer edge naming it (`from_("<Context>/<command>...")`)
 - the seed-utterance table keyed by `(context, command)`
 - the inheritance model, and any `inherits:` prose in generated docs
 - benchmark and end-to-end case tables

@@ -1,11 +1,10 @@
 # library: the sample workflow of the planning-command tutorial
 
 A small library (two branches, four books, three members and their loans) whose commands are
-the worked examples of [docs/tutorials/skills](../../../docs/tutorials/skills/README.md).
+the worked examples of [docs/tutorials/planning_commands](../../../docs/tutorials/planning_commands/README.md).
 
-> **Status.** Written for the release that implements
-> [unified_command_architecture](../../../docs/unified_command_architecture/), sixth
-> amendment included: planning commands in `_commands/`, `from_`, `__result__`, check
+> **Status.** Written for the release that implements the unified command architecture,
+> sixth amendment included: planning commands in `_commands/`, `from_`, `__result__`, check
 > options such as `in_request` on any command's `Input` fields, nested planning commands,
 > scoped lookup, commands that return their `Output`, facts typed by the commands that
 > produce them, steps written with helpers, and `pick` reading the listing wherever the

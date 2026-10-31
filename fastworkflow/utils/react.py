@@ -53,7 +53,7 @@ class fastWorkflowReAct(Module):
     # -> a note that replaces the finish observation and sends the agent back to
     # the loop, or None to finish. Set by the caller per run (the finish check).
     finish_reviewer: Callable[[dict[str, Any], int], str | None] | None = None
-    # The steps code runs before the loop (``skill_phases.CodeSteps``), for the next
+    # The steps code runs before the loop (``planning_phases.CodeSteps``), for the next
     # forward() only: set by the caller per run, taken (and cleared) by forward().
     code_steps: Any = None
 
@@ -385,7 +385,7 @@ class fastWorkflowReAct(Module):
         Sets ``self._exhausted_last_run`` when the loop ends because max_iters
         was reached without the agent selecting the `finish` tool.
 
-        With *code* (``skill_phases.CodeSteps``) the steps are code's, not the model's:
+        With *code* (``planning_phases.CodeSteps``) the steps are code's, not the model's:
         each ``(thought, command)`` it gives runs as an ``execute_workflow_query`` step,
         written, traced (``by_code``) and hooked like any other, and is reported back to
         it (``code.ran``). They do not count toward ``iteration_counter``. The loop ends

@@ -241,13 +241,13 @@ class ChatSession:
         except Exception as warm_err:  # pragma: no cover – warm-up must never fail
             logger.debug(f"Model warm-up skipped due to error: {warm_err}")
 
-        # Skills and command utterances: read on the first request otherwise (~2 s).
+        # Planning commands and command utterances: read on the first request otherwise (~2 s).
         # Keyed by the folder path string, so the same one the turn path passes.
         try:
-            from fastworkflow.workflow_agent import warm_skills
-            warm_skills(workflow.folderpath)
+            from fastworkflow.workflow_agent import warm_planning_commands
+            warm_planning_commands(workflow.folderpath)
         except Exception as warm_err:  # pragma: no cover – warm-up must never fail
-            logger.debug(f"Skill warm-up skipped due to error: {warm_err}")
+            logger.debug(f"Planning command warm-up skipped due to error: {warm_err}")
 
         self._core.bind_app_workflow(workflow)
         self._core.keep_alive = self._keep_alive

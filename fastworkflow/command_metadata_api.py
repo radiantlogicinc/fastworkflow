@@ -246,11 +246,11 @@ class CommandMetadataAPI:
 
     @staticmethod
     def _planning_template(subject_workflow_path: str, qualified_name: str) -> tuple[str, ...]:
-        """The template steps of a planning command (``skill_commands.planning_command``), the
+        """The template steps of a planning command (``planning_commands.planning_command``), the
         ones a call of it runs; empty for an execution command."""
-        # inline import avoids circular import: skill_commands -> observation_offloading -> command_metadata_api
-        from fastworkflow import skill_commands
-        command = skill_commands.planning_command(subject_workflow_path, qualified_name)
+        # inline import avoids circular import: planning_commands -> observation_offloading -> command_metadata_api
+        from fastworkflow import planning_commands
+        command = planning_commands.planning_command(subject_workflow_path, qualified_name)
         return command.template if command is not None else ()
 
     @staticmethod

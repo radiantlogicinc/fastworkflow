@@ -69,7 +69,7 @@ class PlanFrame:
     initial_plan_text: str = ""          # not serialised (as today); stays: the planner writes the run's plan (Phase 6 decision 2026-10-30)
     phase_run: Optional[dict[str, Any]] = None
     phase_live: Optional[tuple[Any, list[Any]]] = None   # not serialised (as today)
-    phased_skill_call: Any = None        # not serialised (as today)
+    phased_planning_command_call: Any = None        # not serialised (as today)
     child_step_ranges: list[list[int]] = field(default_factory=list)  # [first, last] per child run
     invoking_step: Optional[int] = None  # the parent step index this frame runs inside
     #: The step number the call's first step takes (its run's range starts here).

@@ -16,7 +16,7 @@ An archived row counts for the command the router resolved its text to (from
 the session's action log) when that is known, else for the command its text
 names. A step that writes an argument right after its command
 (``command key=<...>``) is not satisfied by a run whose text has no arguments.
-In a skill phase's check (``values=True``, set by the phase runner) a step
+In a planning command phase's check (``values=True``, set by the phase runner) a step
 that gives an argument a concrete value (``find_x query=Ann``) is also
 satisfied only by a run that carries that value (``step_arguments``,
 ``satisfies``); a placeholder (``key=<...>``) or prose ("with the uid of the
@@ -432,7 +432,7 @@ def satisfies(step: PlanStep, row: Mapping[str, Any], names: Iterable[str] = ())
 
 def _satisfies(step: PlanStep, row: Mapping[str, Any], names: set, values: bool = False) -> bool:
     """Whether *row* does *step*. By default only the bare-run rule: a run with no
-    arguments does not satisfy a step that writes one. With *values* (a skill phase's
+    arguments does not satisfy a step that writes one. With *values* (a planning command phase's
     check), also the step's concrete values (``satisfies``)."""
     if values:
         return satisfies(step, row, names)
@@ -455,7 +455,7 @@ def attribute_rows(steps: Sequence[PlanStep], rows: Sequence[Mapping[str, Any]],
     *resolved* maps a row's command text to the command it resolved to (see
     ``resolved_command_names``); a row whose text it lacks counts for the
     command its text names. A step that writes an argument after its command
-    takes only runs that carry arguments -- with *values* (a skill phase's
+    takes only runs that carry arguments -- with *values* (a planning command phase's
     check), only runs that carry each concrete value it gives (``satisfies``):
     those steps pick first, in order, then the others take what is left, in order.
 
@@ -567,7 +567,7 @@ def review_finish(*, plan_text: str, floor: int, iters_left: int,
 
     *resolved* maps raw command text to the command it resolved to; rows whose
     text it lacks count for the command their text names. *values*: a step's
-    concrete argument values must match (a skill phase's check; ``satisfies``).
+    concrete argument values must match (a planning command phase's check; ``satisfies``).
     """
     from fastworkflow.observation_offloading.state import (
         current_scope, durable_archive, record_event)

@@ -8,7 +8,7 @@ such description is still refused. The pronoun refusal applies to a kind selecto
 an optional field takes its default.
 
 Integration only: a temporary copy of ``todo_list_workflow`` (its contexts are the kind words) and of
-``skill_tutorial_workflow`` (with one skill added), the real vocabulary builder, loader, screens and
+``planning_tutorial_workflow`` (with one skill added), the real vocabulary builder, loader, screens and
 ``check_arguments``. The repo's own ``___command_info`` is never read for writing or touched.
 """
 
@@ -24,7 +24,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import skill_commands as sc
+from fastworkflow import planning_commands as sc
 from fastworkflow import workflow_agent
 from fastworkflow.utils import signatures
 from fastworkflow.utils import workflow_vocabulary as wv
@@ -32,7 +32,7 @@ from fastworkflow.utils.signatures import InputForParamExtraction
 
 TESTS = Path(__file__).resolve().parent
 TODO = TESTS / "todo_list_workflow"
-TUTORIAL = TESTS / "skill_tutorial_workflow"
+TUTORIAL = TESTS / "planning_tutorial_workflow"
 ASSIGN_TO = "TodoItem/assign_to"
 GENERIC_DESCRIPTION = "name of the person responsible for doing this task"
 LISTED_DESCRIPTION = "the kind of record responsible for this task. One of: todoitem, todolist"
@@ -263,16 +263,16 @@ def test_a_changed_labeled_example_makes_the_stored_vocabulary_stale(todo_copy):
 
 # ---------------------------------------------------------------- the typed skill screen
 
-def _skill(folder: str, name: str) -> sc.SkillCommand:
-    return workflow_agent.load_skill_commands(folder)[name]
+def _planning_command(folder: str, name: str) -> sc.PlanningCommandCommand:
+    return workflow_agent.load_planning_command_map(folder)[name]
 
 
-def _raw(command: sc.SkillCommand, **values) -> dict:
+def _raw(command: sc.PlanningCommandCommand, **values) -> dict:
     return {p.name: values.get(p.name) for p in command.params}
 
 
-def test_a_skill_argument_whose_description_lists_a_kind_takes_it(tutorial_copy):
-    command = _skill(tutorial_copy, "file_request")
+def test_a_planning_command_argument_whose_description_lists_a_kind_takes_it(tutorial_copy):
+    command = _planning_command(tutorial_copy, "file_request")
 
     args, _ = sc.check_arguments(command, _raw(command, resource_type="book", query="Dune"),
                                  "show the book Dune")
@@ -280,17 +280,17 @@ def test_a_skill_argument_whose_description_lists_a_kind_takes_it(tutorial_copy)
     assert args["resource_type"] == "book"
 
 
-def test_the_same_kind_word_in_a_free_text_skill_argument_is_refused(tutorial_copy):
-    command = _skill(tutorial_copy, "file_request")
-    with pytest.raises(sc.SkillInputError) as refused:
+def test_the_same_kind_word_in_a_free_text_planning_command_argument_is_refused(tutorial_copy):
+    command = _planning_command(tutorial_copy, "file_request")
+    with pytest.raises(sc.PlanningCommandInputError) as refused:
         sc.check_arguments(command, _raw(command, resource_type="book", query="book"), "show the book Dune")
 
     assert "query='book' is a kind word of this workflow" in str(refused.value)
 
 
-def test_the_none_marker_makes_a_required_skill_argument_missing(tutorial_copy):
-    command = _skill(tutorial_copy, "file_request")
-    with pytest.raises(sc.SkillInputError) as refused:
+def test_the_none_marker_makes_a_required_planning_command_argument_missing(tutorial_copy):
+    command = _planning_command(tutorial_copy, "file_request")
+    with pytest.raises(sc.PlanningCommandInputError) as refused:
         sc.check_arguments(command, _raw(command, resource_type="book", query="None"), "show the book Dune")
 
     assert str(refused.value) == "missing required argument query"
@@ -298,8 +298,8 @@ def test_the_none_marker_makes_a_required_skill_argument_missing(tutorial_copy):
         "I can't run file request yet: your request does not say which query to use. Which query should I use?")
 
 
-def test_the_none_marker_gives_an_optional_skill_argument_its_default(tutorial_copy):
-    command = _skill(tutorial_copy, "file_request")
+def test_the_none_marker_gives_an_optional_planning_command_argument_its_default(tutorial_copy):
+    command = _planning_command(tutorial_copy, "file_request")
 
     args, _ = sc.check_arguments(command, _raw(command, resource_type="book", query="Dune", note="None"),
                                  "show the book Dune")

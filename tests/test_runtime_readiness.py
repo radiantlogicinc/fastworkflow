@@ -47,7 +47,7 @@ NOT_PORTED_FIELDS = {
     "catalog_loaded",
     "catalog_mode",
     "catalog_fingerprint",
-    "catalog_skill_count",
+    "catalog_planning_command_count",
     "task_card_count",
     "selector_surface_task_only",
     "presented_result_max_bytes",

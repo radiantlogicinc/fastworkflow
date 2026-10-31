@@ -129,7 +129,7 @@ the `fw.nlu.intent` spans:
 
 | Observation | Diagnosis | Fix with |
 |---|---|---|
-| `missing_fields` non-empty | Extraction could not find the value in the utterance | Sharpen `Field(description=…, examples=…)` on `Signature.Input`; if the value is an opaque handle the user cannot know, declare its producer — `declare-parameter-producers` (`available_from`) |
+| `missing_fields` non-empty | Extraction could not find the value in the utterance | Sharpen `Field(description=…, examples=…)` on `Signature.Input`; if the value is an opaque handle the user cannot know, declare its producer with `from_` — `declare-parameter-producers` |
 | `db_lookup` event with `outcome: rejected` + `suggestions` | The typed value missed the live key set | `resolve-parameter-values` — check the key set and thresholds; a rejection of a *valid* value usually means the wrong candidate list |
 | `db_lookup` event with `outcome: applied`, `corrected: true`, but wrong result downstream | The fuzzy matcher rewrote the value incorrectly (auto-apply too loose, or label/uid mixup) | `resolve-parameter-values` — `auto_apply_threshold`, and return the value the *field* holds, not the label matched on |
 | `validation_hook.is_valid: false` | The command's own `validate_extracted_parameters` rejected the call — `message` says why; `raised` means the hook itself crashed | `validate-command-parameters` |
@@ -170,10 +170,10 @@ name the feature, and load the companion skill before writing the change:
 | Seed utterances, context layout, `base` inheritance | `design-context-models` |
 | Near-duplicate commands | `detect-duplicate-capabilities` |
 | Measuring whether a routing change helped | `evaluate-intent-routing` |
-| `available_from` producer hints | `declare-parameter-producers` |
+| `from_` producer edges (shown in the runtime as `available_from`) | `declare-parameter-producers` |
 | `db_lookup` value resolution | `resolve-parameter-values` |
 | `validate_extracted_parameters` | `validate-command-parameters` |
-| Skill files (`_skills/<name>.py`): phases, facts, step wording (`fw.skill.phase` failures) | [author-workflow-skills](../author-workflow-skills/SKILL.md) |
+| Skill files (`_commands/<name>.py`): phases, facts, step wording (`fw.skill.phase` failures) | [author-planning-commands](../author-planning-commands/SKILL.md) |
 | Training utterance realism | `supply-training-personas` |
 | Retraining mechanics after any of the above | `train-and-publish-models` |
 | Publishing a regression task and creating a comparison experiment | [create-workflow-benchmarks](../create-workflow-benchmarks/SKILL.md) |

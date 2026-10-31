@@ -22,16 +22,16 @@ from dspy.experimental import Choice, TypeSafe
 
 import fastworkflow
 from fastworkflow import tracing
-from fastworkflow import skill_commands
-from fastworkflow.skill_commands import (
-    SkillCommand, SkillFormatError, SkillInputError, plan_skill_call, refusal_question)
+from fastworkflow import planning_commands
+from fastworkflow.planning_commands import (
+    PlanningCommandCommand, PlanningCommandFormatError, PlanningCommandInputError, typed_planning_call, refusal_question)
 from fastworkflow.split_merge import (
     definite_descriptions, merge_subtasks, request_subjects, subjects_in, unnamed_subjects, with_referent)
 from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
 from fastworkflow.command_directory import (
-    CommandDirectory, _command_kind_from_ast, _handle_command_field_source_errors, check_no_skills_folder,
+    CommandDirectory, _command_kind_from_ast, _handle_command_field_source_errors, check_no_planning_commands_folder,
 )
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_executor import AlreadyInContextError, CommandNotFoundError
@@ -109,7 +109,7 @@ def _held_context(chat_session_obj, command_output, ran_in_clause, ran_in_name):
     """
     active = chat_session_obj.get_active_workflow()
     try:
-        if active is None or skill_commands.planning_command(
+        if active is None or planning_commands.planning_command(
                 active.folderpath, command_output.command_name) is None:
             return ran_in_clause, ran_in_name
         return context_clause_for(active), context_identity(active)[0]
@@ -819,17 +819,17 @@ def _refusal_may_ask_attended(chat_session_obj) -> bool:
     not already been put a refusal question (the reply gets one re-run, no second question).
 
     The callers add their own check that nothing ran yet in the turn (a re-run would repeat its
-    side effects): a skill call's refusal checks the whole turn, a fast-path call its own outputs.
+    side effects): a planning command call's refusal checks the whole turn, a fast-path call its own outputs.
     """
     return (
         getattr(chat_session_obj, "_turn_unattended", True) is False
         and getattr(chat_session_obj, "user_message_queue", True) is None
-        and not getattr(chat_session_obj, "_skill_refusal_answered", True)
+        and not getattr(chat_session_obj, "_planning_command_refusal_answered", True)
     )
 
 
-def _skill_refusal_may_ask(chat_session_obj) -> bool:
-    """Whether a refused skill call may be put to the user, suspending the turn (Topology B).
+def _planning_command_refusal_may_ask(chat_session_obj) -> bool:
+    """Whether a refused planning command call may be put to the user, suspending the turn (Topology B).
 
     Only when ask_user is available to the turn (attended, no queue-based blocking ask), no
     run has happened yet in the turn (a re-run would repeat its side effects), and the turn has
@@ -1200,34 +1200,34 @@ class SplitIntoSubtasks(dspy.Signature):
     subtasks: str = dspy.OutputField(desc="the sub-tasks as a numbered list, one per line")
 
 
-def _read_skill_file(name: str, path: str, workflow_folderpath: str):
-    """The ``SkillFile`` of ``_commands/<name>.py`` (or ``_commands/<Context>/<name>.py``, where
+def _read_planning_command_file(name: str, path: str, workflow_folderpath: str):
+    """The ``PlanningCommandFile`` of ``_commands/<name>.py`` (or ``_commands/<Context>/<name>.py``, where
     *name* is ``"<Context>/<stem>"``).
 
     The file is imported as a command file is (``python_utils.get_module`` under the
     workflow's package, so package-relative imports work: ``from ._helpers import ...`` reads
-    ``_commands/_helpers.py``). Raises SkillFormatError when the file stem is not a Python
+    ``_commands/_helpers.py``). Raises PlanningCommandFormatError when the file stem is not a Python
     identifier or the declaration is malformed, and the import's own error for a file that
     does not import.
     """
     from fastworkflow.utils import python_utils
 
-    CommandDirectory.check_skill_path(name, path)
+    CommandDirectory.check_planning_command_path(name, path)
     module = python_utils.get_module(path, workflow_folderpath)
-    return skill_commands.command_from_module(name, module, path)
+    return planning_commands.command_from_module(name, module, path)
 
 
-def _load_skill_file(name: str, path: str, workflow_folderpath: str):
-    """The ``SkillFile`` of ``_commands/<name>.py`` (``_read_skill_file``), or None when it
-    cannot be read: a broken skill file costs that skill, not the workflow. The error is
-    logged, and ``fastworkflow command preview`` reports the skill as not loaded.
+def _load_planning_command_file(name: str, path: str, workflow_folderpath: str):
+    """The ``PlanningCommandFile`` of ``_commands/<name>.py`` (``_read_planning_command_file``), or None when it
+    cannot be read: a broken planning command file costs that planning command, not the workflow. The error is
+    logged, and ``fastworkflow command preview`` reports the planning command as not loaded.
     """
     try:
-        return _read_skill_file(name, path, workflow_folderpath)
-    except SkillFormatError as error:
-        logger.error(f"skipping skill {name!r}: {error}")
+        return _read_planning_command_file(name, path, workflow_folderpath)
+    except PlanningCommandFormatError as error:
+        logger.error(f"skipping planning command {name!r}: {error}")
     except Exception:  # noqa: BLE001 - workflow code
-        logger.error(f"skipping skill {name!r}: could not import {path}", exc_info=True)
+        logger.error(f"skipping planning command {name!r}: could not import {path}", exc_info=True)
     return None
 
 
@@ -1240,15 +1240,15 @@ def _is_planning_file(path: str) -> bool:
         return False
 
 
-def _skill_files(root: str) -> list[tuple[str, str]]:
+def _planning_command_files(root: str) -> list[tuple[str, str]]:
     """``(name, path)`` of each planning command file of a workflow's ``_commands`` folder, by name.
 
     A planning command is a command file with a top-level ``PlanGenerator`` (as ``CommandDirectory``
     classifies it): a root one is ``_commands/<name>.py``, named by its file stem, and a context
     one is ``_commands/<Context>/<name>.py``, named ``"<Context>/<stem>"`` (the file stem is a
-    Python identifier, snake_case; ``_read_skill_file`` refuses another). A ``.py`` file or subfolder
+    Python identifier, snake_case; ``_read_planning_command_file`` refuses another). A ``.py`` file or subfolder
     whose name starts with ``_`` or ``.`` (such as ``__pycache__`` or a ``_helpers.py`` module the
-    skill files import) is skipped silently at both levels; ``_split.py`` is the workflow's split
+    planning command files import) is skipped silently at both levels; ``_split.py`` is the workflow's split
     settings (``split_settings``). Execution commands and other files are not returned.
     """
     out = []
@@ -1271,44 +1271,44 @@ def _skill_files(root: str) -> list[tuple[str, str]]:
     return out
 
 
-#: Held while a workflow's skills are read, so threads that start together build them once.
-_parsed_skills_lock = threading.RLock()
+#: Held while a workflow's planning commands are read, so threads that start together build them once.
+_parsed_planning_commands_lock = threading.RLock()
 
 
-def _parsed_skills(workflow_folderpath: str) -> tuple[
-        tuple[str, str, tuple[str, ...], "SkillCommand", tuple[str, ...]], ...]:
-    """``(name, description, template steps, command, plain_utterances)`` per skill;
-    see ``load_skills``. Built once per process (``_build_parsed_skills``): a skill file that
-    cannot be read is skipped (``_load_skill_file``), so it is not read again each turn."""
-    with _parsed_skills_lock:
-        return _build_parsed_skills(workflow_folderpath)
+def _parsed_planning_commands(workflow_folderpath: str) -> tuple[
+        tuple[str, str, tuple[str, ...], "PlanningCommandCommand", tuple[str, ...]], ...]:
+    """``(name, description, template steps, command, plain_utterances)`` per planning command;
+    see ``load_planning_commands``. Built once per process (``_build_parsed_planning_commands``): a planning command file that
+    cannot be read is skipped (``_load_planning_command_file``), so it is not read again each turn."""
+    with _parsed_planning_commands_lock:
+        return _build_parsed_planning_commands(workflow_folderpath)
 
 
 @functools.lru_cache(maxsize=None)
-def _build_parsed_skills(workflow_folderpath: str) -> tuple[
-        tuple[str, str, tuple[str, ...], "SkillCommand", tuple[str, ...]], ...]:
-    check_no_skills_folder(workflow_folderpath)
+def _build_parsed_planning_commands(workflow_folderpath: str) -> tuple[
+        tuple[str, str, tuple[str, ...], "PlanningCommandCommand", tuple[str, ...]], ...]:
+    check_no_planning_commands_folder(workflow_folderpath)
     root = os.path.join(workflow_folderpath, "_commands")
     identifiers = identifier_patterns(workflow_folderpath)
-    field_resolution = skill_commands.resolve_field_sources(workflow_folderpath)
-    try:   # read once for every skill's step and phase-source checks (None: each check reads it again)
+    field_resolution = planning_commands.resolve_field_sources(workflow_folderpath)
+    try:   # read once for every planning command's step and phase-source checks (None: each check reads it again)
         signatures = command_signatures(workflow_folderpath)
     except Exception as error:  # noqa: BLE001 - the checks warn and skip, as they did before
-        logger.warning(f"could not read the workflow's command signatures to check its skills: "
+        logger.warning(f"could not read the workflow's command signatures to check its planning commands: "
                        f"{type(error).__name__}: {error}")
         signatures = None
     logged_field_source_commands: set[str] = set()
-    files = []   # (name, SkillFile)
-    for name, path in _skill_files(root):
-        loaded = _load_skill_file(name, path, workflow_folderpath)
+    files = []   # (name, PlanningCommandFile)
+    for name, path in _planning_command_files(root):
+        loaded = _load_planning_command_file(name, path, workflow_folderpath)
         if loaded is not None:
             files.append((name, loaded))
-    skill_names = {name for name, _ in files}
+    planning_command_names = {name for name, _ in files}
     for problem in field_resolution.errors:
         if not problem.command:
             logger.error(problem.format())
         elif (
-            problem.command not in skill_names
+            problem.command not in planning_command_names
             and problem.command not in logged_field_source_commands
         ):
             logged_field_source_commands.add(problem.command)
@@ -1320,7 +1320,7 @@ def _build_parsed_skills(workflow_folderpath: str) -> tuple[
     out = []
     for name, loaded in files:
         command = dataclasses.replace(loaded.command, identifiers=identifiers)
-        if skill_commands.fixed_steps(command):
+        if planning_commands.fixed_steps(command):
             # Its steps are text the planner reads and code runs as they are: not checked
             # against the workflow's commands (a step that names no command is run by the agent).
             out.append((name, loaded.description, loaded.steps, command, loaded.plain_utterances))
@@ -1333,7 +1333,7 @@ def _build_parsed_skills(workflow_folderpath: str) -> tuple[
                 name, field_source_errs, workflow_folderpath=workflow_folderpath
             )
         if step_problems:
-            logger.error(f"skipping skill {name!r}: " + "; ".join(step_problems))
+            logger.error(f"skipping planning command {name!r}: " + "; ".join(step_problems))
             continue
         if command.phase_outputs:
             _warn_phase_sources(command, workflow_folderpath, signatures)
@@ -1341,114 +1341,114 @@ def _build_parsed_skills(workflow_folderpath: str) -> tuple[
     return tuple(out)
 
 
-def _warn_phase_sources(command: SkillCommand, workflow_folderpath: str,
+def _warn_phase_sources(command: PlanningCommandCommand, workflow_folderpath: str,
                         signatures: Optional[dict] = None) -> None:
     """Log a warning for each phase output field whose ``"from"`` names no command field.
 
     Not a load failure: the workflow may add the command's ``Output`` later
-    (``skill_commands.check_phase_sources``). A phase whose field is still missing
+    (``planning_commands.check_phase_sources``). A phase whose field is still missing
     when it runs fails then, naming the field; ``fastworkflow command preview --check``
     fails on it (``phase_source_problems``).
     """
     for warning in phase_source_problems(command, workflow_folderpath, signatures):
-        logger.warning(f"skill {command.name!r}: phase output source not found (loaded anyway): {warning}")
+        logger.warning(f"planning command {command.name!r}: phase output source not found (loaded anyway): {warning}")
 
 
 def command_signatures(workflow_folderpath: str) -> dict[str, Any]:
-    """The ``Signature`` of each command a skill's steps and phase sources may name: the routed
+    """The ``Signature`` of each command a planning command's steps and phase sources may name: the routed
     execution commands (``workflow_signatures``) and the planning commands. A planning command is
-    not in routing; its ``Signature`` comes from ``skill_commands.resolve_field_sources``, the same
-    source ``skill_phases.parameter_classes`` reads a planning command's ``Input`` from (Phase 5)."""
+    not in routing; its ``Signature`` comes from ``planning_commands.resolve_field_sources``, the same
+    source ``planning_phases.parameter_classes`` reads a planning command's ``Input`` from (Phase 5)."""
     from fastworkflow.observation_offloading.facts import workflow_signatures
 
     signatures = dict(workflow_signatures(workflow_folderpath))
-    resolution = skill_commands.resolve_field_sources(workflow_folderpath)
+    resolution = planning_commands.resolve_field_sources(workflow_folderpath)
     for name in resolution.planning_commands:
         if name in resolution.signatures:
             signatures[name] = resolution.signatures[name]
     return signatures
 
 
-def step_command_problems(command: SkillCommand, workflow_folderpath: str,
+def step_command_problems(command: PlanningCommandCommand, workflow_folderpath: str,
                           signatures: Optional[dict] = None) -> list[str]:
-    """``skill_commands.check_step_commands`` of *command* against the workflow's command
+    """``planning_commands.check_step_commands`` of *command* against the workflow's command
     signatures (``command_signatures``, or *signatures* when the caller read them once): a step
     naming a command the workflow lacks, or a parameter its ``Signature.Input`` lacks. A load
-    error (the skill is skipped); empty, with a logged warning, when the signatures cannot be read
+    error (the planning command is skipped); empty, with a logged warning, when the signatures cannot be read
     (``fastworkflow command preview --check`` still checks)."""
     if signatures is None:
         try:
             signatures = command_signatures(workflow_folderpath)
         except Exception as error:  # noqa: BLE001 - checked again by the preview's --check
-            logger.warning(f"skill {command.name!r}: could not read the workflow's command signatures "
+            logger.warning(f"planning command {command.name!r}: could not read the workflow's command signatures "
                            f"to check its steps: {type(error).__name__}: {error}")
             return []
-    return skill_commands.check_step_commands(command, signatures)
+    return planning_commands.check_step_commands(command, signatures)
 
 
-def phase_source_problems(command: SkillCommand, workflow_folderpath: str,
+def phase_source_problems(command: PlanningCommandCommand, workflow_folderpath: str,
                           signatures: Optional[dict] = None) -> list[str]:
-    """``skill_commands.check_phase_sources`` of *command* against the workflow's command
+    """``planning_commands.check_phase_sources`` of *command* against the workflow's command
     signatures (``command_signatures``); empty, with a logged warning, when they cannot be read."""
     if signatures is None:
         try:
             signatures = command_signatures(workflow_folderpath)
-        except Exception as error:  # noqa: BLE001 - the check is advice; the skill still loads
-            logger.warning(f"skill {command.name!r}: could not read the workflow's command signatures "
+        except Exception as error:  # noqa: BLE001 - the check is advice; the planning command still loads
+            logger.warning(f"planning command {command.name!r}: could not read the workflow's command signatures "
                            f"to check its phase outputs: {type(error).__name__}: {error}")
             return []
-    return skill_commands.check_phase_sources(command, signatures)
+    return planning_commands.check_phase_sources(command, signatures)
 
 
-def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
-    """``(name, description, steps)`` for each skill of the workflow (``_commands/<name>.py``
+def load_planning_commands(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+    """``(name, description, steps)`` for each planning command of the workflow (``_commands/<name>.py``
     and ``_commands/<Context>/<name>.py``).
 
-    A skill is defined by the file ``_commands/<name>.py`` at the root or
+    A planning command is defined by the file ``_commands/<name>.py`` at the root or
     ``_commands/<Context>/<name>.py`` in a context subfolder (format:
-    ``fastworkflow.skill_commands``; which files are skills: ``_skill_files``); its name is
+    ``fastworkflow.planning_commands``; which files are planning commands: ``_planning_command_files``); its name is
     the file stem (or ``"<Context>/<stem>"`` in a context) and the ``Signature`` docstring
     its description. A
-    skill's template text is its steps (its ``steps()`` on placeholder inputs; for a skill
-    without parameters or phases, its fixed ``steps()``), and ``load_skill_commands`` holds its
-    parsed form. A skill file that cannot be imported or is malformed is logged as an error and skipped (the
-    other skills still load; ``fastworkflow command preview`` fails on it); a malformed split
-    settings file raises SkillFormatError. ``_commands`` also holds the workflow's
+    planning command's template text is its steps (its ``steps()`` on placeholder inputs; for a planning command
+    without parameters or phases, its fixed ``steps()``), and ``load_planning_command_map`` holds its
+    parsed form. A planning command file that cannot be imported or is malformed is logged as an error and skipped (the
+    other planning commands still load; ``fastworkflow command preview`` fails on it); a malformed split
+    settings file raises PlanningCommandFormatError. ``_commands`` also holds the workflow's
     split settings, ``_split.py`` (``split_settings``), and helper modules named ``_<name>.py``.
     """
-    return tuple((name, description, steps) for name, description, steps, *_ in _parsed_skills(workflow_folderpath))
+    return tuple((name, description, steps) for name, description, steps, *_ in _parsed_planning_commands(workflow_folderpath))
 
 
-def load_skill_commands(workflow_folderpath: str) -> dict[str, SkillCommand]:
-    """The workflow's skills as commands, by name: each skill's parsed form, which a call of it
-    runs (a skill with fixed steps has one with no parameters, ``skill_commands.fixed_steps``)."""
-    return {name: command for name, _, _, command, _ in _parsed_skills(workflow_folderpath)}
+def load_planning_command_map(workflow_folderpath: str) -> dict[str, PlanningCommandCommand]:
+    """The workflow's planning commands as commands, by name: each planning command's parsed form, which a call of it
+    runs (a planning command with fixed steps has one with no parameters, ``planning_commands.fixed_steps``)."""
+    return {name: command for name, _, _, command, _ in _parsed_planning_commands(workflow_folderpath)}
 
 
-def skill_utterances(workflow_folderpath: str) -> dict[str, tuple[str, ...]]:
-    """Each skill's ``Signature.plain_utterances`` (empty when it declares none), by name."""
-    return {name: utterances for name, _, _, _, utterances in _parsed_skills(workflow_folderpath)}
+def planning_command_utterances(workflow_folderpath: str) -> dict[str, tuple[str, ...]]:
+    """Each planning command's ``Signature.plain_utterances`` (empty when it declares none), by name."""
+    return {name: utterances for name, _, _, _, utterances in _parsed_planning_commands(workflow_folderpath)}
 
 
-def warm_skills(workflow_folderpath: str) -> None:
-    """Read the workflow's skills and its commands' utterances once, at startup, so the first
-    request does not pay for them (``load_skills``; ``skill_commands.command_utterances``,
-    which ``plan_skill_call`` reaches through ``command_texts``). The skill cache is keyed by
+def warm_planning_commands(workflow_folderpath: str) -> None:
+    """Read the workflow's planning commands and its commands' utterances once, at startup, so the first
+    request does not pay for them (``load_planning_commands``; ``planning_commands.command_utterances``,
+    which ``typed_planning_call`` reaches through ``command_texts``). The planning command cache is keyed by
     the path string: pass the one the turn path uses, the app workflow's ``folderpath``.
     A workflow without planning commands has nothing to warm. Never raises: a failure is
     logged and the turn path meets it again."""
-    if not _skill_files(os.path.join(workflow_folderpath, "_commands")):
+    if not _planning_command_files(os.path.join(workflow_folderpath, "_commands")):
         return
-    skills = ()
-    for step in (load_skills, skill_commands.command_utterances):
+    loaded = ()
+    for step in (load_planning_commands, planning_commands.command_utterances):
         try:
             result = step(workflow_folderpath)
-            if step is load_skills:
-                skills = result
+            if step is load_planning_commands:
+                loaded = result
         except Exception as error:  # noqa: BLE001 - warm-up must not stop startup
-            logger.warning(f"skill warm-up: {step.__name__} failed for {workflow_folderpath}: "
+            logger.warning(f"planning command warm-up: {step.__name__} failed for {workflow_folderpath}: "
                            f"{type(error).__name__}: {error}")
-    if skills and _jev_lm() is None:
+    if loaded and _jev_lm() is None:
         _warn_missing_jev_key(workflow_folderpath)
 
 
@@ -1485,10 +1485,10 @@ def _split_field_descs(signature, path: str) -> tuple[tuple[str, str], ...]:
         if model is None:
             continue
         if not (inspect.isclass(model) and issubclass(model, BaseModel)):
-            raise SkillFormatError(f"{path}: Signature.{block} must be a pydantic BaseModel")
+            raise PlanningCommandFormatError(f"{path}: Signature.{block} must be a pydantic BaseModel")
         for name, info in model.model_fields.items():
             if name not in allowed:
-                raise SkillFormatError(f"{path}: Signature.{block}.{name} is not a splitter "
+                raise PlanningCommandFormatError(f"{path}: Signature.{block}.{name} is not a splitter "
                                        f"{block.lower()} (one of {', '.join(sorted(allowed))})")
             if info.description is not None:
                 out.append((name, info.description))
@@ -1498,7 +1498,7 @@ def _split_field_descs(signature, path: str) -> tuple[tuple[str, str], ...]:
 def split_settings_from_module(module, path: str) -> SplitSettings:
     """The ``SplitSettings`` a split settings file (already imported) declares.
 
-    Every attribute is optional. Raises SkillFormatError for a malformed one (see ``split_settings``).
+    Every attribute is optional. Raises PlanningCommandFormatError for a malformed one (see ``split_settings``).
     """
     import inspect
 
@@ -1506,18 +1506,18 @@ def split_settings_from_module(module, path: str) -> SplitSettings:
     signature = getattr(module, "Signature", None)
     if signature is not None:
         if not inspect.isclass(signature):
-            raise SkillFormatError(f"{path}: Signature must be a class")
+            raise PlanningCommandFormatError(f"{path}: Signature must be a class")
         instructions = inspect.cleandoc(signature.__doc__ or "") or None
         field_descs = _split_field_descs(signature, path)
     patterns = getattr(module, "identifier_patterns", ())
     if isinstance(patterns, (str, re.Pattern)) or not isinstance(patterns, (list, tuple)):
-        raise SkillFormatError(f"{path}: identifier_patterns must be a list of compiled patterns (re.compile)")
+        raise PlanningCommandFormatError(f"{path}: identifier_patterns must be a list of compiled patterns (re.compile)")
     for pattern in patterns:
         if not isinstance(pattern, re.Pattern):
-            raise SkillFormatError(f"{path}: identifier_patterns holds {pattern!r}; write re.compile({pattern!r})")
+            raise PlanningCommandFormatError(f"{path}: identifier_patterns holds {pattern!r}; write re.compile({pattern!r})")
     hints = getattr(module, "subject_hints", None)
     if hints is not None and not isinstance(hints, str):
-        raise SkillFormatError(f"{path}: subject_hints must be a str")
+        raise PlanningCommandFormatError(f"{path}: subject_hints must be a str")
     return SplitSettings(instructions=instructions, field_descs=field_descs,
                          identifier_patterns=tuple(patterns), subject_hints=hints)
 
@@ -1527,7 +1527,7 @@ def split_settings(workflow_folderpath: str) -> SplitSettings:
     """The workflow's split settings, from its optional ``_commands/_split.py``; the defaults without one.
 
     The file configures the split stage (the splitter, the split merge and the referent step); it
-    is not a skill (its leading ``_`` keeps ``_skill_files`` from loading it as one). It is
+    is not a planning command (its leading ``_`` keeps ``_planning_command_files`` from loading it as one). It is
     written as a command file is, and every attribute is optional:
 
     - ``class Signature``: its docstring replaces ``SplitIntoSubtasks``'s instructions (as
@@ -1540,11 +1540,11 @@ def split_settings(workflow_folderpath: str) -> SplitSettings:
     - ``subject_hints``: a str telling the referent step what the workflow counts as a record
       (``resolve_referents``).
 
-    The file is imported as a skill file is (``python_utils.get_module`` under the workflow's
+    The file is imported as a planning command file is (``python_utils.get_module`` under the workflow's
     package, so package-relative imports work). It is the whole split configuration, so a file
     that cannot be imported (an invalid pattern raises in ``re.compile``) is not skipped, as a
-    skill file would be, but fails the load as a malformed skill file does: the error is logged
-    and SkillFormatError raised naming the file.
+    planning command file would be, but fails the load as a malformed planning command file does: the error is logged
+    and PlanningCommandFormatError raised naming the file.
     """
     from fastworkflow.utils import python_utils
 
@@ -1555,7 +1555,7 @@ def split_settings(workflow_folderpath: str) -> SplitSettings:
         module = python_utils.get_module(path, workflow_folderpath)
     except Exception as exc:  # noqa: BLE001 - reported as the file's error
         logger.error(f"could not import the split settings {path}", exc_info=True)
-        raise SkillFormatError(f"{path}: could not import the split settings: {exc}") from exc
+        raise PlanningCommandFormatError(f"{path}: could not import the split settings: {exc}") from exc
     return split_settings_from_module(module, path)
 
 
@@ -1582,21 +1582,21 @@ def _split_signature(workflow_folderpath: str) -> type[dspy.Signature]:
 
 
 def _job_types_for(workflow_folderpath: str | None) -> str:
-    """One ``- name: description`` line per skill of the workflow; "(none)" without skills."""
-    skills = load_skills(workflow_folderpath) if workflow_folderpath else ()
-    if not skills:
+    """One ``- name: description`` line per planning command of the workflow; "(none)" without planning commands."""
+    planning_commands = load_planning_commands(workflow_folderpath) if workflow_folderpath else ()
+    if not planning_commands:
         return "(none)"
-    return "\n".join(f"- {name}: {description}" for name, description, _ in skills)
+    return "\n".join(f"- {name}: {description}" for name, description, _ in planning_commands)
 
 
-def _skill_scope(name: str) -> str:
-    """The context name of skill ``name`` (``"Library"`` for ``"Library/dune_search"``),
-    or ``""`` for a root skill."""
+def _planning_scope(name: str) -> str:
+    """The context name of planning command ``name`` (``"Library"`` for ``"Library/dune_search"``),
+    or ``""`` for a root planning command."""
     return name.rpartition("/")[0]
 
 
-def skill_scopes(workflow) -> tuple[str, ...]:
-    """The skill scopes on ``workflow``'s lookup path, ending with ``""`` for the root.
+def planning_scopes(workflow) -> tuple[str, ...]:
+    """The planning command scopes on ``workflow``'s lookup path, ending with ``""`` for the root.
 
     Planning commands are matched scope by scope along the lookup path:
     1. The active context.
@@ -1618,7 +1618,7 @@ def skill_scopes(workflow) -> tuple[str, ...]:
         try:
             parent = workflow.get_parent(obj)
         except Exception:  # noqa: BLE001 - never fail scope lookup on parent walk
-            logger.debug(f"skill_scopes parent walk stopped at {obj!r}", exc_info=True)
+            logger.debug(f"planning_scopes parent walk stopped at {obj!r}", exc_info=True)
             break
         if parent is None or id(parent) in visited_objs:
             break
@@ -1630,20 +1630,20 @@ def skill_scopes(workflow) -> tuple[str, ...]:
     return lookup_scopes(folder, names)
 
 
-#: The skill matcher shows at most this many of a skill's ``plain_utterances`` (its first
+#: The planning command matcher shows at most this many of a planning command's ``plain_utterances`` (its first
 #: ones) after its description, to bound the prompt.
 MATCHER_EXAMPLES = 9
 
 
 def _matcher_job_types(workflow_folderpath: str, examples: int = MATCHER_EXAMPLES,
                        scope: str | None = None) -> str:
-    """The skill matcher's job types: one ``- name: description`` line per skill, followed by
-    ``e.g. "...", "..."`` when the skill declares ``plain_utterances`` (at most ``examples``).
-    With ``scope`` given (``""`` for root, or a context name), only that scope's skills are listed."""
-    utterances = skill_utterances(workflow_folderpath)
+    """The planning command matcher's job types: one ``- name: description`` line per planning command, followed by
+    ``e.g. "...", "..."`` when the planning command declares ``plain_utterances`` (at most ``examples``).
+    With ``scope`` given (``""`` for root, or a context name), only that scope's planning commands are listed."""
+    utterances = planning_command_utterances(workflow_folderpath)
     lines = []
-    for name, description, _ in load_skills(workflow_folderpath):
-        if scope is not None and _skill_scope(name) != scope:
+    for name, description, _ in load_planning_commands(workflow_folderpath):
+        if scope is not None and _planning_scope(name) != scope:
             continue
         shown = [" ".join(u.split()) for u in utterances.get(name, ())[:max(0, examples)]]
         shown = [u for u in shown if u]
@@ -1652,9 +1652,9 @@ def _matcher_job_types(workflow_folderpath: str, examples: int = MATCHER_EXAMPLE
     return "\n".join(lines)
 
 
-#: A matched skill's steps are offered to the planner only at or above this Jev
+#: A matched planning command's steps are offered to the planner only at or above this Jev
 #: probability (measured offline: at 0.5, 96.6% of sub-tasks get a template, 1.1% a wrong one).
-SKILL_MATCH_THRESHOLD = 0.5
+PLANNING_COMMAND_MATCH_THRESHOLD = 0.5
 
 #: The planner's instructions (the planner signatures use them as their docstring unchanged).
 PLANNER_INSTRUCTIONS = """
@@ -1692,7 +1692,7 @@ def typed_planner_commands_text(current_workflow) -> str:
     The section headers and the order of the commands are the planner listing's (so every command
     it names is named here, once per section), and each block's description and parameters are
     those of the context the section is for: a command listed in several contexts keeps what it
-    does in each. A planning command's parameters are its skill's typed fields.
+    does in each. A planning command's parameters are its own typed fields.
     """
     full = planner_commands_text(current_workflow)
     folderpath = current_workflow.folderpath
@@ -1714,17 +1714,17 @@ def typed_planner_commands_text(current_workflow) -> str:
             params = [str(i.get("name")) for i in cmd.get("inputs", []) or [] if i.get("name")]
             by_context.setdefault((context, name), (doc, params))
             by_name.setdefault(name, (doc, params))
-    for skill_name, skill in load_skill_commands(folderpath).items():
-        name = skill_name.rpartition("/")[2]
-        params = [p.name for p in skill.params]
+    for planning_command_name, planning_command in load_planning_command_map(folderpath).items():
+        name = planning_command_name.rpartition("/")[2]
+        params = [p.name for p in planning_command.params]
         for key, (doc, _) in list(by_context.items()):
             if key[1] == name:
-                by_context[key] = (doc or skill.description, params)
+                by_context[key] = (doc or planning_command.description, params)
         if name in by_name:
             doc, _ = by_name[name]
-            by_name[name] = (doc or skill.description, params)
+            by_name[name] = (doc or planning_command.description, params)
         else:
-            by_name[name] = (skill.description, params)
+            by_name[name] = (planning_command.description, params)
     out: list[str] = []
     context = active
     for line in full.split("\n"):
@@ -1762,7 +1762,7 @@ def _warn_missing_jev_key(workflow_folderpath: str) -> None:
     planning commands (``_commands``) and ``JEV_API_KEY`` is not set: the agent chooses and adapts
     them as it plans, and the ``verify`` checks of the fields it names are inactive.
     """
-    fields = skill_commands.verify_field_names(workflow_folderpath)
+    fields = planning_commands.verify_field_names(workflow_folderpath)
     checks = f" and the verify checks of {', '.join(fields)}" if fields else ""
     logger.info(
         f"{workflow_folderpath}: planning commands are chosen and adapted by the agent as it plans; "
@@ -1776,28 +1776,28 @@ def _choice_value_and_probability(choice) -> tuple[str, float]:
 
 
 @functools.lru_cache(maxsize=None)
-def _skill_matcher(workflow_folderpath: str):
-    """``{scope: (predictor, jev_lm)}`` choosing a sub-task's skill per scope (``""`` for root),
-    or None without skills or a JEV_API_KEY."""
-    skills = load_skills(workflow_folderpath)
-    if not skills:
+def _planning_command_matcher(workflow_folderpath: str):
+    """``{scope: (predictor, jev_lm)}`` choosing a sub-task's planning command per scope (``""`` for root),
+    or None without planning commands or a JEV_API_KEY."""
+    planning_commands = load_planning_commands(workflow_folderpath)
+    if not planning_commands:
         return None
     jev_lm = _jev_lm()
     if jev_lm is None:
         _warn_missing_jev_key(workflow_folderpath)
         return None
-    utterances = skill_utterances(workflow_folderpath)
+    utterances = planning_command_utterances(workflow_folderpath)
     by_scope: dict[str, list[tuple[str, str]]] = {}
-    for name, description, _ in skills:
-        by_scope.setdefault(_skill_scope(name), []).append((name, description))
+    for name, description, _ in planning_commands:
+        by_scope.setdefault(_planning_scope(name), []).append((name, description))
     matchers: dict[str, tuple] = {}
-    for scope, scope_skills in by_scope.items():
-        options = tuple(scope_skills) + (("none", "None of the job types fits this sub-task."),)
+    for scope, scope_planning_commands in by_scope.items():
+        options = tuple(scope_planning_commands) + (("none", "None of the job types fits this sub-task."),)
         listing = "the available job types, one per line as '- name: description'"
-        if any(utterances.get(name) for name, _ in scope_skills):
+        if any(utterances.get(name) for name, _ in scope_planning_commands):
             listing += ", some followed by example requests for that job (e.g. ...)"
 
-        class MatchSkill(dspy.Signature):
+        class MatchPlanningCommand(dspy.Signature):
             """Decide which job type a sub-task asks for."""
 
             subtask: str = dspy.InputField(desc="one sub-task from a user request")
@@ -1805,28 +1805,28 @@ def _skill_matcher(workflow_folderpath: str):
             job: Choice[options] = dspy.OutputField(
                 desc="Which job type does this sub-task ask for? 'none' if none of them fits.")
 
-        matchers[scope] = (dspy.Predict(MatchSkill), jev_lm)
+        matchers[scope] = (dspy.Predict(MatchPlanningCommand), jev_lm)
     return matchers
 
 
-def match_skill(text: str, workflow_folderpath: str,
+def match_planning_command(text: str, workflow_folderpath: str,
                 scopes: tuple[str, ...] = ("",)) -> tuple[str, tuple[str, ...]] | None:
-    """``(name, steps)`` of the skill ``text`` asks for along ``scopes`` (``""`` for root),
+    """``(name, steps)`` of the planning command ``text`` asks for along ``scopes`` (``""`` for root),
     when Jev is confident; None otherwise.
 
     Runs once for each scope on ``scopes`` that has planning commands, offering only that
-    scope's skills plus ``"none"``; the first confident match (>= ``SKILL_MATCH_THRESHOLD``)
+    scope's planning commands plus ``"none"``; the first confident match (>= ``PLANNING_COMMAND_MATCH_THRESHOLD``)
     wins and later scopes are not asked. Never raises: a failed match only means the
     planner gets no template.
     """
     try:
-        matcher = _skill_matcher(workflow_folderpath)
+        matcher = _planning_command_matcher(workflow_folderpath)
         if matcher is None:
             return None
-        skills = load_skills(workflow_folderpath)
+        planning_commands = load_planning_commands(workflow_folderpath)
         by_scope: dict[str, dict[str, tuple[str, ...]]] = {}
-        for name, _, steps in skills:
-            by_scope.setdefault(_skill_scope(name), {})[name] = steps
+        for name, _, steps in planning_commands:
+            by_scope.setdefault(_planning_scope(name), {})[name] = steps
         seen: set[str] = set()
         for scope in scopes:
             if scope in seen:
@@ -1842,12 +1842,12 @@ def match_skill(text: str, workflow_folderpath: str,
                 choice = predictor(subtask=text, job_types=job_types).job
             value, probability = _choice_value_and_probability(choice)
             scope_label = scope or "root"
-            logger.info(f"skill match in scope {scope_label!r} for {text!r}: {value} (confidence {probability:.2f})")
-            if value in scope_steps and probability >= SKILL_MATCH_THRESHOLD:
+            logger.info(f"planning command match in scope {scope_label!r} for {text!r}: {value} (confidence {probability:.2f})")
+            if value in scope_steps and probability >= PLANNING_COMMAND_MATCH_THRESHOLD:
                 return value, scope_steps[value]
         return None
     except Exception:  # noqa: BLE001 - a template is an optimisation; never fail the turn
-        logger.warning("could not match the sub-task to a skill", exc_info=True)
+        logger.warning("could not match the sub-task to a planning command", exc_info=True)
         return None
 
 
@@ -1857,25 +1857,25 @@ def _template_text(steps: tuple[str, ...]) -> str:
             "Adapt this to the request: drop steps it does not need and add steps it asks for.")
 
 
-def planner_skill_for(text: str, workflow_folderpath: str,
-                      scopes: tuple[str, ...] = ("",)) -> tuple[str, SkillCommand | None]:
-    """``(template, command)`` for the skill ``text`` asks for along ``scopes`` (``""`` for root).
+def planner_planning_command_for(text: str, workflow_folderpath: str,
+                      scopes: tuple[str, ...] = ("",)) -> tuple[str, PlanningCommandCommand | None]:
+    """``(template, command)`` for the planning command ``text`` asks for along ``scopes`` (``""`` for root).
 
-    ``template`` is ``plan_template_for``'s text ("" when no skill matches); ``command`` is
-    the matched skill's parsed form (None when no skill matches). A matched skill's call runs
+    ``template`` is ``plan_template_for``'s text ("" when no planning command matches); ``command`` is
+    the matched planning command's parsed form (None when no planning command matches). A matched planning command's call runs
     through the phase runner, whatever its shape.
     """
-    matched = match_skill(text, workflow_folderpath, scopes=scopes)
+    matched = match_planning_command(text, workflow_folderpath, scopes=scopes)
     if matched is None:
         return "", None
     name, steps = matched
-    return _template_text(steps), load_skill_commands(workflow_folderpath).get(name)
+    return _template_text(steps), load_planning_command_map(workflow_folderpath).get(name)
 
 
 def plan_template_for(text: str, workflow_folderpath: str,
                       scopes: tuple[str, ...] = ("",)) -> str:
-    """The matched skill's steps as a planner template for ``text``; "" when no skill matches."""
-    return planner_skill_for(text, workflow_folderpath, scopes=scopes)[0]
+    """The matched planning command's steps as a planner template for ``text``; "" when no planning command matches."""
+    return planner_planning_command_for(text, workflow_folderpath, scopes=scopes)[0]
 
 
 #: A reply's non-answer intent applies only at or above this Jev probability.
@@ -1952,7 +1952,7 @@ def split_into_subtasks(user_query: str, planner_lm=None,
     """The request as independent sub-tasks, in order; ``[user_query]`` when it is not split.
 
     One call on the planner LM, with no command catalog: the split is about the
-    request, not about how to carry it out. It is shown the workflow's skills
+    request, not about how to carry it out. It is shown the workflow's planning commands
     (``_commands``), as the kinds of job it may contain.
     Any failure, an empty answer, or more than MAX_SUBTASKS sub-tasks leaves the
     request whole. A reply cut off at ``split_max_tokens()`` is not an answer, even
@@ -2111,7 +2111,7 @@ def build_query_with_next_steps(user_query: str,
     planner_user_query: str | None = None,
     plan_template: str | None = None,
     done_only: bool = False,
-    skill_command: SkillCommand | None = None) -> str:
+    planning_command: PlanningCommandCommand | None = None) -> str:
     """
     Generate a todo list.
     Return a string that combine the user query and todo list
@@ -2128,19 +2128,19 @@ def build_query_with_next_steps(user_query: str,
             turns are supplied via ``previous_turn_summaries``, pass the raw user
             message here so ``user_query`` (often a refined string that already
             embeds recent summaries) is not duplicated in the planner prompt.
-        plan_template: Optional skill steps for the planner only, appended to the
+        plan_template: Optional planning command steps for the planner only, appended to the
             request in the planner prompt (not in the returned string). Used on
             the turn's initial plan, not on a replan.
         done_only: With a trajectory, return only the "what's done" summary.
-        skill_command: The matched skill's parsed form. On the turn's initial plan the
-            planner then fills the skill's typed parameters and code expands its steps
-            (``skill_commands.plan_skill_call``; span ``plan_source`` "skill_call"; a skill
+        planning_command: The matched planning command's parsed form. On the turn's initial plan the
+            planner then fills the planning command's typed parameters and code expands its steps
+            (``planning_commands.typed_planning_call``; span ``plan_source`` "skill_call"; a planning command
             without parameters makes no planner call); Jev, when configured, checks the
-            skill's ``verify`` parameters against the request. The call's phases are then
-            run by the execution context (``_phased_skill_call``). Any failure falls back to
+            planning command's ``verify`` parameters against the request. The call's phases are then
+            run by the execution context (``_phased_planning_command_call``). Any failure falls back to
             the text planner with ``plan_template``, except a refusal of the arguments
-            (SkillInputError) on a turn that may ask (``_skill_refusal_may_ask``): its question
-            is left on ``chat_session_obj._skill_refusal``, no plan is made, and the execution
+            (PlanningCommandInputError) on a turn that may ask (``_planning_command_refusal_may_ask``): its question
+            is left on ``chat_session_obj._planning_command_refusal``, no plan is made, and the execution
             context suspends the turn on it. Ignored on a replan.
     """
     current_workflow = chat_session_obj.get_active_workflow()
@@ -2221,41 +2221,41 @@ def build_query_with_next_steps(user_query: str,
 
     plan_text = ""
     plan_source = None
-    skill_args = None
-    skill_notes = None
-    skill_fallback = None
+    planning_command_args = None
+    planning_command_notes = None
+    planning_command_fallback = None
     prediction = None
-    # The question to put to the user when the skill call is refused and the turn may ask (see
-    # _skill_refusal_may_ask); None when the text planner takes over as before.
+    # The question to put to the user when the planning command call is refused and the turn may ask (see
+    # _planning_command_refusal_may_ask); None when the text planner takes over as before.
     refusal_ask = None
     if initial_plan:
-        # A phased skill call (skill_phases): the runner reads it after this plan.
-        chat_session_obj._phased_skill_call = None
-        # A refused skill call the turn asks the user about (set below; read by the execution context).
-        chat_session_obj._skill_refusal = None
+        # A phased planning command call (planning_phases): the runner reads it after this plan.
+        chat_session_obj._phased_planning_command_call = None
+        # A refused planning command call the turn asks the user about (set below; read by the execution context).
+        chat_session_obj._planning_command_refusal = None
     try:
         with dspy.context(lm=planner_lm, adapter=agent_adapter):
-            if skill_command is not None and initial_plan:
+            if planning_command is not None and initial_plan:
                 try:
                     # The typed planning call gets the trimmed listing (design 3.4); the text planner keeps the full one.
-                    call = plan_skill_call(skill_command, request_text, typed_planner_commands_text(current_workflow),
+                    call = typed_planning_call(planning_command, request_text, typed_planner_commands_text(current_workflow),
                                            check_lm=_jev_lm(), workflow=current_workflow)
-                    prediction, plan_text, skill_args = call.prediction, call.plan, call.args
-                    skill_notes = list(call.notes) or None
+                    prediction, plan_text, planning_command_args = call.prediction, call.plan, call.args
+                    planning_command_notes = list(call.notes) or None
                     plan_source = "skill_call"
-                    chat_session_obj._phased_skill_call = (skill_command, call)
-                    logger.info(f"skill call {skill_command.name}{call.args}"
+                    chat_session_obj._phased_planning_command_call = (planning_command, call)
+                    logger.info(f"planning command call {planning_command.name}{call.args}"
                                 + (f" ({'; '.join(call.notes)})" if call.notes else ""))
-                except SkillInputError as exc:  # asked of the user, or the text planner takes over
-                    skill_fallback = f"{type(exc).__name__}: {exc}"[:500]
-                    if _skill_refusal_may_ask(chat_session_obj):
-                        refusal_ask = refusal_question(skill_command, exc)
-                        logger.info(f"skill call {skill_command.name} refused, asking the user: {refusal_ask!r}")
+                except PlanningCommandInputError as exc:  # asked of the user, or the text planner takes over
+                    planning_command_fallback = f"{type(exc).__name__}: {exc}"[:500]
+                    if _planning_command_refusal_may_ask(chat_session_obj):
+                        refusal_ask = refusal_question(planning_command, exc)
+                        logger.info(f"planning command call {planning_command.name} refused, asking the user: {refusal_ask!r}")
                     else:
-                        logger.info(f"skill call {skill_command.name} failed, planning from its template: {skill_fallback}")
+                        logger.info(f"planning command call {planning_command.name} failed, planning from its template: {planning_command_fallback}")
                 except Exception as exc:  # noqa: BLE001 - the text planner with the template takes over
-                    skill_fallback = f"{type(exc).__name__}: {exc}"[:500]
-                    logger.info(f"skill call {skill_command.name} failed, planning from its template: {skill_fallback}")
+                    planning_command_fallback = f"{type(exc).__name__}: {exc}"[:500]
+                    logger.info(f"planning command call {planning_command.name} failed, planning from its template: {planning_command_fallback}")
             if plan_source is None and refusal_ask is None:
                 prediction = plan_with()
                 plan_text = prediction.next_steps or ""
@@ -2266,7 +2266,7 @@ def build_query_with_next_steps(user_query: str,
     if refusal_ask is not None:
         # No plan for the refused call: the turn waits on the user, and the execution context
         # reads the question and suspends (_call_agent_for_query).
-        chat_session_obj._skill_refusal = refusal_ask
+        chat_session_obj._planning_command_refusal = refusal_ask
         plan_source = "none"
     tracing.end_span(
         chat_session_obj,
@@ -2274,10 +2274,10 @@ def build_query_with_next_steps(user_query: str,
         attributes={
             "plan": plan_text,
             "plan_source": plan_source,
-            "skill": skill_command.name if skill_command is not None and initial_plan else None,
-            "skill_args": skill_args,
-            "skill_notes": skill_notes,
-            "skill_fallback": skill_fallback,
+            "skill": planning_command.name if planning_command is not None and initial_plan else None,
+            "skill_args": planning_command_args,
+            "skill_notes": planning_command_notes,
+            "skill_fallback": planning_command_fallback,
             "skill_refusal_asked": True if refusal_ask is not None else None,
         },
     )

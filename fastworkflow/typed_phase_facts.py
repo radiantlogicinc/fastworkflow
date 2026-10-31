@@ -21,7 +21,7 @@ from fastworkflow.observation_offloading.facts import (
     _scalar_of_pages,
     fact_sources,
 )
-from fastworkflow.skill_phases import FULL_LIST_PHRASES, is_from_source
+from fastworkflow.planning_phases import FULL_LIST_PHRASES, is_from_source
 
 
 @dataclass(frozen=True)

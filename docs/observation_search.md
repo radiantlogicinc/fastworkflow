@@ -176,7 +176,7 @@ names a command or field `signatures` lacks (`check_fact_sources`,
 against the record's context, and otherwise raises `AmbiguousFactSourceError`.
 Facts carry values, never `O<n>` aliases, which restart with each executor run.
 
-A phased skill (`docs/skill_phases.md`) fills each phase's output this way after
+A phased skill (`docs/planning_command_phases.md`) fills each phase's output this way after
 the phase's run, from that phase's own runs on the record it ended on.
 
 ## Answer-time rehydration

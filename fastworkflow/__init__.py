@@ -81,12 +81,12 @@ class CommandTraceEvent:
     turn_key: str | None = None
 
 class Refused(ValueError):
-    """The one way a command or skill hook declines: ``raise fastworkflow.Refused(message)``.
+    """The one way a command or planning command hook declines: ``raise fastworkflow.Refused(message)``.
 
     A decision, not a crash. Raised from a command's ``ResponseGenerator.__call__``, the
     command answers ``CommandOutput(CommandResponse(response=message, success=False))``, as
     if it had returned that. Raised from a ``validate_extracted_parameters`` hook (a
-    command's or a skill's), it is the hook's ``(False, message)``. Returning those forms
+    command's or a planning command's), it is the hook's ``(False, message)``. Returning those forms
     still works exactly as before. A ``ValueError``, so code that caught ``ValueError``
     around a command's helpers keeps catching it.
     """
@@ -431,7 +431,7 @@ _LAZY_ATTRS = {
         "fastworkflow.workflow_execution_context",
         "CommandCancelledError",
     ),
-    "from_": ("fastworkflow.skill_phases", "from_"),
+    "from_": ("fastworkflow.planning_phases", "from_"),
 }
 
 __all__ = (

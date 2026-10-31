@@ -24,7 +24,7 @@ those tasks: connect an application runner using the experiment and task IDs. Us
 [optimize-workflow-with-feedback](../optimize-workflow-with-feedback/SKILL.md) to verify changes
 against recorded outcomes. Human annotations do not automatically update the agent or train models.
 When a family of requests needs the same several commands in a known order, write a skill
-(`_skills/<name>.py`) with [author-workflow-skills](../author-workflow-skills/SKILL.md).
+(`_commands/<name>.py`) with [author-planning-commands](../author-planning-commands/SKILL.md).
 
 ## Mission
 
@@ -117,12 +117,12 @@ writing the first command rather than after the first bad demo:
 
 | Read | For |
 |---|---|
-| [declare-parameter-producers](../declare-parameter-producers/SKILL.md) | `available_from` hints. Any parameter that is an id, uid or code the user cannot invent needs one, or the planner cannot work out what to call first. This is the single highest-value thing in this step. |
+| [declare-parameter-producers](../declare-parameter-producers/SKILL.md) | `from_` producer edges on `Input` fields. Any parameter that is an id, uid or code the user cannot invent needs one, or the planner cannot work out what to call first. This is the single highest-value thing in this step. |
 | [validate-command-parameters](../validate-command-parameters/SKILL.md) | The `validate_extracted_parameters` hook — cross-field rules, context preconditions, and normalising a value in place so a near-miss does not cost a round trip. |
 | [resolve-parameter-values](../resolve-parameter-values/SKILL.md) | `db_lookup`, for any parameter naming a real-world entity the user types by hand. Turns a spelling mismatch into a correction or a "did you mean", instead of a not-found. |
 | [design-context-models](../design-context-models/SKILL.md) | How to group commands into contexts. Read it once the tree is more than a handful of commands, or as soon as intent routing starts confusing two of them. |
 
-The first three form one pipeline per parameter: `available_from` says where a **missing** value
+The first three form one pipeline per parameter: the `from_` edge says where a **missing** value
 comes from, `db_lookup` fixes one that arrived **nearly right**, and
 `validate_extracted_parameters` rejects or normalises one that arrived **unusable**. A parameter
 worth taking is usually worth declaring in at least one of the three.

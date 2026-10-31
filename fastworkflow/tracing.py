@@ -257,13 +257,13 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 #
 # v14: fw.planner.plan / fw.planner.replan v4 -- `plan_source` may be
 # "skill_call", and the spans gain `skill`, `skill_args` and `skill_fallback`
-# (skills as parameterized commands).
+# (planning commands as parameterized commands).
 #
 # v15: fw.nlu.param_extraction v4 -- `unwrapped_quoted_values`,
 # `defaulted_sentinel_values` and `out_of_range_values` (fix-7t0q).
 #
 # v16: fw.skill.phase added (fix-hia1.2) -- one span per phase run of a phased
-# skill call (`fastworkflow.skill_phases`). No existing span changed.
+# planning command call (`fastworkflow.planning_phases`). No existing span changed.
 #
 # v17: fw.skill.phase v2 (fix-hia1.7, fix-hia1.3) -- `answer_only` (a phase whose
 # steps name no command, answered by one model call with no tools), and for one
@@ -289,7 +289,7 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # code wrote its answer from its steps (every step verbatim or a guard), no model call.
 #
 # v23: fw.planner.plan / fw.planner.replan v5 (fix-hia1.34) -- `skill_notes`: what
-# the argument guards and verify verdicts changed in a skill call's arguments.
+# the argument guards and verify verdicts changed in a planning command call's arguments.
 #
 # v24: `frame_alias` on every span (design 3.5, Phase 4 of fix-3rsq, fix-3rsq.4.6): the
 # alias of the planning-command frame the span was opened under, "" for the turn frame.
@@ -304,7 +304,7 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # None when no check ran). All three are logged on every planner span; a span recorded before
 # this carries none of them.
 #
-# v26: fw.planner.plan / fw.planner.replan v7 -- `skill_refusal_asked`: a refused skill call's
+# v26: fw.planner.plan / fw.planner.replan v7 -- `skill_refusal_asked`: a refused planning command call's
 # question was put to the user, and the turn suspends on it (see the contract's v7 note). A span
 # recorded before this carries no such key, which reads as "not asked".
 #
@@ -362,10 +362,10 @@ SPAN_AGENT_STEP = "fw.agent.step"
 
 AGENT_LOOP_SPAN_NAMES = frozenset({SPAN_AGENT_EXECUTE, SPAN_AGENT_STEP})
 
-# One phase of a phased skill call (``fastworkflow.skill_phases``): a bounded
+# One phase of a phased planning command call (``fastworkflow.planning_phases``): a bounded
 # sub-plan run by a fresh executor. Its fw.agent.execute span is its child, so a
 # grader reads each phase's steps, budget and filled facts in one place.
-SPAN_SKILL_PHASE = "fw.skill.phase"
+SPAN_PLANNING_COMMAND_PHASE = "fw.skill.phase"
 
 # Originally reserved-for-v2 so the schema needed no migration when the deeper
 # emitters landed. They have (D3 amendment, 2026-08-26): fw.nlu.* emit inside
@@ -543,7 +543,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
             }
         ),
     ),
-    # One phase run of a phased skill call. Opened with the phase (`skill`,
+    # One phase run of a phased planning command call. Opened with the phase (`skill`,
     # `phase`, `phase_index` of `phase_count`, its executor `step_budget`, the
     # `first_step` of its run, `resumed` after an ask_user); closed with `steps`
     # (the phase's numbered plan), `steps_used`, whether it reached its budget
@@ -568,11 +568,11 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # could be read).
     # Absent on an answer-only phase and on a resumed run.
     # v5 (fix-hia1.30): `answer_by_code` on an answer-only phase only: true when code
-    # wrote its answer from its steps with no model call (`skill_phases.answer_by_code`).
+    # wrote its answer from its steps with no model call (`planning_phases.answer_by_code`).
     # v6 (fix-3rsq.4.10): `uses_result`, written on an answer-only phase of a command with
     # a result method when that phase is skipped (no executor, no model call). It was
     # written from Phase 3 without being declared here.
-    SPAN_SKILL_PHASE: SpanContract(
+    SPAN_PLANNING_COMMAND_PHASE: SpanContract(
         version=6,
         attributes=frozenset(
             {
@@ -620,7 +620,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # v6: `folded_command` (fix-5jss) is the command text the command tool built
     # from parameters the model passed as tool arguments beside `command`;
     # `tool_args` is still what the model sent.
-    # v7 (fix-6llp): `by_code` (true) on a step code ran (skill_phases.CodeSteps),
+    # v7 (fix-6llp): `by_code` (true) on a step code ran (planning_phases.CodeSteps),
     # not the model; `thought` then says "run by code".
     SPAN_AGENT_STEP: SpanContract(
         version=7,
@@ -655,18 +655,18 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # `plan_source` "text" or "none"; older records may still hold "structured"
     # / "text_fallback" and a `subjects` list.
     # v3: `subjects` is no longer written (see SPAN_CONTRACT_VERSION v12).
-    # v4: skills as parameterized commands. `plan_source` may be "skill_call" (the
-    # planner filled a skill's typed parameters and code expanded its steps);
-    # `skill` names the matched skill with params or phases (None otherwise, and on a replan),
-    # `skill_args` holds the arguments of a skill call, `skill_fallback` why a
-    # skill call fell back to the text planner.
-    # v5: `skill_notes`, the notes of a skill call (``SkillCallPlan.notes``: an argument
+    # v4: planning commands as parameterized commands. `plan_source` may be "skill_call" (the
+    # planner filled a planning command's typed parameters and code expanded its steps);
+    # `skill` names the matched planning command with params or phases (None otherwise, and on a replan),
+    # `skill_args` holds the arguments of a planning command call, `skill_fallback` why a
+    # planning command call fell back to the text planner.
+    # v5: `skill_notes`, the notes of a planning command call (``PlanningCommandCallPlan.notes``: an argument
     # a guard or a sure verify verdict replaced, dropped extra steps); None otherwise.
     # v6: `experiment_arm`, `fast_path` and `recipe_choice` (SPAN_CONTRACT_VERSION v25; Phase 6 arm
     # selector). `plan_source` may be "recipe_choice" (arm B: the recipe covers the request, so the
     # plan is its one call).
     # v7: `skill_refusal_asked` (SPAN_CONTRACT_VERSION v26): True when the planner's refusal of a
-    # skill call's arguments was put to the user, so the turn suspends on the question instead of
+    # planning command call's arguments was put to the user, so the turn suspends on the question instead of
     # falling back to the text planner; `plan_source` is then "none" and `skill_fallback` still
     # says why. None otherwise.
     # v8: the v6 keys `experiment_arm`, `fast_path` and `recipe_choice` are withdrawn: the Phase 6

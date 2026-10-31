@@ -15,7 +15,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import skill_commands, skill_phases, skill_preview, tracing, workflow_agent
+from fastworkflow import planning_commands, planning_phases, command_preview, tracing, workflow_agent
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     ParameterExtraction,
 )
@@ -45,15 +45,15 @@ from fastworkflow.planning import (
     run,
     when,
 )
-from fastworkflow.skill import Step, command_inputs_for_steps, picks_noted, planned
-from fastworkflow.skill_commands import SkillCallPlan, SkillFormatError, call_phases
-from fastworkflow.skill_phases import Placeholder, step_paging
+from fastworkflow.planning import Step, command_inputs_for_steps, picks_noted, planned
+from fastworkflow.planning_commands import PlanningCommandCallPlan, PlanningCommandFormatError, call_phases
+from fastworkflow.planning_phases import Placeholder, step_paging
 from fastworkflow.turn import TurnStatus
 from fastworkflow.utils import python_utils
 from fastworkflow.utils.react import fastWorkflowReAct
 from fastworkflow.workflow_agent import core_command_names, initialize_workflow_tool_agent
-from tests.test_skill_code_steps import Model
-from tests.test_skill_phases import RecordingSink
+from tests.test_planning_command_code_steps import Model
+from tests.test_planning_command_phases import RecordingSink
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures
     _make_agent_ctx,
     _set_agents,
@@ -95,7 +95,7 @@ _COPIED_CONTEXT_CLASSES = (
 
 def _library_workflow(
     tmp_path,
-    extra_skills: dict[str, str] | None = None,
+    extra_planning_commands: dict[str, str] | None = None,
     extra_commands: tuple[str, ...] = (),
     command_texts: dict[str, str] | None = None,
 ) -> str:
@@ -126,12 +126,12 @@ def _library_workflow(
         else:
             shutil.copy2(src, dst)
 
-    skills_dir = folder / "_commands"
-    skills_dir.mkdir(parents=True, exist_ok=True)
-    for name, text in (extra_skills or {}).items():
-        skill_path = skills_dir / f"{name}.py"
-        skill_path.parent.mkdir(parents=True, exist_ok=True)
-        skill_path.write_text(text, encoding="utf-8")
+    planning_commands_dir = folder / "_commands"
+    planning_commands_dir.mkdir(parents=True, exist_ok=True)
+    for name, text in (extra_planning_commands or {}).items():
+        planning_command_path = planning_commands_dir / f"{name}.py"
+        planning_command_path.parent.mkdir(parents=True, exist_ok=True)
+        planning_command_path.write_text(text, encoding="utf-8")
 
     return str(folder)
 
@@ -275,7 +275,7 @@ class PlanGenerator:
             run("list_branches", branch="Central")
 
     bad_path = os.path.join(folder, "_commands", "Library", "bad_command.py")
-    loaded_bad = workflow_agent._read_skill_file("Library/bad_command", bad_path, folder)
+    loaded_bad = workflow_agent._read_planning_command_file("Library/bad_command", bad_path, folder)
     problems = [
         p.replace(folder + os.sep, "")
         for p in workflow_agent.step_command_problems(loaded_bad.command, folder)
@@ -287,7 +287,7 @@ class PlanGenerator:
 
     # Quoted values holding "a=b", "x, y=z", or "see (a=b)" do not report spurious keys.
     note_path = os.path.join(folder, "_commands", "Record", "quoted_note.py")
-    loaded_note = workflow_agent._read_skill_file("Record/quoted_note", note_path, folder)
+    loaded_note = workflow_agent._read_planning_command_file("Record/quoted_note", note_path, folder)
     assert workflow_agent.step_command_problems(loaded_note.command, folder) == []
 
 
@@ -369,11 +369,11 @@ class PlanGenerator:
     sigs = workflow_signatures(folder)
 
     bad_path = os.path.join(folder, "_commands", "Record", "bad_note.py")
-    loaded_bad = workflow_agent._read_skill_file("Record/bad_note", bad_path, folder)
+    loaded_bad = workflow_agent._read_planning_command_file("Record/bad_note", bad_path, folder)
     assert workflow_agent.step_command_problems(loaded_bad.command, folder) == []
     bad_note_warnings = [
         w.replace(folder + os.sep, "")
-        for w in skill_commands.check_note_condition_steps(loaded_bad.command, sigs)
+        for w in planning_commands.check_note_condition_steps(loaded_bad.command, sigs)
     ]
     assert bad_note_warnings == [
         "_commands/Record/bad_note.py: phase 'note', step 'add_note text=<text> (only when the member asked)': "
@@ -382,11 +382,11 @@ class PlanGenerator:
     ]
 
     hand_path = os.path.join(folder, "_commands", "Record", "bad_hand_note.py")
-    loaded_hand = workflow_agent._read_skill_file("Record/bad_hand_note", hand_path, folder)
+    loaded_hand = workflow_agent._read_planning_command_file("Record/bad_hand_note", hand_path, folder)
     assert workflow_agent.step_command_problems(loaded_hand.command, folder) == []
     hand_warnings = [
         w.replace(folder + os.sep, "")
-        for w in skill_commands.check_note_condition_steps(loaded_hand.command, sigs)
+        for w in planning_commands.check_note_condition_steps(loaded_hand.command, sigs)
     ]
     assert hand_warnings == [
         "_commands/Record/bad_hand_note.py: phase 'check', step 'show_notes (if the member has any)': "
@@ -394,28 +394,28 @@ class PlanGenerator:
         'Decide it in code with if, or write when("the member has any", "show_notes") for the agent to decide'
     ]
 
-    loaded_good = workflow_agent._read_skill_file(
+    loaded_good = workflow_agent._read_planning_command_file(
         "Library/good_steps",
         os.path.join(folder, "_commands", "Library", "good_steps.py"),
         folder,
     )
     assert workflow_agent.step_command_problems(loaded_good.command, folder) == []
     assert any("only when find.book_uids" in s for s in loaded_good.command.template)
-    good_warnings = skill_commands.check_note_condition_steps(loaded_good.command, sigs)
+    good_warnings = planning_commands.check_note_condition_steps(loaded_good.command, sigs)
     assert len(good_warnings) == 1
     assert "only if the member asked" in good_warnings[0]
     assert not any("first page only" in w for w in good_warnings)
     assert not any("the number only" in w for w in good_warnings)
-    assert {name for name, _, _ in workflow_agent.load_skills(folder)} == {
+    assert {name for name, _, _ in workflow_agent.load_planning_commands(folder)} == {
         "Record/bad_note",
         "Record/bad_hand_note",
         "Library/good_steps",
     }
 
     out_dir = str(tmp_path / "previews")
-    skill_preview.write_previews(folder, out_dir)
+    command_preview.write_previews(folder, out_dir)
     capsys.readouterr()
-    rc = skill_preview.preview_main(
+    rc = command_preview.preview_main(
         argparse.Namespace(workflow_folder=folder, out=out_dir, check=True)
     )
     assert rc == 0
@@ -432,7 +432,7 @@ class PlanGenerator:
     }
 
 
-def test_pick_without_named_is_a_skill_load_error(tmp_path):
+def test_pick_without_named_is_a_planning_command_load_error(tmp_path):
     bad_pick = '''from pydantic import BaseModel, Field
 from fastworkflow.planning import fact_from, pick, run
 
@@ -458,12 +458,12 @@ class PlanGenerator:
     folder = _library_workflow(tmp_path, {"Library/bad_pick": bad_pick})
     path = os.path.join(folder, "_commands", "Library", "bad_pick.py")
     with pytest.raises(
-        SkillFormatError,
+        PlanningCommandFormatError,
         match=r"bad_pick\.py: phase 'book' fails while its template is built .*"
         r"pick\('open_book'\): named= is the name the row is picked by",
     ):
-        workflow_agent._read_skill_file("Library/bad_pick", path, folder)
-    assert {name for name, _, _ in workflow_agent.load_skills(folder)} == set()
+        workflow_agent._read_planning_command_file("Library/bad_pick", path, folder)
+    assert {name for name, _, _ in workflow_agent.load_planning_commands(folder)} == set()
 
 
 # ----------------------------------------------------------------------
@@ -500,7 +500,7 @@ def test_code_runs_quoted_values_and_example_values_while_hand_typed_and_cme_kee
     # LibraryRunner reads wf.context["by_code"], which run_execute_workflow_query sets for
     # code-run steps and clears in its finally block.
     orig_extract = ParameterExtraction._extract_parameters_from_key_values
-    library_env.skill = _build_skill(WriteNotes)
+    library_env.planning_command = _build_planning_command(WriteNotes)
 
     # First verify the parser without code_written declines the example value and placeholders,
     # and drops the trailing parenthetical on the unquoted f-string form.
@@ -514,7 +514,7 @@ def test_code_runs_quoted_values_and_example_values_while_hand_typed_and_cme_kee
     fstring_bound = orig_extract(fstring_step, AddNote.Input, "add_note")
     assert fstring_bound is not None and fstring_bound.text == "prefers email"
     fstring_plan_step = finish_check.parse_plan(f"1. {fstring_step}", ["add_note"])[0]
-    assert skill_phases.code_step(fstring_plan_step, AddNote.Input) == "add_note text=prefers email"
+    assert planning_phases.code_step(fstring_plan_step, AddNote.Input) == "add_note text=prefers email"
 
     # Now run the skill end-to-end through the phase runner and verify every note bound whole.
     lib = library_env.wf.root_command_context
@@ -562,7 +562,7 @@ def test_the_cme_declines_an_example_value_in_a_step_the_agent_wrote(library_env
         def answer(self):
             return ["say that the book was opened"]
 
-    library_env.skill = _build_skill(Plan)
+    library_env.planning_command = _build_planning_command(Plan)
     before_notes = list(lib.books["b1"].notes)
     library_env.model.run("open_book book_uid=b1")
     library_env.model.run("add_note text=the cover is torn")
@@ -795,7 +795,6 @@ def script_command_extraction(monkeypatch, wf, extracted: dict[str, dict] | None
 @pytest.fixture
 def library_env(tmp_path, initialized_fastworkflow, monkeypatch):
     """A runnable library workflow in *tmp_path* driven through the real phase runner."""
-    monkeypatch.delenv(skill_phases.PHASE_MAX_STEPS_ENV, raising=False)
     folder = _library_workflow(tmp_path)
     ctx, wf = _make_agent_ctx(folder, monkeypatch)
     sink = RecordingSink()
@@ -822,37 +821,37 @@ def library_env(tmp_path, initialized_fastworkflow, monkeypatch):
         agent=agent,
         model=model,
         runner=runner,
-        skill=None,
+        planning_command=None,
         args={"title": "Dune"},
     )
 
     def fake_plan(user_query, session, with_agent_inputs_and_trajectory=False,
-                  planner_lm=None, skill_command=None, **kwargs):
-        if skill_command is None:
+                  planner_lm=None, planning_command=None, **kwargs):
+        if planning_command is None:
             return user_query
-        call = SkillCallPlan(
+        call = PlanningCommandCallPlan(
             plan="",
             args=dict(state.args),
             notes=[],
             prediction=None,
-            phases=call_phases(skill_command, dict(state.args)),
+            phases=call_phases(planning_command, dict(state.args)),
             steps_after=[],
             steps_before=[],
         )
-        session._phased_skill_call = (skill_command, call)
+        session._phased_planning_command_call = (planning_command, call)
         session._initial_plan_text = ""
         return user_query
 
     monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", fake_plan)
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.planner_skill_for",
-        lambda text, folder_path, **_: ("", state.skill),
+        "fastworkflow.workflow_agent.planner_planning_command_for",
+        lambda text, folder_path, **_: ("", state.planning_command),
     )
     monkeypatch.setattr(
         "fastworkflow.workflow_agent.split_into_subtasks",
         lambda *args, **kwargs: ["look up the book"],
     )
-    monkeypatch.setattr("fastworkflow.skill_phases.write_answer", lambda query: "written")
+    monkeypatch.setattr("fastworkflow.planning_phases.write_answer", lambda query: "written")
 
     runner.sent.clear()
     yield state
@@ -862,7 +861,7 @@ def library_env(tmp_path, initialized_fastworkflow, monkeypatch):
 def _real_planning_command(qualified_name: str, rel_under_library: str):
     fpath = os.path.join(LIBRARY, rel_under_library)
     mod = python_utils.get_module(fpath, LIBRARY)
-    return skill_commands.command_from_module(qualified_name, mod, fpath)
+    return planning_commands.command_from_module(qualified_name, mod, fpath)
 
 
 def _make_library_runner_env(
@@ -870,7 +869,7 @@ def _make_library_runner_env(
     initialized_fastworkflow,
     monkeypatch,
     *,
-    extra_skills: dict[str, str] | None = None,
+    extra_planning_commands: dict[str, str] | None = None,
     extra_commands: tuple[str, ...] = (),
     args: dict | None = None,
     real_dispatch: bool = False,
@@ -880,7 +879,7 @@ def _make_library_runner_env(
 ):
     """Like ``library_env``, on a copy that may include extra commands or skills.
 
-    With *real_folder* the library folder itself runs (no copy; *extra_skills*,
+    With *real_folder* the library folder itself runs (no copy; *extra_planning_commands*,
     *extra_commands* and *command_texts* must be empty), so the caller keeps its state root
     outside the folder.
 
@@ -891,12 +890,11 @@ def _make_library_runner_env(
     ``CommandExecutor.invoke_command``. *command_texts* replaces library command files in
     the copy (``_library_workflow``).
     """
-    monkeypatch.delenv(skill_phases.PHASE_MAX_STEPS_ENV, raising=False)
     if real_folder:
-        assert not (extra_skills or extra_commands or command_texts), "the real folder is not a copy"
+        assert not (extra_planning_commands or extra_commands or command_texts), "the real folder is not a copy"
         folder = LIBRARY
     else:
-        folder = _library_workflow(tmp_path, extra_skills=extra_skills,
+        folder = _library_workflow(tmp_path, extra_planning_commands=extra_planning_commands,
                                    extra_commands=extra_commands, command_texts=command_texts)
     ctx, wf = _make_agent_ctx(folder, monkeypatch)
     sink = RecordingSink()
@@ -929,37 +927,37 @@ def _make_library_runner_env(
         model=model,
         nested=nested,
         runner=runner,
-        skill=None,
+        planning_command=None,
         args=args or {},
     )
 
     def fake_plan(user_query, session, with_agent_inputs_and_trajectory=False,
-                  planner_lm=None, skill_command=None, **kwargs):
-        if skill_command is None:
+                  planner_lm=None, planning_command=None, **kwargs):
+        if planning_command is None:
             return user_query
-        call = SkillCallPlan(
+        call = PlanningCommandCallPlan(
             plan="",
             args=dict(state.args),
             notes=[],
             prediction=None,
-            phases=call_phases(skill_command, dict(state.args)),
+            phases=call_phases(planning_command, dict(state.args)),
             steps_after=[],
             steps_before=[],
         )
-        session._phased_skill_call = (skill_command, call)
+        session._phased_planning_command_call = (planning_command, call)
         session._initial_plan_text = ""
         return user_query
 
     monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", fake_plan)
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.planner_skill_for",
-        lambda text, folder_path, **_: ("", state.skill),
+        "fastworkflow.workflow_agent.planner_planning_command_for",
+        lambda text, folder_path, **_: ("", state.planning_command),
     )
     monkeypatch.setattr(
         "fastworkflow.workflow_agent.split_into_subtasks",
         lambda *args, **kwargs: ["look up the book"],
     )
-    monkeypatch.setattr("fastworkflow.skill_phases.write_answer", lambda query: "written")
+    monkeypatch.setattr("fastworkflow.planning_phases.write_answer", lambda query: "written")
 
     runner.sent.clear()
     return state
@@ -996,7 +994,7 @@ class OpenedBook(BaseModel):
     title: str = fact_from("open_book.title")
 
 
-def _build_skill(plan_cls, args_fields: dict[str, tuple[type, object]] | None = None):
+def _build_planning_command(plan_cls, args_fields: dict[str, tuple[type, object]] | None = None):
     fields = args_fields or {"title": (str, Field(description="the book's title"))}
     input_cls = type(
         "Input",
@@ -1009,7 +1007,7 @@ def _build_skill(plan_cls, args_fields: dict[str, tuple[type, object]] | None = 
     sig_cls = type("Signature", (), {"__doc__": "Look up a book.", "Input": input_cls})
     module = types.ModuleType("book_lookup")
     module.Signature, module.PlanGenerator = sig_cls, plan_cls
-    return skill_commands.command_from_module(
+    return planning_commands.command_from_module(
         "Library/book_lookup", module, "_commands/Library/book_lookup.py"
     ).command
 
@@ -1025,14 +1023,14 @@ def test_pick_in_a_later_phase_runs_by_code_on_the_one_exact_match(library_env):
         def answer(self, book):
             return [f"say that {book.title} ({book.book_uid}) was opened"]
 
-    library_env.skill = _build_skill(Plan)
+    library_env.planning_command = _build_planning_command(Plan)
     result = library_env.ctx.process_turn("look up Dune")
 
     assert result.status == TurnStatus.COMPLETED
     assert library_env.model.asked == []
     # find_book query=Dune returned b1 ("Dune") and b2 ("Dune Messiah"); pick opened b1 in code.
     assert library_env.runner.sent == ["find_book query=Dune", "open_book book_uid=b1"]
-    spans = library_env.sink.named(tracing.SPAN_SKILL_PHASE)
+    spans = library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
     assert [s.attributes["phase"] for s in spans] == ["find", "book", "answer"]
     assert spans[1].attributes["code_stop"] == "done"
     assert spans[1].attributes["facts"] == {"book_uid": "b1", "title": "Dune"}
@@ -1046,7 +1044,7 @@ def test_pick_goes_to_the_agent_when_two_rows_or_none_match(library_env):
         def book(self, input, find):
             return [pick("open_book", named=input.title)]
 
-    library_env.skill = _build_skill(Plan)
+    library_env.planning_command = _build_planning_command(Plan)
 
     # 1. Two rows titled "Dune": add a second edition in the tmp copy's in-memory library.
     lib = library_env.wf.root_command_context
@@ -1060,7 +1058,7 @@ def test_pick_goes_to_the_agent_when_two_rows_or_none_match(library_env):
     assert result.status == TurnStatus.COMPLETED
     assert len(library_env.model.asked) == 2
     assert "1. open_book with the uid of the Dune match" in library_env.model.asked[0]["query"]
-    spans = library_env.sink.named(tracing.SPAN_SKILL_PHASE)
+    spans = library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
     assert spans[1].attributes["code_stop"] == "open step 1"
 
     # 2. No row matches the named title ("Dune" when only "Dune 1" and "Dune Messiah" exist).
@@ -1098,7 +1096,7 @@ def test_pick_chooses_the_listing_whose_uid_list_fits_the_command_parameter(libr
         def answer(self, book):
             return [f"say that {book.book_uid} was opened"]
 
-    library_env.skill = _build_skill(Plan)
+    library_env.planning_command = _build_planning_command(Plan)
     result = library_env.ctx.process_turn("look up Dune")
 
     assert result.status == TurnStatus.COMPLETED
@@ -1121,7 +1119,7 @@ def test_pick_uses_an_explicit_uid_as_given(library_env):
         def answer(self, book):
             return [f"say that {book.book_uid} was opened"]
 
-    library_env.skill = _build_skill(Plan)
+    library_env.planning_command = _build_planning_command(Plan)
     result = library_env.ctx.process_turn("look up Dune")
 
     assert result.status == TurnStatus.COMPLETED
@@ -1152,7 +1150,7 @@ def test_pick_joins_pages_of_a_full_list_listing(library_env, monkeypatch):
         def answer(self, book):
             return [f"say that {book.book_uid} was opened"]
 
-    library_env.skill = _build_skill(AuthorPlan)
+    library_env.planning_command = _build_planning_command(AuthorPlan)
 
     result = library_env.ctx.process_turn("look up Frank Herbert")
     assert result.status == TurnStatus.COMPLETED
@@ -1197,7 +1195,7 @@ def test_pick_skips_a_child_listing_inside_a_child_range(library_env, monkeypatc
         def answer(self, book):
             return [f"say that {book.book_uid} was opened"]
 
-    library_env.skill = _build_skill(Plan)
+    library_env.planning_command = _build_planning_command(Plan)
     library_env.model.run("find_book query=Dune")
     library_env.model.finish()
     if not child_range:
@@ -1212,7 +1210,7 @@ def test_pick_skips_a_child_listing_inside_a_child_range(library_env, monkeypatc
     assert [(row["step_index"], row["command"]) for row in rows] == [
         (0, "Library/find_book"), (1, "Library/find_book"), (3, "Library/open_book")]
     assert result.status == TurnStatus.COMPLETED
-    book_span = library_env.sink.named(tracing.SPAN_SKILL_PHASE)[1]
+    book_span = library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[1]
     if child_range:
         assert book_span.attributes["code_stop"] == "done"
         assert book_span.attributes["steps_by_code"] == 1
@@ -1315,11 +1313,11 @@ class PlanGenerator:
         },
     )
     out_dir = str(tmp_path / "previews")
-    skill_preview.write_previews(folder, out_dir)
+    command_preview.write_previews(folder, out_dir)
     capsys.readouterr()
 
     # preview --check exits 0 and prints the warnings for hand_typed, none for helper_written.
-    rc = skill_preview.preview_main(
+    rc = command_preview.preview_main(
         argparse.Namespace(workflow_folder=folder, out=out_dir, check=True)
     )
     assert rc == 0
@@ -1348,8 +1346,8 @@ class PlanGenerator:
     ):
         fpath = os.path.join(ROOT, rel_path)
         mod = python_utils.get_module(fpath, LIBRARY)
-        sf = skill_commands.command_from_module(qname, mod, fpath)
-        assert skill_commands.check_hand_typed_steps(sf, sigs) == []
+        sf = planning_commands.command_from_module(qname, mod, fpath)
+        assert planning_commands.check_hand_typed_steps(sf, sigs) == []
 
 
 # ----------------------------------------------------------------------
@@ -1388,8 +1386,8 @@ def test_library_planning_commands_load_inventory():
             sf = _real_planning_command(qname, rel)
             problems = workflow_agent.step_command_problems(sf.command, LIBRARY)
             loads = not problems
-            hand = skill_commands.check_hand_typed_steps(sf, sigs)
-        except SkillFormatError as error:
+            hand = planning_commands.check_hand_typed_steps(sf, sigs)
+        except PlanningCommandFormatError as error:
             loads = False
             assert err_key in str(error), (qname, error)
         assert loads == expect_load, qname
@@ -1399,7 +1397,7 @@ def test_library_planning_commands_load_inventory():
             assert phase
     # Phase 5 (fix-3rsq.5.10): the folder loads with no field-source error, and every row that
     # loads is a planning command the runtime can run (Library/book_loans calls book_by_title).
-    res = skill_commands.resolve_field_sources(LIBRARY)
+    res = planning_commands.resolve_field_sources(LIBRARY)
     assert res.errors == ()
     loaded = {qname for qname, _, expect_load, _, _ in _LIBRARY_PLANNING_INVENTORY if expect_load}
     assert loaded <= set(res.planning_commands)
@@ -1408,9 +1406,9 @@ def test_library_planning_commands_load_inventory():
 def test_library_overdue_summary_from_real_module_runs_code_steps(library_proof_env):
     sf = _real_planning_command("Library/overdue_summary", "_commands/Library/overdue_summary.py")
     assert workflow_agent.step_command_problems(sf.command, LIBRARY) == []
-    assert skill_commands.check_hand_typed_steps(sf, workflow_signatures(LIBRARY)) == []
+    assert planning_commands.check_hand_typed_steps(sf, workflow_signatures(LIBRARY)) == []
 
-    library_proof_env.skill = sf.command
+    library_proof_env.planning_command = sf.command
     library_proof_env.args = {}
     result = library_proof_env.ctx.process_turn("library overview")
 
@@ -1426,10 +1424,10 @@ def test_library_loan_report_from_real_module_runs_full_list_on_open_book(librar
     # code step. The turn may still complete with phase failure text until Phase 3 lands.
     sf = _real_planning_command("Book/loan_report", "_commands/Book/loan_report.py")
     assert workflow_agent.step_command_problems(sf.command, LIBRARY) == []
-    assert skill_commands.check_hand_typed_steps(sf, workflow_signatures(LIBRARY)) == []
+    assert planning_commands.check_hand_typed_steps(sf, workflow_signatures(LIBRARY)) == []
 
     library_proof_env.runner(library_proof_env.ctx, "open_book book_uid=b1")
-    library_proof_env.skill = sf.command
+    library_proof_env.planning_command = sf.command
     library_proof_env.args = {}
     library_proof_env.runner.sent.clear()
     result = library_proof_env.ctx.process_turn("who has this book")
@@ -1437,7 +1435,7 @@ def test_library_loan_report_from_real_module_runs_full_list_on_open_book(librar
     assert result.status == TurnStatus.COMPLETED
     assert library_proof_env.model.asked == []
     assert library_proof_env.runner.sent == ["list_loans"]
-    spans = library_proof_env.sink.named(tracing.SPAN_SKILL_PHASE)
+    spans = library_proof_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
     assert len(spans) == 1
     assert spans[0].attributes["code_stop"] == "done"
     assert spans[0].attributes["steps_by_code"] == 1
@@ -1449,21 +1447,21 @@ def test_library_note_member_pick_without_uid_on_test_copy(tmp_path, initialized
         tmp_path,
         initialized_fastworkflow,
         monkeypatch,
-        extra_skills={"Library/note_member": _note_member_without_in_request()},
+        extra_planning_commands={"Library/note_member": _note_member_without_in_request()},
     )
     try:
-        skill_path = os.path.join(
+        planning_command_path = os.path.join(
             str(tmp_path / "library_wf"),
             "_commands",
             "Library",
             "note_member.py",
         )
-        loaded = workflow_agent._read_skill_file("Library/note_member", skill_path, state.wf.folderpath)
+        loaded = workflow_agent._read_planning_command_file("Library/note_member", planning_command_path, state.wf.folderpath)
         assert workflow_agent.step_command_problems(loaded.command, state.wf.folderpath) == []
 
         lib = state.wf.root_command_context
         before = list(lib.members["m2"].notes)
-        state.skill = loaded.command
+        state.planning_command = loaded.command
         state.args = {"member": "Raj Patel", "text": "card renewed"}
         result = state.ctx.process_turn("note on Raj Patel")
 

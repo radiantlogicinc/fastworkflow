@@ -187,7 +187,7 @@ def test_exhausted_subtask_hands_off_to_a_continuation_matched_on_its_original_t
     triggers = _fake_progress_check(monkeypatch)
     templates = []
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.planner_skill_for",
+        "fastworkflow.workflow_agent.planner_planning_command_for",
         lambda text, folder, **_: templates.append(text) or ("", None),
     )
     _split(monkeypatch, ["find X", "find Y"])

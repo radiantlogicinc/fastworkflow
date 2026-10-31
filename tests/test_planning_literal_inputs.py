@@ -8,7 +8,7 @@ members included. The live `inspect_entity` got `kind 'login'` rejected with
 `typing.Literal['person', 'login', ...]` as the expected type.
 
 Every test here is integration: a real library copy, its real `RoutingDefinition`, the real
-skill loader (`skill_commands.planning_command`) and the real `validate_parameters` and
+skill loader (`planning_commands.planning_command`) and the real `validate_parameters` and
 `CommandExecutor`. The only double is the classifier, which raises if it is ever consulted.
 """
 
@@ -21,7 +21,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import skill_commands
+from fastworkflow import planning_commands
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.command_routing import RoutingRegistry
@@ -118,7 +118,7 @@ def literal_env(tmp_path, initialized_fastworkflow, monkeypatch):
 def _planning_params(env, **values):
     """The planning command's own Input model holding *values*, built as extraction builds it
     (``model_construct``, no validation: the check under test is the one that runs later)."""
-    planning = skill_commands.planning_command(env.folder, ROOT_PLANNING)
+    planning = planning_commands.planning_command(env.folder, ROOT_PLANNING)
     assert planning is not None and planning.input_model is not None
     return planning.input_model.model_construct(name="Jesse Rodgers-ADM", **values)
 

@@ -6,7 +6,7 @@ The extractor writes a word that names the kind of record (``book``), a field na
 such a value so the normal missing message is produced, with wording that says why. A value that
 merely contains such a word passes, and a declared choice (Literal or Enum) is never screened.
 
-Integration: the real ``skill_tutorial_workflow`` (its vocabulary is derived in memory, since no
+Integration: the real ``planning_tutorial_workflow`` (its vocabulary is derived in memory, since no
 ``workflow_vocabulary.json`` is stored there) and the real ``validate_parameters``. No mocks.
 """
 
@@ -24,7 +24,7 @@ import fastworkflow
 from fastworkflow.utils import signatures
 from fastworkflow.utils.signatures import InputForParamExtraction
 
-WORKFLOW_PATH = str(Path(__file__).parent.joinpath("skill_tutorial_workflow").resolve())
+WORKFLOW_PATH = str(Path(__file__).parent.joinpath("planning_tutorial_workflow").resolve())
 
 
 @pytest.fixture(autouse=True)

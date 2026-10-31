@@ -549,7 +549,7 @@ def _fact_value_text(value: Any, max_items: Optional[int] = None) -> str:
 
 def facts_text(facts: Any, *, fields: Optional[Iterable[str]] = None, sep: str = "; ",
                max_items: Optional[int] = None) -> str:
-    """*facts* (a filled facts model) as compact ``field: value`` text, for a skill's steps.
+    """*facts* (a filled facts model) as compact ``field: value`` text, for a planning command's steps.
 
     ``uid: b1; loan_uids: l1, l2; total: 3``. A list is joined with ``", "`` (``none`` when
     empty), ``None`` is ``none``, a bool ``true``/``false``, a nested model or mapping is
@@ -561,7 +561,7 @@ def facts_text(facts: Any, *, fields: Optional[Iterable[str]] = None, sep: str =
     answer to name a list must give it whole.
 
     The text is plain data: a phase that writes its answer from earlier facts (an
-    answer-only phase, see ``fastworkflow.skill_phases``) reads the values as given.
+    answer-only phase, see ``fastworkflow.planning_phases``) reads the values as given.
     """
     if isinstance(facts, (list, tuple)):
         return ", ".join(f"({facts_text(item, fields=fields, sep=sep, max_items=max_items)})"

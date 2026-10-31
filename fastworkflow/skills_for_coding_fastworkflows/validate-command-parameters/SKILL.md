@@ -146,8 +146,8 @@ meaningful right now" goes:
             errors.append("Nothing is selected. Use select_items first, then retry.")
 ```
 
-Note the message names the producing command, the same job `available_from` does for a parameter
-that never arrived.
+Note the message names the producing command, the same job the `from_` edge does for a parameter
+that never arrived (the runtime message reads `use the <producers> command(s) to get <field> information`).
 
 ## Do not treat it as a security boundary
 
