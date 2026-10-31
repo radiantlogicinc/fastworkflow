@@ -4,6 +4,12 @@
 
 ### Added
 
+- **A migration guide for app workflows** (fix-3rsq.8,
+  `docs/migrating_skills_to_commands.md`): moving `_skills/` into
+  `_commands/`, keeping an app's own generator from deleting planning
+  commands, import depth, `from_`, `__phases__`, the step helpers, the field
+  options, and the renames below.
+
 - **The build generator protects planning commands** (fix-3rsq.7,
   `fastworkflow/build/command_file_template.py`). Every file `fastworkflow
   build` creates starts with `# fastworkflow:generated — regenerate with
@@ -480,10 +486,19 @@
 
 ### Removed
 
+- **`fastworkflow.skill`** (fix-3rsq.8): the module planning commands import
+  is `fastworkflow.planning`; there is no alias.
+
+- **`FW_SKILL_PHASE_MAX_STEPS`, `FW_SKILL_FANOUT_MAX_ITEMS`,
+  `FW_SKILL_FACTS_MAX_LIST_ITEMS`** (fix-3rsq.8): no longer read. They are
+  the constants `PHASE_MAX_STEPS` (15), `FANOUT_MAX_ITEMS` (10) and
+  `FACTS_MAX_LIST_ITEMS` (100) in `fastworkflow.planning_phases`. Remove them
+  from env files.
+
 - **`_skills/`** (fix-3rsq.7): a workflow that still has a `_skills/`
   folder fails to load with "_skills/ is no longer read; move these files into
   _commands/ (first make sure any script that regenerates _commands/ preserves
-  them; see docs/unified_command_architecture/3.8)". The checks that existed
+  them; see docs/migrating_skills_to_commands.md)". The checks that existed
   only while two trees did (a skill named like a command, a skill folder for an
   unknown context, the nested-folder warning) are gone with it.
 
@@ -533,6 +548,24 @@
   A folder under `_skills` is not a skill (see the skill-context note above).
 
 ### Changed
+
+- **Skills are planning commands, by name** (fix-3rsq.8). Modules:
+  `skill_commands` → `planning_commands`, `skill_phases` → `planning_phases`,
+  `skill_preview` → `command_preview`. Classes: `Skill*` → `PlanningCommand*`
+  (`SkillFormatError` → `PlanningCommandFormatError`, `SkillCommand` →
+  `PlanningCommand`). Functions: `load_skills` → `load_planning_commands`,
+  `warm_skills` → `warm_planning_commands`, `match_skill` →
+  `match_planning_command`, `plan_skill_call` → `typed_planning_call`.
+  Folders: `docs/tutorials/skills/` → `docs/tutorials/planning_commands/`,
+  `docs/skill_*.md` → `docs/planning_command_*.md`, the
+  `author-workflow-skills` coding skill → `author-planning-commands`. Log,
+  error and CLI messages say "planning command". Span names, span attributes
+  and saved session keys keep their `skill` names.
+
+- **`PlanGenerator.__call__` is `__phases__`** (fix-3rsq.8): the method that
+  orders a planning command's phases is `__phases__`, and a `PlanGenerator`
+  that defines `__call__` fails to load with "PlanGenerator defines __call__;
+  rename it to __phases__".
 
 - **Planning commands live in `_commands/`** (fix-3rsq.7,
   `fastworkflow/workflow_agent.py`, `fastworkflow/command_directory.py`,
