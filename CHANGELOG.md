@@ -4,6 +4,15 @@
 
 ### Added
 
+- **The build generator protects planning commands** (fix-3rsq.7,
+  `fastworkflow/build/command_file_template.py`). Every file `fastworkflow
+  build` creates starts with `# fastworkflow:generated — regenerate with
+  fastworkflow build; edits may be overwritten`. The build will not write over
+  a file that defines a top-level `PlanGenerator`, even with
+  `overwrite=True`; it logs a warning naming the file instead. The check reads
+  the file with `ast` and falls back to a line check when the file does not
+  parse. The build validator checks only `Signature` on a planning command.
+
 - **Sealed experiments can be selected and acted on together** (Tools → Sealed
   experiments). Select all, or pick rows, to seal complete experiments, delete
   sealed ones, or release invalid ones in one confirmation. A released
@@ -471,6 +480,13 @@
 
 ### Removed
 
+- **`_skills/`** (fix-3rsq.7): a workflow that still has a `_skills/`
+  folder fails to load with "_skills/ is no longer read; move these files into
+  _commands/ (first make sure any script that regenerates _commands/ preserves
+  them; see docs/unified_command_architecture/3.8)". The checks that existed
+  only while two trees did (a skill named like a command, a skill folder for an
+  unknown context, the nested-folder warning) are gone with it.
+
 - **Skill `repeat()` / `REPEAT_LIMIT` and `@<skill>` include lines**
   (fix-ajir.18): a skill file's `steps()` loops with `range()` (bound the int
   field with `le`) and shares steps through a helper module
@@ -517,6 +533,22 @@
   A folder under `_skills` is not a skill (see the skill-context note above).
 
 ### Changed
+
+- **Planning commands live in `_commands/`** (fix-3rsq.7,
+  `fastworkflow/workflow_agent.py`, `fastworkflow/command_directory.py`,
+  `fastworkflow/skill_preview.py`). A planning command is a file in
+  `_commands/` (root or one context folder) with a top-level `PlanGenerator`,
+  beside the execution commands; the split settings file is
+  `_commands/_split.py`. To migrate, move each `_skills/` file, with the `_`
+  helpers it imports, to the same place under `_commands/`, make sure any
+  script that regenerates `_commands/` preserves them, and regenerate pinned
+  previews (`fastworkflow command preview <workflow> --out <dir>`), whose
+  source line names the new path.
+
+- **A step may run a planning command at load** (fix-3rsq.7,
+  `fastworkflow/workflow_agent.py`). The load-time step and phase-source checks
+  read the signatures of planning commands as well as execution commands, so a
+  planning command whose step runs another planning command loads.
 
 - **A prompt stored as pieces is no longer also kept as a 16 KB prefix**
   (fix-ajir.37): an `fw.llm.call` that records `prompt_slots_ref` keeps only
