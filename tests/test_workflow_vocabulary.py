@@ -85,7 +85,7 @@ def test_the_loader_derives_in_memory_when_the_stored_file_is_stale_and_leaves_i
     payload["words"] = sorted([*payload["words"], "sentinel_word"])
     _store(tutorial_copy, payload)
     stored_bytes = wv.vocabulary_path(tutorial_copy).read_bytes()
-    skill = Path(tutorial_copy) / "_skills" / "author_books.py"
+    skill = Path(tutorial_copy) / "_commands" / "author_books.py"
     skill.write_text(skill.read_text(encoding="utf-8") + "\n# an edit after the last train\n", encoding="utf-8")
 
     vocabulary = wv.load_workflow_vocabulary(tutorial_copy)

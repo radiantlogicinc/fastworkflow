@@ -66,10 +66,34 @@ def _plain(description: str, steps: list[str]) -> str:
             f"    def steps(self):\n        return {steps!r}\n")
 
 
+#: The command names the fixtures' template steps name, as stubs: a step must name a command of the
+#: workflow (checked on load; before Phase 7 a fixture with no execution commands was not checked).
+STEP_STUB_NAMES = ("assess_risk", "check_a", "compare_alpha_beta", "deep_scan", "find_feed", "find_group", "find_k0", "find_k1", "find_k2", "find_k3", "find_k4", "find_person", "find_right", "find_shelf", "list_logins", "list_members", "not_last", "open_directory", "open_group_by_uid", "show_alpha", "show_beta", "show_delta", "show_epsilon", "show_eta", "show_gamma", "show_iota", "show_kappa", "show_mu", "show_nu", "show_theta", "show_zeta",)
+
+
+#: The parameter each stub takes, where a fixture's step passes one (a step must pass fields its command has).
+STEP_STUB_PARAMS = {"find_group": "query", "find_feed": "query", "find_right": "query", "find_person": "query",
+                    "find_shelf": "query", "find_k0": "query", "find_k1": "query", "find_k2": "query",
+                    "find_k3": "query", "find_k4": "query", "list_members": "filter", "list_logins": "filter",
+                    "assess_risk": "owner"}
+
+
+def _write_step_stubs(folder) -> None:
+    for name in STEP_STUB_NAMES:
+        param = STEP_STUB_PARAMS.get(name)
+        body = (f'        {param}: str = ""\n' if param else "        pass\n")
+        (folder / "_commands" / f"{name}.py").write_text(
+            "from pydantic import BaseModel\n\n\nclass Signature:\n"
+            '    """Stub: a command a fixture\'s steps name."""\n\n    class Input(BaseModel):\n'
+            + body + "\n\nclass ResponseGenerator:\n    def __call__(self, workflow, command, command_parameters):\n"
+            "        return None\n")
+
+
 def _write(tmp_path, skills: dict[str, str]) -> str:
-    (tmp_path / "_skills").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "_commands").mkdir(parents=True, exist_ok=True)
+    _write_step_stubs(tmp_path)
     for name, text in skills.items():
-        (tmp_path / "_skills" / f"{name}.py").write_text(text)
+        (tmp_path / "_commands" / f"{name}.py").write_text(text)
     return str(tmp_path)
 
 
@@ -862,7 +886,7 @@ def test_check_verdicts_skips_a_subject_check_when_the_request_names_nothing(tmp
 
 def test_load_skill_commands_gives_each_command_the_workflow_identifiers(tmp_path):
     folder = _write(tmp_path, {"ask": NAMED})
-    (tmp_path / "_skills" / "_split.py").write_text(
+    (tmp_path / "_commands" / "_split.py").write_text(
         "import re\n\n# codes\nidentifier_patterns = [re.compile(r'\\bacct_[0-9]+')]\n")
     command = workflow_agent.load_skill_commands(folder)["ask"]
     assert [p.pattern for p in command.identifiers] == [r"\bacct_[0-9]+"]

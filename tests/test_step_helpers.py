@@ -126,7 +126,7 @@ def _library_workflow(
         else:
             shutil.copy2(src, dst)
 
-    skills_dir = folder / "_skills"
+    skills_dir = folder / "_commands"
     skills_dir.mkdir(parents=True, exist_ok=True)
     for name, text in (extra_skills or {}).items():
         skill_path = skills_dir / f"{name}.py"
@@ -274,19 +274,19 @@ class PlanGenerator:
         ):
             run("list_branches", branch="Central")
 
-    bad_path = os.path.join(folder, "_skills", "Library", "bad_command.py")
+    bad_path = os.path.join(folder, "_commands", "Library", "bad_command.py")
     loaded_bad = workflow_agent._read_skill_file("Library/bad_command", bad_path, folder)
     problems = [
         p.replace(folder + os.sep, "")
         for p in workflow_agent.step_command_problems(loaded_bad.command, folder)
     ]
     assert problems == [
-        "_skills/Library/bad_command.py: a step runs 'find_books', which is not a command of the workflow",
-        "_skills/Library/bad_command.py: a step passes title to 'find_book', whose Signature.Input has no such field",
+        "_commands/Library/bad_command.py: a step runs 'find_books', which is not a command of the workflow",
+        "_commands/Library/bad_command.py: a step passes title to 'find_book', whose Signature.Input has no such field",
     ]
 
     # Quoted values holding "a=b", "x, y=z", or "see (a=b)" do not report spurious keys.
-    note_path = os.path.join(folder, "_skills", "Record", "quoted_note.py")
+    note_path = os.path.join(folder, "_commands", "Record", "quoted_note.py")
     loaded_note = workflow_agent._read_skill_file("Record/quoted_note", note_path, folder)
     assert workflow_agent.step_command_problems(loaded_note.command, folder) == []
 
@@ -368,7 +368,7 @@ class PlanGenerator:
     )
     sigs = workflow_signatures(folder)
 
-    bad_path = os.path.join(folder, "_skills", "Record", "bad_note.py")
+    bad_path = os.path.join(folder, "_commands", "Record", "bad_note.py")
     loaded_bad = workflow_agent._read_skill_file("Record/bad_note", bad_path, folder)
     assert workflow_agent.step_command_problems(loaded_bad.command, folder) == []
     bad_note_warnings = [
@@ -376,12 +376,12 @@ class PlanGenerator:
         for w in skill_commands.check_note_condition_steps(loaded_bad.command, sigs)
     ]
     assert bad_note_warnings == [
-        "_skills/Record/bad_note.py: phase 'note', step 'add_note text=<text> (only when the member asked)': "
+        "_commands/Record/bad_note.py: phase 'note', step 'add_note text=<text> (only when the member asked)': "
         "the note holds a condition, but code never reads a note, so add_note would run every time. "
         'Decide it in code with if, or write when("the member asked", "add_note text=<text>") for the agent to decide'
     ]
 
-    hand_path = os.path.join(folder, "_skills", "Record", "bad_hand_note.py")
+    hand_path = os.path.join(folder, "_commands", "Record", "bad_hand_note.py")
     loaded_hand = workflow_agent._read_skill_file("Record/bad_hand_note", hand_path, folder)
     assert workflow_agent.step_command_problems(loaded_hand.command, folder) == []
     hand_warnings = [
@@ -389,14 +389,14 @@ class PlanGenerator:
         for w in skill_commands.check_note_condition_steps(loaded_hand.command, sigs)
     ]
     assert hand_warnings == [
-        "_skills/Record/bad_hand_note.py: phase 'check', step 'show_notes (if the member has any)': "
+        "_commands/Record/bad_hand_note.py: phase 'check', step 'show_notes (if the member has any)': "
         "the note holds a condition, but code never reads a note, so show_notes would run every time. "
         'Decide it in code with if, or write when("the member has any", "show_notes") for the agent to decide'
     ]
 
     loaded_good = workflow_agent._read_skill_file(
         "Library/good_steps",
-        os.path.join(folder, "_skills", "Library", "good_steps.py"),
+        os.path.join(folder, "_commands", "Library", "good_steps.py"),
         folder,
     )
     assert workflow_agent.step_command_problems(loaded_good.command, folder) == []
@@ -426,9 +426,9 @@ class PlanGenerator:
     ]
     assert len(note_lines) == 3
     assert {line.split(":")[0] for line in note_lines} == {
-        "_skills/Record/bad_note.py",
-        "_skills/Record/bad_hand_note.py",
-        "_skills/Library/good_steps.py",
+        "_commands/Record/bad_note.py",
+        "_commands/Record/bad_hand_note.py",
+        "_commands/Library/good_steps.py",
     }
 
 
@@ -456,7 +456,7 @@ class PlanGenerator:
         return [pick("open_book")]
 '''
     folder = _library_workflow(tmp_path, {"Library/bad_pick": bad_pick})
-    path = os.path.join(folder, "_skills", "Library", "bad_pick.py")
+    path = os.path.join(folder, "_commands", "Library", "bad_pick.py")
     with pytest.raises(
         SkillFormatError,
         match=r"bad_pick\.py: phase 'book' fails while its template is built .*"
@@ -1010,7 +1010,7 @@ def _build_skill(plan_cls, args_fields: dict[str, tuple[type, object]] | None = 
     module = types.ModuleType("book_lookup")
     module.Signature, module.PlanGenerator = sig_cls, plan_cls
     return skill_commands.command_from_module(
-        "Library/book_lookup", module, "_skills/Library/book_lookup.py"
+        "Library/book_lookup", module, "_commands/Library/book_lookup.py"
     ).command
 
 
@@ -1330,13 +1330,13 @@ class PlanGenerator:
         if "written by hand" in line
     ]
     assert rel_lines == [
-        "_skills/Library/hand_typed.py: phase 'branches', step 'list_branches': written by hand; write run(...) so that code reads it as you mean",
-        "_skills/Library/hand_typed.py: phase 'search', step 'find_book query=<title>': written by hand; write run(...) so that code reads it as you mean",
-        "_skills/Library/hand_typed.py: phase 'search', step 'add_note text=prefers email (not phone)': written by hand; write run(...) so that code reads it as you mean",
-        "_skills/Library/hand_typed.py: phase 'search', step 'open_book with the uid of the <title> match': written by hand; write pick(...) so that code reads it as you mean",
-        "_skills/Library/hand_typed.py: phase 'search', step 'list_loans (full list)': written by hand; write full_list(...) so that code reads it as you mean",
-        "_skills/Library/hand_typed.py: phase 'search', step 'only when the book has notes, show_notes': written by hand; write when(...) so that code reads it as you mean",
-        "_skills/Library/hand_typed.py: phase 'search', step 'do not run add_note': written by hand; write do_not_run(...) so that code reads it as you mean",
+        "_commands/Library/hand_typed.py: phase 'branches', step 'list_branches': written by hand; write run(...) so that code reads it as you mean",
+        "_commands/Library/hand_typed.py: phase 'search', step 'find_book query=<title>': written by hand; write run(...) so that code reads it as you mean",
+        "_commands/Library/hand_typed.py: phase 'search', step 'add_note text=prefers email (not phone)': written by hand; write run(...) so that code reads it as you mean",
+        "_commands/Library/hand_typed.py: phase 'search', step 'open_book with the uid of the <title> match': written by hand; write pick(...) so that code reads it as you mean",
+        "_commands/Library/hand_typed.py: phase 'search', step 'list_loans (full list)': written by hand; write full_list(...) so that code reads it as you mean",
+        "_commands/Library/hand_typed.py: phase 'search', step 'only when the book has notes, show_notes': written by hand; write when(...) so that code reads it as you mean",
+        "_commands/Library/hand_typed.py: phase 'search', step 'do not run add_note': written by hand; write do_not_run(...) so that code reads it as you mean",
     ]
     assert not any("helper_written" in line for line in rel_lines)
 
@@ -1454,7 +1454,7 @@ def test_library_note_member_pick_without_uid_on_test_copy(tmp_path, initialized
     try:
         skill_path = os.path.join(
             str(tmp_path / "library_wf"),
-            "_skills",
+            "_commands",
             "Library",
             "note_member.py",
         )

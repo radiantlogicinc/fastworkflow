@@ -1,6 +1,6 @@
 r'''Skills as parameterized commands.
 
-A skill is one Python file, ``_skills/<name>.py``, written with the abstractions of a
+A skill is one Python file, ``_commands/<name>.py``, written with the abstractions of a
 command file: a ``Signature`` whose docstring describes the job (what the skill matcher and
 the text planner read) and whose pydantic ``Input`` declares typed parameters, and a
 ``class PlanGenerator`` (as a command has a ``ResponseGenerator``) whose methods write the
@@ -12,13 +12,13 @@ planning call, and its steps are also the template the text planner reads for a 
 it matches (see ``workflow_agent.load_skills``); one without parameters that has phases is a
 skill call with no arguments (its phases, with no planning call).
 
-The ``_skills`` folder is laid out as ``_commands`` is: a root skill is the file
-``_skills/<name>.py`` whose name is the file stem, and a context skill in
-``_skills/<Context>/<name>.py`` is named ``"<Context>/<stem>"`` (as ``_commands/<Context>/``
+A planning command sits in ``_commands`` as an execution command does: a root skill is the file
+``_commands/<name>.py`` whose name is the file stem, and a context skill in
+``_commands/<Context>/<name>.py`` is named ``"<Context>/<stem>"`` (as ``_commands/<Context>/``
 names its commands); the file stem is a Python identifier (snake_case: ``show_record.py``).
 A ``.py`` file or subfolder whose name starts with ``_`` or ``.`` is skipped (``_kinds.py``
 is a helper the skill files import with ``from ._kinds import FIND``, not a skill).
-``_skills/_split.py`` is not a skill either: it configures the split stage (the
+``_commands/_split.py`` is not a skill either: it configures the split stage (the
 splitter's instructions, the identifier patterns of the split merge, the referent step's subject
 hints; see ``workflow_agent.split_settings``). No other file is read.
 
@@ -131,7 +131,7 @@ A skill file::
   ``fastworkflow.skill`` for the rules. The methods build text only: they must not call a
   backend or read state. A repeated part is a ``for`` loop over ``range()``, bounded by the
   int field's ``le``; steps shared by several skills go in a helper module
-  (``_skills/_<name>.py``). Lookup tables are plain module-level dicts. A skill whose one
+  (``_commands/_<name>.py``). Lookup tables are plain module-level dicts. A skill whose one
   phase reads and fills no facts runs flat (one plan); one without parameters whose one
   method takes no ``input`` gives fixed steps.
 - ``plain_utterances`` (optional, with or without params): example requests for the
@@ -191,7 +191,7 @@ an error and skipped, the workflow's other skills still load, and ``fastworkflow
 preview`` fails naming it.
 
 Any ``str`` argument that lies inside a match of one of the workflow's identifier patterns
-(``identifier_patterns`` in ``_skills/_split.py``, e.g. ``\bacct_[0-9]+``) without being all of it becomes the
+(``identifier_patterns`` in ``_commands/_split.py``, e.g. ``\bacct_[0-9]+``) without being all of it becomes the
 whole match ("4421" of "acct_4421"); inside several, it is refused.
 
 The model's ``steps_before`` / ``steps_after`` lose any ``<...>`` placeholder (and the
@@ -345,9 +345,9 @@ def _role_fits(request: str, value: str, p: "Param") -> bool:
 
 
 def _skills_workflow_root(path: str) -> str | None:
-    """The workflow folder of a skill file: the parent of the ``_skills`` folder it sits in."""
+    """The workflow folder of a skill file: the parent of the ``_commands`` folder it sits in."""
     for parent in Path(path).parents:
-        if parent.name == "_skills":
+        if parent.name == "_commands":
             return str(parent.parent)
     return None
 
@@ -589,7 +589,7 @@ def _flag(spec: dict, key: str, name: str, where: str) -> bool:
     return value == "true"
 
 
-# ---------------------------------------------------------------- skill files (_skills/<name>.py)
+# ---------------------------------------------------------------- skill files (_commands/<name>.py)
 
 #: Keys a skill file's ``Input`` field may set in ``json_schema_extra``.
 SKILL_FIELD_KEYS = frozenset({"strip", "subject", "verify", "means", "in_request",
@@ -1275,7 +1275,7 @@ def _check_result_method(plan_cls: type, path: str, command: "SkillCommand") -> 
 
 
 def command_from_module(name: str, module, path: str) -> SkillFile:
-    """The skill a skill file (``_skills/<name>.py``, already imported) defines.
+    """The skill a skill file (``_commands/<name>.py``, already imported) defines.
 
     Raises SkillFormatError for a malformed declaration (see the module doc).
     """
@@ -2056,7 +2056,7 @@ def resolve_field_sources(workflow_folderpath: str) -> FieldSourceResolution:
     """Resolve every ``from_`` declaration across the commands and skills of *workflow_folderpath*.
 
     Runs once per workflow (cached by normalized folder path and command-source fingerprint):
-    - reads command files from :class:`CommandDirectory` (``_commands/`` and ``_skills/``),
+    - reads command files from :class:`CommandDirectory` (``_commands/``, planning commands included),
       recording any import failure rather than dropping the command;
     - builds the ``{Signature.Output | Signature.Input -> qualified_name}`` map (3.12);
     - checks every ``from_`` placement and reference grammar, runs the type checks, flags

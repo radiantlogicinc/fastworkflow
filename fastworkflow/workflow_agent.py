@@ -11,7 +11,9 @@ import re
 import threading
 import time
 import traceback
+from typing import Any, Optional
 from datetime import datetime, timezone
+from pathlib import Path
 
 import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
@@ -28,7 +30,9 @@ from fastworkflow.split_merge import (
 from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
-from fastworkflow.command_directory import CommandDirectory, _handle_command_field_source_errors
+from fastworkflow.command_directory import (
+    CommandDirectory, _command_kind_from_ast, _handle_command_field_source_errors, check_no_skills_folder,
+)
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_executor import AlreadyInContextError, CommandNotFoundError
 from fastworkflow.context_navigation import (
@@ -1197,25 +1201,24 @@ class SplitIntoSubtasks(dspy.Signature):
 
 
 def _read_skill_file(name: str, path: str, workflow_folderpath: str):
-    """The ``SkillFile`` of ``_skills/<name>.py`` (or ``_skills/<Context>/<name>.py``, where
+    """The ``SkillFile`` of ``_commands/<name>.py`` (or ``_commands/<Context>/<name>.py``, where
     *name* is ``"<Context>/<stem>"``).
 
     The file is imported as a command file is (``python_utils.get_module`` under the
     workflow's package, so package-relative imports work: ``from ._helpers import ...`` reads
-    ``_skills/_helpers.py``). Raises SkillFormatError when the file stem is not a Python
-    identifier, the skill's context does not exist in the workflow, the skill has the same
-    qualified name as one of the workflow's commands, or the declaration is malformed, and
-    the import's own error for a file that does not import.
+    ``_commands/_helpers.py``). Raises SkillFormatError when the file stem is not a Python
+    identifier or the declaration is malformed, and the import's own error for a file that
+    does not import.
     """
     from fastworkflow.utils import python_utils
 
-    CommandDirectory.check_skill_path(name, path, workflow_folderpath)
+    CommandDirectory.check_skill_path(name, path)
     module = python_utils.get_module(path, workflow_folderpath)
     return skill_commands.command_from_module(name, module, path)
 
 
 def _load_skill_file(name: str, path: str, workflow_folderpath: str):
-    """The ``SkillFile`` of ``_skills/<name>.py`` (``_read_skill_file``), or None when it
+    """The ``SkillFile`` of ``_commands/<name>.py`` (``_read_skill_file``), or None when it
     cannot be read: a broken skill file costs that skill, not the workflow. The error is
     logged, and ``fastworkflow command preview`` reports the skill as not loaded.
     """
@@ -1228,17 +1231,25 @@ def _load_skill_file(name: str, path: str, workflow_folderpath: str):
     return None
 
 
-def _skill_files(root: str) -> list[tuple[str, str]]:
-    """``(name, path)`` of each skill file of a workflow's ``_skills`` folder, by name.
+def _is_planning_file(path: str) -> bool:
+    """Whether the command file at *path* defines a top-level ``PlanGenerator``: read from the
+    source (``command_directory._command_kind_from_ast``), never imported."""
+    try:
+        return _command_kind_from_ast(Path(path))[1]
+    except (ValueError, SyntaxError):
+        return False
 
-    As for command files under ``_commands``: a root skill is a file ``_skills/<name>.py``
-    whose name is the file stem, and a context skill in ``_skills/<Context>/<name>.py`` is
-    named ``"<Context>/<stem>"`` (the file stem is a Python identifier, snake_case;
-    ``_read_skill_file`` refuses another). A ``.py`` file or subfolder whose name starts
-    with ``_`` or ``.`` (such as ``__pycache__`` or a ``_helpers.py`` module the skill files
-    import) is skipped silently at both levels; ``_split.py`` is the workflow's split
-    settings (``split_settings``). A folder nested deeper than ``_skills/<Context>/`` is not
-    a skill location and is logged and skipped. Other files are not read.
+
+def _skill_files(root: str) -> list[tuple[str, str]]:
+    """``(name, path)`` of each planning command file of a workflow's ``_commands`` folder, by name.
+
+    A planning command is a command file with a top-level ``PlanGenerator`` (as ``CommandDirectory``
+    classifies it): a root one is ``_commands/<name>.py``, named by its file stem, and a context
+    one is ``_commands/<Context>/<name>.py``, named ``"<Context>/<stem>"`` (the file stem is a
+    Python identifier, snake_case; ``_read_skill_file`` refuses another). A ``.py`` file or subfolder
+    whose name starts with ``_`` or ``.`` (such as ``__pycache__`` or a ``_helpers.py`` module the
+    skill files import) is skipped silently at both levels; ``_split.py`` is the workflow's split
+    settings (``split_settings``). Execution commands and other files are not returned.
     """
     out = []
     for entry in sorted(os.listdir(root)) if os.path.isdir(root) else ():
@@ -1250,17 +1261,13 @@ def _skill_files(root: str) -> list[tuple[str, str]]:
                 if sub.startswith(("_", ".")):
                     continue
                 sub_path = os.path.join(path, sub)
-                if os.path.isdir(sub_path):
-                    logger.warning(f"{sub_path}: folders nested inside a skill context are not loaded; skipped")
-                    continue
                 stem, ext = os.path.splitext(sub)
-                if ext == ".py":
+                if ext == ".py" and _is_planning_file(sub_path):
                     out.append((f"{entry}/{stem}", sub_path))
             continue
         stem, ext = os.path.splitext(entry)
-        if ext != ".py":
-            continue
-        out.append((stem, path))
+        if ext == ".py" and _is_planning_file(path):
+            out.append((stem, path))
     return out
 
 
@@ -1280,9 +1287,16 @@ def _parsed_skills(workflow_folderpath: str) -> tuple[
 @functools.lru_cache(maxsize=None)
 def _build_parsed_skills(workflow_folderpath: str) -> tuple[
         tuple[str, str, tuple[str, ...], "SkillCommand", tuple[str, ...]], ...]:
-    root = os.path.join(workflow_folderpath, "_skills")
+    check_no_skills_folder(workflow_folderpath)
+    root = os.path.join(workflow_folderpath, "_commands")
     identifiers = identifier_patterns(workflow_folderpath)
     field_resolution = skill_commands.resolve_field_sources(workflow_folderpath)
+    try:   # read once for every skill's step and phase-source checks (None: each check reads it again)
+        signatures = command_signatures(workflow_folderpath)
+    except Exception as error:  # noqa: BLE001 - the checks warn and skip, as they did before
+        logger.warning(f"could not read the workflow's command signatures to check its skills: "
+                       f"{type(error).__name__}: {error}")
+        signatures = None
     logged_field_source_commands: set[str] = set()
     files = []   # (name, SkillFile)
     for name, path in _skill_files(root):
@@ -1311,7 +1325,7 @@ def _build_parsed_skills(workflow_folderpath: str) -> tuple[
             # against the workflow's commands (a step that names no command is run by the agent).
             out.append((name, loaded.description, loaded.steps, command, loaded.plain_utterances))
             continue
-        step_problems = step_command_problems(command, workflow_folderpath)
+        step_problems = step_command_problems(command, workflow_folderpath, signatures)
         field_source_errs = field_resolution.errors_for(name)
         if field_source_errs and name not in logged_field_source_commands:
             logged_field_source_commands.add(name)
@@ -1322,12 +1336,13 @@ def _build_parsed_skills(workflow_folderpath: str) -> tuple[
             logger.error(f"skipping skill {name!r}: " + "; ".join(step_problems))
             continue
         if command.phase_outputs:
-            _warn_phase_sources(command, workflow_folderpath)
+            _warn_phase_sources(command, workflow_folderpath, signatures)
         out.append((name, loaded.description, command.template, command, loaded.plain_utterances))
     return tuple(out)
 
 
-def _warn_phase_sources(command: SkillCommand, workflow_folderpath: str) -> None:
+def _warn_phase_sources(command: SkillCommand, workflow_folderpath: str,
+                        signatures: Optional[dict] = None) -> None:
     """Log a warning for each phase output field whose ``"from"`` names no command field.
 
     Not a load failure: the workflow may add the command's ``Output`` later
@@ -1335,47 +1350,62 @@ def _warn_phase_sources(command: SkillCommand, workflow_folderpath: str) -> None
     when it runs fails then, naming the field; ``fastworkflow command preview --check``
     fails on it (``phase_source_problems``).
     """
-    for warning in phase_source_problems(command, workflow_folderpath):
+    for warning in phase_source_problems(command, workflow_folderpath, signatures):
         logger.warning(f"skill {command.name!r}: phase output source not found (loaded anyway): {warning}")
 
 
-def step_command_problems(command: SkillCommand, workflow_folderpath: str) -> list[str]:
-    """``skill_commands.check_step_commands`` of *command* against the workflow's command
-    signatures: a step naming a command the workflow lacks, or a parameter its
-    ``Signature.Input`` lacks. A load error (the skill is skipped); empty, with a logged
-    warning, when the signatures cannot be read (``fastworkflow command preview --check``
-    still checks)."""
+def command_signatures(workflow_folderpath: str) -> dict[str, Any]:
+    """The ``Signature`` of each command a skill's steps and phase sources may name: the routed
+    execution commands (``workflow_signatures``) and the planning commands. A planning command is
+    not in routing; its ``Signature`` comes from ``skill_commands.resolve_field_sources``, the same
+    source ``skill_phases.parameter_classes`` reads a planning command's ``Input`` from (Phase 5)."""
     from fastworkflow.observation_offloading.facts import workflow_signatures
 
-    try:
-        signatures = workflow_signatures(workflow_folderpath)
-    except Exception as error:  # noqa: BLE001 - checked again by the preview's --check
-        logger.warning(f"skill {command.name!r}: could not read the workflow's command signatures "
-                       f"to check its steps: {type(error).__name__}: {error}")
-        return []
+    signatures = dict(workflow_signatures(workflow_folderpath))
+    resolution = skill_commands.resolve_field_sources(workflow_folderpath)
+    for name in resolution.planning_commands:
+        if name in resolution.signatures:
+            signatures[name] = resolution.signatures[name]
+    return signatures
+
+
+def step_command_problems(command: SkillCommand, workflow_folderpath: str,
+                          signatures: Optional[dict] = None) -> list[str]:
+    """``skill_commands.check_step_commands`` of *command* against the workflow's command
+    signatures (``command_signatures``, or *signatures* when the caller read them once): a step
+    naming a command the workflow lacks, or a parameter its ``Signature.Input`` lacks. A load
+    error (the skill is skipped); empty, with a logged warning, when the signatures cannot be read
+    (``fastworkflow command preview --check`` still checks)."""
+    if signatures is None:
+        try:
+            signatures = command_signatures(workflow_folderpath)
+        except Exception as error:  # noqa: BLE001 - checked again by the preview's --check
+            logger.warning(f"skill {command.name!r}: could not read the workflow's command signatures "
+                           f"to check its steps: {type(error).__name__}: {error}")
+            return []
     return skill_commands.check_step_commands(command, signatures)
 
 
-def phase_source_problems(command: SkillCommand, workflow_folderpath: str) -> list[str]:
+def phase_source_problems(command: SkillCommand, workflow_folderpath: str,
+                          signatures: Optional[dict] = None) -> list[str]:
     """``skill_commands.check_phase_sources`` of *command* against the workflow's command
-    signatures; empty, with a logged warning, when they cannot be read."""
-    from fastworkflow.observation_offloading.facts import workflow_signatures
-
-    try:
-        signatures = workflow_signatures(workflow_folderpath)
-    except Exception as error:  # noqa: BLE001 - the check is advice; the skill still loads
-        logger.warning(f"skill {command.name!r}: could not read the workflow's command signatures "
-                       f"to check its phase outputs: {type(error).__name__}: {error}")
-        return []
+    signatures (``command_signatures``); empty, with a logged warning, when they cannot be read."""
+    if signatures is None:
+        try:
+            signatures = command_signatures(workflow_folderpath)
+        except Exception as error:  # noqa: BLE001 - the check is advice; the skill still loads
+            logger.warning(f"skill {command.name!r}: could not read the workflow's command signatures "
+                           f"to check its phase outputs: {type(error).__name__}: {error}")
+            return []
     return skill_commands.check_phase_sources(command, signatures)
 
 
 def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
-    """``(name, description, steps)`` for each skill of the workflow (``_skills/<name>.py``
-    and ``_skills/<Context>/<name>.py``).
+    """``(name, description, steps)`` for each skill of the workflow (``_commands/<name>.py``
+    and ``_commands/<Context>/<name>.py``).
 
-    A skill is defined by the file ``_skills/<name>.py`` at the root or
-    ``_skills/<Context>/<name>.py`` in a context subfolder (format:
+    A skill is defined by the file ``_commands/<name>.py`` at the root or
+    ``_commands/<Context>/<name>.py`` in a context subfolder (format:
     ``fastworkflow.skill_commands``; which files are skills: ``_skill_files``); its name is
     the file stem (or ``"<Context>/<stem>"`` in a context) and the ``Signature`` docstring
     its description. A
@@ -1383,7 +1413,7 @@ def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ..
     without parameters or phases, its fixed ``steps()``), and ``load_skill_commands`` holds its
     parsed form. A skill file that cannot be imported or is malformed is logged as an error and skipped (the
     other skills still load; ``fastworkflow command preview`` fails on it); a malformed split
-    settings file raises SkillFormatError. ``_skills`` also holds the workflow's
+    settings file raises SkillFormatError. ``_commands`` also holds the workflow's
     split settings, ``_split.py`` (``split_settings``), and helper modules named ``_<name>.py``.
     """
     return tuple((name, description, steps) for name, description, steps, *_ in _parsed_skills(workflow_folderpath))
@@ -1405,9 +1435,9 @@ def warm_skills(workflow_folderpath: str) -> None:
     request does not pay for them (``load_skills``; ``skill_commands.command_utterances``,
     which ``plan_skill_call`` reaches through ``command_texts``). The skill cache is keyed by
     the path string: pass the one the turn path uses, the app workflow's ``folderpath``.
-    A workflow without a ``_skills`` folder has nothing to warm. Never raises: a failure is
+    A workflow without planning commands has nothing to warm. Never raises: a failure is
     logged and the turn path meets it again."""
-    if not os.path.isdir(os.path.join(workflow_folderpath, "_skills")):
+    if not _skill_files(os.path.join(workflow_folderpath, "_commands")):
         return
     skills = ()
     for step in (load_skills, skill_commands.command_utterances):
@@ -1422,7 +1452,7 @@ def warm_skills(workflow_folderpath: str) -> None:
         _warn_missing_jev_key(workflow_folderpath)
 
 
-#: The workflow's split settings file, ``_skills/_split.py`` (see ``split_settings``).
+#: The workflow's split settings file, ``_commands/_split.py`` (see ``split_settings``).
 SPLIT_FILE = "_split.py"
 #: The fields of ``SplitIntoSubtasks`` a split settings file may describe, as ``Signature.Input``
 #: and ``Signature.Output``.
@@ -1431,7 +1461,7 @@ _SPLIT_INPUTS, _SPLIT_OUTPUTS = frozenset({"job_types", "user_query"}), frozense
 
 @dataclasses.dataclass(frozen=True)
 class SplitSettings:
-    """What a workflow's ``_skills/_split.py`` sets for the split stage; the defaults when absent."""
+    """What a workflow's ``_commands/_split.py`` sets for the split stage; the defaults when absent."""
 
     #: Replaces ``SplitIntoSubtasks``'s instructions (``Signature``'s docstring), or None.
     instructions: str | None = None
@@ -1494,7 +1524,7 @@ def split_settings_from_module(module, path: str) -> SplitSettings:
 
 @functools.lru_cache(maxsize=None)
 def split_settings(workflow_folderpath: str) -> SplitSettings:
-    """The workflow's split settings, from its optional ``_skills/_split.py``; the defaults without one.
+    """The workflow's split settings, from its optional ``_commands/_split.py``; the defaults without one.
 
     The file configures the split stage (the splitter, the split merge and the referent step); it
     is not a skill (its leading ``_`` keeps ``_skill_files`` from loading it as one). It is
@@ -1518,7 +1548,7 @@ def split_settings(workflow_folderpath: str) -> SplitSettings:
     """
     from fastworkflow.utils import python_utils
 
-    path = os.path.join(workflow_folderpath, "_skills", SPLIT_FILE)
+    path = os.path.join(workflow_folderpath, "_commands", SPLIT_FILE)
     if not os.path.isfile(path):
         return SplitSettings()
     try:
@@ -1530,7 +1560,7 @@ def split_settings(workflow_folderpath: str) -> SplitSettings:
 
 
 def identifier_patterns(workflow_folderpath: str) -> tuple[re.Pattern, ...]:
-    """The workflow's identifier patterns (``identifier_patterns`` of its optional ``_skills/_split.py``).
+    """The workflow's identifier patterns (``identifier_patterns`` of its optional ``_commands/_split.py``).
 
     Each match in a request is a subject for the split merge (``split_merge.merge_subtasks``),
     like a quoted name: the framework knows no workflow's identifier formats.
@@ -1541,7 +1571,7 @@ def identifier_patterns(workflow_folderpath: str) -> tuple[re.Pattern, ...]:
 @functools.lru_cache(maxsize=None)
 def _split_signature(workflow_folderpath: str) -> type[dspy.Signature]:
     """``SplitIntoSubtasks``, with the instructions and field descriptions of the workflow's
-    ``_skills/_split.py`` when it sets them."""
+    ``_commands/_split.py`` when it sets them."""
     settings = split_settings(workflow_folderpath)
     signature = SplitIntoSubtasks
     if settings.instructions is not None:
@@ -1729,7 +1759,7 @@ def _jev_lm():
 @functools.lru_cache(maxsize=None)
 def _warn_missing_jev_key(workflow_folderpath: str) -> None:
     """The INFO line of design 3.9, once per workflow folder per process, when a workflow has
-    planning commands (``_skills``) and ``JEV_API_KEY`` is not set: the agent chooses and adapts
+    planning commands (``_commands``) and ``JEV_API_KEY`` is not set: the agent chooses and adapts
     them as it plans, and the ``verify`` checks of the fields it names are inactive.
     """
     fields = skill_commands.verify_field_names(workflow_folderpath)
@@ -1923,7 +1953,7 @@ def split_into_subtasks(user_query: str, planner_lm=None,
 
     One call on the planner LM, with no command catalog: the split is about the
     request, not about how to carry it out. It is shown the workflow's skills
-    (``_skills``), as the kinds of job it may contain.
+    (``_commands``), as the kinds of job it may contain.
     Any failure, an empty answer, or more than MAX_SUBTASKS sub-tasks leaves the
     request whole. A reply cut off at ``split_max_tokens()`` is not an answer, even
     when it parses (a field header written mid-reasoning, e.g. the output template
@@ -1997,7 +2027,7 @@ def resolve_referents(user_query: str, subtasks: list[str], workflow_folderpath:
     leaves", "Confirm whether Raj Patel is among its holders". For a sub-task that leaves some of
     the request's subjects unnamed, Jev chooses which of them, if any, it is about
     (``split_merge.unnamed_subjects``), told what the workflow counts as a record by its optional
-    ``subject_hints`` in ``_skills/_split.py``; ``split_merge.with_referent`` writes the choice in. Without a Jev
+    ``subject_hints`` in ``_commands/_split.py``; ``split_merge.with_referent`` writes the choice in. Without a Jev
     key, or on any failure, the sub-tasks are returned unchanged.
 
     When a record is chosen and the sub-task holds definite descriptions ("the customer", see

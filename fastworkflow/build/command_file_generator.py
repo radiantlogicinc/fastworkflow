@@ -194,8 +194,12 @@ def validate_command_file_components_in_dir(directory: str) -> list:
                     has_validate_extracted_parameters = False
                     has_response_generator = False
                     has_response_call = False
+                    has_plan_generator = False
 
                     for node in tree.body:
+                        # PlanGenerator class (a planning command)
+                        if isinstance(node, ast.ClassDef) and node.name == 'PlanGenerator':
+                            has_plan_generator = True
                         # Signature class
                         if isinstance(node, ast.ClassDef) and node.name == 'Signature':
                             has_signature = True
@@ -243,6 +247,9 @@ def validate_command_file_components_in_dir(directory: str) -> list:
                     # Collect errors
                     if not has_signature:
                         errors.append((file_path, 'Missing Signature class'))
+                        continue
+                    # A planning command has no ResponseGenerator; only its Signature is checked
+                    if has_plan_generator:
                         continue
                     if not has_input:
                         errors.append((file_path, 'Missing Input class in Signature'))

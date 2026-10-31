@@ -118,7 +118,7 @@ MAX_VARIANTS = 16
 
 
 class PreviewError(ValueError):
-    """A workflow whose skills cannot be previewed (no ``_skills`` folder, a skill not loaded)."""
+    """A workflow whose skills cannot be previewed (no ``_commands`` folder, a skill not loaded)."""
 
 
 # ---------------------------------------------------------------- placeholders
@@ -1357,7 +1357,7 @@ def _fan_out_cell(name: str, found: list[_Variant]) -> str:
 
 def _workflow_root_from_path(path: str) -> str:
     folder = os.path.abspath(os.path.dirname(path))
-    while folder and os.path.basename(folder) not in ("_commands", "_skills"):
+    while folder and os.path.basename(folder) != "_commands":
         folder = os.path.dirname(folder)
     return os.path.dirname(folder) if folder else ""
 
@@ -1545,7 +1545,7 @@ def render_preview(name: str, description: str, steps: tuple, command,
                    utterances: tuple, source: str, names: Optional[dict] = None,
                    calls: Optional[tuple[list[str], int]] = None) -> str:
     """The markdown preview of one skill (see the module doc). *source* is the skill file's
-    path relative to the workflow folder (``_skills/<name>.py``); *names* the command names
+    path relative to the workflow folder (``_commands/<name>.py``); *names* the command names
     a phase's steps are read with (``phase_command_names``), to show who writes an
     answer-only phase's answer (none given: not shown). *calls* is the skill's ``(callees,
     depth)`` (``Calls:`` and ``Depth:``), none given: not shown."""
@@ -1582,16 +1582,21 @@ def render_previews(workflow_folder: str) -> dict[str, str]:
     """``{"<skill>.md": preview}`` for every skill of the workflow, by skill name (a
     context skill is ``"<Context>/<name>.md"``, written to ``<out>/<Context>/<name>.md``).
 
-    Raises PreviewError when the workflow has no ``_skills`` folder or a skill file could
+    Raises PreviewError when the workflow has no ``_commands`` folder or a skill file could
     not be loaded (the loader logs and skips one that does not import or is malformed),
     giving each such file's error.
     """
     from fastworkflow import workflow_agent
+    from fastworkflow.command_directory import check_no_skills_folder
 
     folder = os.path.abspath(workflow_folder)
-    root = os.path.join(folder, "_skills")
+    try:
+        check_no_skills_folder(folder)
+    except ValueError as error:   # a retired _skills folder: reported as the preview's error
+        raise PreviewError(str(error)) from error
+    root = os.path.join(folder, "_commands")
     if not os.path.isdir(root):
-        raise PreviewError(f"{workflow_folder} has no _skills folder")
+        raise PreviewError(f"{workflow_folder} has no _commands folder")
     files = workflow_agent._skill_files(root)
     loaded = workflow_agent.load_skills(folder)
     # A skill with fixed steps is previewed as its steps, with no inputs and no plan, as before.
@@ -1608,7 +1613,7 @@ def render_previews(workflow_folder: str) -> dict[str, str]:
     calls = {name: (sorted(resolution.callees.get(name, ())), skill_commands.call_depth(name, resolution))
              for name in names}
     return {f"{name}.md": render_preview(name, description, steps, commands.get(name),
-                                         utterances.get(name, ()), f"_skills/{name}.py",
+                                         utterances.get(name, ()), f"_commands/{name}.py",
                                          command_names, calls.get(name))
             for name, description, steps in sorted(loaded)}
 
@@ -1737,7 +1742,7 @@ def check_hand_typed_warnings(workflow_folder: str) -> list[str]:
         signatures = workflow_signatures(folder)
     except Exception:  # noqa: BLE001 - without signatures no command is known
         return []
-    root = os.path.join(folder, "_skills")
+    root = os.path.join(folder, "_commands")
     loaded_names = {name for name, _, _ in workflow_agent.load_skills(folder)}
     warnings: list[str] = []
     for name, path in workflow_agent._skill_files(root):
@@ -1762,7 +1767,7 @@ def check_note_condition_warnings(workflow_folder: str) -> list[str]:
         signatures = workflow_signatures(folder)
     except Exception:  # noqa: BLE001 - without signatures no command is known
         return []
-    root = os.path.join(folder, "_skills")
+    root = os.path.join(folder, "_commands")
     loaded_names = {name for name, _, _ in workflow_agent.load_skills(folder)}
     warnings: list[str] = []
     for name, path in workflow_agent._skill_files(root):
@@ -1785,7 +1790,7 @@ def preview_main(args) -> int:
     if args.check:
         try:
             problems = check_previews(args.workflow_folder, out_dir)
-        except PreviewError as error:   # no _skills folder, or a skill file that does not load
+        except PreviewError as error:   # no _commands folder, or a skill file that does not load
             print(f"skill previews in {out_dir} cannot be checked: {error}")
             return 1
         for info in skill_commands.resolve_field_sources(os.path.abspath(args.workflow_folder)).infos:

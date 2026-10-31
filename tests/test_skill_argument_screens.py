@@ -47,7 +47,7 @@ def workflow(tmp_path):
     """A temporary copy of the tutorial workflow with the ``transfer_loan`` skill added."""
     copy = tmp_path / "tutorial"
     shutil.copytree(TUTORIAL, copy, ignore=shutil.ignore_patterns("___command_info", "__pycache__", "versions"))
-    (copy / "_skills" / "transfer_loan.py").write_text(TRANSFER_LOAN, encoding="utf-8")
+    (copy / "_commands" / "transfer_loan.py").write_text(TRANSFER_LOAN, encoding="utf-8")
     return str(copy)
 
 

@@ -1,4 +1,4 @@
-"""Skills as Python skill files (``_skills/<name>.py``): loading, expansion, the
+"""Skills as Python skill files (``_commands/<name>.py``): loading, expansion, the
 template text, argument screen, validation hook and the planner path."""
 from __future__ import annotations
 
@@ -31,9 +31,38 @@ class PlanGenerator:
 '''
 
 
+#: The execution commands the fixtures' steps name, with the parameter each one takes (None: none).
+#: A step must name a command of the workflow (checked at load), so a fixture workflow has them.
+STEP_COMMANDS = {"find_group": "query", "find_unit": "query", "list_members": "filter", "assess_risk": None,
+                 "add_label": None, "remove_label": None, "show_labels": None, "list_labels": None}
+
+STEP_COMMAND = '''import fastworkflow
+from pydantic import BaseModel, Field
+
+
+class Signature:
+    """Stub: a command the planning fixtures' steps name."""
+
+    class Input(BaseModel):
+{field}
+
+    class Output(BaseModel):
+        found: bool = Field(default=True, description="a stub output")
+
+
+class ResponseGenerator:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, command_parameters):
+        return Signature.Output()
+'''
+
+
 def _write(tmp_path, skills: dict[str, str]) -> str:
-    folder = tmp_path / "_skills"
+    folder = tmp_path / "_commands"
     folder.mkdir(parents=True, exist_ok=True)
+    for name, param in STEP_COMMANDS.items():
+        field = (f'        {param}: str = Field(default="", description="a stub parameter")' if param
+                 else "        pass")
+        (folder / f"{name}.py").write_text(STEP_COMMAND.format(field=field))
     for skill, text in skills.items():
         (folder / f"{skill}.py").write_text(text)
     return str(tmp_path)
@@ -209,15 +238,34 @@ def test_a_skill_file_imports_a_helper_of_its_folder_and_of_its_package(tmp_path
     text = EXAMPLE.replace('FIND = {"group": "find_group", "unit": "find_unit"}',
                            "from ._kinds import FIND\nfrom ..texts import UNIT\nassert FIND['unit'] == UNIT")
     folder = _write(package, {"show_record": text, "close_out": CLOSE_OUT})
-    (package / "_skills" / "_kinds.py").write_text('FIND = {"group": "find_group", "unit": "find_unit"}\n')
+    (package / "_commands" / "_kinds.py").write_text('FIND = {"group": "find_group", "unit": "find_unit"}\n')
     # the helper _kinds.py is not a skill
     assert [s[0] for s in workflow_agent.load_skills(folder)] == ["close_out", "show_record"]
     assert sc.expand(workflow_agent.load_skill_commands(folder)["show_record"], _args(count=0))[0] == \
         "find_group query=Payroll"
 
 
+def test_a_workflow_that_still_has_a_skills_folder_fails_to_load(tmp_path):
+    # Phase 7: _skills/ is no longer read; the load fails with the retired message, not a silent skip.
+    from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
+
+    folder = _write(tmp_path, {"close_out": CLOSE_OUT})
+    (tmp_path / "_skills").mkdir()
+    (tmp_path / "_skills" / "show_record.py").write_text(EXAMPLE)
+    expected = re.escape(
+        "_skills/ is no longer read; move these files into _commands/ (first make sure any script "
+        "that regenerates _commands/ preserves them; see docs/unified_command_architecture/3.8)")
+    with pytest.raises(ValueError, match=expected):
+        workflow_agent.load_skills(folder)
+    with pytest.raises(ValueError, match=expected):
+        CommandDirectory.load(folder)
+    with pytest.raises(ValueError, match=expected):
+        get_cached_command_directory(folder)
+
+
 def test_a_skill_file_that_cannot_be_imported_is_logged_and_skipped(tmp_path, caplog):
-    folder = _write(tmp_path, {"broken": "import no_such_module_anywhere\n", "close_out": CLOSE_OUT})
+    broken = "import no_such_module_anywhere\n\n\n" + NO_SIGNATURE   # a planning command that does not import
+    folder = _write(tmp_path, {"broken": broken, "close_out": CLOSE_OUT})
     with caplog.at_level(logging.ERROR):
         skills = workflow_agent.load_skills(folder)
     assert [s[0] for s in skills] == ["close_out"]
@@ -254,7 +302,14 @@ def _generator(body: str) -> str:
     (_generator("    def steps(self):\n        return []\n"), "returns no steps"),
 ])
 def test_a_malformed_skill_file_fails_the_load(tmp_path, text, message):
-    assert re.search(message, _load_error(_write(tmp_path, {"bad": text})))
+    folder = _write(tmp_path, {"bad": text})
+    if "PlanGenerator" not in text:
+        # Phase 7: a file in _commands/ is a planning command only with a top-level PlanGenerator
+        # (read from the source), so one without it is not a skill file and gets no skill error.
+        assert "bad" not in {name for name, _, _ in workflow_agent.load_skills(folder)}
+        assert "bad" not in dict(workflow_agent._skill_files(str(tmp_path / "_commands")))
+        return
+    assert re.search(message, _load_error(folder))
 
 
 FIELD = '''from typing import Literal, Optional
@@ -353,16 +408,15 @@ def test_steps_that_fail_on_placeholder_inputs_need_a_declared_template(tmp_path
 
 def test_only_the_python_files_of_the_skills_folder_not_starting_with_an_underscore_are_skills(tmp_path, caplog):
     folder = _write(tmp_path, {"close_out": CLOSE_OUT, "_helpers": "import no_such_module_anywhere\n"})
-    skills = tmp_path / "_skills"
+    skills = tmp_path / "_commands"
     (skills / "_split.py").write_text('class Signature:\n    """Split it my way."""\n')
     (skills / "notes.md").write_text("Not read.")
     (skills / "__pycache__").mkdir()
-    # a subfolder naming an unknown context fails the load for its files and is skipped
+    # a subfolder of _commands is a context (Phase 7: one tree), so its planning command is a skill of it
     (skills / "Record").mkdir()
     (skills / "Record" / "show_record.py").write_text(EXAMPLE)
     with caplog.at_level(logging.WARNING):
-        assert [s[0] for s in workflow_agent.load_skills(folder)] == ["close_out"]
-    assert "Record: context 'Record' does not exist in this workflow" in caplog.text
+        assert sorted(s[0] for s in workflow_agent.load_skills(folder)) == ["Record/show_record", "close_out"]
     assert "__pycache__" not in caplog.text and "_helpers" not in caplog.text
 
 

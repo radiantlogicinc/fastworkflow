@@ -2,7 +2,6 @@ import ast
 import contextlib
 import functools
 import hashlib
-import json
 import os
 import re
 from typing import Optional
@@ -242,6 +241,10 @@ class CommandDirectory(BaseModel):
                 base_paths = []
             else:
                 raise RuntimeError(f"Error processing workflow inheritance: {e}") from e
+
+        # A retired _skills/ folder (here or in a base) is a load error: its planning commands are not read
+        for path in (*base_paths, workflow_folderpath):
+            check_no_skills_folder(path)
         
         # Step 2: Process base workflows first (in order of precedence)
         for base_path in base_paths:
@@ -250,9 +253,6 @@ class CommandDirectory(BaseModel):
         # Step 3: Process current workflow commands (highest precedence for user commands)
         cls._load_commands_from_path(command_directory, workflow_folderpath)
 
-        # Step 3b: Register planning commands from the workflow's _skills/ tree
-        cls._load_skills_from_path(command_directory, workflow_folderpath)
-        
         # Step 4: Populate utterance metadata when available (optional; defers imports)
         if hydrate_utterances:
             for command_key in command_directory.map_command_2_metadata:
@@ -328,67 +328,11 @@ class CommandDirectory(BaseModel):
                 if has_commands:  # Only register context classes if there are actual commands
                     cls._register_context_class(command_directory, context_name, context_dir, path)
     
-    @classmethod
-    def _load_skills_from_path(cls, command_directory: "CommandDirectory", workflow_folderpath: str):
-        """Register planning commands from ``_skills/`` (root and one context level deep)."""
-        skills_root = Path(workflow_folderpath) / "_skills"
-        if not skills_root.is_dir():
-            return
-        for item_path in sorted(skills_root.glob("*.py")):
-            if item_path.is_file() and not item_path.name.startswith("_") and item_path.name != "__init__.py":
-                command_name = item_path.stem
-                cls._register_skill_command(
-                    command_directory, command_name, item_path, workflow_folderpath
-                )
-        for context_dir in sorted(p for p in skills_root.iterdir() if p.is_dir()):
-            if context_dir.name.startswith(("_", ".")):
-                continue
-            context_name = context_dir.name
-            for command_file in sorted(context_dir.glob("*.py")):
-                if command_file.name.startswith("_") or command_file.name == "__init__.py":
-                    continue
-                command_name = command_file.stem
-                qualified_command_name = f"{context_name}/{command_name}"
-                cls._register_skill_command(
-                    command_directory, qualified_command_name, command_file, workflow_folderpath
-                )
-
-    @classmethod
-    def _register_skill_command(
-        cls,
-        command_directory: "CommandDirectory",
-        command_name: str,
-        command_file_path: Path,
-        workflow_folderpath: str,
-    ):
-        """Register one ``_skills/`` file when it passes path checks and defines ``PlanGenerator``."""
-        # skill_commands imports command_directory at load (via command_context_model); import here to break the cycle
-        from fastworkflow.skill_commands import SkillFormatError
-
-        try:
-            cls.check_skill_path(command_name, str(command_file_path), workflow_folderpath)
-        except SkillFormatError:
-            return
-        try:
-            response_class, is_planning = _command_kind_from_ast(command_file_path)
-        except (ValueError, SyntaxError):
-            return
-        if not is_planning:
-            return
-        cls._register_command(
-            command_directory,
-            command_name,
-            command_file_path,
-            workflow_folderpath,
-            response_generation_class_name=response_class,
-            is_planning=True,
-        )
-
     @staticmethod
-    def check_skill_path(name: str, path: str, workflow_folderpath: str) -> None:
-        """Validate a skill path before load (unknown context, name collision with ``_commands/``).
+    def check_skill_path(name: str, path: str) -> None:
+        """Validate a planning command's file name before load: its stem is a Python identifier.
 
-        Raises :class:`fastworkflow.skill_commands.SkillFormatError` when the path is invalid.
+        Raises :class:`fastworkflow.skill_commands.SkillFormatError` when it is not.
         """
         # skill_commands imports command_directory at load (via command_context_model); import here to break the cycle
         from fastworkflow.skill_commands import SkillFormatError
@@ -398,16 +342,6 @@ class CommandDirectory(BaseModel):
             raise SkillFormatError(
                 f"{path}: a skill's name is its file name, a Python identifier "
                 f"(snake_case): rename it to {re.sub(r'[^0-9A-Za-z_]', '_', stem)}.py"
-            )
-        context = _context or None
-        if context and context not in _workflow_context_names(workflow_folderpath):
-            raise SkillFormatError(
-                f"{os.path.dirname(path)}: context {context!r} does not exist in this workflow"
-            )
-        existing = _execution_command_path_for_name(workflow_folderpath, name)
-        if existing is not None:
-            raise SkillFormatError(
-                f"{path}: skill {name!r} has the same name as command {existing}"
             )
 
     @classmethod
@@ -901,6 +835,23 @@ def _lazy_hydrate_metadata(module_path: str, metadata: CommandMetadata, director
 _CONTEXT_MODEL_BASENAMES = ("context_inheritance_model.json",)
 
 
+#: The load error for a workflow that still has a ``_skills/`` folder (see ``check_no_skills_folder``).
+SKILLS_FOLDER_RETIRED = (
+    "_skills/ is no longer read; move these files into _commands/ (first make sure any script "
+    "that regenerates _commands/ preserves them; see docs/unified_command_architecture/3.8)"
+)
+
+
+def check_no_skills_folder(workflow_folderpath: str) -> None:
+    """Raise ValueError when the workflow folder still has a retired ``_skills/`` folder.
+
+    Planning commands are read from ``_commands/`` (as are execution commands), so a workflow
+    that keeps its planning commands in ``_skills/`` must move them before it loads.
+    """
+    if os.path.isdir(os.path.join(workflow_folderpath, "_skills")):
+        raise ValueError(SKILLS_FOLDER_RETIRED)
+
+
 def _command_kind_from_ast(command_file_path: Path) -> tuple[str, bool]:
     """Return ``(response_generation_class_name, is_planning)`` without importing the module."""
     try:
@@ -927,46 +878,6 @@ def _command_kind_from_ast(command_file_path: Path) -> tuple[str, bool]:
     return "ResponseGenerator", False
 
 
-def _workflow_context_names(workflow_folderpath: str) -> set[str]:
-    """The context names of the workflow at *workflow_folderpath*: each ``_commands/<Context>/``
-    folder and each key or ``base`` entry in ``_commands/context_inheritance_model.json``."""
-    commands = os.path.join(workflow_folderpath, "_commands")
-    contexts = {
-        entry for entry in (os.listdir(commands) if os.path.isdir(commands) else ())
-        if not entry.startswith(("_", ".")) and os.path.isdir(os.path.join(commands, entry))
-    }
-    model_path = os.path.join(commands, "context_inheritance_model.json")
-    if os.path.isfile(model_path):
-        try:
-            with open(model_path, encoding="utf-8") as handle:
-                model = json.load(handle)
-        except Exception as error:  # noqa: BLE001 - fall back to _commands folders alone
-            logger.warning(f"could not read {model_path}: {type(error).__name__}: {error}")
-            model = None
-        if isinstance(model, dict):
-            contexts.update(k for k in model if isinstance(k, str))
-            for entry in model.values():
-                if isinstance(entry, dict) and isinstance(entry.get("base"), list):
-                    contexts.update(b for b in entry["base"] if isinstance(b, str))
-    return contexts
-
-
-def _execution_command_path_for_name(workflow_folderpath: str, name: str) -> str | None:
-    """``{qualified_name: path}`` lookup for one command file of *workflow_folderpath*'s
-    ``_commands`` folder (``_commands/<name>.py`` at the root and
-    ``_commands/<Context>/<name>.py`` per context, skipping ``_``- and ``.``-prefixed
-    entries). Returns the path for *name*, or ``None`` if no such file exists."""
-    commands = os.path.join(workflow_folderpath, "_commands")
-    if not os.path.isdir(commands):
-        return None
-    if "/" in name:
-        context, cmd = name.split("/", 1)
-        path = os.path.join(commands, context, f"{cmd}.py")
-        return path if os.path.isfile(path) else None
-    path = os.path.join(commands, f"{name}.py")
-    return path if os.path.isfile(path) else None
-
-
 def _command_source_roots(workflow_folderpath: str) -> list[Path]:
     """Return every `_commands` root that contributes to this workflow.
 
@@ -983,9 +894,6 @@ def _command_source_roots(workflow_folderpath: str) -> list[Path]:
             for base_path in inheritance_model.resolve_base_paths(workflow_folderpath)
         )
     roots.append(Path(workflow_folderpath) / "_commands")
-    skills_root = Path(workflow_folderpath) / "_skills"
-    if skills_root.is_dir():
-        roots.append(skills_root)
     # Core commands and their context classes are registered into every directory
     # (see `_register_core_commands`), so their source must invalidate it too.
     import fastworkflow
@@ -1060,6 +968,8 @@ def get_cached_command_directory(workflow_folderpath: str) -> CommandDirectory:
     """
 
     workflow_folderpath = str(Path(workflow_folderpath).resolve())
+    # Checked before the fast path: a snapshot written before a _skills/ folder appeared still matches the fingerprint
+    check_no_skills_folder(workflow_folderpath)
 
     cache_folder = Path(CommandDirectory.get_commandinfo_folderpath(workflow_folderpath))
     cache_file = cache_folder / "command_directory.json"

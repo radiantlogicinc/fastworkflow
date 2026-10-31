@@ -1,6 +1,6 @@
 """Answer a capability question ("what can you do?") in code, in agent mode.
 
-When the app workflow has skills (``_skills/<name>.py``) and the whole user message asks
+When the app workflow has skills (``_commands/<name>.py``) and the whole user message asks
 what the assistant can do, the turn is answered here, before the split and the planner,
 with no model call: each skill in plain words with its shortest ``plain_utterance`` as the
 example, then the current context's commands, one line each, then one line for the commands

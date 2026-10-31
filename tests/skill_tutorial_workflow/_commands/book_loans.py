@@ -1,13 +1,13 @@
 """book_loans: the book the request names and who has it on loan.
 
-Reuses book_by_title's phases by subclassing its PlanGenerator: __call__ places them and the
-new loans phase in order, and answer extends book_by_title's answer with super().
+Reuses the phases book_by_title shares (_book_phases.BookPhases): __call__ places them and the
+new loans phase in order, and answer extends the shared answer with super().
 """
 from pydantic import BaseModel, Field
 
 from fastworkflow.planning import fact_from, full_list, listed
 
-from .book_by_title import PlanGenerator as BookByTitle
+from ._book_phases import BookPhases
 
 
 class Signature:
@@ -19,7 +19,7 @@ class Signature:
         title: str = Field(description="the book's title")
 
 
-class PlanGenerator(BookByTitle):
+class PlanGenerator(BookPhases):
     def __call__(self, input):
         return [self.find, self.book, self.loans, self.answer]
 

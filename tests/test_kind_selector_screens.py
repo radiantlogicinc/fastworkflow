@@ -79,7 +79,7 @@ def todo_copy(tmp_path):
 def tutorial_copy(tmp_path):
     """A copy of the tutorial workflow with the ``file_request`` skill added."""
     folder = _copy(TUTORIAL, tmp_path / "tutorial")
-    (Path(folder) / "_skills" / "file_request.py").write_text(FILE_REQUEST, encoding="utf-8")
+    (Path(folder) / "_commands" / "file_request.py").write_text(FILE_REQUEST, encoding="utf-8")
     return folder
 
 

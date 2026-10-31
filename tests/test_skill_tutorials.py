@@ -2,15 +2,17 @@
 
 Every tutorial page marks what it shows with an HTML comment right above a fenced block:
 
-- ``<!-- file: tests/skill_tutorial_workflow/_skills/x.py -->``: the block is that file;
+- ``<!-- file: fastworkflow/examples/library/_commands/x.py -->``: the block is that file
+  (a path from the repository root; the pages name the library's planning commands);
 - ``<!-- template: x -->``: the block is skill x's template, the steps the planner sees;
 - ``<!-- preview: x -->``: the block is part of x's ``fastworkflow command preview``;
 - ``<!-- dry-run: x {"arg": "value"} -->``: the block is ``dry_run("x", {...})``;
 - ``<!-- refusal: x {...} -->``: the block is the refusal a call of x with those arguments gets;
 - ``<!-- doctest -->``: the block runs as a doctest;
 - ``<!-- broken: x -->`` then ``<!-- load-error -->``, ``<!-- check-error -->`` or
-  ``<!-- template-line -->``: the first block, saved as ``_skills/x.py`` in a copy of the
-  tutorial workflow, gives that load error, ``command preview --check`` problem, or template line.
+  ``<!-- template-line -->``: the first block, saved as ``_commands/x.py`` (a planning command,
+  with a top-level ``PlanGenerator``) in a copy of the tutorial workflow, gives that load error,
+  ``command preview --check`` problem, or template line.
 
 ``dry_run`` runs a skill call offline, with no model: each phase's steps as the runtime
 writes them, the leading steps code runs (``skill_phases.plan_code_steps``, ``pick_listing``
@@ -167,18 +169,19 @@ def _template(skill: str, folder: str = WORKFLOW) -> str:
 
 
 def _copy_workflow(tmp_path, name: str) -> str:
-    """A copy of the tutorial workflow without its skills; a fresh package name each time."""
+    """A copy of the tutorial workflow without its planning commands; a fresh package name each
+    time. The execution commands stay, as they do in the workflow itself."""
     folder = tmp_path / f"tutorial_{name}"
-    shutil.copytree(WORKFLOW, folder, ignore=shutil.ignore_patterns(
-        "_skills", "__pycache__", "___*"))
-    (folder / "_skills").mkdir()
+    shutil.copytree(WORKFLOW, folder, ignore=shutil.ignore_patterns("__pycache__", "___*"))
+    for _, path in workflow_agent._skill_files(os.path.join(str(folder), "_commands")):
+        os.remove(path)
     return str(folder)
 
 
 def load_problem(folder: str, name: str) -> str:
-    """Why ``_skills/<name>.py`` of *folder* does not load (or fails ``--check``), with the
+    """Why ``_commands/<name>.py`` of *folder* does not load (or fails ``--check``), with the
     folder's path dropped from the message."""
-    path = os.path.join(folder, "_skills", f"{name}.py")
+    path = os.path.join(folder, "_commands", f"{name}.py")
     try:
         loaded = workflow_agent._read_skill_file(name, path, folder)
     except Exception as error:  # noqa: BLE001 - the message is what the page shows
@@ -215,8 +218,7 @@ def previews():
 
 def test_every_tutorial_skill_loads_and_its_committed_preview_is_current():
     names = {n for n, _, _ in workflow_agent.load_skills(WORKFLOW)}
-    files = {f[:-3] for f in os.listdir(os.path.join(WORKFLOW, "_skills"))
-             if f.endswith(".py") and not f.startswith("_")}
+    files = {n for n, _ in workflow_agent._skill_files(os.path.join(WORKFLOW, "_commands"))}
     assert names == files
     assert skill_preview.check_previews(WORKFLOW, PREVIEWS) == []
 
@@ -263,7 +265,7 @@ def test_troubleshooting_errors_are_real(tmp_path):
             if kind != "broken":
                 continue
             folder = _copy_workflow(tmp_path, f"{checked}_{name}")
-            with open(os.path.join(folder, "_skills", f"{name}.py"), "w") as fh:
+            with open(os.path.join(folder, "_commands", f"{name}.py"), "w") as fh:
                 fh.write(text + "\n")
             where = f"{page}: broken {name}"
             if expect == "load-error":

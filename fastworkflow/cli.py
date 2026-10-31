@@ -299,7 +299,7 @@ def add_run_parser(subparsers):
 
 def add_command_parser(subparsers):
     """Add the 'command' group: 'command preview' renders a workflow's planning commands to markdown."""
-    parser_command = subparsers.add_parser("command", help="Work with a workflow's planning commands (_skills/<name>.py).")
+    parser_command = subparsers.add_parser("command", help="Work with a workflow's planning commands (_commands/<name>.py).")
     command_subparsers = parser_command.add_subparsers(dest="action", required=True)
     parser_preview = command_subparsers.add_parser(
         "preview",

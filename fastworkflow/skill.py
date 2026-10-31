@@ -1,6 +1,6 @@
 """What a skill file writes: ``class PlanGenerator``, ``@phase``, ``pick``, the step helpers and three filters.
 
-A skill file (``_skills/<name>.py``) reads like a command file. ``class Signature`` declares
+A skill file (``_commands/<name>.py``) reads like a command file. ``class Signature`` declares
 the skill exactly as a command's does (docstring, ``Input``, ``plain_utterances``,
 ``validate_extracted_parameters``, ``fastworkflow.Refused``). Where a command has a
 ``ResponseGenerator`` because it generates a response, a skill has a ``PlanGenerator``

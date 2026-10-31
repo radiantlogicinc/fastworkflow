@@ -214,7 +214,7 @@ def test_a_parameter_naming_a_phase_the_call_does_not_have_keeps_its_default():
             more = [f"say that it has {extra.total} checks"] if extra is not None else []
             return [f"say that {find.labels[0]} was found", *more]
 
-    loaded = skill_commands.command_from_module("maybe", _module(plan=Maybe), "_skills/maybe.py")
+    loaded = skill_commands.command_from_module("maybe", _module(plan=Maybe), "_commands/maybe.py")
     assert list(loaded.steps) == [
         "find_item query=<name>", "count_checks (only when more)",
         "say that <find.labels[0]> was found",
@@ -231,7 +231,7 @@ def test_a_method_failing_on_unknown_facts_or_writing_none_is_a_load_error():
 
     with pytest.raises(skill_commands.SkillFormatError, match="phase 'answer' fails while its "
                                                                 "template is built"):
-        skill_commands.command_from_module("fails", _module(plan=Fails), "_skills/fails.py")
+        skill_commands.command_from_module("fails", _module(plan=Fails), "_commands/fails.py")
 
     class WritesNone:
         def find(self, input) -> Found:
@@ -241,7 +241,7 @@ def test_a_method_failing_on_unknown_facts_or_writing_none_is_a_load_error():
             return ["say that done"]
 
     with pytest.raises(skill_commands.SkillFormatError, match="writes None into a step"):
-        skill_commands.command_from_module("none", _module(plan=WritesNone), "_skills/none.py")
+        skill_commands.command_from_module("none", _module(plan=WritesNone), "_commands/none.py")
 
 
 def test_the_loaded_template_merges_enum_lines_without_splitting_a_bracket():
@@ -261,7 +261,7 @@ def test_the_loaded_template_merges_enum_lines_without_splitting_a_bracket():
                     f"open_{input.kind} {input.kind}_uid=<{input.kind}s.uids[0]>"]
 
     loaded = skill_commands.command_from_module("said", _module(KindSignature, Said),
-                                                "_skills/said.py")
+                                                "_commands/said.py")
     # a "(" keeps its ")" (no "<list_a (its as; or ..., by kind> full list)"): lines that
     # differ in more words than they share stay apart; a key= keeps its value
     assert list(loaded.steps) == [
@@ -278,11 +278,11 @@ def test_a_plan_of_one_phase_that_reads_no_facts_runs_flat():
         def find(self, input):
             return [f"find_item query={input.name}"]
 
-    loaded = skill_commands.command_from_module("find", _module(plan=Flat), "_skills/find.py")
+    loaded = skill_commands.command_from_module("find", _module(plan=Flat), "_commands/find.py")
     assert loaded.command.plan_fn is None and skill_commands.expand(
         loaded.command, {"name": "Dune", "more": False, "stop_late": False}) == [
         "find_item query=Dune"]
-    assert skill_commands.command_from_module("walk", _module(), "_skills/walk.py").command.plan_fn
+    assert skill_commands.command_from_module("walk", _module(), "_commands/walk.py").command.plan_fn
 
 
 def test_call_picks_the_phases_and_a_flat_call_runs_from_its_one_phase():
@@ -302,7 +302,7 @@ def test_call_picks_the_phases_and_a_flat_call_runs_from_its_one_phase():
             return [f"say that {find.labels[0]} was found"]
 
     command = skill_commands.command_from_module("either", _module(plan=Either),
-                                                 "_skills/either.py").command
+                                                 "_commands/either.py").command
     args = {"name": "Dune", "more": False, "stop_late": False}
     assert skill_commands.phases_for(command, args) is None
     assert skill_commands.expand(command, args) == ["find_item query=Dune (the first row only)"]
@@ -314,14 +314,14 @@ def test_the_loader_refuses_the_old_forms_and_a_method_without_self():
     module = types.ModuleType("skill")
     module.Signature, module.steps = Signature, (lambda input: [])
     with pytest.raises(skill_commands.SkillFormatError, match="class PlanGenerator"):
-        skill_commands.command_from_module("walk", module, "_skills/walk.py")
+        skill_commands.command_from_module("walk", module, "_commands/walk.py")
 
     class NoSelf:
         def find(input):
             return []
 
     with pytest.raises(skill_commands.SkillFormatError, match="self"):
-        skill_commands.command_from_module("walk", _module(plan=NoSelf), "_skills/walk.py")
+        skill_commands.command_from_module("walk", _module(plan=NoSelf), "_commands/walk.py")
 
 
 def test_a_fan_out_runs_per_item_and_stops_on_until():
@@ -364,7 +364,7 @@ def test_refused_from_a_skill_hook_is_its_refusal():
 
     module = types.ModuleType("skill")
     module.Signature, module.PlanGenerator = Refusing, PlanGenerator
-    command = skill_commands.command_from_module("walk", module, "_skills/walk.py").command
+    command = skill_commands.command_from_module("walk", module, "_commands/walk.py").command
     with pytest.raises(skill_commands.SkillInputError, match="name the item"):
         skill_commands.validate_call(command, {"name": "Nope", "more": False, "stop_late": False}, "")
     assert skill_commands.validate_call(command, {"name": "Dune", "more": False, "stop_late": False}, "")
@@ -413,7 +413,7 @@ def test_the_step_check_names_unknown_commands_and_parameters():
             return [pick("open_item_by_uid", itme_uid=find.only_uid(input.name), named=input.name)]
 
     command = skill_commands.command_from_module("typos", _module(plan=Typos),
-                                                 "_skills/typos.py").command
+                                                 "_commands/typos.py").command
     problems = skill_commands.check_step_commands(command, sigs)
     assert [p.split(": ", 1)[1] for p in problems] == [
         "a step runs 'find_itme', which is not a command of the workflow",
@@ -465,7 +465,7 @@ def test_a_subclass_that_adds_phases_writes_call_with_the_order():
                        r"runs, in order \(from: self.find, self.item, self.answer, self.parts\)"):
         planned(Parts)
     with pytest.raises(skill_commands.SkillFormatError, match="write __call__"):
-        skill_commands.command_from_module("parts", _module(plan=Parts), "_skills/parts.py")
+        skill_commands.command_from_module("parts", _module(plan=Parts), "_commands/parts.py")
 
     class Ordered(Parts):                                   # base phases placed anywhere
         def __call__(self, input):
@@ -535,7 +535,7 @@ def test_an_override_extends_the_base_steps_with_super_at_run_time_and_in_the_te
     assert phase_steps(phases[3], facts) == ["say that Dune is u1",
                                              "say that it has 2 parts: gear, axle"]
     assert phase_steps(phases[3], {"find": facts["find"]}) == ["say that Dune is not found"]
-    loaded = skill_commands.command_from_module("parts", _module(plan=Parts), "_skills/parts.py")
+    loaded = skill_commands.command_from_module("parts", _module(plan=Parts), "_commands/parts.py")
     # template mode: super() reaches Lookup.answer, whose helper reads as its name
     assert list(loaded.steps) == [
         "find_item query=<name>",
@@ -573,7 +573,7 @@ def test_a_subclass_that_only_overrides_keeps_the_base_plan_and_inherits_call():
 
     assert [p.name for p in planned(Same)(_input())] == ["find", "item", "answer"]
     assert [p.name for p in planned(Inherits)(_input())] == ["find", "answer"]
-    loaded = skill_commands.command_from_module("same", _module(plan=Same), "_skills/same.py")
+    loaded = skill_commands.command_from_module("same", _module(plan=Same), "_commands/same.py")
     assert loaded.steps[-2:] == ("say that <name> is <uid>", "apply no change")
 
 
@@ -618,7 +618,7 @@ class NoInputPlan:
                                              "Input": type("Input", (BaseModel,), {})})])
 def test_a_skill_with_no_inputs_can_have_phases(signature):
     loaded = skill_commands.command_from_module("summary", _module(signature, NoInputPlan),
-                                                "_skills/summary.py")
+                                                "_commands/summary.py")
     command = loaded.command
     assert command is not None and command.params == ()
     assert loaded.steps == ("list_sections", "count_late", "say how many items are late")
@@ -638,7 +638,7 @@ def test_a_skill_with_no_inputs_and_one_method_stays_fixed_steps():
             return ["list_sections", "say how many sections there are"]
 
     loaded = skill_commands.command_from_module("summary", _module(NoInputSignature, OnePlan),
-                                                "_skills/summary.py")
+                                                "_commands/summary.py")
     assert skill_commands.fixed_steps(loaded.command)
     assert loaded.steps == ("list_sections", "say how many sections there are")
 
@@ -648,7 +648,7 @@ def test_a_no_input_phased_skill_call_has_no_arguments():
     from dspy.utils import DummyLM
 
     command = skill_commands.command_from_module(
-        "summary", _module(NoInputSignature, NoInputPlan), "_skills/summary.py").command
+        "summary", _module(NoInputSignature, NoInputPlan), "_commands/summary.py").command
     lm = DummyLM([])
     with dspy.context(lm=lm):
         call = skill_commands.plan_skill_call(command, "give me the catalog summary",

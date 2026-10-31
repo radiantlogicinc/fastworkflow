@@ -670,7 +670,7 @@ def test_union_annotation_hands_on_whichever_member_ran(library_env):
     module = types.ModuleType("find_union")
     module.Signature, module.PlanGenerator = sig_cls, Plan
     skill = skill_commands.command_from_module(
-        "Library/find_union", module, "_skills/Library/find_union.py"
+        "Library/find_union", module, "_commands/Library/find_union.py"
     ).command
 
     library_env.skill = skill

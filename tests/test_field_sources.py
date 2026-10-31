@@ -72,7 +72,7 @@ def _build_workflow(
     extra_skills: dict[str, str] | None = None,
     extra_inheritance: dict[str, dict] | None = None,
 ) -> str:
-    """Build an isolated workflow folder in *tmp_path* with real ``_commands/`` and ``_skills/``."""
+    """Build an isolated workflow folder in *tmp_path* with real ``_commands/`` and ``_commands/``."""
     folder = tmp_path / name
     folder.mkdir(parents=True, exist_ok=True)
     shutil.copy2(os.path.join(LIBRARY, "__init__.py"), folder / "__init__.py")
@@ -103,7 +103,7 @@ def _build_workflow(
             cmd_path.parent.mkdir(parents=True, exist_ok=True)
             cmd_path.write_text(code, encoding="utf-8")
 
-    skills_dir = folder / "_skills"
+    skills_dir = folder / "_commands"
     skills_dir.mkdir(parents=True, exist_ok=True)
     skills = {"hours_overview": ROOT_SKILL, **(extra_skills or {})}
     for skill_name, code in skills.items():

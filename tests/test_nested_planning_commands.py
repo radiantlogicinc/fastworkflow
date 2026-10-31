@@ -575,7 +575,7 @@ def _planning_command(name: str, plan_cls, input_cls=None):
     module = types.ModuleType("test_planning_command")
     module.Signature = type("Signature", (), attributes)
     module.PlanGenerator = plan_cls
-    return skill_commands.command_from_module(name, module, f"_skills/{name}.py").command
+    return skill_commands.command_from_module(name, module, f"_commands/{name}.py").command
 
 
 def test_o_a_planning_command_with_no_input_and_one_phase_runs_through_the_phase_runner(

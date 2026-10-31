@@ -1,11 +1,39 @@
 from string import Template
 import os
+import re
+from pathlib import Path
 from fastworkflow.build.pydantic_model_generator import generate_input_model_code, generate_output_model_code, generate_property_output_model_code
 from fastworkflow.build.utterance_generator import generate_utterances
 from fastworkflow.build.command_import_utils import generate_import_statements
 from fastworkflow.build.class_analysis_structures import PropertyInfo, FunctionInfo
+from fastworkflow.command_directory import _command_kind_from_ast
+from fastworkflow.utils.logging import logger
 from typing import Optional, List, Dict
 from pydantic import BaseModel, Field
+
+GENERATED_FILE_HEADER = "# fastworkflow:generated — regenerate with fastworkflow build; edits may be overwritten"
+
+def _is_planning_command_file(file_path: str) -> bool:
+    """True when the existing file defines a top-level PlanGenerator (checked with ast, never imported)."""
+    if not os.path.isfile(file_path):
+        return False
+    try:
+        return _command_kind_from_ast(Path(file_path))[1]
+    except SyntaxError:
+        # Unparseable, but a half-edited planning command must not be overwritten: fall back to a line check
+        text = Path(file_path).read_text(encoding="utf-8", errors="replace")
+        return re.search(r'^class\s+PlanGenerator\b', text, re.MULTILINE) is not None
+    except ValueError:
+        # Defines both ResponseGenerator and PlanGenerator, or cannot be read: protect it
+        return True
+
+def _refuses_overwrite(file_path: str) -> bool:
+    """Warn and return True when writing file_path must be refused because it is a planning command.
+    A generated execution command with the same qualified name is the same path, so this covers it too."""
+    if _is_planning_command_file(file_path):
+        logger.warning(f"Not writing {file_path}: it is a planning command (defines PlanGenerator); generated execution commands do not overwrite or share a name with planning commands.")
+        return True
+    return False
 
 def get_import_block():
     return (
@@ -83,7 +111,7 @@ def create_function_command_file(function_info: FunctionInfo, output_dir: str, f
     plain_utterances = ",\n".join([f'        "{u}"' for u in generate_utterances(None, function_info.name, function_info.parameters, is_function=True)])
 
     # Build the command file content
-    command_file_content = "\n" + get_import_block() + "\n\n" + "class Signature:\n"
+    command_file_content = GENERATED_FILE_HEADER + "\n" + get_import_block() + "\n\n" + "class Signature:\n"
 
     # Add Input class if needed
     if has_input:
@@ -134,8 +162,10 @@ def create_function_command_file(function_info: FunctionInfo, output_dir: str, f
         )
 """
 
-    # Write the command file
-    with open(file_path, 'w') as f:
+    # Write the command file, unless it is a planning command (refused even with overwrite=True)
+    if _refuses_overwrite(file_path):
+        return file_path
+    with open(file_path, 'w', encoding='utf-8') as f:
         f.write(command_file_content)
 
     return file_path
@@ -320,7 +350,7 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
         call_arg = ""
 
     # Build the command file content using string concatenation instead of template formatting
-    command_file_content = "\n" + import_block + "\n\n" + "class Signature:\n"
+    command_file_content = GENERATED_FILE_HEADER + "\n" + import_block + "\n\n" + "class Signature:\n"
 
     # Add Input class if needed
     command_file_content += input_class
@@ -368,6 +398,9 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
     file_path = os.path.join(output_dir, file_name)
     if not overwrite and os.path.exists(file_path):
         return file_path
-    with open(file_path, 'w') as f:
+    # Refuse to write over a planning command (even with overwrite=True) or to collide with one
+    if _refuses_overwrite(file_path):
+        return file_path
+    with open(file_path, 'w', encoding='utf-8') as f:
         f.write(command_file_content)
     return file_path 

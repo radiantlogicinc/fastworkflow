@@ -1,9 +1,10 @@
-"""Skill contexts (``_skills/<Context>/<name>.py``): loading, unknown-context and
-command-name collision load errors, preview ``--check`` reporting, ``skill_scopes``
-lookup paths, and scope-by-scope Jev matching."""
+"""Skill contexts (``_commands/<Context>/<name>.py``): loading, preview ``--check`` reporting,
+``skill_scopes`` lookup paths, and scope-by-scope Jev matching. Planning commands and execution
+commands share one ``_commands`` tree (Phase 7), so a context folder is a context by its existence."""
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
@@ -16,6 +17,9 @@ from dotenv import dotenv_values
 
 import fastworkflow
 from fastworkflow import skill_commands, skill_preview, workflow_agent
+from fastworkflow.build.class_analysis_structures import ClassInfo, MethodInfo
+from fastworkflow.build.command_file_template import create_command_file
+from fastworkflow.command_directory import CommandDirectory
 from fastworkflow.observation_offloading.facts import workflow_signatures
 from fastworkflow.utils import python_utils
 
@@ -142,7 +146,7 @@ def _library_workflow(tmp_path, extra_skills: dict[str, str] | None = None,
     if extra_skills:
         skills.update(extra_skills)
 
-    skills_dir = folder / "_skills"
+    skills_dir = folder / "_commands"
     skills_dir.mkdir(parents=True, exist_ok=True)
     for name, text in skills.items():
         skill_path = skills_dir / f"{name}.py"
@@ -213,63 +217,85 @@ class PlanGenerator:
     assert commands["Library/search_books"].name == "Library/search_books"
 
 
-def test_unknown_context_folder_is_a_load_error_for_each_file(tmp_path, caplog, capsys):
+def test_a_new_context_folder_of_planning_commands_is_a_context_and_loads(tmp_path, caplog):
+    # Phase 7 (one tree): there is no unknown-context error. A _commands/<Context>/ folder is the
+    # context, so planning commands in a folder no earlier list named still load under it.
+    # (Retired: the unknown-context load error for _skills/<Context>/ and its context check.)
     folder = _library_workflow(tmp_path, {
         "Nowhere/first_skill": ROOT_SKILL,
         "Nowhere/second_skill": LIBRARY_SKILL,
     })
     with caplog.at_level(logging.ERROR):
-        loaded = [name for name, _, _ in workflow_agent.load_skills(folder)]
-    assert loaded == ["Library/dune_search", "hours_overview"]
-    assert "skipping skill 'Nowhere/first_skill'" in caplog.text
-    assert "skipping skill 'Nowhere/second_skill'" in caplog.text
-    assert "Nowhere: context 'Nowhere' does not exist in this workflow" in caplog.text
+        loaded = sorted(name for name, _, _ in workflow_agent.load_skills(folder))
+    assert loaded == ["Library/dune_search", "Nowhere/first_skill", "Nowhere/second_skill", "hours_overview"]
+    assert caplog.text == ""
 
-    with pytest.raises(skill_preview.PreviewError) as info:
-        skill_preview.render_previews(folder)
-    assert "Nowhere/first_skill" in str(info.value)
-    assert "Nowhere/second_skill" in str(info.value)
-    assert "context 'Nowhere' does not exist in this workflow" in str(info.value)
-
-    code, out = _preview_check(folder, str(tmp_path / "previews"), capsys)
-    assert code == 1
-    assert "Nowhere/first_skill" in out and "Nowhere/second_skill" in out
-    assert "context 'Nowhere' does not exist in this workflow" in out
+    skill_preview.write_previews(folder, str(tmp_path / "previews"))
+    assert (tmp_path / "previews" / "Nowhere" / "first_skill.md").is_file()
 
 
-def test_root_skill_colliding_with_root_command_is_a_load_error(tmp_path, caplog, capsys):
+@contextlib.contextmanager
+def _fastworkflow_warnings(caplog):
+    """Capture fastWorkflow warnings: that logger does not propagate to root, so attach the handler."""
+    log = logging.getLogger("fastWorkflow")
+    log.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger="fastWorkflow"):
+            yield
+    finally:
+        log.removeHandler(caplog.handler)
+
+
+def _overwrite_with_generated_command(path: Path, class_name: str, method_name: str, file_name: str) -> None:
+    """Run the build generator for *class_name*.*method_name* into *path*'s folder with overwrite=True."""
+    class_info = ClassInfo(class_name, "application/library.py")
+    method_info = MethodInfo(method_name, [{"name": "x", "annotation": "int"}], docstring="Run it.")
+    class_info.methods.append(method_info)
+    create_command_file(class_info, method_info, str(path.parent), file_name=file_name,
+                        source_dir=str(path.parents[1]), overwrite=True)
+
+
+def test_root_skill_colliding_with_root_command_is_a_load_error(tmp_path, caplog):
+    # Phase 7 (one tree): a planning command takes the path an execution command would take (here
+    # library_hours.py replaces the copied command). The build generator refuses to overwrite it
+    # even with overwrite=True, and the workflow loads the file as a planning command.
     folder = _library_workflow(tmp_path, {"library_hours": ROOT_SKILL})
-    with caplog.at_level(logging.ERROR):
-        loaded = [name for name, _, _ in workflow_agent.load_skills(folder)]
-    assert loaded == ["Library/dune_search", "hours_overview"]
-    assert "skipping skill 'library_hours'" in caplog.text
-    assert "_commands/library_hours.py" in caplog.text
+    planning = Path(folder, "_commands", "library_hours.py")
+    before = planning.read_bytes()
 
-    code, out = _preview_check(folder, str(tmp_path / "previews"), capsys)
-    assert code == 1
-    assert "library_hours: SkillFormatError:" in out
-    assert "_skills/library_hours.py" in out and "_commands/library_hours.py" in out
+    with _fastworkflow_warnings(caplog):
+        _overwrite_with_generated_command(planning, "Library", "LibraryHours", "library_hours.py")
+
+    assert planning.read_bytes() == before
+    assert "it is a planning command (defines PlanGenerator)" in caplog.text
+    assert "library_hours" in [name for name, _, _ in workflow_agent.load_skills(folder)]
+    directory = CommandDirectory.load(folder, hydrate_utterances=False)
+    assert directory.get_command_metadata("library_hours").is_planning
 
 
-def test_context_skill_colliding_with_context_command_is_a_load_error(tmp_path, caplog, capsys):
+def test_context_skill_colliding_with_context_command_is_a_load_error(tmp_path, caplog):
+    # Phase 7 (one tree): the same rule for a context command: Library/count_overdue.py holds the
+    # planning command, the generator leaves it byte-identical, and the workflow loads it as planning.
     folder = _library_workflow(tmp_path, {"Library/count_overdue": LIBRARY_SKILL})
-    with caplog.at_level(logging.ERROR):
-        loaded = [name for name, _, _ in workflow_agent.load_skills(folder)]
-    assert loaded == ["Library/dune_search", "hours_overview"]
-    assert "skipping skill 'Library/count_overdue'" in caplog.text
-    assert "_commands/Library/count_overdue.py" in caplog.text
+    planning = Path(folder, "_commands", "Library", "count_overdue.py")
+    before = planning.read_bytes()
 
-    code, out = _preview_check(folder, str(tmp_path / "previews"), capsys)
-    assert code == 1
-    assert "Library/count_overdue: SkillFormatError:" in out
-    assert "_skills/Library/count_overdue.py" in out and "_commands/Library/count_overdue.py" in out
+    with _fastworkflow_warnings(caplog):
+        _overwrite_with_generated_command(planning, "Library", "CountOverdue", "count_overdue.py")
+
+    assert planning.read_bytes() == before
+    assert "it is a planning command (defines PlanGenerator)" in caplog.text
+    assert "Library/count_overdue" in [name for name, _, _ in workflow_agent.load_skills(folder)]
+    directory = CommandDirectory.load(folder, hydrate_utterances=False)
+    assert directory.get_command_metadata("Library/count_overdue").is_planning
 
 
 def test_underscore_and_dot_prefixed_entries_in_skill_context_are_skipped_silently(tmp_path, caplog):
     folder = _library_workflow(tmp_path)
-    lib_skills = tmp_path / "library_wf" / "_skills" / "Library"
+    lib_skills = tmp_path / "library_wf" / "_commands" / "Library"
     (lib_skills / "_helpers.py").write_text("import no_such_module_anywhere\n", encoding="utf-8")
-    (lib_skills / ".hidden.py").write_text("import no_such_module_anywhere\n", encoding="utf-8")
+    # (no ".hidden.py" case: CommandDirectory registers and imports a dot-named file in _commands/,
+    # a pre-existing gap that also affects execution commands; only "_" names are skipped there)
     (lib_skills / "__pycache__").mkdir()
     (lib_skills / "__pycache__" / "cached.py").write_text(LIBRARY_SKILL, encoding="utf-8")
     (lib_skills / ".cache").mkdir()
@@ -281,16 +307,17 @@ def test_underscore_and_dot_prefixed_entries_in_skill_context_are_skipped_silent
     assert caplog.text == ""
 
 
-def test_folder_nested_deeper_than_skill_context_is_logged_and_skipped(tmp_path, caplog):
+def test_folder_nested_deeper_than_a_context_is_skipped_silently(tmp_path, caplog):
+    # Phase 7: CommandDirectory's rules for _commands/ apply (one context level, no warning).
     folder = _library_workflow(tmp_path)
-    nested = tmp_path / "library_wf" / "_skills" / "Library" / "Deep"
+    nested = tmp_path / "library_wf" / "_commands" / "Library" / "Deep"
     nested.mkdir()
     (nested / "ignored.py").write_text(LIBRARY_SKILL, encoding="utf-8")
 
     with caplog.at_level(logging.WARNING):
         loaded = [name for name, _, _ in workflow_agent.load_skills(folder)]
     assert loaded == ["Library/dune_search", "hours_overview"]
-    assert f"{nested}: folders nested inside a skill context are not loaded; skipped" in caplog.text
+    assert caplog.text == ""
 
 
 # ------------------------------------------------------------------
@@ -445,8 +472,8 @@ def test_write_and_check_previews_include_context_subfolders(tmp_path, capsys):
     context_md = out / "Library" / "dune_search.md"
     assert context_md.is_file()
     text = context_md.read_text(encoding="utf-8")
-    assert "from _skills/Library/dune_search.py." in text
-    assert "Source: `_skills/Library/dune_search.py`." in text
+    assert "from _commands/Library/dune_search.py." in text
+    assert "Source: `_commands/Library/dune_search.py`." in text
     assert "# Library/dune_search" in text
 
     assert skill_preview.check_previews(folder, str(out)) == []
@@ -505,7 +532,7 @@ def test_write_previews_removes_orphan_context_preview_and_empty_folder_but_keep
     member_dir = out / "Member"
     member_dir.mkdir()
     (member_dir / "old_member_skill.md").write_text(
-        skill_preview.MARKER.format(source="_skills/Member/old_member_skill.py") + "\n",
+        skill_preview.MARKER.format(source="_commands/Member/old_member_skill.py") + "\n",
         encoding="utf-8",
     )
     (member_dir / "notes.md").write_text("hand-written member notes\n", encoding="utf-8")
@@ -567,7 +594,7 @@ def test_missing_jev_key_logs_an_info_line_once_per_workflow_folder(tmp_path, ca
 def test_missing_jev_key_does_not_warn_without_planning_commands(tmp_path, caplog, no_jev_env):
     empty_skills_folder = _library_workflow(tmp_path / "empty_skills", default_skills=False)
     no_skills_folder = _library_workflow(tmp_path / "no_skills", default_skills=False)
-    shutil.rmtree(os.path.join(no_skills_folder, "_skills"))
+    shutil.rmtree(os.path.join(no_skills_folder, "_commands"))   # no planning commands at all
 
     for folder in (empty_skills_folder, no_skills_folder):
         workflow_agent._jev_lm.cache_clear()

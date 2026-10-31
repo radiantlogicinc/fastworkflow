@@ -135,13 +135,13 @@ def _module(**attrs):
 
 def _phased_command(**attrs):
     attrs.setdefault("plan", plan)
-    return command_from_module("show_book", _module(**attrs), "_skills/show_book.py").command
+    return command_from_module("show_book", _module(**attrs), "_commands/show_book.py").command
 
 
 def _flat_command():
     return command_from_module(
         "show_book", _module(steps=lambda input: find_steps(input.name)),
-        "_skills/show_book.py").command
+        "_commands/show_book.py").command
 
 
 # ----------------------------------------------------------------------
@@ -214,7 +214,7 @@ def test_a_plan_without_params_is_one_plan_for_every_call():
     class NoParams:
         """Show the shelves."""
 
-    loaded = skill_from_parts("shelves", NoParams, "_skills/shelves.py", plan_fn=lambda input: [
+    loaded = skill_from_parts("shelves", NoParams, "_commands/shelves.py", plan_fn=lambda input: [
         Phase("a", lambda: ["list_shelves"]), Phase("b", lambda: ["say how many shelves"])])
     assert loaded.command.params == () and loaded.steps == ("list_shelves", "say how many shelves")
 

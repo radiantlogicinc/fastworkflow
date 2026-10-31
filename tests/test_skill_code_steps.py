@@ -250,7 +250,7 @@ def _skill(plan):
     module = types.ModuleType("show_list_skill")
     module.Signature = ShowSignature
     module.plan = plan
-    return command_from_module("show_list", module, "_skills/show_list.py").command
+    return command_from_module("show_list", module, "_commands/show_list.py").command
 
 
 def _flat_skill(steps, plan=None):
@@ -261,7 +261,7 @@ def _flat_skill(steps, plan=None):
     module.steps = steps
     if plan is not None:
         module.plan = plan
-    return command_from_module("show_list", module, "_skills/show_list.py").command
+    return command_from_module("show_list", module, "_commands/show_list.py").command
 
 
 def _qualified(workflow, name):

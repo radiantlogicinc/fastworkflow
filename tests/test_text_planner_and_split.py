@@ -270,8 +270,8 @@ def test_the_split_goes_through_the_merge():
 
 
 def _split_file(folder, text):
-    (folder / "_skills").mkdir(parents=True, exist_ok=True)
-    (folder / "_skills" / "_split.py").write_text(text)
+    (folder / "_commands").mkdir(parents=True, exist_ok=True)
+    (folder / "_commands" / "_split.py").write_text(text)
     return str(folder)
 
 
@@ -587,7 +587,7 @@ def test_a_reply_is_cut_off_by_its_finish_reason_or_by_reaching_max_tokens():
 
 
 def skill_file(text: str) -> str:
-    """The skill file (``_skills/<name>.py``) of a skill without params: ``text``'s first line is its description,
+    """The skill file (``_commands/<name>.py``) of a skill without params: ``text``'s first line is its description,
     every other non-empty line one step."""
     description, *steps = [line.strip() for line in text.splitlines() if line.strip()]
     return (f"class Signature:\n    __doc__ = {description!r}\n\n\nclass PlanGenerator:\n"
@@ -597,10 +597,10 @@ def skill_file(text: str) -> str:
 def test_skills_without_params_give_their_steps_and_all_are_shown(tmp_path):
     from fastworkflow.workflow_agent import _job_types_for, load_skills
 
-    (tmp_path / "_skills").mkdir()
+    (tmp_path / "_commands").mkdir()
     for name, text in {"leaver_sweep": "One person is leaving: their reach. One job per person.\nfind them\nopen them",
                        "unit_walk": "Walk a whole unit roster. The unit is one job.\nopen the unit"}.items():
-        (tmp_path / "_skills" / f"{name}.py").write_text(skill_file(text))
+        (tmp_path / "_commands" / f"{name}.py").write_text(skill_file(text))
 
     assert load_skills(str(tmp_path))[0] == (
         "leaver_sweep", "One person is leaving: their reach. One job per person.", ("find them", "open them"))
@@ -612,9 +612,9 @@ def test_skills_without_params_give_their_steps_and_all_are_shown(tmp_path):
 
 
 def _write_skills(tmp_path, skills):
-    (tmp_path / "_skills").mkdir(parents=True)
+    (tmp_path / "_commands").mkdir(parents=True)
     for name, text in skills.items():
-        (tmp_path / "_skills" / f"{name}.py").write_text(skill_file(text))
+        (tmp_path / "_commands" / f"{name}.py").write_text(skill_file(text))
     return str(tmp_path)
 
 
@@ -632,7 +632,7 @@ def test_the_split_files_signature_docstring_replaces_the_default_instructions(t
 
     folder = _split_file(tmp_path, 'class Signature:\n    """Split it my way.\n\n    - one rule\n    """\n')
     other = tmp_path / "other"
-    (other / "_skills").mkdir(parents=True)
+    (other / "_commands").mkdir(parents=True)
 
     assert _split_signature(folder).instructions == "Split it my way.\n\n- one rule"
     assert _split_signature(folder).fields["job_types"].json_schema_extra["desc"] == \
@@ -670,8 +670,8 @@ def test_the_split_files_input_and_output_describe_the_splitter_fields(tmp_path)
 
 
 def _skill_folder(tmp_path):
-    (tmp_path / "_skills").mkdir(parents=True)
-    (tmp_path / "_skills" / "leaver.py").write_text(skill_file("Someone is leaving.\nfind them\nopen them\n"))
+    (tmp_path / "_commands").mkdir(parents=True)
+    (tmp_path / "_commands" / "leaver.py").write_text(skill_file("Someone is leaving.\nfind them\nopen them\n"))
     return str(tmp_path)
 
 
