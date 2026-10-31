@@ -5,7 +5,7 @@ READ-ONLY: the observability DB is opened with ``mode=ro``; nothing is run.
 
 Every ``fw.skill.phase`` span in the DB carries the phase's numbered plan
 (``steps``). Each plan is read the way the runner reads it before a phase run
-(``skill_phases.plan_code_steps``), with the workflow's own command schemas:
+(``planning_phases.plan_code_steps``), with the workflow's own command schemas:
 a step is MECHANICAL (code runs it), PASSED over (an answer or negated step:
 nothing to run) or OPEN (the agent's). Printed:
 
@@ -62,7 +62,7 @@ def stored_plans(db, experiments=()):
 
 def replay(folder, db, experiments=()):
     import fastworkflow
-    from fastworkflow import skill_phases
+    from fastworkflow import planning_phases
     from fastworkflow.observation_offloading.facts import PAGING_PARAMETERS
 
     env = os.path.join(folder, "fastworkflow.env")
@@ -75,15 +75,15 @@ def replay(folder, db, experiments=()):
     from fastworkflow.workflow_agent import core_command_names
 
     routing = fastworkflow.RoutingRegistry.get_definition(folder)
-    parameters = skill_phases.parameter_classes(routing)
+    parameters = planning_phases.parameter_classes(routing)
     commands, core = list(routing.routing_definition_map), list(core_command_names())
 
     reasons = collections.Counter()
     notes = collections.Counter()
     page_one = collections.Counter()
     phases = steps = mechanical = all_mechanical = leading = 0
-    for _span, _skill, _phase, _item, plan in stored_plans(db, experiments):
-        read = skill_phases.plan_code_steps(plan, commands, core, parameters)
+    for _span, _planning_command, _phase, _item, plan in stored_plans(db, experiments):
+        read = planning_phases.plan_code_steps(plan, commands, core, parameters)
         phases += 1
         steps += len(read)
         open_seen = False

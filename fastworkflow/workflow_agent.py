@@ -1759,14 +1759,15 @@ def _jev_lm():
 @functools.lru_cache(maxsize=None)
 def _warn_missing_jev_key(workflow_folderpath: str) -> None:
     """The INFO line of design 3.9, once per workflow folder per process, when a workflow has
-    planning commands (``_commands``) and ``JEV_API_KEY`` is not set: the agent chooses and adapts
-    them as it plans, and the ``verify`` checks of the fields it names are inactive.
+    planning commands (``_commands``) and ``JEV_API_KEY`` is not set: planning commands are not
+    matched, so the text planner plans the request (it may name them as steps), and the ``verify``
+    checks of the fields that name them are off.
     """
     fields = planning_commands.verify_field_names(workflow_folderpath)
-    checks = f" and the verify checks of {', '.join(fields)}" if fields else ""
+    checks_clause = f"; the verify checks of {', '.join(fields)} are off" if fields else ""
     logger.info(
-        f"{workflow_folderpath}: planning commands are chosen and adapted by the agent as it plans; "
-        f"set JEV_API_KEY to add Jev's choice{checks}."
+        f"{workflow_folderpath}: planning commands are not matched without JEV_API_KEY; "
+        f"the text planner plans and may name them as steps{checks_clause}."
     )
 
 

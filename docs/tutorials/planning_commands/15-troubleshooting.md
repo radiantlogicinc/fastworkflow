@@ -358,11 +358,11 @@ command returns it from `__call__` (page 1), and a planning command from `__resu
 its command's `Output` or a `CommandResponse`, keeps the call: a model writes the answer from
 the phases' runs, `output` is `None`, and the warning names the command and the exception.
 
-**`verify` checks nothing.** `library: planning commands are chosen and adapted by the
-agent as it plans; set JEV_API_KEY to add Jev's choice and the verify checks of
-<fields>.`, logged once at load, means the workflow has no `JEV_API_KEY`: the agent chooses
-planning commands by itself as it plans, and the fields the line names carry a `verify`
-option that checks nothing without the key (page 9).
+**`verify` checks nothing.** `library: planning commands are not matched without JEV_API_KEY;
+the text planner plans and may name them as steps; the verify checks of <fields> are off.`,
+logged once at load, means the workflow has no `JEV_API_KEY`: without it planning commands are
+not matched and the text planner plans the request, and the fields the line names carry a
+`verify` option that checks nothing without the key (page 9).
 
 **A navigation command without `descends_to`.** `open_shelf moved the workflow into Shelf but
 declares no descends_to; declare descends_to = "Shelf" so plans can reach Shelf's commands`

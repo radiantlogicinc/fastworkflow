@@ -113,7 +113,7 @@ fastWorkflow was benchmarked on [Tau Bench](https://github.com/sierra-research/t
 - [Quick Start: run an example in 5 minutes](#quick-start-run-an-example-in-5-minutes)
 - [AI-enable your own app (without restructuring it)](#ai-enable-your-own-app-without-restructuring-it)
 - [How complex workflows scale: context hierarchies](#how-complex-workflows-scale-context-hierarchies)
-- [Skills: multi-command jobs in code (`_skills`)](#skills-multi-command-jobs-in-code-_skills)
+- [Planning commands: multi-command jobs in code](#planning-commands-multi-command-jobs-in-code)
 - [Chat with it and debug it: `run_chatbot`](#chat-with-it-and-debug-it-run_chatbot)
 - [Production deployment](#production-deployment)
 - [Developer FAQ](#developer-faq)
@@ -300,16 +300,16 @@ This is what lets small models stay accurate as your app grows — and what keep
 
 ---
 
-## Skills: multi-command jobs in code (`_skills`)
+## Planning commands: multi-command jobs in code
 
-When a family of requests is answered by the same few commands in a known order (find a record, open it, read it, answer), write that job once as a **skill**: a Python file `_skills/<name>.py` next to `_commands/`. Its `Signature` describes the job and declares typed inputs; `steps(input)` builds the steps as text, or `plan(input)` splits them into phases that pass facts to each other in code. The planner fills the inputs from the request and the steps become the agent's plan; code runs the mechanical steps itself.
+When a family of requests is answered by the same few commands in a known order (find a record, open it, read it, answer), write that job once as a **planning command**: a Python file in `_commands/` (or `_commands/<Context>/`), beside the execution commands. Its `Signature` describes the job and declares typed inputs, and its `PlanGenerator` class holds the phases. Each phase is a method, run in the order `__phases__` gives, and the phases pass facts to each other in code. With `JEV_API_KEY`, Jev matches a request to a planning command, one typed call fills its inputs, and the fields marked `verify` are checked. Without it, planning commands are not matched, and the text planner plans the request (it may name planning commands as steps). Code runs the mechanical steps itself.
 
 ```sh
-fastworkflow command preview <workflow_dir>           # one markdown preview per skill
-fastworkflow command preview <workflow_dir> --check   # CI: fails on stale previews or a broken skill
+fastworkflow command preview <workflow_dir>           # one markdown preview per planning command
+fastworkflow command preview <workflow_dir> --check   # CI: fails on stale previews or a broken planning command
 ```
 
-Coding agents: use the wheel-shipped [author-workflow-skills](fastworkflow/skills_for_coding_fastworkflows/author-workflow-skills/SKILL.md) skill (file shape, input rules, phases, and the step wording the framework reads). Full reference: [`docs/skill_file_layout.md`](docs/skill_file_layout.md) and [`docs/skill_phases.md`](docs/skill_phases.md).
+Coding agents: use the wheel-shipped [author-planning-commands](fastworkflow/skills_for_coding_fastworkflows/author-planning-commands/SKILL.md) skill (file shape, input rules, phases, and the step wording the framework reads). Full reference: [`docs/planning_command_file_layout.md`](docs/planning_command_file_layout.md) and [`docs/planning_command_phases.md`](docs/planning_command_phases.md). Workflows that still keep planning commands in `_skills/` (a load error now) should follow [`docs/migrating_skills_to_commands.md`](docs/migrating_skills_to_commands.md).
 
 ---
 
