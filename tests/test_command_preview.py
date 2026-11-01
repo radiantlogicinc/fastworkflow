@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import uuid
 from typing import Optional
 
 import pytest
@@ -1070,3 +1071,193 @@ def test_the_command_group_replaces_planning_command_with_no_alias(tmp_path, mon
     capsys.readouterr()
     assert _run_cli(monkeypatch, "skill", "preview", folder, "--out", out) == 2
     assert "invalid choice: 'skill'" in capsys.readouterr().err
+
+
+#: A union-output fixture (design 3.12): two commands of one context, ``find_book`` and
+#: ``find_member``, and a planning command whose find phase returns either one's Output.
+#: ``OUTPUT`` is that phase's return annotation, ``OVER`` the field its fan-out reads.
+UNION_CONTEXT = '''
+class Context:
+    @classmethod
+    def get_parent(cls, command_context_object) -> None:
+        return None
+
+    @classmethod
+    def get_displayname(cls, command_context_object) -> str:
+        return "Lib"
+'''
+
+UNION_STUB = '''
+import fastworkflow
+from pydantic import BaseModel, Field
+
+
+class Signature:
+    """Find one kind of record. A stub the union fixture's steps name."""
+
+    class Input(BaseModel):
+        query: str = Field(default="", description="a stub parameter")
+
+    class Output(BaseModel):
+        OUTPUT_FIELDS
+
+
+class ResponseGenerator:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, command_parameters):
+        return Signature.Output()
+'''
+
+UNION_FIND = '''
+"""find_either: whether a book or a member goes by a name, and which."""
+from typing import Literal, Optional, Union
+
+from pydantic import BaseModel, Field
+
+from fastworkflow.planning import phase
+
+from .find_book import Signature as FindBook
+from .find_member import Signature as FindMember
+
+
+class Signature:
+    """Say whether a book or a member goes by a name, and name each match."""
+
+    plain_utterances = ["do you have a book called Emma", "is there a member named Lee"]
+
+    class Input(BaseModel):
+        name: str = Field(description="the name to look for")
+        kind: Literal["book", "member"] = Field(default="book", description="a book or a member")
+
+
+class PlanGenerator:
+    def __phases__(self, input):
+        return [self.find, self.each, self.answer]
+
+    def find(self, input) -> OUTPUT:
+        return [f"find_{input.kind} query={input.name}"]
+
+    @phase(over="OVER")
+    def each(self, title):
+        return [f"say that {title} matches"]
+
+    def answer(self, input, find):
+        return [f"say that {input.name} matches {find.total}"]
+'''
+
+BOOK_FIELDS = ("titles: list[str] = Field(default_factory=list, description=\"a stub output\")\n"
+               "        total: int = Field(default=0, description=\"a stub output\")")
+MEMBER_FIELDS = ("names: list[str] = Field(default_factory=list, description=\"a stub output\")\n"
+                 "        total: int = Field(default=0, description=\"a stub output\")")
+
+
+def _union_workflow(root, over: str = "find.titles", output: str = "FindBook.Output | FindMember.Output") -> str:
+    # a folder name of its own: the loader imports a workflow's modules by their names, so two
+    # fixtures sharing one name in one process would share (and mix up) the classes of the first
+    folder = root / f"union_{uuid.uuid4().hex[:8]}"
+    commands = folder / "_commands" / "Lib"
+    commands.mkdir(parents=True)
+    (commands / "_Lib.py").write_text(UNION_CONTEXT)
+    (commands / "find_book.py").write_text(UNION_STUB.replace("OUTPUT_FIELDS", BOOK_FIELDS))
+    (commands / "find_member.py").write_text(UNION_STUB.replace("OUTPUT_FIELDS", MEMBER_FIELDS))
+    text = UNION_FIND.replace("OVER", over).replace("OUTPUT", output)
+    (commands / "find_either.py").write_text(text)
+    return str(folder)
+
+
+@pytest.fixture
+def union_workflow(tmp_path):
+    return _union_workflow(tmp_path)
+
+
+def test_a_union_output_renders_each_member_as_a_labelled_variant(union_workflow):
+    text = command_preview.render_previews(union_workflow)["Lib/find_either.md"]
+    # the phase's output names both commands' Outputs, and the table cell escapes the separator
+    assert "| `find` | `Lib/find_book`'s `Output` \\| `Lib/find_member`'s `Output` | always | no |" in text
+    assert "### `find` -> `Lib/find_book`'s `Output` | `Lib/find_member`'s `Output`" in text
+    # each member, labelled by its command, with its own fields
+    assert ("`Lib/find_book`'s `Output`:\n\n| fact | type | from |\n|---|---|---|\n"
+            "| `titles` | `list[str]` | not filled from a command |\n"
+            "| `total` | `int` | not filled from a command |") in text
+    assert ("`Lib/find_member`'s `Output`:\n\n| fact | type | from |\n|---|---|---|\n"
+            "| `names` | `list[str]` | not filled from a command |\n"
+            "| `total` | `int` | not filled from a command |") in text
+
+
+def test_a_from_edge_to_a_field_of_one_member_resolves_and_says_which_member_has_it(union_workflow):
+    text = command_preview.render_previews(union_workflow)["Lib/find_either.md"]
+    # kind = book runs find_book, whose Output has titles: the fan-out renders its items
+    assert "| `each` | none | always | per item of `find.titles` as `title` |" in text
+    book = _plan(text, "when kind = book")
+    assert "For the first item, `title` = `<find.titles[0]>`:\n\n1. `say that <find.titles[0]> matches`" in book
+    # kind = member runs find_member, which has no titles: the preview says so, and says who has it
+    member = _plan(text, "when kind = member")
+    assert "_Items not rendered: phase 'each': over='find.titles': Output has no field 'titles'. " \
+           "`titles` is a field of `Lib/find_book`'s `Output` only._" in member
+    assert "say that <find.titles[0]> matches" not in member
+
+
+def test_a_field_in_neither_member_is_reported_as_unresolved(tmp_path):
+    folder = _union_workflow(tmp_path, over="find.authors")
+    with pytest.raises(command_preview.PreviewError) as error:
+        command_preview.render_previews(folder)
+    assert "find_book.Output | find_member.Output has no field 'authors'" in str(error.value)
+    assert "find_either" in str(error.value)
+
+
+@pytest.mark.parametrize("output", [
+    "FindBook.Output | None",
+    "Optional[FindBook.Output]",
+    "Union[FindBook.Output, FindMember.Output]",
+    "Union[FindBook.Output, FindMember.Output, None]",
+    "Optional[Union[FindBook.Output, FindMember.Output]]",
+])
+def test_optional_and_typing_unions_render_their_members(tmp_path, output):
+    text = command_preview.render_previews(_union_workflow(tmp_path, output=output))["Lib/find_either.md"]
+    assert "### `find` -> `Lib/find_book`'s `Output`" in text
+    assert "`Lib/find_book`'s `Output`:\n\n| fact | type | from |" in text
+    assert "per item of `find.titles` as `title`" in text
+    # None is not a member: no variant for it
+    assert "NoneType" not in text and "None`'s" not in text
+
+
+def test_output_members_and_placeholder_member_read_unions_and_optionals():
+    from typing import Optional, Union
+
+    from fastworkflow import planning_phases
+
+    class Book(BaseModel):
+        titles: list[str] = []
+
+    class Member(BaseModel):
+        names: list[str] = []
+
+    assert planning_phases.output_members(Book) == (Book,)
+    assert planning_phases.output_members(Book | Member) == (Book, Member)
+    assert planning_phases.output_members(Union[Book, Member]) == (Book, Member)
+    assert planning_phases.output_members(Optional[Book]) == (Book,)
+    assert planning_phases.output_members(Book | None) == (Book,)
+    assert planning_phases.output_members(Union[Book, Member, None]) == (Book, Member)
+    for not_a_model in (None, int, Book | int, list[str]):
+        assert planning_phases.output_members(not_a_model) == ()
+    assert planning_phases.placeholder_member(Book | Member) is Book
+    assert planning_phases.placeholder_member(Book | Member, "names") is Member
+    assert planning_phases.placeholder_member(Book | Member, "nowhere") is Book
+    assert planning_phases.placeholder_member(Book) is Book
+
+
+LIBRARY = os.path.join(os.path.dirname(os.path.abspath(command_preview.__file__)), "examples", "library")
+
+
+def test_the_library_find_record_preview_renders_both_variants():
+    text = command_preview.render_previews(LIBRARY)["Library/find_record.md"]
+    assert "`Library/find_book`'s `Output`:" in text
+    assert "`Library/find_member`'s `Output`:" in text
+    assert "| `names` | `list[str]` |" in text and "| `titles` | `list[str]` |" in text
+    assert "1. `find_member query=<name>`" in text
+
+
+def test_the_library_previews_write_and_check_clean_in_a_tmp_dir(tmp_path, monkeypatch):
+    out = tmp_path / "library_previews"
+    assert _run_cli(monkeypatch, "command", "preview", LIBRARY, "--out", str(out)) == 0
+    assert (out / "Library" / "find_record.md").is_file()
+    assert _run_cli(monkeypatch, "command", "preview", LIBRARY, "--check", "--out", str(out)) == 0

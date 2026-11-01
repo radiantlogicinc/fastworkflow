@@ -307,16 +307,42 @@ class Workflow:
                 command_name=f"IntentDetection/{name}",
                 command_response=fastworkflow.CommandResponse(
                     response=f"Context is now '{wf.current_command_context_displayname}'"))
-        qualified = _qualified(wf, name)
+        # As the CME walk does (3.9): a name on the lookup path runs bound to the record of its
+        # scope. perform_action would reset the binding to the current object, so such a run
+        # calls the response generator itself, after binding.
+        from fastworkflow.context_navigation import command_on_path
+
+        found = command_on_path(wf, name)
+        bound = found is not None and len(found[1]) == 1 and found[0].record is not wf.current_command_context
+        if found is not None and len(found[1]) == 1:
+            qualified = found[1][0]
+        else:
+            qualified = _qualified(wf, name)
         routing = fastworkflow.RoutingRegistry.get_definition(wf.folderpath)
         cls = routing.get_command_class(qualified, fastworkflow.ModuleType.COMMAND_PARAMETERS_CLASS)
         params = None
         if cls is not None:
             params = (ParameterExtraction._extract_parameters_from_key_values(command, cls, name)
                       or ParameterExtraction._extract_parameters_from_bare(command, cls, name))
-        out = CommandExecutor.perform_action(wf, fastworkflow.Action(
-            command_name=qualified, command=command,
-            parameters=params.model_dump() if params is not None else {}))
+        if bound:
+            from fastworkflow.command_executor import call_response_generator
+
+            wf.command_context_for_response_generation = found[0].record
+            gen_cls = routing.get_command_class(
+                qualified, fastworkflow.ModuleType.RESPONSE_GENERATION_INFERENCE)
+            raw = call_response_generator(gen_cls(), wf, command, *([] if params is None else [params]))
+            if isinstance(raw, fastworkflow.CommandOutput):
+                out = raw
+            else:
+                out = fastworkflow.CommandOutput(
+                    command_name=qualified, command_parameters=params,
+                    command_response=fastworkflow.CommandResponse(
+                        response=raw.model_dump_json() if isinstance(raw, BaseModel) else str(raw),
+                        output=raw if isinstance(raw, BaseModel) else None))
+        else:
+            out = CommandExecutor.perform_action(wf, fastworkflow.Action(
+                command_name=qualified, command=command,
+                parameters=params.model_dump() if params is not None else {}))
         out.command_name = qualified
         text = out.command_response.response or ""
         if text.startswith("Response: "):
@@ -652,13 +678,13 @@ def test_code_reaches_the_context_of_a_step_by_a_no_value_path(todo, climbable):
     todo.plan = _plan(Phase("report", lambda: ["get_todo_list id=8", "list_todo_lists"]))
     todo.turn()
 
+    # 3.9: list_todo_lists is a TodoListManager command, on the path from the list, so it runs
+    # in place (bound to the manager) and no go_up is inserted. The list stays current.
     assert todo.model.asked == []
-    assert todo.workflow.sent == ["get_todo_list id=8", "go_up", "list_todo_lists"]
-    trajectory = todo.agent.trajectory
-    assert trajectory["thought_1"] == "Run by code to reach the context of step 2."
-    assert trajectory["tool_args_1"] == {"command": "go_up"}
+    assert todo.workflow.sent == ["get_todo_list id=8", "list_todo_lists"]
+    assert todo.wf.current_command_context.id == 8
     runs = [r["command"].split("/")[-1] for r in todo.ctx._archived_command_runs()]
-    assert runs[:3] == ["get_todo_list", "go_up", "list_todo_lists"]
+    assert runs[:2] == ["get_todo_list", "list_todo_lists"]
 
 
 def test_a_path_that_needs_a_value_stops_code_with_the_refusal(todo, monkeypatch):
@@ -689,9 +715,12 @@ def test_opening_the_record_already_open_counts_as_done(todo, monkeypatch):
         "get_todo_list id=8", "get_todo_list id=8", "get_properties"]))
     todo.turn()
 
+    # 3.9: get_todo_list is a TodoListManager command on the path from the list, so the repeat
+    # runs in place (it re-enters the same list: the end state is unchanged) instead of being
+    # refused as "already in context". The step still counts as done, with no model call.
     assert todo.model.asked == []
-    assert todo.workflow.sent == ["get_todo_list id=8", "get_properties"]
-    assert "You are already in context" in todo.agent.trajectory["observation_1"]
+    assert todo.workflow.sent == ["get_todo_list id=8", "get_todo_list id=8", "get_properties"]
+    assert todo.wf.current_command_context.id == 8
     assert _phases(todo.sink)[0].attributes["code_stop"] == "done"
 
 
@@ -865,8 +894,11 @@ def test_a_fan_out_of_mechanical_items_runs_every_item_with_no_model_call(todo, 
 
     assert result.status == TurnStatus.COMPLETED
     assert todo.model.asked == [] and todo.model.answers == []
+    # 3.9: get_todo_list is a TodoListManager command on the path from each list, so the second
+    # item runs in place: no go_up between the items. The last item stays current.
     assert todo.workflow.sent == ["get_todo_list id=7", "get_properties",
-                                  "go_up", "get_todo_list id=8", "get_properties"]
+                                  "get_todo_list id=8", "get_properties"]
+    assert todo.wf.current_command_context.id == 8
     items = [s for s in _phases(todo.sink) if s.attributes["phase"] == "each"]
     assert [s.attributes["facts"] for s in items] == [{"description": "chores"},
                                                       {"description": "errands"}]

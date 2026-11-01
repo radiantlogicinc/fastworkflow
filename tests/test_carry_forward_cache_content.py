@@ -28,15 +28,13 @@ from fastworkflow.train.selective_training import (
 
 CONTEXT_COMMANDS = {
     "TodoListManager": {"TodoListManager/create", "TodoListManager/delete"},
-    "TodoList": {"TodoList/add_item"},
-    "TodoItem": {"TodoItem/complete"},
-}
-# TodoList inherits TodoListManager's commands as its wildcard class; TodoItem
-# inherits both. This is the shape that makes one command feed several contexts.
-CONTEXT_ANCESTORS = {
-    "TodoListManager": set(),
-    "TodoList": {"TodoListManager"},
-    "TodoItem": {"TodoList", "TodoListManager"},
+    # Phase 9 flattened heads (design 3.9): each head's label space is its own commands
+    # PLUS the commands it inherits, so context_commands is already the flattened set.
+    "TodoList": {"TodoList/add_item", "TodoListManager/create", "TodoListManager/delete"},
+    "TodoItem": {
+        "TodoItem/complete", "TodoList/add_item",
+        "TodoListManager/create", "TodoListManager/delete",
+    },
 }
 # Which commands synthetic generation would actually produce utterances for. Supplied
 # explicitly here because these fixtures are dictionaries rather than real workflows;
@@ -61,17 +59,17 @@ def _cache_entry(workflow: Path, command_name: str) -> Path:
 
 
 def test_ancestor_commands_count_as_contributing():
-    """A context's wildcard class is built from its ancestors' utterances.
+    """An inherited command is part of a head's label space, so it contributes.
 
     If contribution meant only "own commands", the shared set would be empty for
     exactly the inheritance shape the hazard needs, and the check would never fire.
+    Under flattened heads (Phase 9, design 3.9) the inheritance is already merged into
+    context_commands, so contribution is read from that map alone.
     """
-    contributing = _commands_contributing_to(
-        "TodoItem", CONTEXT_COMMANDS, CONTEXT_ANCESTORS
-    )
+    contributing = _commands_contributing_to("TodoItem", CONTEXT_COMMANDS)
 
     assert "TodoItem/complete" in contributing
-    assert "TodoList/add_item" in contributing, "parent's commands are the wildcard class"
+    assert "TodoList/add_item" in contributing, "parent's commands are in the label space"
     assert "TodoListManager/create" in contributing, "grandparent's too"
 
 
@@ -82,7 +80,6 @@ def test_a_missing_cache_directory_blocks_carry_forward(workflow: Path):
         to_train=["TodoListManager"],
         carried=["TodoList"],
         context_commands=CONTEXT_COMMANDS,
-        context_ancestors=CONTEXT_ANCESTORS,
         generation_eligible=ALL_GENERATED,
     )
 
@@ -99,7 +96,6 @@ def test_a_populated_cache_allows_carry_forward(workflow: Path):
         to_train=["TodoListManager"],
         carried=["TodoList"],
         context_commands=CONTEXT_COMMANDS,
-        context_ancestors=CONTEXT_ANCESTORS,
         generation_eligible=ALL_GENERATED,
     )
 
@@ -119,7 +115,6 @@ def test_a_partially_populated_cache_still_blocks(workflow: Path):
         to_train=["TodoListManager"],
         carried=["TodoList"],
         context_commands=CONTEXT_COMMANDS,
-        context_ancestors=CONTEXT_ANCESTORS,
         generation_eligible=ALL_GENERATED,
     )
 
@@ -138,7 +133,6 @@ def test_commands_not_shared_with_a_carried_context_are_ignored(workflow: Path):
         to_train=["TodoItem"],
         carried=[],
         context_commands=CONTEXT_COMMANDS,
-        context_ancestors=CONTEXT_ANCESTORS,
         generation_eligible=ALL_GENERATED,
     )
 
@@ -160,7 +154,6 @@ def test_the_check_matches_on_the_cache_naming_scheme(workflow: Path):
         to_train=["TodoListManager"],
         carried=["TodoList"],
         context_commands=CONTEXT_COMMANDS,
-        context_ancestors={"TodoList": {"TodoListManager"}},
         generation_eligible=ALL_GENERATED,
     )
 
@@ -177,7 +170,6 @@ def test_a_non_json_file_in_the_cache_does_not_count_as_an_entry(workflow: Path)
         to_train=["TodoListManager"],
         carried=["TodoList"],
         context_commands=CONTEXT_COMMANDS,
-        context_ancestors={"TodoList": {"TodoListManager"}},
         generation_eligible=ALL_GENERATED,
     )
 
@@ -418,7 +410,6 @@ def test_a_command_with_nothing_to_generate_is_not_a_missing_cache_entry(workflo
             **CONTEXT_COMMANDS,
             "TodoListManager": CONTEXT_COMMANDS["TodoListManager"] | {"set_root_context"},
         },
-        context_ancestors=CONTEXT_ANCESTORS,
         # set_root_context is deliberately absent: generation never produces
         # utterances for it, so it can never have a cache entry.
         generation_eligible=ALL_GENERATED,
@@ -440,8 +431,7 @@ def test_a_dotted_command_name_recovers_its_full_stem(workflow: Path):
         str(workflow),
         to_train=["A"],
         carried=["B"],
-        context_commands={"A": {dotted}, "B": set()},
-        context_ancestors={"B": {"A"}},
+        context_commands={"A": {dotted}, "B": {dotted}},
         generation_eligible={dotted},
     )
 

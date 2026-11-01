@@ -40,6 +40,15 @@ with open(os.path.join(info, "routing_definition.json"), "w", encoding="utf-8") 
     json.dump({{"contexts": {{"*": ["demo"]}}}}, f)
 with open(os.path.join(info, "global", "threshold.json"), "w", encoding="utf-8") as f:
     json.dump({{"confidence_threshold": 0.5}}, f)
+# Phase 9 step 4: an artifact without the not-here construction record is refused at load,
+# so the stub publishes a version that carries the record, as the real trainer does.
+vdir = os.path.join(info, "versions", "stubv1")
+os.makedirs(vdir, exist_ok=True)
+with open(os.path.join(vdir, "manifest.json"), "w", encoding="utf-8") as f:
+    json.dump({{"version_id": "stubv1",
+               "not_here": {{"construction": "sparse", "seeds_per_command": 1}}}}, f)
+with open(os.path.join(info, "current.json"), "w", encoding="utf-8") as f:
+    json.dump({{"version_id": "stubv1", "layout": "versioned"}}, f)
 """
 
 
@@ -72,6 +81,15 @@ def _mark_trained(wf: Path) -> None:
     (info / "global" / "threshold.json").write_text(
         json.dumps({"confidence_threshold": 0.5}), encoding="utf-8"
     )
+    # Phase 9 step 4: a trained workflow has a current version whose manifest carries the
+    # not-here construction record. Flat artifacts alone are refused (see the test below).
+    from fastworkflow.model_pipeline_training import construction_records
+    from fastworkflow.train import artifact_versioning as av
+
+    version_id = av.new_version_id()
+    record_fields, _ = construction_records(folderpath=str(wf))
+    av.write_manifest(str(wf), version_id, **record_fields)
+    av._write_pointer(str(wf), version_id, "versioned")
 
 
 def _kill(pid: int) -> None:
@@ -123,6 +141,17 @@ class TestWorkflowIsTrained:
     def test_command_info_dir_alone_is_not_trained(self, tmp_path):
         wf = _untrained_workflow(tmp_path)
         (wf / "___command_info").mkdir()
+        assert run_chatbot_server._workflow_is_trained(str(wf)) is False
+
+    def test_flat_artifacts_without_a_version_are_not_trained(self, tmp_path):
+        """Phase 9 step 4: an unversioned layout has no construction record and is refused."""
+        wf = _untrained_workflow(tmp_path)
+        info = wf / "___command_info"
+        (info / "global").mkdir(parents=True)
+        (info / "routing_definition.json").write_text(
+            json.dumps({"contexts": {"*": ["demo"]}}), encoding="utf-8")
+        (info / "global" / "threshold.json").write_text(
+            json.dumps({"confidence_threshold": 0.5}), encoding="utf-8")
         assert run_chatbot_server._workflow_is_trained(str(wf)) is False
 
     def test_threshold_json_for_global_is_trained(self, tmp_path):

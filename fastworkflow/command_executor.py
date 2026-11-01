@@ -333,6 +333,9 @@ class CommandExecutor(CommandExecutorInterface):
 
         command_name = command_output.command_response.artifacts["command_name"]
         input_obj = command_output.command_response.artifacts["cmd_parameters"]
+        # Set by the CME walk when the command runs on an enclosing record (None otherwise).
+        ran_on_name = command_output.command_response.artifacts.get("ran_on_context_name")
+        ran_on_clause = command_output.command_response.artifacts.get("ran_on_context_clause")
 
         workflow = chat_session.get_active_workflow()
         workflow_name = workflow.folderpath.split('/')[-1]
@@ -405,6 +408,11 @@ class CommandExecutor(CommandExecutorInterface):
         command_output.context = context
         command_output.command_name = command_name
         command_output.command_parameters = input_obj or None
+        if ran_on_clause is not None:
+            # A command the walk ran on an enclosing record is filed under that record.
+            command_output.context = "global" if not ran_on_name else ran_on_name
+            command_output.ran_in_context_name = ran_on_name or ""
+            command_output.ran_in_context_clause = ran_on_clause
 
         # important to clear the current command mode from the workflow context
         if "is_assistant_mode_command" in chat_session.cme_workflow._context:

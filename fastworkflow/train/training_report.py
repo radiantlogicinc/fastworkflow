@@ -241,43 +241,21 @@ class CommandRow(BaseModel):
         return self.status in BLOCKING_STATUSES
 
 
-class EscalationBudget(BaseModel):
-    """Every number that decided one context's reserved escalation-class row count.
+class NotHereHead(BaseModel):
+    """One head's 'not here' class: the rows trained and the foreign commands they came from.
 
-    "Why does this context's `wildcard` class have 87 rows?" is the question AR6 spent a
-    spec section on, because the reference workflow's numbers could not be reconstructed
-    after the fact. `model_pipeline_training._record_wildcard_context_training` writes
-    these into provenance; this is the row that puts them in front of a person.
+    A 'not here' row is a seed of a command that belongs to some other context, labelled so the
+    head learns "this is not one of mine" (design 2.50 / Phase 9). Read from the context's
+    provenance record, written by `model_pipeline_training._record_wildcard_context_training`.
     """
 
     context_name: str
-    #: False when the context has no non-local ancestor utterances, so no escalation class
-    #: was emitted at all. Its `selected_rows` is 0 and every denominator is moot.
+    #: False when the head has no 'not here' class (the internal workflow has none).
     included: bool
-    #: Rows the escalation class actually trained on.
-    selected_rows: int
-    #: This context's own labelled rows, counted BEFORE escalation rows were appended.
-    #: The budget is a multiplier on this, which is what bounds training cost.
-    own_rows: Optional[int] = None
-    #: Ancestor rows available before and after de-duplication against this context's own
-    #: utterances. The gap between them is how much of the ancestor corpus means
-    #: something here and therefore cannot train "ask my parent".
-    raw_candidate_rows: Optional[int] = None
-    deduplicated_candidate_rows: Optional[int] = None
-    #: Rows the selection had to include regardless of budget (the base `wildcard`
-    #: command's own utterances).
-    always_include_rows: Optional[int] = None
-    #: The bound `class_balance.reserved_class_budget` computed.
-    selected_budget: Optional[int] = None
-    #: Distinct ancestor (context, command) sources, EXCLUDING the core commands. Each
-    #: must keep at least one row or it cannot be escalated to at all, so
-    #: `class_balance.reserved_class_budget` takes the max of this and the cost ratio:
-    #: coverage is a requirement, cost a preference. Core commands are excluded because
-    #: they are a label in every context and so are never escalation targets -- which is
-    #: also what stops this number moving when an unrelated context is renamed (bd
-    #: fix-4ej); see `class_balance`'s module docstring for the derivation.
-    coverage_floor: Optional[int] = None
-    coverage_floor_applied: Optional[bool] = None
+    #: 'not here' rows the head trained on.
+    not_here_rows: int
+    #: Foreign commands those rows were sampled from. None when not recorded.
+    sampled_commands: Optional[int] = None
     reason: Optional[str] = None
 
 
@@ -289,9 +267,9 @@ class TrainingReport(BaseModel):
     min_rows: int
     min_seeds: int
     rows: list[CommandRow] = Field(default_factory=list)
-    #: Per-context escalation-class budget decisions, newest run only. Empty for a
-    #: workflow trained before these were recorded, and for one with no ancestor contexts.
-    escalation_budgets: list[EscalationBudget] = Field(default_factory=list)
+    #: Per-head 'not here' class summary, newest run only. Empty for a workflow trained
+    #: before these were recorded.
+    not_here_heads: list[NotHereHead] = Field(default_factory=list)
     #: Human-readable descriptions of anything that stopped the report being complete —
     #: a missing provenance file, unreadable JSON, a record that failed validation.
     #: Never an exception: a broken report must not mask the training result the
@@ -357,7 +335,7 @@ class TrainingReport(BaseModel):
             "excluded_from_training": len(self.with_status(RowStatus.EXCLUDED)),
             "ok": len(self.with_status(RowStatus.OK)),
             "has_blocking_problems": self.has_blocking_problems,
-            "escalation_contexts": len(self.escalation_budgets),
+            "not_here_heads": len(self.not_here_heads),
         }
         return payload
 
@@ -514,12 +492,18 @@ def load_context_training(
 
 def _load_command_directory(
     workflow_folderpath: str, problems: list[str]
-) -> tuple[set[str], dict[str, bool]]:
-    """Return (core command names, command -> participates in intent training).
+) -> tuple[set[str], dict[str, bool], set[str]]:
+    """Return (core command names, command -> participates in intent training, planning).
 
     The second map mirrors `model_pipeline_training._requires_utterances`, which keys
     solely off `input_for_param_extraction_class`. A command without one is dispatched
     through `perform_action` and is deliberately not a classifier label.
+
+    The third set is the planning commands (`CommandMetadata.is_planning`, serialised
+    as the same flag). `model_pipeline_training.trained_command_labels` drops them from
+    the label space, so they never receive training rows and must not be listed as
+    untrained. They are kept out of the second map as well, so no reader of this module
+    can rediscover them as trainable labels.
     """
     data = _read_json(
         command_info_dir(workflow_folderpath) / COMMAND_DIRECTORY_FILENAME,
@@ -527,16 +511,21 @@ def _load_command_directory(
         "Command directory",
     )
     if data is None:
-        return set(), {}
+        return set(), {}, set()
 
     core = {str(name) for name in data.get("core_command_names") or []}
     metadata = data.get("map_command_2_metadata")
     requires: dict[str, bool] = {}
+    planning: set[str] = set()
     if isinstance(metadata, dict):
         for name, entry in metadata.items():
-            if isinstance(entry, dict):
-                requires[str(name)] = bool(entry.get("input_for_param_extraction_class"))
-    return core, requires
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("is_planning"):
+                planning.add(str(name))
+                continue
+            requires[str(name)] = bool(entry.get("input_for_param_extraction_class"))
+    return core, requires, planning
 
 
 def _load_command_contexts(
@@ -604,39 +593,28 @@ def _load_heldout_per_command(
 # Building
 # ---------------------------------------------------------------------
 
-def _build_escalation_budgets(
+def _build_not_here_heads(
     context_training: dict[tuple[str, str], ContextTrainingProvenance],
-) -> list[EscalationBudget]:
-    """Pull the escalation-class budget records out of the context-training provenance.
-
-    Keyed on the reserved label rather than on a separate provenance block, because that
-    is where the trainer already records them — the fields exist on every
-    `ContextTrainingProvenance` and only the reserved labels populate them.
-    """
-    budgets: list[EscalationBudget] = []
+) -> list[NotHereHead]:
+    """Pull each head's 'not here' class summary out of the context-training provenance."""
+    heads: list[NotHereHead] = []
     for (context_name, command_name), record in sorted(context_training.items()):
         if command_name != WILDCARD_LABEL:
             continue
-        budgets.append(
-            EscalationBudget(
+        heads.append(
+            NotHereHead(
                 context_name=context_name,
                 included=record.status
                 in {
                     ContextTrainingStatus.INCLUDED,
                     ContextTrainingStatus.INCLUDED_FALLBACK,
                 },
-                selected_rows=record.row_count,
-                own_rows=record.own_row_count,
-                raw_candidate_rows=record.raw_candidate_count,
-                deduplicated_candidate_rows=record.deduplicated_candidate_count,
-                always_include_rows=record.always_include_count,
-                selected_budget=record.selected_budget,
-                coverage_floor=record.coverage_floor,
-                coverage_floor_applied=record.coverage_floor_applied,
+                not_here_rows=record.row_count,
+                sampled_commands=record.sampled_commands,
                 reason=record.reason,
             )
         )
-    return budgets
+    return heads
 
 
 def _classify_kind(command_name: str, core_commands: set[str]) -> CommandKind:
@@ -669,7 +647,7 @@ def _classify_status(
     """Turn counts into a single verdict. Order is severity order.
 
     A reserved label is exempt from every floor *except* the fallback flag. Its rows
-    are fixed literals or ancestor utterances rather than anything generated for it,
+    are fixed literals or sampled foreign-command seeds rather than anything generated for it,
     so "no provenance" and "few seeds" are its normal state and flagging them would
     put a non-command at the top of a list of broken commands. A reserved label that
     genuinely fell back is still surfaced, because a degraded escalation class
@@ -738,7 +716,7 @@ def build_report(
     problems: list[str] = []
     records = load_provenance(workflow_folderpath, problems)
     context_training = load_context_training(workflow_folderpath, problems)
-    core_commands, requires_utterances = _load_command_directory(
+    core_commands, requires_utterances, planning_commands = _load_command_directory(
         workflow_folderpath, problems
     )
     command_contexts = _load_command_contexts(workflow_folderpath, problems)
@@ -764,9 +742,12 @@ def build_report(
     # that generated utterances but vanished from routing is as interesting as the
     # reverse, and silently reporting the intersection would hide both.
     context_commands = {command for _context, command in context_training}
+    # Planning commands are not labels (see `_load_command_directory`), so they are
+    # subtracted from the union here as well: a stray provenance or routing entry for one
+    # must not turn it back into a "missing" row.
     all_commands = (
         set(records) | context_commands | set(command_contexts) | set(requires_utterances)
-    )
+    ) - planning_commands
 
     rows: list[CommandRow] = []
     for command_name in sorted(all_commands):
@@ -881,7 +862,7 @@ def build_report(
         min_rows=resolved_min_rows,
         min_seeds=resolved_min_seeds,
         rows=rows,
-        escalation_budgets=_build_escalation_budgets(context_training),
+        not_here_heads=_build_not_here_heads(context_training),
         problems=problems,
         provenance_path=str(path) if path.is_file() else None,
         heldout_available=bool(heldout),
@@ -956,55 +937,35 @@ def _detail_lines(
     return lines
 
 
-def _escalation_budget_lines(budgets: list[EscalationBudget]) -> list[str]:
-    """Render the escalation-class budget table.
+def _not_here_lines(heads: list[NotHereHead]) -> list[str]:
+    """Render the per-head 'not here' class table.
 
-    Present even when nothing is wrong, because it is not a defect list: it is the
-    artifact that answers "why does this context's wildcard class have this many rows"
-    without a retained console log, which is the AR6 requirement.
+    Shown only when the newest provenance has at least one head with a 'not here' record.
     """
-    if not budgets:
+    if not heads:
         return []
-    width = max(28, min(46, max(len(b.context_name) for b in budgets) + 1))
+    width = max(28, min(46, max(len(h.context_name) for h in heads) + 1))
     lines = [
         "",
-        f"  ESCALATION BUDGET ({len(budgets)}) — rows given to the reserved "
-        f"`{WILDCARD_LABEL}` class, and",
-        "  the denominators that chose them. Budget bounds ancestor rows at this "
-        "context's own",
-        "  row count; the floor raises it when coverage needs more, so every ancestor "
-        "(context,",
-        "  command) source keeps at least one row. FLOOR excludes core commands: they "
-        "are a",
-        "  label here too, so they are never escalated to. SELECTED is what actually "
-        "trained.",
-        f"    {'CONTEXT':{width}s} {'SELECTED':>8s} {'OWN':>6s} {'BUDGET':>7s} "
-        f"{'FLOOR':>6s} {'CAND(raw/dedup)':>17s} {'ALWAYS':>7s}",
+        f"  NOT-HERE SAMPLES ({len(heads)}) — per head: the 'not here' rows trained, and the "
+        "foreign commands",
+        "  they were sampled from. Each row is a seed of another context's command, labelled "
+        "so the head",
+        "  learns it is not one of its own.",
+        f"    {'CONTEXT':{width}s} {'ROWS':>6s} {'COMMANDS':>9s}",
     ]
-    for budget in budgets:
-        candidates = (
-            f"{_fmt_count(budget.raw_candidate_rows)}/"
-            f"{_fmt_count(budget.deduplicated_candidate_rows)}"
-        )
+    for head in heads:
+        if not head.included:
+            lines.append(f"    {head.context_name:{width}s} {'-':>6s} {'-':>9s}")
+            lines.append(
+                f"      no 'not here' class: {head.reason or 'not emitted here'}"
+            )
+            continue
         lines.append(
-            f"    {budget.context_name:{width}s} {budget.selected_rows:>8d} "
-            f"{_fmt_count(budget.own_rows):>6s} "
-            f"{_fmt_count(budget.selected_budget):>7s} "
-            f"{_fmt_count(budget.coverage_floor):>6s} {candidates:>17s} "
-            f"{_fmt_count(budget.always_include_rows):>7s}"
+            f"    {head.context_name:{width}s} {head.not_here_rows:>6d} "
+            f"{_fmt_count(head.sampled_commands):>9s}"
         )
-        if not budget.included:
-            lines.append(
-                f"      no escalation class: {budget.reason or 'not emitted here'}"
-            )
-        elif budget.coverage_floor_applied:
-            lines.append(
-                f"      coverage floor bound the budget: {budget.coverage_floor} "
-                f"ancestor source(s) needed a row each, above this context's "
-                f"{_fmt_count(budget.own_rows)} own row(s)"
-            )
     return lines
-
 
 def _summarize_healthy(rows: list[CommandRow]) -> str:
     """One line describing the commands that need no attention.
@@ -1153,7 +1114,7 @@ def format_report(report: TrainingReport) -> str:
         )
         lines.extend(_detail_lines(never_routed, width))
 
-    lines.extend(_escalation_budget_lines(report.escalation_budgets))
+    lines.extend(_not_here_lines(report.not_here_heads))
 
     lines.append("")
     lines.append("  SUMMARY")

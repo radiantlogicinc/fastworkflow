@@ -888,6 +888,10 @@ async def _create_user_runtime(
 ) -> None:
     """Build and register a fresh Topology-B runtime (caller holds creation lock)."""
     context = _merge_workflow_context(context, http_bearer_token)
+    # Phase 9 step 4: refuse an app whose artifacts predate the not-here construction, before the
+    # experiment claim below reserves anything. The CME is checked by WorkflowExecutionContext.
+    from fastworkflow.train.artifact_versioning import require_construction_record
+    require_construction_record(workflow_path)
     logger.info(f"Creating new Topology-B session for channel_id: {channel_id}")
 
     claim: Optional[dict[str, Any]] = None

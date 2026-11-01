@@ -22,7 +22,7 @@ import fastworkflow.workflow_agent as workflow_agent
 from fastworkflow import planning_commands, planning_phases
 from fastworkflow import plan_frame as plan_frame_module
 from fastworkflow import tracing
-from fastworkflow.command_executor import CommandNotFoundError
+from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError
 from fastworkflow.context_identity import context_class_for
 from fastworkflow.planning import fact_from, run
 from fastworkflow.planning import phase
@@ -1215,15 +1215,7 @@ def test_aj_the_same_call_fills_a_fact_from_the_child_output_it_names(nested_env
     assert span.attributes["facts"] == {"book_uid": "b1"}
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "A navigation gap, not a planning one (fix-3rsq.5.12 review). After item 1's open_book the "
-    "workflow stands on the Book record, whose parent is the Library root object. "
-    "live_context_chain stops at that root and labels it '*' instead of 'Library', so the navigation "
-    "planner has no Book->Library edge and item 2's call is refused 'No declared navigation path'. "
-    "go_up does reach Library. The execution command find_book gets the same refusal from the same "
-    "state: test_an_execution_command_gets_the_same_refusal_as_a_planning_command_from_the_record."))
-def test_ak_two_fan_out_items_each_open_their_record_with_go_up_between(open_by_uid_env,
-                                                                      monkeypatch):
+def test_ak_two_fan_out_items_each_open_their_record_in_place(open_by_uid_env, monkeypatch):
     state = open_by_uid_env
 
     class Plan:
@@ -1253,11 +1245,14 @@ def test_ak_two_fan_out_items_each_open_their_record_with_go_up_between(open_by_
     ]
     assert entered == [("Library/open_by_uid", "open_by_uid book_uid=b1"),
                        ("Library/open_by_uid", "open_by_uid book_uid=b2")]
-    # The second item's sub-plan leaves the first item's record before it opens its own.
+    # 3.9 (Calls by exact name): item 2's open_book is a Library command, on the lookup path from
+    # the Book item 1 opened, so it runs in place, bound to the library. No go_up runs between the
+    # items, and the second item's record is opened from the first one's.
     names = [o.command_name for o in state.ctx._turn_outputs]
     first_open = names.index("Library/open_by_uid")
-    assert names[first_open + 1:].index("IntentDetection/go_up") < names[first_open + 1:].index(
-        "Library/open_by_uid")
+    second_open = names.index("Library/open_by_uid", first_open + 1)
+    assert "IntentDetection/go_up" not in names[first_open + 1:second_open]
+    assert state.wf.current_command_context.uid == "b2"
     assert result.answer == "b1 Dune, b2 Dune Messiah"
 
 
@@ -1266,12 +1261,14 @@ class _OpenOne:
         return ["open_by_uid book_uid=b1"]
 
 
-def test_an_execution_command_gets_the_same_refusal_as_a_planning_command_from_the_record(
+def test_a_library_command_and_a_library_planning_command_are_callable_from_the_book_record(
         open_by_uid_env):
-    """After a planning call opens b1 the workflow stands on the Book record. From there the
-    Library execution command find_book and the Library planning command open_by_uid are refused
-    the same way, with the same navigation sentence: no declared path back to Library. The
-    xfail of test_ak is therefore about navigation, not about planning."""
+    """After a planning call opens b1 the workflow stands on the Book record, and Library is its
+    enclosing record. 3.9 (Calls by exact name, 3.4 Routing): a Library execution command
+    (find_book) and a Library planning command (open_by_uid) are on the lookup path from there,
+    so both are called by their names, in place, bound to the library. No refusal and no
+    navigation. A command of the sibling Member context is off the path, and is still refused
+    with the navigation sentence (fix-04jl: the way back to the root is named)."""
     state = open_by_uid_env
     state.planning_command = _planning_command("Library/open_one", _OpenOne)
     result = state.ctx.process_turn("open book b1")
@@ -1279,14 +1276,36 @@ def test_an_execution_command_gets_the_same_refusal_as_a_planning_command_from_t
     wf = state.wf
     assert wf.current_command_context_name == "Book"
 
-    execution = _refusal_text(wf, "find_book")
-    planning = _refusal_text(wf, "open_by_uid")
+    # 3.9: accepted by name, and the current object does not move (no go_up is inserted).
+    assert workflow_agent._explicit_agent_command("find_book", wf) == "find_book"
+    assert workflow_agent._explicit_agent_command("open_by_uid", wf) == "open_by_uid"
+    assert wf.current_command_context_name == "Book"
 
-    assert execution.startswith(
-        "Command 'find_book' is not available in the current context 'Book'. "
-        "It is available in: 'Library'.")
-    assert execution.endswith("No declared navigation path from 'Book' to 'Library'.")
-    assert planning == execution.replace("'find_book'", "'open_by_uid'")
+    # Off the path: Member is a sibling of Book, so its command is refused, as before.
+    refused = _refusal_text(wf, "list_member_loans")
+    assert refused.startswith(
+        "Command 'list_member_loans' is not available in the current context 'Book'. "
+        "It is available in: 'Member'.")
+
+
+def test_a_refusal_from_a_record_under_the_root_names_the_way_back_through_the_root(
+        open_by_uid_env):
+    """fix-04jl: from the Book opened from the Library root, live_context_chain names the root
+    ('Book', 'Library', '*'), so the planner sees go_up to Library and then open_member (which needs
+    member_uid) to reach Member. The refusal offers that way, and does not say there is none."""
+    state = open_by_uid_env
+    state.planning_command = _planning_command("Library/open_one", _OpenOne)
+    result = state.ctx.process_turn("open book b1")
+    assert result.status == TurnStatus.COMPLETED
+    wf = state.wf
+    assert wf.current_command_context_name == "Book"
+
+    refused = _refusal_text(wf, "list_member_loans")
+
+    assert "No declared navigation path" not in refused
+    assert "go_up" in refused
+    assert "open_member" in refused
+    assert "member_uid" in refused
 
 
 def test_al_a_nested_step_naming_its_running_ancestor_is_refused_and_the_call_goes_on(
@@ -1699,11 +1718,11 @@ def test_a_nested_step_naming_a_planning_command_of_another_context_is_refused_b
                 if o.command_name == "Book/loan_report"]
 
 
-def test_a_global_planning_command_runs_only_from_the_root_context(tmp_path,
+def test_a_global_planning_command_is_called_by_name_from_any_context(tmp_path,
                                                                    initialized_fastworkflow,
                                                                    monkeypatch):
-    """dune_total belongs to '*'. From Library it is refused as a global execution command is
-    (library_hours), naming the global context; from the root context it is available."""
+    """dune_total belongs to '*'. 3.9: the global scope is on every lookup path, so from Library it is
+    called by name, as the global execution command library_hours is; from the root it is too."""
     state = _make_library_runner_env(
         tmp_path, initialized_fastworkflow, monkeypatch,
         extra_planning_commands={"dune_total": _GLOBAL_DUNE_TOTAL})
@@ -1712,9 +1731,22 @@ def test_a_global_planning_command_runs_only_from_the_root_context(tmp_path,
         "*") == ["dune_total"]
 
     assert wf.current_command_context_name == "Library"
-    planning = _refusal_text(wf, "dune_total")
-    assert planning == _refusal_text(wf, "library_hours").replace("'library_hours'", "'dune_total'")
-    assert "It is available in: 'global'." in planning
+    # 3.9 ("Planning commands use the same path", 3.4 Routing): the global scope is on every lookup
+    # path, so a global planning command is called by its name from a context, as a global
+    # execution command (library_hours) is. The call is bound to the root object (the global
+    # scope), and the current context stays Library.
+    assert workflow_agent._explicit_agent_command("dune_total", wf) == "dune_total"
+    assert workflow_agent._explicit_agent_command("library_hours", wf) == "library_hours"
+    walked = CommandExecutor.perform_action(
+        state.ctx.cme_workflow,
+        fastworkflow.Action(command_name="wildcard", command="dune_total"))
+    assert walked.success
+    assert walked.command_response.artifacts["command_name"] == "dune_total"
+    # The root is the Library itself (the current object), so the run is not moved: no
+    # "ran on" stamp is set, and the binding is the root object.
+    assert "ran_on_context_name" not in walked.command_response.artifacts
+    assert wf.command_context_for_response_generation is wf.root_command_context
+    assert wf.current_command_context_name == "Library"
 
     wf.current_command_context = None
     assert wf.current_command_context_name == "*"

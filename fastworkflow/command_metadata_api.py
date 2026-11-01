@@ -530,8 +530,7 @@ class CommandMetadataAPI:
                 {
                     "workflow_name": str,
                     "available_contexts": list[str],
-                    "context_inheritance_model": dict,
-                    "context_hierarchy_model": dict
+                    "context_inheritance_model": dict
                 }
         
         Returns:
@@ -559,16 +558,6 @@ class CommandMetadataAPI:
                         display_ctx = "global" if ctx == "*" else ctx
                         parent_list = ", ".join(["global" if p == "*" else p for p in parents])
                         lines.append(f"    {display_ctx}: [{parent_list}]")
-        
-        # Context hierarchy (if present and non-empty)
-        if hierarchy := workflow_info.get("context_hierarchy_model"):
-            if hierarchy:  # Only show if not empty dict
-                lines.append("  context_hierarchy:")
-                for parent, children in sorted(hierarchy.items()):
-                    if children:  # Only show if has children
-                        display_parent = "global" if parent == "*" else parent
-                        children_list = ", ".join(["global" if c == "*" else c for c in children])
-                        lines.append(f"    {display_parent}: [{children_list}]")
         
         return "\n".join(lines)
 
@@ -691,13 +680,49 @@ class CommandMetadataAPI:
 
             # Order sections shallowest-first so the command
             # that ENTERS a context is introduced before the context that requires it.
+            # Depth is the breadth-first distance over the declared descend edges
+            # (context_navigation.collect_descend_edges), not a count of ancestors.
+            depths = CommandMetadataAPI._descend_depths(subject_workflow_path, crd)
+
             def _depth(context_name: str) -> int:
-                try:
-                    return len(crd.context_model.get_ancestor_contexts(context_name))
-                except Exception:
-                    return 0
+                return depths.get(context_name, 0)
 
             sections: List[str] = [base_text]
+            # 3.9, Catalogs: the scopes of the exact-name path other than the active one (the enclosing
+            # records' contexts with their bases, then the global scope) are callable here by name, with
+            # the scope each comes from. The live chain is read now, from the live object.
+            if navigation_workflow is not None:
+                from fastworkflow.context_navigation import exact_name_scopes
+
+                for scope in exact_name_scopes(navigation_workflow):
+                    if scope.context_name == active_context_name:
+                        continue
+                    here_names = [
+                        qualified_name
+                        for qualified_name in sorted(CommandMetadataAPI._context_command_names(crd, scope.context_name))
+                        if qualified_name not in already_listed
+                        and qualified_name.split("/")[-1] != "wildcard"
+                    ]
+                    if not here_names:
+                        continue
+                    where = ("the global scope" if scope.context_name == "*"
+                             else f"the {scope.context_name} context")
+                    parts = [
+                        f"Commands available here from {where} "
+                        f"(on your lookup path; run by name, no navigation):"
+                    ]
+                    for qualified_name in here_names:
+                        if part := CommandMetadataAPI.format_callable_here_command(
+                            subject_workflow_path=subject_workflow_path,
+                            cme_workflow_path=cme_workflow_path,
+                            owning_context_name=scope.context_name,
+                            qualified_command_name=qualified_name,
+                            active_context_name=active_context_name,
+                        ):
+                            parts.append(part)
+                    already_listed.update(here_names)
+                    sections.append("\n".join(parts))
+
             occupiable = CommandMetadataAPI._occupiable_context_names(
                 subject_workflow_path
             )
@@ -745,6 +770,36 @@ class CommandMetadataAPI:
             return base_text
 
     @staticmethod
+    def _descend_depths(subject_workflow_path: str, crd) -> Dict[str, int]:
+        """Breadth-first depth of each context from the roots of the descend graph.
+
+        A root is a context no descend edge enters (the global scope is one when it has no
+        edge into it). Contexts no edge reaches keep depth 0, as they did when nothing was
+        declared. Built from the commands the workflow declares, never from a hierarchy file.
+        """
+        from fastworkflow.context_navigation import collect_descend_edges
+
+        edges = collect_descend_edges(subject_workflow_path)
+        targets = {edge.target for edge in edges}
+        sources = {edge.source for edge in edges}
+        children: Dict[str, List[str]] = {}
+        for edge in edges:
+            children.setdefault(edge.source, []).append(edge.target)
+        depths: Dict[str, int] = {}
+        frontier = sorted(name for name in sources | set(crd.contexts) if name not in targets)
+        for name in frontier:
+            depths[name] = 0
+        while frontier:
+            next_frontier: List[str] = []
+            for name in frontier:
+                for target in sorted(set(children.get(name, []))):
+                    if target not in depths:
+                        depths[target] = depths[name] + 1
+                        next_frontier.append(target)
+            frontier = next_frontier
+        return depths
+
+    @staticmethod
     def get_other_context_commands(
         subject_workflow_path: str,
         active_context_name: str,
@@ -782,15 +837,26 @@ class CommandMetadataAPI:
         adds. Empty when the routing definition cannot be read.
         """
         from fastworkflow.context_identity import context_class_for
-        from fastworkflow.context_navigation import navigation_steps_to_context
+        from fastworkflow.context_navigation import exact_name_scopes, navigation_steps_to_context
 
         try:
             lines: List[str] = []
+            # 3.9, Catalogs: a context on the exact-name path (an enclosing record's, or a base of
+            # one) has its commands callable here, so it is not one to enter to run them.
+            on_path = ({scope.context_name for scope in exact_name_scopes(navigation_workflow)}
+                       if navigation_workflow is not None else set())
             for context_name, added in CommandMetadataAPI.get_other_context_commands(
                     subject_workflow_path, active_context_name, exclude).items():
                 context_class = (context_class_for(navigation_workflow, context_name)
                                  if navigation_workflow is not None else None)
                 description = (inspect.getdoc(context_class) or "").strip().split("\n")[0]
+                if context_name in on_path:
+                    if not description:
+                        description = "its commands are on your lookup path"
+                    lines.append(
+                        f"- {context_name}: {description.rstrip('.')}. Its commands are callable "
+                        f"here by name (listed above); you do not enter it to run them.")
+                    continue
                 if not description:
                     description = "commands: " + ", ".join(added) if added else ""
                 steps = None
@@ -802,11 +868,49 @@ class CommandMetadataAPI:
                 lines.append(f"- {context_name}: {description.rstrip('.')}. To enter: {route}")
             if not lines:
                 return ""
-            return ("Other contexts (enter one to see and run its commands):\n"
+            return ("Other contexts (enter one to see and run its commands; a context whose commands are "
+                    "callable here needs no entering):\n"
                     + "\n".join(lines))
         except Exception:  # callers must never break on metadata assembly
             logger.warning("Failed to list the other contexts.", exc_info=True)
             return ""
+
+    @staticmethod
+    def format_callable_here_command(
+        subject_workflow_path: str,
+        cme_workflow_path: str,
+        owning_context_name: str,
+        qualified_command_name: str,
+        active_context_name: str,
+    ) -> str:
+        """One command of a scope on the exact-name path, callable from here by its name (3.9).
+
+        Example::
+
+            - get_all_children
+              Get the children of the list.
+        """
+        meta = CommandMetadataAPI.get_enhanced_command_info(
+            subject_workflow_path=subject_workflow_path,
+            cme_workflow_path=cme_workflow_path,
+            active_context_name=owning_context_name,
+        )
+        commands = meta.get("commands", [])
+        leaf = qualified_command_name.split("/")[-1]
+        target_cmd = (next((cmd for cmd in commands if cmd.get("qualified_name") == qualified_command_name), None)
+                      or next((cmd for cmd in commands if cmd.get("name") == leaf), None))
+        if target_cmd is None:
+            return ""
+        short_name = target_cmd.get("name") or leaf
+        doc_string = (target_cmd.get("doc_string") or "").strip()
+        lines = [f"- {short_name}"]
+        if doc_string:
+            lines.append(f"  {doc_string}")
+        if template := CommandMetadataAPI._planning_template(
+                subject_workflow_path, target_cmd.get("qualified_name", "")):
+            lines.append("  template:")
+            lines.extend(f"  - {step}" for step in template)
+        return "\n".join(lines)
 
     @staticmethod
     def format_deferred_planner_command(

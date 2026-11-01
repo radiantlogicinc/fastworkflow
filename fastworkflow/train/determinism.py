@@ -87,6 +87,38 @@ def get_training_seed() -> int:
     return DEFAULT_TRAINING_SEED
 
 
+#: EXPERIMENT-ONLY (Phase 9 step 1). The model-training seed for one run, set by the pilot
+#: driver's --train-seed. None (the default) keeps every seed at the fixed training seed.
+_TRAIN_SEED_OVERRIDE: Optional[int] = None
+
+
+def set_train_seed(seed: Optional[int]) -> None:
+    """Set (or with None, clear) the model-training seed for this process."""
+    global _TRAIN_SEED_OVERRIDE
+    _TRAIN_SEED_OVERRIDE = None if seed is None else int(seed)
+
+
+def get_train_seed() -> Optional[int]:
+    """The model-training seed set for this process, or None."""
+    return _TRAIN_SEED_OVERRIDE
+
+
+def get_model_seed() -> int:
+    """The seed for model randomness only: weight init, shuffling, dropout, and the sampled
+    reserved rows of a sparse arm. Equal to the fixed training seed unless --train-seed is set."""
+    override = get_train_seed()
+    return get_training_seed() if override is None else override
+
+
+def get_split_seed() -> int:
+    """The seed of the persona holdout split and of everything that generates data.
+
+    Always the fixed training seed, whatever --train-seed says: the held-out cases must be the
+    same across seeds and arms for the paired comparison to mean anything.
+    """
+    return get_training_seed()
+
+
 def seed_everything(seed: Optional[int] = None) -> int:
     """Seed `random`, numpy, torch (+CUDA when present) and transformers.
 
@@ -183,6 +215,8 @@ class ContextTrainingProvenance(BaseModel):
     selected_budget: Optional[int] = None
     coverage_floor: Optional[int] = None
     coverage_floor_applied: Optional[bool] = None
+    #: Number of foreign commands a 'not here' class sampled (the not-here head's sources).
+    sampled_commands: Optional[int] = None
 
 
 class ProvenanceRecorder:
@@ -201,6 +235,9 @@ class ProvenanceRecorder:
 
     def __init__(self, workflow_folderpath: str) -> None:
         self.workflow_folderpath = workflow_folderpath
+        #: Top-level keys added to the saved file. Empty for a shipped run, so the default
+        #: output is unchanged; an experiment arm sets ``reserved_class_arm`` here.
+        self.run_metadata: dict = {}
         self._records: dict[str, UtteranceProvenance] = {}
         self._context_records: dict[
             tuple[str, str], ContextTrainingProvenance
@@ -249,6 +286,7 @@ class ProvenanceRecorder:
         selected_budget: Optional[int | float] = None,
         coverage_floor: Optional[int | float] = None,
         coverage_floor_applied: Optional[bool] = None,
+        sampled_commands: Optional[int | float] = None,
     ) -> None:
         """Record one command's inclusion or explicit skip in one context."""
         record = ContextTrainingProvenance(
@@ -266,6 +304,7 @@ class ProvenanceRecorder:
             selected_budget=_normalize_optional_count(selected_budget),
             coverage_floor=_normalize_optional_count(coverage_floor),
             coverage_floor_applied=coverage_floor_applied,
+            sampled_commands=_normalize_optional_count(sampled_commands),
         )
         with self._lock:
             self._context_records[(record.context_name, record.command_name)] = record
@@ -302,6 +341,7 @@ class ProvenanceRecorder:
                     )
                 },
             }
+            payload.update(self.run_metadata)
         with open(path, "w") as f:
             json.dump(payload, f, indent=2)
         return path
@@ -316,6 +356,13 @@ class ProvenanceRecorder:
             for name, record in commands.items()
             if isinstance(record, dict)
         }
+
+    @classmethod
+    def load_run_metadata(cls, workflow_folderpath: str) -> dict:
+        """The top-level keys written by ``run_metadata`` (empty when there are none)."""
+        payload = cls._load_payload(workflow_folderpath)
+        return {key: value for key, value in payload.items()
+                if key not in ("schema_version", "commands", "context_training")}
 
     @classmethod
     def load_context_records(

@@ -23,6 +23,33 @@ class Signature:
         ]
 
 
+def _global_head_trained(app_workflow) -> bool:
+    """Whether the workflow has a global head to ask: '*' has execution commands, and the trainer
+    wrote its artifacts (``___command_info/global``, the folder ``CommandRouter`` reads for '*').
+    Without one the global-first step is skipped silently, so no model is loaded for it."""
+    import os
+
+    from fastworkflow.model_pipeline_training import GLOBAL_CONTEXT_FOLDER
+
+    try:
+        commands = fastworkflow.RoutingRegistry.get_definition(app_workflow.folderpath).get_command_names("*")
+    except Exception:  # noqa: BLE001 - a workflow whose routing cannot be read has no global head to ask
+        return False
+    if not commands:
+        return False
+    return os.path.isfile(os.path.join(
+        app_workflow.folderpath, "___command_info", GLOBAL_CONTEXT_FOLDER, "threshold.json"))
+
+
+def _confident_global_command(output) -> bool:
+    """A confident answer naming one application command: not a decline, not an ambiguity, not a
+    bare value, and not a framework (CME) command. The reserved labels resolve to no command name."""
+    return (output.command_name is not None
+            and output.error_msg is None
+            and not output.answered_bare_value
+            and not output.is_cme_command)
+
+
 class ResponseGenerator:
     def __call__(
         self, 
@@ -35,8 +62,52 @@ class ResponseGenerator:
             "NLU_Pipeline_Stage", 
             NLUPipelineStage.INTENT_DETECTION)
 
-        predictor = CommandNamePrediction(workflow)           
-        cnp_output = predictor.predict(cmd_ctxt_obj_name, command, nlu_pipeline_stage)
+        # The record the command runs on: the current object, unless an exact command name
+        # resolves to an enclosing record or the global scope on the lookup path (3.9).
+        bound_record = app_workflow.current_command_context
+        typed_name = False  # the first token is a command name (exact, or a core command)
+        if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:
+            from fastworkflow.context_navigation import command_on_path
+            from fastworkflow.workflow_agent import core_command_names
+
+            # A leading '/' is the deterministic-mode prefix, not part of the name (as in
+            # workflow_agent._explicit_agent_command and command_executor). It is kept in `token`
+            # so the slice below stays aligned, and stripped for every name comparison.
+            token = command.split(None, 1)[0].split("(", 1)[0] if command.strip() else ""
+            bare = token.lstrip("/")
+            # A framework core command name is answered by the current scope first, always.
+            core_short = {name.split("/")[-1].lower() for name in core_command_names()}
+            typed_name = bool(bare) and bare.lower() in core_short
+            found = (command_on_path(app_workflow, bare)
+                     if bare and not typed_name else None)
+            if found is not None:
+                typed_name = True
+            if found is not None and len(found[1]) == 1:
+                scope, (name,) = found
+                # The scope's own predict matches the short name exactly, as it does here.
+                command = name.split("/")[-1] + command.strip()[len(token):]
+                cmd_ctxt_obj_name = scope.context_name
+                bound_record = scope.record
+
+        predictor = CommandNamePrediction(workflow)
+        cnp_output = None
+        # Confident global first (owner-approved, step 3 bars): for natural language, the global
+        # head '*' is asked before the current context's head. A confident command of '*' is the
+        # answer and runs bound to the root object, as the climb binds it. Anything else is discarded
+        # and today's flow runs unchanged. An exact name never reaches here (the lookup above).
+        if (nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION
+                and not typed_name
+                and app_workflow.current_command_context_name != "*"
+                and app_workflow.current_command_context is not None
+                and app_workflow.root_command_context is not None
+                and _global_head_trained(app_workflow)):
+            global_output = predictor.predict("*", command, nlu_pipeline_stage)
+            if _confident_global_command(global_output):
+                cnp_output = global_output
+                cmd_ctxt_obj_name = "*"
+                bound_record = app_workflow.root_command_context
+        if cnp_output is None:
+            cnp_output = predictor.predict(cmd_ctxt_obj_name, command, nlu_pipeline_stage)
 
         if cnp_output.error_msg:
             workflow_context = workflow.context
@@ -91,8 +162,7 @@ class ResponseGenerator:
                 NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
                 NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
             }:
-            app_workflow.command_context_for_response_generation = \
-                app_workflow.current_command_context
+            app_workflow.command_context_for_response_generation = bound_record
 
             if cnp_output.command_name is None:
                 # The hint the first declining context composed.
@@ -100,9 +170,12 @@ class ResponseGenerator:
                 # same reason, so the first one is the whole story; it is kept
                 # rather than recomputed because the walk overwrites cnp_output.
                 routing_hint = cnp_output.routing_hint
+                # A head that answered `parameter_value` has said the utterance is a
+                # bare value, so no ancestor is asked (design 2.18, 3.9 step 4).
                 while not cnp_output.command_name and \
-                    app_workflow.command_context_for_response_generation is not None and \
-                        not app_workflow.is_command_context_for_response_generation_root:
+                        not cnp_output.answered_bare_value and \
+                        app_workflow.command_context_for_response_generation is not None and \
+                            not app_workflow.is_command_context_for_response_generation_root:
                     app_workflow.command_context_for_response_generation = \
                         app_workflow.get_parent(app_workflow.command_context_for_response_generation)
                     cnp_output = predictor.predict(
@@ -212,14 +285,27 @@ class ResponseGenerator:
 
         workflow.end_command_processing()
 
+        artifacts = {
+            "command": preserved_command,
+            "command_name": command_name,
+            "cmd_parameters": pe_output.cmd_parameters,
+        }
+        # The walk bound an enclosing record: the command runs on that record, so it is
+        # filed under it (design 3.9, "Filing the run"). Absent when it runs here.
+        ran_on = app_workflow.command_context_for_response_generation
+        if ran_on is not app_workflow.current_command_context:
+            from fastworkflow.context_identity import identity_of
+            from fastworkflow.observation_offloading.labels import context_clause
+
+            ran_on_name, ran_on_label = identity_of(app_workflow, ran_on)
+            artifacts["ran_on_context_name"] = ran_on_name
+            artifacts["ran_on_context_clause"] = (
+                context_clause(ran_on_name, ran_on_label) if ran_on is not None else "")
+
         return CommandOutput(
             command_response=
                 CommandResponse(
                     response="",
-                    artifacts={
-                        "command": preserved_command,
-                        "command_name": command_name,
-                        "cmd_parameters": pe_output.cmd_parameters,
-                    },
+                    artifacts=artifacts,
                 )
         ) 

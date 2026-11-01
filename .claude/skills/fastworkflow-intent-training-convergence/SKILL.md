@@ -66,7 +66,6 @@ Status as of end of wave 3 (`fix-551`):
 | `utterance_cache.py` (R6) | yes | `train_workflow`, via module-level handle |
 | `param_example_cache.py` (`fix-czb`) | yes | `train_workflow`, around DSPy example generation |
 | `training_report.py` (R3b) | yes | `train_workflow`; structural failures prevent publication |
-| `class_balance.py` (R7.2) | yes | `train()`, escalation rows only |
 | `duplicate_detection.py` (R9b/F14) | yes | automatic preflight in `train_workflow`; duplicates fail before LLM generation |
 | `selective_training.py` (R5) | yes | automatic in `train_workflow`; falls back to full training whenever carry-forward is unsafe |
 
@@ -75,8 +74,8 @@ handle** is installed by the caller, so `grep` finding the import proves nothing
 whether it is active on the path you care about — and the determinism test suites install
 those handles *themselves*, so they pass whether or not `train_workflow` does.
 `tests/test_cache_installation_wiring.py` is the guard for that specific blind spot.
-`class_balance` is wired for `wildcard` only; its budget never binds on `parameter_value`,
-which is a fixed row count that does not grow with workflow size. Selective training is an
+The R7.2 `class_balance` budget was removed in Phase 9; the escalation class is now the sparse
+'not here' class (seeds of foreign commands). Selective training is an
 implementation detail: unchanged contexts are reused, while missing baselines, global
 changes, regeneration, or incomplete artifacts force a full retrain automatically.
 
@@ -468,7 +467,7 @@ grep -n "train_test_split" fastworkflow/model_pipeline_training.py
 
 # Which modules are actually wired in (empty output = present but inert).
 # Everything below should print a production call site.
-for m in utterance_cache param_example_cache training_report class_balance \
+for m in utterance_cache param_example_cache training_report \
          duplicate_detection selective_training; do
   echo "== $m"; rg -n "$m" -g '*.py' fastworkflow/ | grep -v "train/$m.py"
 done

@@ -374,8 +374,9 @@ mode.` means it was named in assistant mode, in a `/`-prefixed message, or by a 
 action or MCP call; run it in agent mode.
 
 **The workflow will not load after an upgrade.** "Retrain with `fastworkflow train`" means its
-classifiers were trained before scoped lookup. A warning that `context_hierarchy_model.json`
-is ignored means the file can be deleted.
+classifiers were trained by an earlier release. Retrain it; the first train after the upgrade
+is a full retrain. A warning that `context_hierarchy_model.json` is ignored means the file is no
+longer read and can be deleted (page 14 says where parents come from).
 
 ## A fact named like a `str` method
 

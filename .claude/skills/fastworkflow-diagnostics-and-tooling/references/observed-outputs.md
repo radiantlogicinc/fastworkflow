@@ -105,7 +105,7 @@ Three independent sick signals here, with different meanings:
 
 ```
 $ ... check_cache_freshness.py tests/example_workflow
-Workflow: /home/drawal/rl/fastworkflow/tests/example_workflow
+Workflow: <repo>/tests/example_workflow
 Live fingerprint : ab4c00b5f7ec131f...
 Covers 22 source files; 5 most recently modified:
   2026-07-08T18:18:19  .../tests/example_workflow/_commands/TodoList/get_all_children.py
@@ -273,7 +273,7 @@ $ .venv/bin/python -m fastworkflow.utils.dspy_cache_utils status
 📊 Current DSPy Cache Status:
   • Disk cache enabled: True
   • Memory cache enabled: True
-  • Cache directory: /home/drawal/.dspy_cache
+  • Cache directory: <home>/.dspy_cache
   • LiteLLM cache enabled: False
 ```
 

@@ -36,7 +36,8 @@ from fastworkflow.command_directory import (
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_executor import AlreadyInContextError, CommandNotFoundError
 from fastworkflow.context_navigation import (
-    enters_current_context, lookup_scopes, render_already_in_context, unavailable_command_message)
+    command_on_path, enters_current_context, lookup_scopes, render_already_in_context,
+    scope_command_names, unavailable_command_message)
 from fastworkflow.context_navigation import home_contexts as context_homes
 from fastworkflow.utils.react import AskUserSuspend
 from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
@@ -107,6 +108,10 @@ def _held_context(chat_session_obj, command_output, ran_in_clause, ran_in_name):
     any other command ran, and is held, in the context it was called from.
     Never raises: a label hook must not stop the command.
     """
+    # A run the parent walk executed on an enclosing record is filed under that record.
+    ran_on_clause = getattr(command_output, "ran_in_context_clause", None)
+    if ran_on_clause is not None:
+        return ran_on_clause, getattr(command_output, "ran_in_context_name", None) or ""
     active = chat_session_obj.get_active_workflow()
     try:
         if active is None or planning_commands.planning_command(
@@ -392,6 +397,26 @@ def _explicit_agent_command(command: str, workflow) -> str:
                  | set(app.get_planning_command_names(current_context))
                  | core_command_names())
     matches = [name for name in available if _command_name_matches(token, name)]
+    if not matches and (on_path := command_on_path(workflow, token)) is not None:
+        # 3.9, "Calls by exact name": a command of an enclosing record or of the global
+        # scope runs here, bound to that record (the CME walk binds it). Nearest scope wins.
+        scope, hits = on_path
+        if len(hits) != 1:
+            raise CommandNotFoundError(
+                f"Command {token!r} is ambiguous in context "
+                f"{_display_context_name(scope.context_name)!r}; it matches "
+                f"{', '.join(repr(m) for m in sorted(hits))}. Use the qualified name.")
+        name = hits[0]
+        short = name.split("/")[-1]
+        # The same collapse rule as the current scope, within the scope the name was found in.
+        scope_names = scope_command_names(workflow.folderpath, scope.context_name)
+        if sum(other.split("/")[-1].lower() == short.lower() for other in scope_names) != 1:
+            raise CommandNotFoundError(f"Ambiguous command name {short!r} in context "
+                                       f"{_display_context_name(scope.context_name)!r}")
+        # A qualified token is kept qualified: a nearer scope may hold a command with the
+        # same short name, and the CME walk must find the one the token names.
+        named = name if "/" in token else short
+        return named + (" " + parts[1] if len(parts) > 1 else "")
     if not matches:
         home_contexts = context_homes(workflow, token)
         if not home_contexts:
@@ -766,6 +791,12 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     _append_action_record(chat_session_obj, action_record(command, command_output, response_text))
     held_clause, held_name = _held_context(chat_session_obj, command_output, ran_in_clause, ran_in_name)
     _hold_command_run(chat_session_obj, command_output, held_clause, held_name)
+    if command_output.ran_in_context_clause is not None:
+        # The observation the agent reads names the record the command ran on (read back
+        # by execute_workflow_query, which holds the step's run state).
+        run_state = getattr(getattr(chat_session_obj, "workflow_tool_agent", None), "run_state", None)
+        if isinstance(run_state, dict):
+            run_state["ran_on_clause"] = command_output.ran_in_context_clause
 
     # Check workflow context to determine if we're in an error state that needs specialized handling
     cme_workflow = chat_session_obj.cme_workflow
@@ -1053,11 +1084,16 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         run_state = getattr(chat_session_obj.workflow_tool_agent, "run_state", None)
         if isinstance(run_state, dict):
             run_state["execute_call"] = {"command": command, "folded_note": folded_note}
+            run_state.pop("ran_on_clause", None)
         try:
             response = run_execute_workflow_query(command)
         finally:
             if isinstance(run_state, dict):
                 run_state.pop("execute_call", None)
+        if isinstance(run_state, dict):
+            ran_on_clause = run_state.pop("ran_on_clause", None)
+            if ran_on_clause is not None:
+                clause = ran_on_clause
         workflow_after = chat_session_obj.get_active_workflow()
         context_changed = getattr(workflow_after, "current_command_context", None) is not context_before
         # Name where the command left the agent: a weak model otherwise reads
@@ -1678,9 +1714,12 @@ def planner_commands_text(current_workflow) -> str:
     )
 
 
-#: A section header of the planner's listing: the active context's, or the one a command enters.
+#: A section header of the planner's listing: the active context's, the one a command enters, or the
+#: scope of a command callable here by its name (3.9, Catalogs: an enclosing context, or the global scope).
 _LISTING_SECTION = re.compile(
-    r"^Commands available (?:in the current context\b|after entering the (?P<context>\S+) context\b)")
+    r"^Commands available (?:in the current context\b"
+    r"|after entering the (?P<context>\S+) context\b"
+    r"|here from (?:the (?P<here>\S+) context|(?P<scope>the global scope))\b)")
 #: A command's own line in the planner's listing (its block starts here).
 _LISTING_COMMAND = re.compile(r"^- ([A-Za-z_][A-Za-z0-9_]*)\s*$")
 
@@ -1730,7 +1769,10 @@ def typed_planner_commands_text(current_workflow) -> str:
     for line in full.split("\n"):
         section = _LISTING_SECTION.match(line)
         if section:
-            context = section["context"] or active
+            if section["scope"]:
+                context = "*"
+            else:
+                context = section["context"] or section["here"] or active
             out.append(line)
             continue
         command = _LISTING_COMMAND.match(line)

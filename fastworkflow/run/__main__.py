@@ -167,6 +167,17 @@ def run_main(args):
         )
         exit(1)
 
+    # Phase 9 step 4: artifacts built before the sparse "not here" construction are refused,
+    # for the app and for the internal CME workflow.
+    from fastworkflow.train.artifact_versioning import construction_record_problem
+    cme_path = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
+    problem = (construction_record_problem(args.workflow_path)
+               or construction_record_problem(cme_path))
+    if problem:
+        StartupProgress.end()
+        console.print(f"[bold red]Error:[/bold red] {problem}")
+        exit(1)
+
     startup_action: Optional[fastworkflow.Action] = None
     if args.startup_action:
         with open(args.startup_action, 'r') as file:

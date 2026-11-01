@@ -87,7 +87,14 @@ def live_context_chain(workflow) -> tuple[str, ...]:
         except Exception:
             logger.debug("parent walk stopped at %r", names[-1], exc_info=True)
             break
-        if parent is None or parent is root or parent is obj:
+        if parent is None or parent is obj:
+            break
+        if parent is root:
+            # The root object is a context of its own (library: Library), and go_up reaches it.
+            # Named as the exact-name path names it (exact_name_scopes), before the global scope.
+            root_name = fastworkflow.Workflow.get_command_context_name(root)
+            if root_name not in seen:
+                names.append(root_name)
             break
         parent_name = type(parent).__name__
         if parent_name in seen:
@@ -132,6 +139,104 @@ def lookup_scopes(workflow_folderpath: str, context_names: Iterable[str]) -> tup
         add_with_bases(name)
     scopes.append("")
     return tuple(scopes)
+
+
+@dataclass(frozen=True)
+class LookupScope:
+    """One scope of the exact-name path (design 3.9): a context, and the record a command there runs on.
+
+    ``record`` is the object the command runs on: the current object for its own context and
+    bases, the enclosing record for that record's context and bases, and the root object for
+    the global scope ``*``.
+    """
+
+    context_name: str
+    record: object | None
+
+
+def exact_name_scopes(workflow) -> tuple[LookupScope, ...]:
+    """The scopes an exact command name is looked up in, nearest first (design 3.9, "The path").
+
+    The current object's context, then its bases (``CommandContextModel.ordered_base_contexts``,
+    transitively), then each record on the LIVE chain (``workflow.get_parent``) with its bases, up to
+    and including the root object, then the global scope ``*``. A scope already on the path is
+    skipped, and ``*`` listed as a base is the global scope at the end. The root edge is settled as
+    ``planning_scopes`` settles it: a parent of None, or a parent already on the path, ends the chain.
+    With no current object there is only the global scope.
+    """
+    folder = getattr(workflow, "folderpath", None)
+    root = getattr(workflow, "root_command_context", None)
+    obj = getattr(workflow, "current_command_context", None)
+    records: list[tuple[str, object]] = []
+    if obj is not None:
+        records.append((fastworkflow.Workflow.get_command_context_name(obj), obj))
+        visited: set[int] = {id(obj)}
+        while obj is not root:
+            try:
+                parent = workflow.get_parent(obj)
+            except Exception:  # noqa: BLE001 - never fail a lookup on the parent walk
+                logger.debug("exact-name lookup parent walk stopped at %r", obj, exc_info=True)
+                break
+            if parent is None or id(parent) in visited:
+                break
+            visited.add(id(parent))
+            records.append((fastworkflow.Workflow.get_command_context_name(parent), parent))
+            if parent is root:
+                break
+            obj = parent
+
+    model = None
+    if folder and records:
+        try:
+            model = fastworkflow.RoutingRegistry.get_definition(folder).context_model
+        except Exception:  # noqa: BLE001 - without a model the scopes are the contexts alone
+            logger.debug("exact-name lookup: no context model for %s", folder, exc_info=True)
+
+    scopes: list[LookupScope] = []
+    seen: set[str] = set()
+
+    def add(context_name: str, record: object) -> None:
+        if context_name and context_name != "*" and context_name not in seen:
+            seen.add(context_name)
+            scopes.append(LookupScope(context_name, record))
+
+    for context_name, record in records:
+        add(context_name, record)
+        if model is not None:
+            for base in model.ordered_base_contexts(context_name):
+                add(base, record)
+    scopes.append(LookupScope("*", root))
+    return tuple(scopes)
+
+
+def scope_command_names(workflow_folderpath: str, context_name: str) -> tuple[str, ...]:
+    """The qualified command names a scope offers: its commands, inherited ones and planning commands."""
+    crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
+    return tuple(sorted({*crd.get_command_names(context_name),
+                         *crd.get_planning_command_names(context_name)}))
+
+
+def token_names_command(token: str, name: str) -> bool:
+    """Whether a typed command token names *name*: a qualified token must match the whole name."""
+    return token.lower() == (name if "/" in token else name.split("/")[-1]).lower()
+
+
+def command_on_path(workflow, token: str) -> tuple[LookupScope, tuple[str, ...]] | None:
+    """The nearest scope on the exact-name path that has a command the token names, with those names.
+
+    The names are the matching qualified names within that one scope: one, unless the token is
+    ambiguous there. The caller answers a framework core command name first (it is always in the
+    current scope); this lookup does not know the core set. None when no scope names the token.
+    """
+    folder = getattr(workflow, "folderpath", None)
+    if not token or not isinstance(folder, str) or not folder:
+        return None
+    for scope in exact_name_scopes(workflow):
+        names = scope_command_names(folder, scope.context_name)
+        hits = tuple(name for name in names if token_names_command(token, name))
+        if hits:
+            return scope, hits
+    return None
 
 
 def plan_navigation(

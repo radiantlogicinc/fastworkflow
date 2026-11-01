@@ -975,3 +975,84 @@ def test_report_describes_a_real_training_run(tmp_path_factory):
         fastworkflow.init(previous)
         if os.path.isdir("./___workflow_contexts"):
             shutil.rmtree("./___workflow_contexts")
+
+
+# ---------------------------------------------------------------------------
+# Planning commands are not training labels, so they are never "missing" rows
+# ---------------------------------------------------------------------------
+
+PLANNING_WORKFLOW_PATH = os.path.join(os.path.dirname(__file__), "planning_tutorial_workflow")
+
+
+@pytest.fixture
+def planning_workflow(tmp_path):
+    """A copy of the tutorial workflow, which has planning commands in `_commands/`.
+
+    The whole tree is copied, not just the JSON snapshots, because the report resolves
+    the routing definition through the real command loader. Nothing is trained: the
+    test writes provenance for the non-planning commands only, as a clean run would.
+    """
+    folder = tmp_path / "planning_workflow"
+    shutil.copytree(
+        PLANNING_WORKFLOW_PATH,
+        folder,
+        ignore=shutil.ignore_patterns("__pycache__", "___convo_info", "___workflow_contexts"),
+    )
+    return str(folder)
+
+
+def _planning_command_names(workflow_folderpath: str) -> set[str]:
+    path = os.path.join(
+        workflow_folderpath, COMMAND_INFO_FOLDERNAME, tr.COMMAND_DIRECTORY_FILENAME
+    )
+    with open(path, encoding="utf-8") as f:
+        directory = json.load(f)
+    return {
+        name
+        for name, metadata in directory["map_command_2_metadata"].items()
+        if metadata.get("is_planning")
+    }
+
+
+def test_planning_commands_in_commands_folder_are_not_reported_as_missing(planning_workflow):
+    """Regression: a clean run of a workflow with planning commands blocked publication.
+
+    `trained_command_labels` and the trainer's label space already exclude planning
+    commands, so they never get provenance. The report used to take its command list
+    from every `map_command_2_metadata` entry, so each planning command became a
+    `MISSING` row, which `has_blocking_problems` then refused to publish. The report
+    must not list them, and a run that trained everything else must pass the gate.
+    """
+    planning = _planning_command_names(planning_workflow)
+    assert planning, "the tutorial workflow must contain planning commands for this test"
+
+    directory_path = os.path.join(
+        planning_workflow, COMMAND_INFO_FOLDERNAME, tr.COMMAND_DIRECTORY_FILENAME
+    )
+    with open(directory_path, encoding="utf-8") as f:
+        metadata = json.load(f)["map_command_2_metadata"]
+    trainable = [
+        name
+        for name in _all_generating_commands(planning_workflow)
+        if name not in planning and not metadata[name].get("is_planning")
+    ]
+    assert trainable, "the tutorial workflow must also have trainable commands"
+    _save_provenance(
+        planning_workflow,
+        *[_provenance_for(name, seeds=9, generated=20) for name in trainable],
+    )
+
+    report = tr.build_report(planning_workflow)
+
+    reported = {row.command_name for row in report.rows}
+    assert not (planning & reported), (
+        f"planning commands must not be report rows: {sorted(planning & reported)}"
+    )
+    assert not report.has_blocking_problems
+    assert not report.blocking_rows
+    assert set(trainable) <= reported
+
+    # The publish gate itself must accept this report.
+    from fastworkflow.train import __main__ as train_orchestration
+
+    train_orchestration._require_publishable_training_report(report)

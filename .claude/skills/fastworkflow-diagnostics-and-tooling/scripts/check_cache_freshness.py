@@ -9,7 +9,6 @@ stamped with `source_fingerprint` = sha256 over the sorted list of
   * <workflow>/_commands/**/*.py (recursively)
   * _commands/**/context_inheritance_model.json
   * the same for every base workflow named in workflow_inheritance_model.json
-  * <workflow>/context_hierarchy_model.json (if present)
 At load time fastworkflow trusts a snapshot ONLY if its stamp matches the
 recomputed fingerprint; otherwise it silently rebuilds the JSON (cheap).
 The trained MODELS (tinymodel.pth etc.) are NOT fingerprint-guarded — a stale
@@ -74,10 +73,6 @@ def contributing_sources(workflow_dir: str):
             if p.is_file() and (p.suffix == ".py" or p.name in _CONTEXT_MODEL_BASENAMES):
                 st = p.stat()
                 entries.append((str(p), st.st_size, st.st_mtime_ns))
-    hierarchy = wf / "context_hierarchy_model.json"
-    if hierarchy.is_file():
-        st = hierarchy.stat()
-        entries.append((str(hierarchy), st.st_size, st.st_mtime_ns))
     return entries
 
 

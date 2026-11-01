@@ -518,7 +518,7 @@ it — making the stale snapshot authoritative on next creation.
 ### R15 — [S4] Evidence bookkeeping
 
 - **Interpreter pin.** The header's "installed DSPy 3.2.1" holds for `.venv` only; the ambient
-  interpreter on this machine (`/home/drawal/miniconda3/bin/python`) has DSPy **2.6.27**. Since §9
+  interpreter on this machine (`<home>/miniconda3/bin/python`) has DSPy **2.6.27**. Since §9
   is version-sensitive and §13.4 mandates isolated subprocesses, the plan should pin
   `.venv/bin/python` explicitly rather than inherit `python`, or a §13.4 run can silently exercise
   a 2.x DSPy and prove nothing about the shipped policy.

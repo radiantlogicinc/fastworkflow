@@ -1,12 +1,11 @@
 """Integration tests for the selective-retraining closure (R5, bd fix-551.10).
 
-The closure rule is the whole point of this module, so these tests exercise the two
-inheritance axes independently:
-
-  * ``base``   -- a changed command reaching a context through command inheritance
-  * ``parent`` -- a changed command in an ancestor invalidating a descendant's
-                  ``wildcard`` class, even though the descendant's own label space
-                  never mentions that command
+The closure rule (Phase 9 step 6, design 2.50 and 3.9): an added or removed command dirties EVERY
+head, because every head's foreign set changes. A changed command (its source or its seeds) dirties
+only the heads that LABEL it, since a foreign head reads one recorded sample of it, and that sample's
+movement is decided by the head's own signature. The ``parent`` axis of
+``context_hierarchy_model.json`` is retired; the ``base`` axis is still merged into each head's own
+label space, which the tests below keep exercising.
 
 The closure functions are pure over plain data, so these are real end-to-end
 exercises of the rule rather than mocks of anything.
@@ -29,20 +28,15 @@ from fastworkflow.train.selective_training import (
     TrainingPlan,
     changed_commands,
     close_dirty_contexts,
-    descendants_of,
     format_plan,
 )
 
 
-# A hierarchy with both axes present.
+# No parent links: the file that declared them is retired (Phase 9 step 5).
 #
-#   Workspace (root)
-#     |- ReviewTicket      parent: Workspace
-#     |- Account           parent: Workspace
-#     |- AdminAccount      parent: Workspace, base: Account
-#
-# AdminAccount inherits Account/close through `base`, so a change to Account/close
-# reaches AdminAccount's label space without any hierarchy relationship between them.
+#   Workspace, ReviewTicket, Account, AdminAccount
+#   AdminAccount inherits Account/close through `base`, so a change to Account/close
+#   reaches AdminAccount's label space.
 CONTEXT_COMMANDS = {
     "Workspace": {"Workspace/bulk_decide", "Workspace/list_all"},
     "ReviewTicket": {"ReviewTicket/certify_approve"},
@@ -50,103 +44,58 @@ CONTEXT_COMMANDS = {
     "AdminAccount": {"Account/close", "AdminAccount/force_close"},
 }
 
-CONTEXT_ANCESTORS = {
-    "Workspace": [],
-    "ReviewTicket": ["Workspace"],
-    "Account": ["Workspace"],
-    "AdminAccount": ["Workspace"],
-}
 
+def test_a_command_change_dirties_only_the_heads_that_label_it():
+    """A changed command dirties its own heads (design 2.50). The others carry it as a sample.
 
-def test_ancestor_change_invalidates_every_descendant_wildcard_class():
-    """A command changing in an ancestor dirties every descendant.
-
-    None of the descendants list Workspace/bulk_decide in their own label space; they
-    are pulled in solely because ancestor utterances constitute their wildcard class.
-    This is the dependency that makes naive per-command retraining wrong.
+    None of the other heads list Workspace/bulk_decide in their own label space, so none of them
+    reads its seeds as anything but one recorded sample, which the head's own signature checks.
     """
+    reasons = close_dirty_contexts({"Workspace/bulk_decide"}, CONTEXT_COMMANDS)
+
+    assert set(reasons) == {"Workspace"}
+    assert reasons["Workspace"] == ["label space contains changed command(s): Workspace/bulk_decide"]
+
+
+def test_an_added_or_removed_command_dirties_every_head():
+    """Adding or removing a command changes every head's foreign set, so every head is dirty."""
     reasons = close_dirty_contexts(
-        {"Workspace/bulk_decide"}, CONTEXT_COMMANDS, CONTEXT_ANCESTORS
-    )
+        {"Workspace/bulk_decide"}, CONTEXT_COMMANDS,
+        structural_commands={"Workspace/bulk_decide"})
 
     assert set(reasons) == {"Workspace", "ReviewTicket", "Account", "AdminAccount"}
-    assert any("label space" in r for r in reasons["Workspace"])
-    for descendant in ("ReviewTicket", "Account", "AdminAccount"):
-        assert any("wildcard class is stale" in r for r in reasons[descendant])
-        assert any("Workspace" in r for r in reasons[descendant])
+    for context_name in CONTEXT_COMMANDS:
+        assert any("every head is retrained" in r for r in reasons[context_name])
 
 
-def test_base_inheritance_is_a_second_closure_axis():
-    """A changed command reaches every context that inherits it via `base`.
-
-    AdminAccount has no hierarchy relationship to Account -- they are siblings under
-    Workspace -- so only command inheritance can explain its inclusion.
-    """
-    reasons = close_dirty_contexts({"Account/close"}, CONTEXT_COMMANDS, CONTEXT_ANCESTORS)
+def test_base_inheritance_still_reaches_the_inheriting_head_by_name():
+    """A command reaches a head that inherits it via `base`, and its reason names the command."""
+    reasons = close_dirty_contexts({"Account/close"}, CONTEXT_COMMANDS)
 
     assert set(reasons) == {"Account", "AdminAccount"}
+    assert any("label space contains changed command(s): Account/close" in r
+               for r in reasons["AdminAccount"])
     assert "Workspace" not in reasons
-    assert "ReviewTicket" not in reasons
-    assert any("Account/close" in r for r in reasons["AdminAccount"])
 
 
-def test_base_and_parent_axes_compose():
-    """A command reaches a context that is on neither its base nor its parent chain.
-
-    This is the composition the adversarial review (AR2) identified as the real gap in
-    the original closure rule: expanding over `parent` alone misses it, and expanding
-    over `base` alone misses it too. Only the union catches it.
-
-        Account            owns Account/close
-        AdminAccount       base:   [Account]        -> inherits Account/close
-        AdminSession       parent: [AdminAccount]   -> wildcard class carries it
-
-    AdminSession is not a descendant of Account and does not inherit from it, yet its
-    wildcard class is built from AdminAccount's utterances, which include Account/close.
-    """
-    context_commands = {
-        "Account": {"Account/close"},
-        "AdminAccount": {"Account/close", "AdminAccount/force_close"},
-        "AdminSession": {"AdminSession/end"},
-    }
-    context_ancestors = {
-        "Account": [],
-        "AdminAccount": [],
-        "AdminSession": ["AdminAccount"],
-    }
-
-    reasons = close_dirty_contexts({"Account/close"}, context_commands, context_ancestors)
-
-    assert set(reasons) == {"Account", "AdminAccount", "AdminSession"}
-    assert any("wildcard class is stale" in r for r in reasons["AdminSession"])
-    assert any("AdminAccount" in r for r in reasons["AdminSession"])
-
-
-def test_leaf_change_stays_local():
-    reasons = close_dirty_contexts(
-        {"ReviewTicket/certify_approve"}, CONTEXT_COMMANDS, CONTEXT_ANCESTORS
-    )
+def test_a_leaf_change_stays_in_its_own_head():
+    """The leaf changed, so its own head is retrained and no other head is (design 2.50)."""
+    reasons = close_dirty_contexts({"ReviewTicket/certify_approve"}, CONTEXT_COMMANDS)
     assert set(reasons) == {"ReviewTicket"}
+    assert any("label space contains changed command(s): ReviewTicket/certify_approve" in r
+               for r in reasons["ReviewTicket"])
 
 
 def test_no_dirty_commands_closes_to_nothing():
-    assert close_dirty_contexts(set(), CONTEXT_COMMANDS, CONTEXT_ANCESTORS) == {}
+    assert close_dirty_contexts(set(), CONTEXT_COMMANDS) == {}
 
 
-def test_a_context_can_be_dirty_on_both_axes_at_once():
-    reasons = close_dirty_contexts(
-        {"Workspace/bulk_decide", "Account/close"}, CONTEXT_COMMANDS, CONTEXT_ANCESTORS
-    )
-    assert len(reasons["AdminAccount"]) == 2
-
-
-def test_descendants_of_finds_the_full_subtree():
-    assert descendants_of("Workspace", CONTEXT_ANCESTORS) == {
-        "ReviewTicket",
-        "Account",
-        "AdminAccount",
-    }
-    assert descendants_of("Account", CONTEXT_ANCESTORS) == set()
+def test_a_head_that_holds_two_changed_commands_names_the_ones_it_holds():
+    reasons = close_dirty_contexts({"Workspace/bulk_decide", "Account/close"}, CONTEXT_COMMANDS)
+    assert set(reasons) == {"Workspace", "Account", "AdminAccount"}
+    assert reasons["AdminAccount"] == [
+        "label space contains changed command(s): Account/close"
+    ]
 
 
 def _fingerprint(name, source="a", seeds="s"):
@@ -308,14 +257,14 @@ def test_format_plan_states_both_retrained_and_carried_forward():
         contexts_carried_forward=["Unrelated"],
         reasons={
             "Workspace": ["label space contains changed command(s): Workspace/bulk_decide"],
-            "ReviewTicket": ["wildcard class is stale: ancestor 'Workspace' changed"],
+            "ReviewTicket": ["a command changed (Workspace/bulk_decide); every head is retrained"],
         },
     )
 
     rendered = format_plan(plan)
     assert "retraining 2 context(s)" in rendered
     assert "carrying forward 1 context(s): Unrelated" in rendered
-    assert "wildcard class is stale" in rendered
+    assert "every head is retrained" in rendered
 
 
 def test_full_retrain_plan_renders_distinctly():
@@ -328,7 +277,6 @@ def test_full_retrain_plan_renders_distinctly():
     [
         ("fastworkflow/model_pipeline_training.py", "trainer_source_digest"),
         ("fastworkflow/train/generate_synthetic.py", "generator_source_digest"),
-        ("fastworkflow/train/class_balance.py", "class_balance_source_digest"),
     ],
 )
 def test_helper_edits_in_training_modules_change_global_signature(

@@ -8,7 +8,7 @@ description: >
   TurnRegistry turns engine, context models, or session serialization. Trigger phrases:
   "why is this a BaseException", "Topology A vs Topology B", "where does the turn get
   finalized", "is it safe to run two turns on one channel", "what breaks if I rename a
-  command", "what is the cme workflow", "context_hierarchy_model". Do NOT load it for
+  command", "what is the cme workflow", "context_hierarchy_model (retired; ignored)". Do NOT load it for
   step-by-step debugging of a failure (use fastworkflow-debugging-playbook), for running
   the server/CLI (fastworkflow-run-and-operate), for model/threshold details of the NLU
   stack (fastworkflow-nlu-pipeline-reference), or for env-var/flag lookups
@@ -229,22 +229,24 @@ Only the first is documented in CLAUDE.md / `.claude/rules/command-authoring.md`
    filesystem-derived, and a `'/'` key in the JSON is *rejected* at `:93-97` — the
    command-authoring rule's claim that entries have "two possible keys" describes the
    merged in-memory model, not the file).
-2. **`context_hierarchy_model.json`** (workflow ROOT, not `_commands/`) — parent/containment
-   ancestry with cycle detection. Loader: `command_context_model.py:151-160`
-   (`_load_context_hierarchy`), resolution + cycle error `:162-216`; the per-entry key is
-   `"parent"` (list of context names).
+2. **`context_hierarchy_model.json`: retired (scoped lookup, Phase 9).** It is not read. A
+   workflow that still has one loads, logs one warning that it is ignored and can be deleted, and
+   routes the same way. Parents are no longer a JSON axis: they come from item 3 along the live
+   object chain. `fastworkflow build` does not generate the file.
 3. **`_<ContextName>.py` Context callback classes** — a file like
    `_commands/TodoItem/_TodoItem.py` exposing `class Context` with `get_parent`
    (classmethod). Loaded via `ModuleType.CONTEXT_CLASS` (`__init__.py:144-149`), resolved
    by `CommandContextModel.get_context_class` (`command_context_model.py:272-290`), and
    consumed by `Workflow.get_parent` for context navigation (`workflow.py:219-234`) and
-   `current_command_context_displayname` (`:187-196`). The wildcard command walks parents
-   when a command isn't found in the current context (`wildcard.py:99-107`).
+   `current_command_context_displayname` (`:187-196`). The lookup walks the live chain: the
+   current context and its bases, then each enclosing record and its bases, then the global
+   commands (`context_navigation.command_on_path` for exact names; the climb in `wildcard.py`
+   for natural language, which asks the global head first when it is confident).
 
-**In-tree proof:** `tests/todo_list_workflow/` has all three —
-`context_hierarchy_model.json` (TodoItem→TodoList→TodoListManager→`*`),
-`_commands/TodoItem/_TodoItem.py` (`get_parent` returns `command_context_object.parent`),
-and `_commands/context_inheritance_model.json` (TodoList inherits TodoItem's commands).
+**In-tree proof:** `tests/todo_list_workflow/` has `_commands/TodoItem/_TodoItem.py`
+(`get_parent` returns `command_context_object.parent`) and
+`_commands/context_inheritance_model.json` (TodoList inherits TodoItem's commands). It also keeps a
+leftover `context_hierarchy_model.json`, which is ignored and is read only by the warning test.
 This is real, load-bearing runtime behavior, used by 10+ test files. It is a documented-
 nowhere-else feature; PRD at `docs/context_modules_prd.txt` (moved out of the
 package dir from `fastworkflow/docs/` on 2026-08-25).
@@ -320,7 +322,7 @@ Re-verification one-liners for every volatile fact:
 | TurnRegistry invariants + TTL no-op | `sed -n '13,28p;226,243p' fastworkflow/run_fastapi_mcp/turns.py` |
 | process_message deprecation | `grep -n DeprecationWarning fastworkflow/workflow_execution_context.py` |
 | v3.0 modules still absent | `ls fastworkflow/turn_accumulator.py fastworkflow/stores 2>&1` |
-| Dual context model loaders | `grep -n 'context_hierarchy_model.json\|context_inheritance_model.json' fastworkflow/command_context_model.py` |
+| Context model loader | `grep -n 'context_inheritance_model.json' fastworkflow/command_context_model.py` (the hierarchy file is retired) |
 | Context callback example | `cat tests/todo_list_workflow/_commands/TodoItem/_TodoItem.py` |
 | Descriptor shadowing | `python -c "import fastworkflow; print(type(fastworkflow.chat_session))"` |
 | conversation_store finally bug | `sed -n '47,54p' fastworkflow/run_fastapi_mcp/conversation_store.py` |

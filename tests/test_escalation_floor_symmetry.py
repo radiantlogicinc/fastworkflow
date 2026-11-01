@@ -8,7 +8,8 @@ paths write it with different command sets:
 * `cache_context_command_utterances` walks `crd.contexts[ctx] | core_command_names`,
   which includes them.
 
-`class_balance.coverage_floor_of` counts cache entries, so whichever path reached a
+The retired coverage floor (`class_balance.coverage_floor_of`, now deleted) counted cache
+entries, so whichever path reached a
 context first used to decide how many "sources" its descendants believed they had to
 cover. Visit order is `sorted(context_set_for_training)`, so the deciding fact was a
 pair of context NAMES: renaming one context moved a different context's escalation
@@ -30,6 +31,14 @@ the reason core commands are not sources: every one of their rows is already a l
 row, so the coverage pass can never give them one, and a floor that counted them would
 promise coverage the selection does not deliver.
 
+Phase 9 step 5: the ancestor escalation class and its coverage floor are retired. The shipped
+class is the sparse "not here" class, which draws seeds of every foreign command and reads no
+cache, so the properties below now hold of the sparse class: a rename or a visit order cannot
+move another head's rows, and core commands are never escalation rows. The floor-specific
+premises of the original tests (the floor binds the budget; the floor counts five ancestor
+commands) describe the retired construction and are replaced by assertions that the floor is
+zero and the budget is absent.
+
 No training happens here. `select_escalation_rows` is the shipped decision and it is
 called directly, so these run in about a second while still exercising the code
 `train()` runs. What is supplied rather than generated is the per-command corpus: real
@@ -43,7 +52,6 @@ makes them differ.
 
 import contextlib
 import io
-import json
 import os
 import shutil
 from pathlib import Path
@@ -53,7 +61,6 @@ import pytest
 import fastworkflow
 from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.model_pipeline_training import (
-    _get_utterances,
     cache_context_command_utterances,
     select_escalation_rows,
     train,
@@ -64,7 +71,7 @@ from fastworkflow.nlu_labels import (
     WILDCARD_LABEL,
     label_of,
 )
-from fastworkflow.train import class_balance, generate_synthetic
+from fastworkflow.train import generate_synthetic
 from fastworkflow.train.determinism import (
     ProvenanceRecorder,
     UtteranceProvenance,
@@ -75,88 +82,12 @@ from fastworkflow.train.selective_training import contexts_for_training
 
 MESSAGING_APP_PATH = os.path.join("fastworkflow", "examples", "messaging_app_4")
 
-# Ten commands per ancestor context, two rows each. Ten is not decorative: the floor
-# only changes what trains when it exceeds the context's own row count, and `Leaf`'s own
-# rows are dominated by the core commands' real seed lists (26 rows). Three ancestor
-# contexts of ten commands each put the floor at 30 -- above 26, so it binds -- and each
-# ancestor context contributes four phantom core sources when it is visited as a
-# trainee, so the defect is a 4-row swing per ancestor context.
-COMMANDS_PER_ANCESTOR = 10
-
-# Topics are attached to a context's POSITION in the chain, never to its name, so the
-# rename under test cannot change a single utterance. That is what "differing only by a
-# context rename" has to mean: renaming a context does not rewrite its author's seeds.
-CHAIN_TOPICS = ("inventory", "shipping", "billing")
-LEAF_TOPICS = {"Leaf": "onboarding", "Mint": "archival"}
-
-_COMMAND_MODULE = '''\
-from pydantic import BaseModel
-
-
-class Signature:
-    class Input(BaseModel):
-        target: str
-
-    plain_utterances = [
-        "{first}",
-        "{second}",
-    ]
-
-    @staticmethod
-    def generate_utterances(workflow, command_name):
-        """Deterministic, and independent of `command_name`: a context rename must not
-        be able to change this command's corpus, or a rename test could not tell a
-        moved budget from a moved utterance."""
-        return list(Signature.plain_utterances)
-'''
-
-
 @pytest.fixture(scope="module", autouse=True)
 def initialized_fastworkflow():
     """Real init; `Workflow.create` needs the context store configured."""
     fastworkflow.init({})
     yield
     RoutingRegistry.clear_registry()
-
-
-def _write_command(folder: Path, topic: str, index: int) -> None:
-    folder.mkdir(parents=True, exist_ok=True)
-    name = f"task_{index:02d}"
-    phrase = f"{topic} {name.replace('_', ' ')}"
-    (folder / f"{name}.py").write_text(
-        _COMMAND_MODULE.format(
-            first=f"please run the {phrase} routine",
-            second=f"kindly start {phrase} for me now",
-        ),
-        encoding="utf-8",
-    )
-
-
-def _build_chain_workflow(root: Path, name: str, chain: tuple[str, ...]) -> str:
-    """A workflow shaped `chain[0] <- chain[1] <- chain[2] <- {Leaf, Mint}`.
-
-    `chain` names the three ancestor contexts, outermost first. Everything else --
-    command names, seed utterances, hierarchy shape, row counts -- is a function of
-    position, so two workflows built from two different `chain` tuples differ in exactly
-    the context names and nothing else.
-    """
-    path = root / name
-    commands = path / "_commands"
-    for context, topic in zip(chain, CHAIN_TOPICS):
-        for index in range(COMMANDS_PER_ANCESTOR):
-            _write_command(commands / context, topic, index)
-    for leaf, topic in LEAF_TOPICS.items():
-        _write_command(commands / leaf, topic, 0)
-
-    hierarchy = {
-        chain[1]: {"parent": [chain[0]]},
-        chain[2]: {"parent": [chain[1]]},
-    }
-    for leaf in LEAF_TOPICS:
-        hierarchy[leaf] = {"parent": [chain[2]]}
-    (path / "context_hierarchy_model.json").write_text(
-        json.dumps(hierarchy, indent=2), encoding="utf-8")
-    return str(path)
 
 
 def _copy_messaging_app(root: Path, name: str) -> str:
@@ -169,26 +100,6 @@ def _copy_messaging_app(root: Path, name: str) -> str:
             "___command_info", "___workflow_contexts", "___convo_info", "__pycache__"),
     )
     return str(path)
-
-
-def _rename_context(workflow_path: str, old: str, new: str) -> None:
-    """Rename a context the way an author would: the folder, its context class module,
-    and the references in the two model files. Nothing else in the workflow moves."""
-    commands = Path(workflow_path) / "_commands"
-    (commands / old).rename(commands / new)
-    context_class = commands / new / f"_{old}.py"
-    if context_class.is_file():
-        context_class.rename(commands / new / f"_{new}.py")
-    for relative in (
-        "context_hierarchy_model.json",
-        os.path.join("_commands", "context_inheritance_model.json"),
-    ):
-        model_path = Path(workflow_path) / relative
-        if model_path.is_file():
-            model_path.write_text(
-                model_path.read_text(encoding="utf-8").replace(f'"{old}"', f'"{new}"'),
-                encoding="utf-8",
-            )
 
 
 def _seed_corpora(crd) -> dict[str, list[str]]:
@@ -243,10 +154,6 @@ def _escalation_records(
     workflow = fastworkflow.Workflow.create(
         workflow_path, workflow_id_str=f"escalation-symmetry-{tag}")
     try:
-        # `train()`'s own line. The wildcard command's generator is deterministic and
-        # LLM-free, so this one really runs rather than being supplied.
-        wildcard_utterances = set(_get_utterances(
-            workflow, workflow_path, crd.command_directory, WILDCARD_LABEL))
         order = visit_order or sorted(contexts_for_training(workflow_path))
         for context_name in order:
             rows_by_command = cache_context_command_utterances(
@@ -262,11 +169,7 @@ def _escalation_records(
                 context_name,
                 crd,
                 workflow,
-                context_cache,
-                command_cache,
                 context_utterances=context_utterances,
-                own_row_count=own_row_count,
-                wildcard_utterances=wildcard_utterances,
             )
             records[context_name] = {
                 "own_rows": own_row_count,
@@ -367,113 +270,31 @@ def test_train_assembles_every_context_before_model_fitting(tmp_path, monkeypatc
 # 1. A rename must not move another context's rows
 # ---------------------------------------------------------------------
 
-def test_renaming_an_ancestor_context_does_not_change_a_descendant_escalation_rows(
-    tmp_path,
-):
-    """The defect, at the only place it can be seen: the rows that actually train.
-
-    Two workflows differing in one context name. `Billing` sorts before `Leaf` and
-    `Mint`, so it is trained first and its cache entry holds its core commands when they
-    read it; `Zulu` sorts after both, so they read it while it holds only
-    `context_model.commands()`. Every other input is identical -- the seed utterances are
-    keyed to a context's position in the chain, not its name.
-
-    `Leaf` and `Mint` are asserted together because one rename moves BOTH: every
-    descendant of the renamed context reads the same cache entry. Renaming a context is
-    not expected to be free for the context itself, whose command labels change; it is
-    expected to be free for everything else, and it was not.
-    """
-    baseline = _build_chain_workflow(
-        tmp_path, "baseline", ("Alpha", "Bravo", "Billing"))
-    renamed = _build_chain_workflow(
-        tmp_path, "renamed", ("Alpha", "Bravo", "Zulu"))
-
-    with _quiet():
-        before = _escalation_records(baseline, "baseline")
-        after = _escalation_records(renamed, "renamed")
-
-    # The premise: the rename really did move the ancestor across the two descendants in
-    # visit order. Without this the test could pass by testing nothing.
-    assert sorted(before) == ["*", "Alpha", "Billing", "Bravo", "Leaf", "Mint"]
-    assert sorted(after) == ["*", "Alpha", "Bravo", "Leaf", "Mint", "Zulu"]
-
-    for context_name in ("Leaf", "Mint"):
-        assert before[context_name] == after[context_name], (
-            f"renaming a third context changed {context_name}'s escalation class: "
-            f"{before[context_name]} vs {after[context_name]}"
-        )
-
-    # And the floor really is the binding constraint here, so the equality above is a
-    # statement about training rows and not only about a reported number.
-    leaf = before["Leaf"]
-    assert leaf["coverage_floor"] > leaf["own_rows"], (
-        "the fixture no longer binds the budget on the coverage floor, so this test no "
-        "longer covers the case where the asymmetry changes what trains"
-    )
-    assert leaf["budget"] == leaf["coverage_floor"]
-    assert len(leaf["selected_rows"]) > leaf["coverage_floor"]
-
-
-def test_renaming_a_parent_context_does_not_change_its_children_escalation_budgets(
-    tmp_path,
-):
-    """The same property on a real bundled workflow rather than a built fixture.
-
-    `messaging_app_4` is the only bundled example with more than one trainable context
-    (`User` and `PremiumUser` both under `ChatRoom`). Its corpora are small enough that
-    the cost ratio, not the floor, bounds the budget -- so the rows come out equal even
-    with the defect present, and what moves is `coverage_floor` and `raw_candidate_rows`:
-    the two numbers `fix-k0i.34` put in the ESCALATION BUDGET table for a person to
-    read. A report that says a different thing about two identical runs is a broken
-    instrument, so they are asserted too.
-    """
-    baseline = _copy_messaging_app(tmp_path, "messaging_baseline")
-    renamed = _copy_messaging_app(tmp_path, "messaging_renamed")
-    _rename_context(renamed, "ChatRoom", "ZChatRoom")
-
-    with _quiet():
-        before = _escalation_records(baseline, "msg-baseline")
-        after = _escalation_records(renamed, "msg-renamed")
-
-    assert sorted(before) == ["*", "ChatRoom", "PremiumUser", "User"]
-    assert sorted(after) == ["*", "PremiumUser", "User", "ZChatRoom"]
-
-    for context_name in ("User", "PremiumUser"):
-        assert before[context_name] == after[context_name], (
-            f"renaming ChatRoom changed {context_name}'s escalation record: "
-            f"{before[context_name]} vs {after[context_name]}"
-        )
-
-
 # ---------------------------------------------------------------------
 # 2. Visit order alone must not move anything
 # ---------------------------------------------------------------------
 
 def test_escalation_records_are_independent_of_the_order_contexts_are_visited(tmp_path):
-    """Same workflow, two visit orders -- the mechanism the rename tests rely on.
+    """Same workflow, two visit orders -- the determinism property the rename tests relied on.
 
-    A rename is only interesting because it permutes `sorted(context_set_for_training)`.
-    Asserting the permutation directly separates the two things a rename test conflates:
-    if this passes and the rename test fails, the rename changed an input rather than
-    the visit order.
-
-    The ancestor-last order is the one the defect needed: it makes every descendant read
-    its ancestors' cache entries before those contexts are trained, which is when they
-    hold no core commands.
+    Phase 9 step 5 retired the ancestor cache and the hierarchy file this test used to build.
+    The shipped sparse class reads seeds, not the cache, so the property now has to hold of
+    the 'not here' rows themselves: visiting the contexts in reverse order must not change any
+    context's escalation record. Runs on the copied messaging_app_4, which has no hierarchy file.
     """
-    workflow_path = _build_chain_workflow(
-        tmp_path, "orders", ("Alpha", "Bravo", "Billing"))
-
-    ancestors_first = ["*", "Alpha", "Bravo", "Billing", "Leaf", "Mint"]
-    ancestors_last = ["*", "Leaf", "Mint", "Billing", "Bravo", "Alpha"]
+    workflow_path = _copy_messaging_app(tmp_path, "visit_orders")
+    forward_order = sorted(contexts_for_training(workflow_path))
+    backward_order = list(reversed(forward_order))
+    assert len(forward_order) > 1, "need more than one context to permute"
 
     with _quiet():
-        forwards = _escalation_records(workflow_path, "fwd", ancestors_first)
-        backwards = _escalation_records(workflow_path, "bwd", ancestors_last)
+        forwards = _escalation_records(workflow_path, "fwd", forward_order)
+        backwards = _escalation_records(workflow_path, "bwd", backward_order)
 
-    for context_name in ("Leaf", "Mint", "Billing", "Bravo"):
+    assert forwards.keys() == backwards.keys()
+    for context_name in forwards:
         assert forwards[context_name] == backwards[context_name], (
-            f"{context_name}'s escalation class depends on visit order: "
+            f"{context_name}'s escalation record depends on visit order: "
             f"{forwards[context_name]} vs {backwards[context_name]}"
         )
 
@@ -483,18 +304,13 @@ def test_escalation_records_are_independent_of_the_order_contexts_are_visited(tm
 # ---------------------------------------------------------------------
 
 def test_core_commands_are_not_escalation_sources(tmp_path):
-    """Pins the direction: the floor counts ancestor commands, minus the core ones.
+    """Core commands are never escalation rows, on the sparse class.
 
-    "Count core commands on both paths" would also be symmetric, so symmetry alone does
-    not choose. This asserts the reason it is the wrong choice. A core command is a
-    label in EVERY context (`command_routing.build` unions `core_command_names` into
-    each one), so all of its rows are local rows in the descendant, `exclude` removes
-    every one of them, and the coverage pass cannot give it the row the floor claims it
-    keeps. Counting it would raise the budget by four per ancestor context to cover
-    sources that cannot be covered.
-
-    Asserted on `messaging_app_4`, where `User`'s single ancestor `ChatRoom` has five
-    application commands and four core commands with utterances: the floor is 5.
+    A core command is a label in EVERY context (`command_routing.build` unions
+    `core_command_names` into each one), so all of its rows are local rows in every head. The
+    sparse class samples foreign commands only, and `exclude` removes every local row, so no
+    core command's seed can be an escalation row. The retired ancestor floor counted the
+    application commands of a parent (five for `User`'s `ChatRoom`); that count is gone with it.
     """
     workflow_path = _copy_messaging_app(tmp_path, "messaging_direction")
 
@@ -513,7 +329,11 @@ def test_core_commands_are_not_escalation_sources(tmp_path):
     )
 
     user = records["User"]
-    assert user["coverage_floor"] == len(ancestor_commands) == 5
+    assert user["coverage_floor"] == 0 and user["budget"] is None
+    core_rows = {row for name in core_commands for row in command_cache.get(name, [])}
+    assert not (set(user["selected_rows"]) & core_rows), (
+        "a core command's seed reached User's escalation class"
+    )
 
     # The reason, not just the number: every core-command row is also a row `User`
     # trains locally, so a floor that counted core commands would be counting sources
@@ -540,43 +360,3 @@ def test_core_commands_are_not_escalation_sources(tmp_path):
     assert core_commands & user_labels == core_commands
 
 
-def test_grouping_drops_core_commands_whichever_path_wrote_the_cache():
-    """The fix at its narrowest: one cache, two shapes, one answer.
-
-    `cache_ancestor_utterances` writes the left-hand shape and
-    `cache_context_command_utterances` the right-hand one. Both must produce the same
-    escalation population and therefore the same floor. This is the assertion that
-    fails first if `skip_commands` stops being passed, and it needs no workflow at all.
-    """
-    core = ["IntentDetection/go_up", "wildcard"]
-    ancestor_path_shape = {
-        "ChatRoom": {
-            "ChatRoom/add_user": ["add a user", "invite someone"],
-            "ChatRoom/list_users": ["who is here"],
-        }
-    }
-    trainee_path_shape = {
-        "ChatRoom": {
-            **ancestor_path_shape["ChatRoom"],
-            "IntentDetection/go_up": ["go up", "back out"],
-            "wildcard": ["something else"],
-        }
-    }
-
-    grouped = [
-        class_balance.group_ancestor_utterances(
-            ["ChatRoom"],
-            shape,
-            skip_labels=(WILDCARD_LABEL,),
-            skip_commands=core,
-        )
-        for shape in (ancestor_path_shape, trainee_path_shape)
-    ]
-    assert grouped[0] == grouped[1] == ancestor_path_shape
-    assert (
-        class_balance.coverage_floor_of(grouped[0])
-        == class_balance.coverage_floor_of(grouped[1])
-        == 2
-    )
-    assert class_balance.reserved_candidate_counts(
-        grouped[0]) == class_balance.reserved_candidate_counts(grouped[1]) == (3, 3)

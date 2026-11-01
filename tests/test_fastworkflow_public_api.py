@@ -129,8 +129,17 @@ def test_public_names_still_resolve():
 
     script = textwrap.dedent(
         f"""
+        import types
         import fastworkflow
-        names = [name for name in dir(fastworkflow) if not name.startswith("_")]
+        # Submodules imported as a side effect bind as package attributes (import machinery,
+        # not API). Phase 9 made command_directory and workflow_execution_context load on a
+        # bare import; a module is excluded unless the PUBLIC list declares it.
+        declared = set({sorted(name for name, _, _ in PUBLIC)!r})
+        names = [
+            name for name in dir(fastworkflow)
+            if not name.startswith("_")
+            and (name in declared or not isinstance(getattr(fastworkflow, name), types.ModuleType))
+        ]
         print("\\n".join(names))
         print("--")
         for name in {sorted(INIT_ASSIGNED)!r}:

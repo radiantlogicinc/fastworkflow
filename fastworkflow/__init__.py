@@ -134,6 +134,12 @@ class CommandOutput(BaseModel):
     # validating. None means "written before this field existed" and defers to
     # the name comparison in `is_ask_user`; True and False are authoritative.
     ask_user_entry: Optional[bool] = None
+    # The record a command ran on, when a parent-context walk ran it on an enclosing
+    # record rather than the current one (design 3.9, "Filing the run"). Both None when the
+    # command ran on the current record. ``ran_in_context_name`` is "" for the global
+    # scope and ``ran_in_context_clause`` is "" for a root with no printable identity.
+    ran_in_context_name: Optional[str] = None
+    ran_in_context_clause: Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod

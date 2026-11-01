@@ -117,6 +117,28 @@ def context_clause_for(workflow: Any) -> str:
     return context_clause(name, label)
 
 
+def identity_of(workflow: Any, context_object: Any) -> tuple[str, str]:
+    """``(context name, instance label)`` for *context_object*, which need not be current.
+
+    Used when a command runs on an enclosing record (the parent walk binds it), so its
+    identity must be read from that object, not from the current context. ``("", "")`` for
+    the global scope (``None``) and whenever the identity cannot be read. Never raises.
+    """
+    try:
+        import fastworkflow
+
+        if context_object is None:
+            return ("", "")
+        name = str(fastworkflow.Workflow.get_command_context_name(context_object) or "")
+        if not name:
+            return ("", "")
+        return (name, declared_instance_label(
+            context_class_for(workflow, name), context_object))
+    except Exception:  # noqa: BLE001
+        logger.debug("context identity of an enclosing record unavailable", exc_info=True)
+        return ("", "")
+
+
 __all__ = [
     "INSTANCE_LABEL_ATTR",
     "INSTANCE_LABEL_HOOK",

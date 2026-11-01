@@ -6,7 +6,7 @@ version becomes current instead of after its stale models start answering users.
 shipped instead was the plan-time signature diff, and the finding this file exists for
 (bd fix-k0i.7) is that the diff cannot serve that purpose: both of its sides come out of
 the same ``build_context_maps`` call as the closure itself. A deterministic bug in
-``commands()`` or ``get_ancestor_contexts`` reproduces identically in the baseline and in
+``commands()`` or the ancestor map reproduces identically in the baseline and in
 the current signature, the diff comes out clean, and the bad version publishes.
 
 The first section below demonstrates exactly that, on a real workflow, using the shipped
@@ -32,6 +32,11 @@ have returned, so everything downstream of the simulated bug is the real code pa
 three-generation hierarchy (``TodoItem -> TodoList -> TodoListManager -> *``). Ancestry
 truncation is invisible in a two-generation one: with a single hop there is nothing for a
 truncated chain to omit.
+
+Phase 9 step 5: ``context_hierarchy_model.json`` is retired, so nothing computes an ancestor
+map any more and the closure takes none. The AR3 check still reads the ancestry a version
+RECORDED (old versions carry it; new ones write ``[]``), so the ancestry-law tests below
+write the recorded chain into the manifest directly instead of deriving it from the file.
 """
 
 import ast
@@ -64,6 +69,16 @@ GRANDPARENT_COMMAND_FILE = os.path.join(
     "_commands", "TodoListManager", "create_todo_list.py"
 )
 GRANDCHILD_CONTEXT = "TodoItem"
+
+# The chain the retired hierarchy file declared for todo_list_workflow, as a version that
+# recorded it would carry it (transitively closed). Written into manifests by the tests that
+# exercise AR3's ancestry laws; nothing reads it back from the file.
+TODO_RECORDED_ANCESTRY = {
+    "*": [],
+    "TodoListManager": ["*"],
+    "TodoList": ["*", "TodoListManager"],
+    "TodoItem": ["*", "TodoList", "TodoListManager"],
+}
 
 
 def _resolve_env_vars() -> dict:
@@ -131,11 +146,16 @@ def _rebuild(workflow_path: str) -> None:
     RoutingRegistry.get_definition(workflow_path, load_cached=False)
 
 
-def _signature(workflow_path: str, seed: int = 42) -> st.TrainingSignature:
+def _signature(workflow_path: str, seed: int = 42, recorded=None) -> st.TrainingSignature:
     contexts = st.contexts_for_training(workflow_path)
     signature, _unresolved = st.compute_training_signature(
-        workflow_path, contexts, seed=seed)
+        workflow_path, contexts, seed=seed, recorded_samples=recorded)
     return signature
+
+
+def _recorded(signature: st.TrainingSignature) -> dict:
+    """The not-here samples a version recorded, as the planner hands them on (design 2.50)."""
+    return {name: context.not_here_samples for name, context in signature.contexts.items()}
 
 
 def _write_context_artifacts(folder: Path) -> None:
@@ -149,6 +169,7 @@ def _stage_version(
     signature: st.TrainingSignature,
     plan: st.TrainingPlan,
     contexts: list[str] | None = None,
+    recorded_ancestry: bool = False,
 ) -> str:
     """Do what a training run does between `train()` and `publish_version`.
 
@@ -173,6 +194,11 @@ def _stage_version(
         contexts_carried_forward=sorted(plan.contexts_carried_forward),
         **st.context_contribution_manifest_fields(signature, plan),
     )
+    if recorded_ancestry:
+        manifest = av.read_manifest(workflow_path, version_id)
+        for context_name, record in manifest[av.CONTEXT_CONTRIBUTIONS_KEY].items():
+            record["ancestors"] = list(TODO_RECORDED_ANCESTRY.get(context_name, []))
+        _rewrite_manifest(workflow_path, version_id, manifest)
     return version_id
 
 
@@ -211,42 +237,21 @@ def _append_utterance(path: str, utterance: str) -> None:
     Path(path).write_text(f'{source[:index]}\n        "{utterance}",{source[index:]}')
 
 
-def _truncated_ancestry(context_ancestors: dict[str, list[str]]) -> dict[str, list[str]]:
-    """The map a `get_ancestor_contexts` that stopped after one hop would return.
+def _replace_utterance(path: str, old: str, new: str) -> None:
+    source = Path(path).read_text()
+    assert source.count(f'"{old}"') == 1, f"{path} must hold {old!r} exactly once"
+    Path(path).write_text(source.replace(f'"{old}"', f'"{new}"', 1))
 
-    A plausible, deterministic bug: the docstring promises "the full parent chain up to
-    the root", and returning only the immediate parent still satisfies every caller that
-    happens to have a two-generation hierarchy. Immediate parents are derived rather than
-    re-read from the hierarchy file -- an ancestor that some *other* ancestor already
-    names is reached in more than one hop -- so this does not depend on the order
-    `get_ancestor_contexts` happens to return.
+
+def _truncate_recorded_ancestry(workflow_path: str, version_id: str) -> None:
+    """Record the chain a one-hop `get_ancestor_contexts` would have written.
+
+    A plausible, deterministic bug: TodoItem keeps only its immediate parent, while TodoList
+    still names its own ancestors. The recorded contradiction is what AR3 must refuse.
     """
-    truncated: dict[str, list[str]] = {}
-    for context_name, ancestors in context_ancestors.items():
-        further: set[str] = set()
-        for ancestor in ancestors:
-            further |= set(context_ancestors.get(ancestor, []))
-        truncated[context_name] = [a for a in ancestors if a not in further]
-    return truncated
-
-
-def _buggy_signature(
-    workflow_path: str, signature: st.TrainingSignature
-) -> st.TrainingSignature:
-    """Re-describe *signature*'s contexts as a truncated ancestor chain would.
-
-    Everything downstream of the simulated bug is the shipped code: the truncated map is
-    handed to the real `compute_context_signatures`, so the recorded wildcard sources are
-    consistently truncated too, exactly as a real `get_ancestor_contexts` bug would leave
-    them.
-    """
-    contexts = sorted(signature.contexts)
-    context_commands, context_ancestors, _ = st.build_context_maps(
-        workflow_path, contexts)
-    buggy = signature.model_copy(deep=True)
-    buggy.contexts = st.compute_context_signatures(
-        context_commands, _truncated_ancestry(context_ancestors), contexts)
-    return buggy
+    manifest = av.read_manifest(workflow_path, version_id)
+    manifest[av.CONTEXT_CONTRIBUTIONS_KEY][GRANDCHILD_CONTEXT]["ancestors"] = ["TodoList"]
+    _rewrite_manifest(workflow_path, version_id, manifest)
 
 
 @pytest.fixture
@@ -262,63 +267,56 @@ def workflow(tmp_path: Path, env_vars) -> str:
 # ---------------------------------------------------------------------
 
 
-def test_the_real_hierarchy_has_a_chain_long_enough_to_truncate(workflow: str):
-    """Precondition for everything below: TodoItem is two hops from TodoListManager."""
+def test_the_hierarchy_file_is_no_longer_a_source_of_ancestry(workflow: str):
+    """Phase 9 step 5 (was: the real hierarchy has a chain long enough to truncate).
+
+    The signature no longer records a parent chain, and the grandparent's commands still
+    reach the grandchild's wildcard class, now as one of every foreign command.
+    """
     signature = _signature(workflow)
 
-    assert signature.contexts[GRANDCHILD_CONTEXT].ancestors == [
-        "*", "TodoList", "TodoListManager"
-    ]
     assert any(
         command.startswith(f"{GRANDPARENT_CONTEXT}/")
         for command in signature.contexts[GRANDCHILD_CONTEXT].wildcard_sources
     ), "the grandparent's commands must reach the grandchild's wildcard class"
 
 
-def test_a_deterministic_closure_bug_is_invisible_to_the_plan_time_diff(workflow: str):
-    """The finding, reproduced: same bug on both sides, clean diff, bad version ships.
+def test_a_command_edit_dirties_only_its_own_heads_while_the_recorded_samples_hold(workflow: str):
+    """Phase 9 step 6 (was: a content edit to a grandparent command dirtied every head).
 
-    Both signatures are produced by the shipped `compute_context_signatures` from the
-    ancestor map a truncated `get_ancestor_contexts` returns. The bug is deterministic,
-    so it is present in the baseline and in the current signature alike -- and the two
-    checks the shipped code actually performs both come back clean while a command that
-    feeds TodoItem's wildcard class has demonstrably changed.
+    Design 2.50: a foreign head reads one recorded sample of a command, so an edit that leaves the
+    sample's seed text in place dirties only the command's own heads. The grandchild keeps its
+    sample, so the plan carries it forward, and the signature diff is silent. Whether that carry is
+    honest is the publish check's question, answered by the sample, not by the fingerprints.
     """
     baseline_signature = _signature(workflow)
-    baseline_buggy = _buggy_signature(workflow, baseline_signature)
 
     _append_utterance(
         os.path.join(workflow, GRANDPARENT_COMMAND_FILE),
         "start a brand new checklist for the offsite",
     )
     _rebuild(workflow)
-    current_signature = _signature(workflow)
-    current_buggy = _buggy_signature(workflow, current_signature)
+    current_signature = _signature(workflow, recorded=_recorded(baseline_signature))
 
     changed = st.changed_commands(
-        baseline_buggy.command_fingerprints, current_buggy.command_fingerprints)
+        baseline_signature.command_fingerprints, current_signature.command_fingerprints)
     assert changed, "precondition: the edit must move a command fingerprint"
+    assert baseline_signature.contexts[GRANDCHILD_CONTEXT].not_here_samples[
+        f"{GRANDPARENT_CONTEXT}/create_todo_list"] == current_signature.contexts[
+        GRANDCHILD_CONTEXT].not_here_samples[f"{GRANDPARENT_CONTEXT}/create_todo_list"], (
+        "precondition: the recorded sample is still a seed of the edited command")
 
-    # What the closure decides, given the buggy ancestor map.
-    context_commands, context_ancestors, _ = st.build_context_maps(
+    context_commands, unresolved = st.build_context_maps(
         workflow, sorted(current_signature.contexts))
-    reasons = st.close_dirty_contexts(
-        changed, context_commands, _truncated_ancestry(context_ancestors))
-    assert GRANDCHILD_CONTEXT not in reasons, (
-        "precondition: the truncated chain must leave the grandchild looking clean"
-    )
-    assert GRANDCHILD_CONTEXT in st.close_dirty_contexts(
-        changed, context_commands, context_ancestors
-    ), "and a correct chain must not -- otherwise the bug is not a bug"
+    assert unresolved == {}
+    reasons = st.close_dirty_contexts(changed, context_commands)
+    assert GRANDPARENT_CONTEXT in reasons
+    assert GRANDCHILD_CONTEXT not in reasons
 
-    # What the de-facto substitute for AR3's check decides about the same context.
     assert st._diff_context_signature(
-        baseline_buggy.contexts[GRANDCHILD_CONTEXT],
-        current_buggy.contexts[GRANDCHILD_CONTEXT],
-    ) == [], (
-        "the plan-time signature diff reports no difference: it is computed from the "
-        "same build_context_maps call as the closure, so the bug cancels out"
-    )
+        baseline_signature.contexts[GRANDCHILD_CONTEXT],
+        current_signature.contexts[GRANDCHILD_CONTEXT],
+    ) == [], "the recorded sample holds, so the grandchild's signature does not move"
 
 
 def test_recorded_wildcard_sources_cannot_see_an_ancestor_command_edit(workflow: str):
@@ -329,14 +327,15 @@ def test_recorded_wildcard_sources_cannot_see_an_ancestor_command_edit(workflow:
     description of TodoItem's wildcard class is byte-identical either side of an edit
     that changes what that class is trained on.
     """
-    before = _signature(workflow).contexts[GRANDCHILD_CONTEXT]
+    before_signature = _signature(workflow)
+    before = before_signature.contexts[GRANDCHILD_CONTEXT]
 
     _append_utterance(
         os.path.join(workflow, GRANDPARENT_COMMAND_FILE),
         "spin up a fresh list for the sprint",
     )
     _rebuild(workflow)
-    after_signature = _signature(workflow)
+    after_signature = _signature(workflow, recorded=_recorded(before_signature))
     after = after_signature.contexts[GRANDCHILD_CONTEXT]
 
     assert before.wildcard_sources == after.wildcard_sources
@@ -387,9 +386,14 @@ def test_the_manifest_records_utterance_set_fingerprints_per_context(workflow: s
     assert set(fingerprints) == set(signature.command_fingerprints)
 
     record = contributions[GRANDCHILD_CONTEXT]
-    assert record["ancestor_utterances_sha256"] == av.utterance_set_fingerprint(
-        fingerprints, record["wildcard_sources"]
-    )
+    if av.NOT_HERE_SAMPLES_KEY in record:  # design 2.50: a sparse head's digest is over its samples
+        assert record[av.NOT_HERE_SAMPLES_KEY]
+        assert record["ancestor_utterances_sha256"] == av.not_here_samples_fingerprint(
+            record[av.NOT_HERE_SAMPLES_KEY])
+    else:
+        assert record["ancestor_utterances_sha256"] == av.utterance_set_fingerprint(
+            fingerprints, record["wildcard_sources"]
+        )
     assert record["own_utterances_sha256"] == av.utterance_set_fingerprint(
         fingerprints, record["label_space"]
     )
@@ -404,8 +408,10 @@ def test_a_truncated_ancestor_chain_is_refused_at_promotion(workflow: str):
     paper. Re-running `get_ancestor_contexts` would return the same truncated chain and
     notice nothing; reading what was recorded catches it.
     """
-    signature = _buggy_signature(workflow, _signature(workflow))
-    version_id = _stage_version(workflow, signature, _full_retrain_plan(signature))
+    signature = _signature(workflow)
+    version_id = _stage_version(
+        workflow, signature, _full_retrain_plan(signature), recorded_ancestry=True)
+    _truncate_recorded_ancestry(workflow, version_id)
 
     consistency = av.verify_version_consistency(workflow, version_id)
     assert any(
@@ -461,7 +467,8 @@ def test_an_ancestor_the_version_does_not_describe_is_refused(workflow: str):
     the same silence; requiring every named ancestor to be described does not.
     """
     signature = _signature(workflow)
-    version_id = _stage_version(workflow, signature, _full_retrain_plan(signature))
+    version_id = _stage_version(
+        workflow, signature, _full_retrain_plan(signature), recorded_ancestry=True)
 
     manifest = av.read_manifest(workflow, version_id)
     manifest[av.CONTEXT_CONTRIBUTIONS_KEY].pop("TodoList")
@@ -505,6 +512,7 @@ def test_a_digest_that_disagrees_with_the_versions_fingerprints_is_refused(
     consistency = av.verify_version_consistency(workflow, version_id)
     assert any(
         "disagrees with the command fingerprints present" in problem
+        or "disagrees with the not-here samples" in problem
         for problem in consistency.problems
     ), consistency.problems
 
@@ -533,12 +541,12 @@ def test_a_command_with_no_recorded_fingerprint_is_refused(workflow: str):
 def test_a_carried_forward_context_whose_ancestor_command_changed_is_refused(
     workflow: str,
 ):
-    """The money case, and the one only a fingerprint can catch.
+    """The money case, and the one only a recorded sample can catch.
 
-    TodoItem is carried forward while a TodoListManager command it never declares and
-    never inherits -- it reaches it only through the ancestor axis -- has changed. The
-    recorded wildcard-source NAMES are identical either side of that edit, so the shipped
-    comparison sees nothing. The expectation here comes from the other version's
+    TodoItem is carried forward while the sample it recorded for a TodoListManager command it never
+    declares and never inherits has moved: the seed text was edited away, and the head would have
+    had to choose again (design 2.50). The recorded NAMES are identical either side of that edit, so
+    a name-based comparison sees nothing. The expectation here comes from the other version's
     manifest, not from asking the planner again.
     """
     baseline_signature = _signature(workflow)
@@ -546,12 +554,15 @@ def test_a_carried_forward_context_whose_ancestor_command_changed_is_refused(
         workflow, baseline_signature, _full_retrain_plan(baseline_signature))
     av.publish_version(workflow, baseline)
 
-    _append_utterance(
+    recorded_text = baseline_signature.contexts[GRANDCHILD_CONTEXT].not_here_samples[
+        f"{GRANDPARENT_CONTEXT}/create_todo_list"][0]
+    _replace_utterance(
         os.path.join(workflow, GRANDPARENT_COMMAND_FILE),
+        recorded_text,
         "kick off a new list for the launch",
     )
     _rebuild(workflow)
-    current_signature = _signature(workflow)
+    current_signature = _signature(workflow, recorded=_recorded(baseline_signature))
 
     assert (
         current_signature.contexts[GRANDCHILD_CONTEXT].wildcard_sources
@@ -565,10 +576,33 @@ def test_a_carried_forward_context_whose_ancestor_command_changed_is_refused(
         av.publish_version(workflow, version_id)
     message = str(excinfo.value)
     assert f"{GRANDPARENT_CONTEXT}/create_todo_list" in message
-    assert "wildcard class" in message
+    assert "not-here samples" in message
     assert av.resolve_current_version(workflow) == baseline, (
         "the previously current version must still be current after a refusal"
     )
+
+
+def test_an_honest_carry_past_an_unrecorded_grandparent_edit_still_publishes(workflow: str):
+    """Design 2.50: the same edit, with the recorded sample still a seed, is an honest carry."""
+    baseline_signature = _signature(workflow)
+    baseline = _stage_version(
+        workflow, baseline_signature, _full_retrain_plan(baseline_signature))
+    av.publish_version(workflow, baseline)
+
+    _append_utterance(
+        os.path.join(workflow, GRANDPARENT_COMMAND_FILE),
+        "kick off a new list for the launch",
+    )
+    _rebuild(workflow)
+    current_signature = _signature(workflow, recorded=_recorded(baseline_signature))
+
+    plan = _carry_forward_plan(current_signature, [GRANDCHILD_CONTEXT], baseline)
+    version_id = _stage_version(workflow, current_signature, plan)
+
+    consistency = av.verify_version_consistency(workflow, version_id)
+    assert consistency.problems == []
+    av.publish_version(workflow, version_id)
+    assert av.resolve_current_version(workflow) == version_id
 
 
 def test_a_carried_forward_context_whose_own_command_changed_is_refused(workflow: str):
@@ -770,8 +804,10 @@ def test_the_check_runs_with_the_workflow_sources_deleted(workflow: str):
 
 def test_the_check_catches_the_bug_with_the_workflow_sources_deleted(workflow: str):
     """The same, for a refusal: the evidence is in the version, not in the workflow."""
-    signature = _buggy_signature(workflow, _signature(workflow))
-    version_id = _stage_version(workflow, signature, _full_retrain_plan(signature))
+    signature = _signature(workflow)
+    version_id = _stage_version(
+        workflow, signature, _full_retrain_plan(signature), recorded_ancestry=True)
+    _truncate_recorded_ancestry(workflow, version_id)
 
     shutil.rmtree(os.path.join(workflow, "_commands"))
     RoutingRegistry.clear_registry()

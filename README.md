@@ -283,7 +283,7 @@ User                                ← always visible
         └── escalate_to_human()
 ```
 
-Context relationships live in **one file**, `context_inheritance_model.json` — not code. Each entry uses `base` (parent contexts whose commands are inherited) and optionally `/` (commands declared directly on the context):
+Inheritance lives in **one file**, `context_inheritance_model.json` — not code. Each entry's `base` names the contexts whose commands it inherits:
 
 ```json
 {
@@ -295,6 +295,10 @@ Context relationships live in **one file**, `context_inheritance_model.json` —
   }
 }
 ```
+
+The enclosing object of each context comes from its `get_parent` method, read from the live object chain at run time; there is no separate hierarchy file.
+
+A request is matched along one lookup path: the current context and its bases, then each enclosing record and its bases, then the global commands. The nearest scope that recognises the request wins, and the command runs on that scope's object. For a natural-language request, a confident global command runs first. Exact command names take the nearest scope.
 
 This is what lets small models stay accurate as your app grows — and what keeps frontier models from drowning in tool definitions.
 

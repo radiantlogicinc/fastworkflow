@@ -303,6 +303,12 @@ class WorkflowExecutionContext:
         # i.e. whether it grew the durable memory the label schedule counts.
         self._last_turn_added_memory: bool = False
 
+        # Phase 9 step 4: the CME's heads serve every session, so an old CME is refused here, for
+        # every runtime path (chat, MCP, FastAPI). Training does not construct this class.
+        from fastworkflow.train.artifact_versioning import require_construction_record
+        require_construction_record(
+            fastworkflow.get_internal_workflow_path("command_metadata_extraction"))
+
         cme_id = (
             f"cme_{session_key}"
             if session_key

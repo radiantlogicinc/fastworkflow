@@ -44,12 +44,12 @@ Read them in this order — each introduces exactly one new concept.
   `set_current_user.py`, `get_current_user.py`) plus per-context callback modules
   `_ChatRoom.py` / `_User.py` / `_PremiumUser.py`, global `set_root_context.py`, and a
   `startup_action.json` consumed via `--startup_action`.
-- Also the only bundled example with a workflow-root `context_hierarchy_model.json` — the
-  SECOND context-model file (parent/containment ancestry), distinct from
-  `_commands/context_inheritance_model.json`. Largely undocumented elsewhere; the other in-tree
-  user is `tests/todo_list_workflow/`.
+- Parent-child navigation comes from `_<ContextName>.py` classes that expose `get_parent`, read
+  from the live object chain. The workflow-root `context_hierarchy_model.json` is retired: it is
+  no longer read and was removed from this example. `tests/todo_list_workflow/` still has one
+  that is ignored, for the warning test.
 - Teaches: navigating between contexts (ChatRoom contains Users; `_<ContextName>.py` classes
-  expose e.g. `get_parent` for navigation).
+  expose `get_parent` for navigation).
 
 ## 6. retail_workflow — the tau-bench retail domain
 - 15 global commands in `_commands/`: calculate, cancel_pending_order,

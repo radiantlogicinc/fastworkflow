@@ -860,6 +860,8 @@ class TestTheHintReachesTheFailureMessage:
             self.current_command_context = chain[0]
             self.current_command_context_name = chain[0]
             self.command_context_for_response_generation = chain[0]
+            # No root object: the global-first ask (3.9 owner-approved rule) needs one, so it is skipped.
+            self.root_command_context = None
             self.context = {}
 
         @property

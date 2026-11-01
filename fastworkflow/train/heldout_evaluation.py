@@ -15,9 +15,9 @@ hides the trade):
 
 * **routing** — top-1 and in-list accuracy on phrasings the model did not train on.
 * **escalation** — recall of the "this command lives upstairs" signal. A phrasing aimed at
-  a command that is provably absent from the tested context's label space but present in
-  one of its ancestors must produce a *confident, lone* escalation label, because only a
-  lone escalation label makes the runtime walk the parent chain
+  a command that is provably absent from the tested context's label space but present
+  elsewhere in the workflow must produce a *confident, lone* escalation label, because only
+  a lone escalation label makes the runtime walk the parent chain
   (``_commands/wildcard.py:100-104``). A escalation label buried in a top-k list takes the
   ambiguity branch instead and the signal is discarded (finding F7).
 
@@ -239,8 +239,9 @@ class BenchmarkCase(BaseModel):
     #: Fully-qualified expected label. Required for ``kind == "routing"``.
     expected_label: str | None = None
     kind: Literal["routing", "escalation"] = "routing"
-    #: Escalation only: the command that IS present in an ancestor of ``context`` and
-    #: absent from ``context``'s own label space.
+    #: Escalation only: the command that IS present elsewhere in the workflow (in another
+    #: context's label space) and absent from ``context``'s own label space. The key keeps its
+    #: name because benchmark files are written with it.
     expected_ancestor_command: str | None = None
 
 
@@ -937,15 +938,16 @@ def find_near_duplicate_benchmark_cases(
 def validate_escalation_cases(
     cases: Sequence[BenchmarkCase],
     context_label_space: Mapping[str, set[str]],
-    ancestor_map: Mapping[str, Sequence[str]],
 ) -> list[str]:
     """Return human-readable problems with the escalation cases.
 
     Escalation is defined structurally, not by vibes: the expected command must be
-    provably ABSENT from the tested context's label space and PRESENT in one of that
-    context's ancestors. A case that fails either half is not an escalation case — it is
-    a routing case, or a typo — and scoring it as escalation would report a number about
-    a behaviour that was never tested.
+    provably ABSENT from the tested context's label space and PRESENT somewhere else in the
+    workflow (in any other context's label space). Since the sparse "not here" class samples
+    every foreign command, "elsewhere" means every command outside the head, not an ancestor.
+    A case that fails either half is not an escalation case -- it is a routing case, or a
+    typo -- and scoring it as escalation would report a number about a behaviour that was
+    never tested.
     """
     problems: list[str] = []
 
@@ -977,27 +979,16 @@ def validate_escalation_cases(
             )
             continue
 
-        ancestors = list(ancestor_map.get(case.context, []))
-        if not ancestors:
-            problems.append(
-                f"{prefix}: context {case.context!r} has no ancestors, so nothing can be "
-                f"escalated to"
-            )
-            continue
-
         found_in = [
-            ancestor
-            for ancestor in ancestors
-            if expected
-            in {
-                normalize_label(label)
-                for label in context_label_space.get(ancestor, set())
-            }
+            context_name
+            for context_name, labels in context_label_space.items()
+            if context_name != case.context
+            and expected in {normalize_label(label) for label in labels}
         ]
         if not found_in:
             problems.append(
-                f"{prefix}: expected command {expected!r} is not present in any ancestor of "
-                f"{case.context!r} ({', '.join(ancestors)}), so there is nothing to escalate to"
+                f"{prefix}: expected command {expected!r} is not present in any other context "
+                f"of the workflow, so there is nothing to escalate to"
             )
 
     return problems

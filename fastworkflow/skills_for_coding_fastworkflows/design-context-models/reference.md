@@ -24,7 +24,7 @@ validates the JSON at the same time:
 from fastworkflow.command_context_model import CommandContextModel
 m = CommandContextModel.load(workflow_path)
 m.commands(ctx)                  # effective surface, qualified names
-m.get_ancestor_contexts(ctx)     # transitive `parent` closure
+m.get_ancestor_contexts(ctx)     # enclosing contexts, from the live chain's get_parent
 ```
 
 ### Label space of a context
@@ -33,10 +33,12 @@ What its classifier must actually separate:
 
 ```
 len(surface(ctx))
-+ len(union(surface(a) for a in ancestors(ctx)) - surface(ctx))
 + 4 core commands
-+ 1 for `wildcard`
++ 1 for `wildcard` (the "not here" class, one seed per foreign command)
 ```
+
+Enclosing commands are not labels of the context; they are foreign commands, each with one seed in
+the "not here" class.
 
 Track the sum over enterable contexts as the headline size metric. Base-tier contexts are not
 enterable — nothing navigates into them — so exclude them from that sum. Note that they are still
@@ -51,8 +53,9 @@ pat_ctx = re.compile(r"current_command_context\s*=\s*(\w+)")
 pat_new = re.compile(r"(\w+)\s*=\s*(\w+)\(")   # resolve the local back to its class
 ```
 
-The result maps `Context/command -> entered class`. Inverting it gives the true `parent` graph.
-Anything in `context_hierarchy_model.json` that is not in this inversion is a stale edge.
+The result maps `Context/command -> entered class`. It shows which contexts each command can enter
+(`descends_to`). There is no hierarchy file to diff against: parents are whatever each `get_parent`
+returns for the live object.
 
 ### Which producers a context needs
 
@@ -76,7 +79,7 @@ therefore the minimum base it can inherit.
 and the user is told the request cannot be served here.
 
 **Cause.** The wildcard class is disproportionate — usually after a surface was narrowed without the
-ancestor rows shrinking — *and* something in an ancestor is lexically close. The commonest offender
+foreign seeds in the "not here" class not shrinking — *and* a foreign command is lexically close. The commonest offender
 is a global navigation verb whose seeds describe what the user wants done rather than where they
 want to be.
 
@@ -113,10 +116,11 @@ clarify an enum parameter value before proposing the merge.
 
 **Symptom.** High routing accuracy, low escalation recall.
 
-**Cause.** Missing `parent` edges — the context was never trained to reject its ancestors' commands.
+**Cause.** The enclosing record is not on the live chain: `get_parent` returns `None` or an object
+other than the record that holds the current one. The walk never reaches that record's commands.
 
-**Fix.** Re-derive the hierarchy (Rule 1). This is the failure mode that a hierarchy audit catches
-and that no amount of seed work will.
+**Fix.** Check `get_parent` against the live object (Rule 1). No seed work reaches a scope the walk
+does not visit.
 
 ### Accuracy drops after an unrelated change
 
@@ -139,7 +143,8 @@ Read three fields together:
 
 - `separability` — how badly they collide.
 - `shared_contexts` — whether they collide on a surface. Empty does **not** mean safe: they may still
-  collide through an ancestor's wildcard set, which this field does not show. Check the hierarchy.
+  collide through a foreign command's seed in the wildcard set, which this field does not show. Check
+the foreign seeds recorded in the head's training signature.
 - `terms_only_in_a` / `terms_only_in_b` / `shared_terms` — the shared terms are what the seeds must
   stop relying on; the exclusive terms are what they must lean on.
 

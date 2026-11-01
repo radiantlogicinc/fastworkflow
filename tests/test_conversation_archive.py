@@ -23,7 +23,7 @@ def _turn_row(turn_key: str, message: str, *, experiment_id=None) -> dict:
         "ordinal": 1,
         "user_message": message,
         "refined_user_message": None,
-        "entry_workflow_name": "talk_to_ido",
+        "entry_workflow_name": "sample_app",
         "entry_context": "*",
         "status": "completed",
         "success": 1,
@@ -56,7 +56,7 @@ def _write_turn(store: obs.ObservabilityStore, turn_key: str, message: str, **kw
 
 def test_archiving_an_empty_conversation_removes_the_row(tmp_path, monkeypatch):
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
-    workflow = tmp_path / "talk_to_ido"
+    workflow = tmp_path / "sample_app"
     workflow.mkdir()
     store = obs.ObservabilityStore(state_paths.observability_db(str(workflow)))
     store.mint_conversation_id("chatbot")
@@ -96,7 +96,7 @@ def test_archiving_a_channel_drops_its_counter_without_reusing_its_id(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
-    workflow = tmp_path / "talk_to_ido"
+    workflow = tmp_path / "sample_app"
     workflow.mkdir()
     store = obs.ObservabilityStore(state_paths.observability_db(str(workflow)))
     store.mint_conversation_id("chatbot")
@@ -109,7 +109,7 @@ def test_archiving_a_channel_drops_its_counter_without_reusing_its_id(
 
 def test_archiving_keeps_the_turns_and_drops_them_from_the_live_db(tmp_path, monkeypatch):
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
-    workflow = tmp_path / "talk_to_ido"
+    workflow = tmp_path / "sample_app"
     workflow.mkdir()
     store = obs.ObservabilityStore(state_paths.observability_db(str(workflow)))
     store.mint_conversation_id("chatbot")
@@ -128,7 +128,7 @@ def test_archiving_keeps_the_turns_and_drops_them_from_the_live_db(tmp_path, mon
 
 def test_a_conversation_that_belongs_to_an_experiment_stays_there(tmp_path, monkeypatch):
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
-    workflow = tmp_path / "talk_to_ido"
+    workflow = tmp_path / "sample_app"
     workflow.mkdir()
     store = obs.ObservabilityStore(state_paths.observability_db(str(workflow)))
     store.mint_conversation_id("chatbot", experiment_id="exp-1")
@@ -143,7 +143,7 @@ def test_a_conversation_that_belongs_to_an_experiment_stays_there(tmp_path, monk
 
 def test_chatbot_archives_and_deletes_one_conversation(tmp_path, monkeypatch):
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
-    workflow = tmp_path / "talk_to_ido"
+    workflow = tmp_path / "sample_app"
     workflow.mkdir()
     db_path = state_paths.observability_db(str(workflow))
     store = obs.ObservabilityStore(db_path)
@@ -191,7 +191,7 @@ def test_archive_conversation_dom(tmp_path, monkeypatch):
     if not dependency:
         pytest.skip("Set TEST_JSDOM_ROOT to run DOM integration with jsdom")
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
-    workflow = tmp_path / "talk_to_ido"
+    workflow = tmp_path / "sample_app"
     workflow.mkdir()
     db_path = state_paths.observability_db(str(workflow))
     store = obs.ObservabilityStore(db_path)

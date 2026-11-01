@@ -8,20 +8,15 @@ only one context, because two independent inheritance axes decide the blast radi
     into ``ctx``'s effective label space, so a changed command appears directly in the
     label space of every context that inherits it.
 
-``parent`` — context ancestry, declared in ``context_hierarchy_model.json``.
-    A context's ``wildcard`` class is assembled from its *ancestors'* utterances
-    (see ``model_pipeline_training.cache_ancestor_utterances``). A command changing in
-    context ``A`` therefore changes the *negative* class of every descendant of ``A``,
-    even though none of those descendants list that command in their own label space.
+The parent axis (``context_hierarchy_model.json``) is retired (Phase 9 step 5). A head's
+``wildcard`` class is the sparse "not here" class: one recorded sample of every foreign
+command (design 2.50). So the command axis is the only one left, and it works like this:
 
-The second axis is the one that makes naive per-command retraining wrong. It desyncs
-wildcard classes across the hierarchy with no error, no exception, and no visible
-symptom -- the models simply disagree about what "belongs upstairs".
-
-The closure is computed once rather than iterated to a fixed point: a context that is
-dirty *only* because its wildcard class changed has no changed commands of its own, so
-it does not propagate dirtiness any further. ``get_ancestor_contexts`` already returns
-the full transitive chain, so one pass covers arbitrarily deep hierarchies.
+* adding or removing a command dirties every head, because every head's foreign set changes;
+* editing a command's files dirties the heads that LABEL it (its own heads), since a foreign
+  head reads only the command's recorded sample;
+* a head whose recorded sample for a foreign command no longer exists is dirty, and only that
+  head, because it chooses that command's sample again.
 
 Why the closure alone is not enough
 -----------------------------------
@@ -33,11 +28,8 @@ classes move a context's label space without any command file changing:
 * an edit to ``_commands/context_inheritance_model.json`` (``base``) changes which
   commands a context carries, and therefore which commands reach the *wildcard*
   classes of that context's descendants -- with no command file touched anywhere;
-* an edit to ``context_hierarchy_model.json`` (``parent``) changes whose utterances
-  form a context's wildcard class, and can change whether ``WILDCARD_LABEL`` is a
-  label in that context **at all**: the trainer drops the escalation class where
-  ``ancestor_utterances - context_utterances`` is empty, so gaining or losing an
-  ancestor can add or remove a class;
+* an edit to a leftover ``context_hierarchy_model.json`` changes nothing here: the file
+  is ignored (see ``CommandContextModel.load``);
 * a change to the reserved-label inputs themselves -- ``PARAMETER_VALUE_PLACEHOLDERS``
   is a code constant that is trained as a class in **every** context.
 
@@ -79,7 +71,7 @@ import json
 import os
 import uuid
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Mapping, Optional
 
 from pydantic import BaseModel, ValidationError
 
@@ -115,13 +107,15 @@ SIGNATURE_FILENAME = "training_signature.json"
 # produces different artifacts". The module digests below cover the trainer and its
 # local generation/class-balancing helpers, but this constant remains the backstop
 # for changes outside those modules. Bump it when in doubt: the cost is one slow run.
-ARTIFACT_FORMAT_VERSION = 1
+#
+# 2: the not-here samples are recorded per head (design 2.50). A version written under 1 records
+# no samples, so the first train after the change chooses and records them: one full retrain.
+ARTIFACT_FORMAT_VERSION = 2
 
 # Full-module digests are intentionally conservative. A helper or comments-only edit
 # may trigger a full retrain; missing a helper edit could silently carry stale models.
 TRAINER_SOURCE_MODULE = "fastworkflow.model_pipeline_training"
 GENERATOR_SOURCE_MODULE = "fastworkflow.train.generate_synthetic"
-CLASS_BALANCE_SOURCE_MODULE = "fastworkflow.train.class_balance"
 
 # Every file `train()` writes per context. All of them must exist before a context is
 # eligible to be carried forward -- a half-written directory from an interrupted run
@@ -182,30 +176,48 @@ class ContextSignature(BaseModel):
     ``label_space`` is the set of labels the trainer iterates for this context --
     ``crd.contexts[ctx]`` (already ``base``-resolved) unioned with the core commands.
 
-    ``ancestors`` and ``wildcard_sources`` describe the *escalation* class.
-    ``wildcard_sources`` is the union of ``context_model.commands(a)`` over every
-    ancestor ``a``, which is exactly what ``cache_ancestor_utterances`` walks. Both are
-    recorded because they fail independently: a context can keep the same ancestor set
-    while an ancestor's own command list changes underneath it (someone adds a ``base``
-    entry to the ancestor), and that changes this context's wildcard class without
-    changing anything else observable here.
+    ``wildcard_sources`` describes the *escalation* class: under the sparse construction, every
+    command outside this head (its seeds are the class's rows). The sources are recorded as
+    names, and the fingerprints of those commands are compared elsewhere in the signature.
 
-    ``expects_wildcard_label`` records whether ``WILDCARD_LABEL`` is expected to be a
-    class at all. The trainer's real condition is
-    ``ancestor_utterances - context_utterances != {}``, which is a property of
-    generated TEXT and cannot be evaluated without generating. This is the
-    command-level approximation of it. It is recorded for legibility rather than for
-    safety: every input the real condition depends on -- the ancestor set, the
-    ancestor command lists, the local command list, and each command's fingerprint --
-    is compared exactly elsewhere in this signature, so a change that flips the real
-    condition necessarily changes something already compared.
+    ``expects_wildcard_label`` records whether ``WILDCARD_LABEL`` is expected to be a class at
+    all: it is when there is any foreign command to sample. It is recorded for legibility
+    rather than for safety, since the sources it is derived from are compared exactly.
     """
 
     context_name: str
     label_space: list[str] = []
-    ancestors: list[str] = []
     wildcard_sources: list[str] = []
     expects_wildcard_label: bool = False
+    #: The reserved-class arm this context was trained under, always resolved (a shipped run
+    #: records ``SHIPPED_ARM``, sparse_1). Switching arms changes it, which marks every head dirty.
+    reserved_class_arm: Optional[str] = None
+    #: The EXPERIMENT head layout ("flattened" or "scoped"; None for a shipped run). The two
+    #: layouts train different label spaces and holdouts, so their artifacts never mix.
+    head_scope: Optional[str] = None
+    #: The sparse class's sample for each foreign command, ``{command: [seed text]}`` (design
+    #: 2.50), chosen once and reused while the seed text still exists. None when this head
+    #: records no samples (the internal CME) or the signature predates the recording.
+    not_here_samples: Optional[dict[str, list[str]]] = None
+
+
+def resolved_arm(reserved_class_arm: Optional[str]) -> str:
+    """The arm the planner trains under: the explicit one, else the experiment override, else sparse_1."""
+    # Lazy: model_pipeline_training imports torch, and the planner does not need it otherwise.
+    from fastworkflow.model_pipeline_training import resolve_reserved_class_arm
+
+    return resolve_reserved_class_arm(reserved_class_arm)
+
+
+def sparse_arm(reserved_class_arm: Optional[str]) -> bool:
+    """True when the arm in force builds the sparse "not here" class (Phase 9 step 1, step 4).
+
+    ``None`` is the shipped construction, which is sparse, so a shipped run is sparse too. The
+    internal CME's construction is ``"none"``, which is not sparse.
+    """
+    from fastworkflow.model_pipeline_training import arm_construction
+
+    return arm_construction(resolved_arm(reserved_class_arm)) == "not_here"
 
 
 class TrainingSignature(BaseModel):
@@ -225,8 +237,12 @@ class TrainingSignature(BaseModel):
     persona_source: Optional[str] = None
     generator_source_digest: Optional[str] = None
     trainer_source_digest: Optional[str] = None
-    class_balance_source_digest: Optional[str] = None
     parameter_value_placeholders_sha256: Optional[str] = None
+    #: The not-here construction record (``model_pipeline_training.not_here_construction``).
+    #: A baseline without it, which is every artifact trained before Phase 9 step 4, differs
+    #: from any current value, so the first train under the sparse construction retrains every
+    #: head and never carries an old head forward.
+    not_here: Optional[dict] = None
     command_fingerprints: dict[str, CommandFingerprint] = {}
     contexts: dict[str, ContextSignature] = {}
 
@@ -241,9 +257,9 @@ class TrainingSignature(BaseModel):
             "persona_source": self.persona_source,
             "generator_source_digest": self.generator_source_digest,
             "trainer_source_digest": self.trainer_source_digest,
-            "class_balance_source_digest": self.class_balance_source_digest,
             "parameter_value_placeholders_sha256":
                 self.parameter_value_placeholders_sha256,
+            "not_here": self.not_here,
         }
 
 
@@ -251,8 +267,7 @@ class TrainingPlan(BaseModel):
     """The computed retraining closure, in a form a developer can audit.
 
     ``reasons`` is the point of this object. The developer must be able to see *why*
-    each context was pulled in -- particularly the ancestor-driven entries, which are
-    the ones that look wrong until you know about the wildcard class.
+    each context was pulled in -- a changed command dirties every head, and each reason says so.
 
     ``global_reasons`` records why automatic planning chose a full retrain.
     """
@@ -455,13 +470,18 @@ def changed_commands(
 def close_dirty_contexts(
     dirty_commands: set[str],
     context_commands: dict[str, set[str]],
-    context_ancestors: dict[str, list[str]],
+    *,
+    structural_commands: Iterable[str] = (),
 ) -> dict[str, list[str]]:
-    """Close a set of changed commands upwards over the context hierarchy.
+    """The heads a set of changed commands dirties (Phase 9 step 6, design 2.50 and 3.9).
 
-    Pure function over plain data so the rule can be tested without building a
-    workflow. ``context_commands`` must already have ``base`` inheritance merged in
-    (which is what ``CommandContextModel.commands`` returns).
+    A command that was added or removed (``structural_commands``) changes every head's foreign
+    set, so it dirties every head. Any other changed command (its source or its seeds) dirties
+    only the heads whose own label space holds it: a foreign head reads a command's recorded
+    sample, and whether that sample moved is decided by the head's own signature diff, not here.
+    Pure over plain data so the rule can be tested without building a workflow.
+    ``context_commands`` must already have ``base`` inheritance merged in (which is what
+    ``CommandContextModel.commands`` returns).
 
     Returns context name -> the list of reasons it must be retrained.
     """
@@ -469,53 +489,52 @@ def close_dirty_contexts(
     if not dirty_commands:
         return reasons
 
+    structural = sorted(set(structural_commands) & dirty_commands)
+    if structural:
+        changed = ", ".join(structural)
+        for context_name in context_commands:
+            reasons.setdefault(context_name, []).append(
+                f"a command was added or removed ({changed}); every head is retrained "
+                f"because every head's foreign set changed"
+            )
+        return reasons
+
     for context_name, own_commands in context_commands.items():
-        # Axis 1: the command is in this context's own (base-merged) label space.
         if hit := sorted(own_commands & dirty_commands):
             reasons.setdefault(context_name, []).append(
                 f"label space contains changed command(s): {', '.join(hit)}"
             )
-
-        # Axis 2: an ancestor's command changed, so this context's wildcard class
-        # -- which is built from ancestor utterances -- is now stale.
-        for ancestor in context_ancestors.get(context_name, []):
-            ancestor_commands = context_commands.get(ancestor, set())
-            if ancestor_hit := sorted(ancestor_commands & dirty_commands):
-                reasons.setdefault(context_name, []).append(
-                    f"wildcard class is stale: ancestor '{ancestor}' changed "
-                    f"command(s): {', '.join(ancestor_hit)}"
-                )
-
     return reasons
 
 
 def build_context_maps(
-    workflow_folderpath: str, context_names: Iterable[str]
-) -> tuple[dict[str, set[str]], dict[str, list[str]], dict[str, list[str]]]:
+    workflow_folderpath: str,
+    context_names: Iterable[str],
+    head_scope: Optional[str] = None,
+) -> tuple[dict[str, set[str]], dict[str, list[str]]]:
     """Build the plain-data maps the closure and the signature consume.
 
-    Returns ``(context_commands, context_ancestors, unresolved)`` where ``unresolved``
-    maps a context name to the reasons its model could not be described. The previous
-    shape of this function swallowed lookup failures and substituted a smaller command
-    set, which silently weakened the closure -- a context whose ancestors could not be
-    resolved appeared to have none, so no ancestor change could ever dirty it. Failures
-    are now reported so the caller can force those contexts to retrain.
-
-    Ancestor command lists come from ``context_model.commands``, NOT from
-    ``crd.contexts``, because that is what ``cache_ancestor_utterances`` walks: core
-    commands are deliberately absent from an ancestor's contribution to a wildcard
-    class. The context's OWN label space does include them, which is why the two are
-    built from different sources here.
+    Returns ``(context_commands, unresolved)`` where ``unresolved`` maps a context name to the
+    reasons its model could not be described. A context whose command list cannot be resolved
+    falls back to ``crd.contexts`` and is reported, so the caller can force it to retrain.
     """
     crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
     context_model = crd.context_model
     core_commands = set(crd.command_directory.core_command_names)
+    scoped = head_scope == "scoped"
+    if scoped:
+        # Lazy: model_pipeline_training imports torch, and this module must not.
+        from fastworkflow.model_pipeline_training import own_command_names
 
     context_commands: dict[str, set[str]] = {}
-    context_ancestors: dict[str, list[str]] = {}
     unresolved: dict[str, list[str]] = {}
 
     for context_name in context_names:
+        if scoped:
+            # EXPERIMENT (Phase 9 step 3): under the scoped layout a head's label space is its
+            # own "/" list, so the signature records exactly what the head trains.
+            context_commands[context_name] = own_command_names(crd, context_name) | core_commands
+            continue
         try:
             effective = set(context_model.commands(context_name))
         except Exception as exc:  # noqa: BLE001
@@ -528,27 +547,7 @@ def build_context_maps(
                 f"context model could not resolve commands: {exc}")
         context_commands[context_name] = effective | core_commands
 
-        try:
-            context_ancestors[context_name] = list(
-                context_model.get_ancestor_contexts(context_name)
-            )
-        except Exception as exc:  # noqa: BLE001
-            context_ancestors[context_name] = []
-            unresolved.setdefault(context_name, []).append(
-                f"context model could not resolve ancestors: {exc}")
-
-    return context_commands, context_ancestors, unresolved
-
-
-def descendants_of(
-    context_name: str, context_ancestors: dict[str, list[str]]
-) -> set[str]:
-    """Every context that lists *context_name* somewhere in its ancestor chain."""
-    return {
-        candidate
-        for candidate, ancestors in context_ancestors.items()
-        if context_name in ancestors
-    }
+    return context_commands, unresolved
 
 
 def contexts_for_training(workflow_folderpath: str) -> set[str]:
@@ -604,51 +603,122 @@ def _global_input(getter, label: str) -> Optional[str]:
 
 def compute_context_signatures(
     context_commands: dict[str, set[str]],
-    context_ancestors: dict[str, list[str]],
     context_names: Iterable[str],
+    reserved_class_arm: Optional[str] = None,
+    universe: Optional[set[str]] = None,
+    head_scope: Optional[str] = None,
+    not_here_samples_by_context: Optional[dict[str, Optional[dict[str, list[str]]]]] = None,
 ) -> dict[str, ContextSignature]:
-    """Describe each context's label space and wildcard-class inputs."""
+    """Describe each context's label space and wildcard-class inputs.
+
+    Under a sparse arm the wildcard class samples every command outside the head, so its
+    sources are *universe* minus the head's own labels. The internal CME (construction
+    ``"none"``) has no wildcard class, so its sources are empty. ``not_here_samples_by_context``
+    gives each head's recorded samples; a head not named there records none.
+    """
+    reserved_class_arm = resolved_arm(reserved_class_arm)
+    sparse = sparse_arm(reserved_class_arm)
+    if sparse and universe is None:
+        universe = set().union(*context_commands.values()) if context_commands else set()
     signatures: dict[str, ContextSignature] = {}
     for context_name in context_names:
         own = context_commands.get(context_name, set())
-        ancestors = list(context_ancestors.get(context_name, []))
 
         wildcard_sources: set[str] = set()
-        for ancestor in ancestors:
-            # Mirrors cache_ancestor_utterances, which skips the reserved wildcard
-            # command when collecting an ancestor's utterances.
-            wildcard_sources |= {
-                command
-                for command in context_commands.get(ancestor, set())
-                if command.split("/")[-1] != WILDCARD_LABEL
+        if sparse:
+            wildcard_sources = {
+                command for command in (universe or set())
+                if command not in own and command.split("/")[-1] != WILDCARD_LABEL
             }
 
         signatures[context_name] = ContextSignature(
             context_name=context_name,
             label_space=sorted(own),
-            ancestors=sorted(ancestors),
             wildcard_sources=sorted(wildcard_sources),
             expects_wildcard_label=bool(wildcard_sources - own),
+            reserved_class_arm=reserved_class_arm,
+            head_scope=head_scope,
+            not_here_samples=(
+                (not_here_samples_by_context or {}).get(context_name)
+                if sparse else None
+            ),
         )
     return signatures
+
+
+def compute_planning_fingerprints(workflow_folderpath: str) -> dict[str, CommandFingerprint]:
+    """Fingerprints of the planning commands, which the sparse class samples.
+
+    Keyed by a file's bytes, not by its parsed seeds: the parsed form is cached per process,
+    so a seed edit made in this process would otherwise be invisible to the planner. The
+    file hash also moves on a docstring edit, which is the conservative direction.
+    """
+    from fastworkflow.workflow_agent import _planning_command_files
+
+    fingerprints: dict[str, CommandFingerprint] = {}
+    root = os.path.join(workflow_folderpath, "_commands")
+    for name, path in _planning_command_files(root):
+        digest = _sha256_file(path)
+        if digest is None:
+            fingerprints[name] = _unresolvable(name, f"planning command file unreadable: {path}")
+        else:
+            fingerprints[name] = CommandFingerprint(
+                command_name=name, source_path=path, source_sha256=digest,
+                seed_utterances_sha256=None)
+    return fingerprints
 
 
 def compute_training_signature(
     workflow_folderpath: str,
     context_names: Iterable[str],
     seed: Optional[int] = None,
+    reserved_class_arm: Optional[str] = None,
+    head_scope: Optional[str] = None,
+    recorded_samples: Optional[Mapping[str, Optional[Mapping[str, list[str]]]]] = None,
 ) -> tuple[TrainingSignature, dict[str, list[str]]]:
     """Build the signature this workflow would train under right now.
+
+    ``recorded_samples`` is each head's not-here samples from the version being carried from
+    (design 2.50). A recorded sample is kept while its seed text exists; ``None`` chooses every
+    sample afresh (a first train, or ``--regenerate-utterances``).
 
     Returns ``(signature, unresolved)``; ``unresolved`` names contexts the context
     model could not describe, which the caller must retrain regardless of the diff.
     """
     contexts = sorted(context_names)
-    context_commands, context_ancestors, unresolved = build_context_maps(
-        workflow_folderpath, contexts)
+    context_commands, unresolved = build_context_maps(
+        workflow_folderpath, contexts, head_scope=head_scope)
+
+    from fastworkflow.model_pipeline_training import not_here_construction
+
+    from fastworkflow.model_pipeline_training import arm_for_workflow
+
+    reserved_class_arm = arm_for_workflow(workflow_folderpath, reserved_class_arm)
+    command_fingerprints = compute_command_fingerprints(workflow_folderpath)
+    universe: Optional[set[str]] = None
+    not_here_samples_by_context: Optional[dict[str, Optional[dict[str, list[str]]]]] = None
+    if sparse_arm(reserved_class_arm):
+        planning = compute_planning_fingerprints(workflow_folderpath)
+        command_fingerprints = {**command_fingerprints, **planning}
+        universe = set().union(*context_commands.values()) | set(planning)
+        # After the fingerprints, which hydrate every command the samples are read from.
+        from fastworkflow.model_pipeline_training import not_here_samples_for_context
+
+        crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
+        not_here_samples_by_context = {
+            context_name: not_here_samples_for_context(
+                workflow_folderpath,
+                crd,
+                context_name,
+                reserved_class_arm,
+                recorded=(recorded_samples or {}).get(context_name),
+            )
+            for context_name in contexts
+        }
 
     signature = TrainingSignature(
         format_version=ARTIFACT_FORMAT_VERSION,
+        not_here=not_here_construction(reserved_class_arm, workflow_folderpath),
         seed=(
             int(seed)
             if seed is not None
@@ -673,17 +743,17 @@ def compute_training_signature(
         trainer_source_digest=_global_input(
             lambda: _module_source_digest(TRAINER_SOURCE_MODULE),
             "trainer module source"),
-        class_balance_source_digest=_global_input(
-            lambda: _module_source_digest(CLASS_BALANCE_SOURCE_MODULE),
-            "class-balance module source"),
         # The bare-value literals are a code constant that becomes a real class in
         # EVERY context (`PARAMETER_VALUE_LABEL`). Editing the list changes every
         # context's training data without touching a single workflow file.
         parameter_value_placeholders_sha256=_sha256_strings(
             PARAMETER_VALUE_PLACEHOLDERS),
-        command_fingerprints=compute_command_fingerprints(workflow_folderpath),
+        command_fingerprints=command_fingerprints,
         contexts=compute_context_signatures(
-            context_commands, context_ancestors, contexts),
+            context_commands, contexts,
+            reserved_class_arm=reserved_class_arm, universe=universe,
+            head_scope=head_scope,
+            not_here_samples_by_context=not_here_samples_by_context),
     )
     return signature, unresolved
 
@@ -778,13 +848,11 @@ def context_contribution_manifest_fields(
 ) -> dict:
     """Record what AR3 needs to re-derive this run's closure from the version alone.
 
-    ``ContextSignature`` already names each context's ancestors and wildcard sources,
-    but only as command NAMES, and a name does not move when the command's file or seed
-    list does. An ancestor command whose *content* changed is therefore invisible to
-    every comparison built on those lists -- which is precisely the staleness the
-    ancestor axis of the closure exists to catch, and precisely what a check built on
-    those lists could not catch it failing to do. Hashing each context's contribution
-    over the per-command fingerprints closes that gap.
+    ``ContextSignature`` names each context's wildcard sources, but only as command NAMES,
+    and a name does not move when the command's file or seed list does. A source command
+    whose *content* changed would then be invisible to every comparison built on those
+    lists. Hashing each context's contribution over the per-command fingerprints closes
+    that gap.
 
     Written into the manifest rather than beside ``training_signature.json`` because
     ``artifact_versioning`` is what runs the check, must not import this module (the
@@ -797,18 +865,53 @@ def context_contribution_manifest_fields(
     }
     carried = set(plan.contexts_carried_forward)
 
+    def _arm_fields(context_signature: ContextSignature) -> dict:
+        if context_signature.reserved_class_arm is None:
+            return {}  # shipped runs: the manifest is unchanged
+        from fastworkflow.model_pipeline_training import arm_construction
+
+        not_here = sparse_arm(context_signature.reserved_class_arm)
+        own_union = set()
+        for other in signature.contexts.values():
+            own_union |= set(other.label_space)
+        planning_sources = sorted(
+            set(context_signature.wildcard_sources) - own_union) if not_here else []
+        fields = {
+            "reserved_class_arm": context_signature.reserved_class_arm,
+            "reserved_class_construction": arm_construction(
+                resolved_arm(context_signature.reserved_class_arm)),
+            "not_here_planning_sources": planning_sources,
+        }
+        if context_signature.not_here_samples is not None:
+            fields[artifact_versioning.NOT_HERE_SAMPLES_KEY] = dict(
+                sorted(context_signature.not_here_samples.items()))
+        if context_signature.head_scope is not None:
+            fields["head_scope"] = context_signature.head_scope
+        return fields
+
+    def _foreign_digest(context_signature: ContextSignature) -> str:
+        # A sparse head reads one recorded sample per foreign command, so its digest is over those
+        # samples: a foreign command whose other seeds changed does not move it (design 2.50).
+        if context_signature.not_here_samples is not None:
+            return artifact_versioning.not_here_samples_fingerprint(
+                context_signature.not_here_samples)
+        return artifact_versioning.utterance_set_fingerprint(
+            fingerprints, context_signature.wildcard_sources
+        )
+
     contributions = {
         context_name: {
-            "ancestors": sorted(context_signature.ancestors),
+            **_arm_fields(context_signature),
+            # Always empty: no sparse or internal construction samples an ancestor. The key stays
+            # so the promotion check (artifact_versioning) reads the same shape it always has.
+            "ancestors": [],
             "label_space": sorted(context_signature.label_space),
             "wildcard_sources": sorted(context_signature.wildcard_sources),
             "expects_wildcard_label": context_signature.expects_wildcard_label,
             "own_utterances_sha256": artifact_versioning.utterance_set_fingerprint(
                 fingerprints, context_signature.label_space
             ),
-            "ancestor_utterances_sha256": artifact_versioning.utterance_set_fingerprint(
-                fingerprints, context_signature.wildcard_sources
-            ),
+            "ancestor_utterances_sha256": _foreign_digest(context_signature),
             "carried_forward": context_name in carried,
         }
         for context_name, context_signature in sorted(signature.contexts.items())
@@ -868,6 +971,15 @@ def _diff_context_signature(
     if previous is None:
         return ["no recorded signature in the version being carried from"]
     differences: list[str] = []
+    if previous.reserved_class_arm != current.reserved_class_arm:
+        differences.append(
+            f"reserved-class arm changed: {previous.reserved_class_arm} -> "
+            f"{current.reserved_class_arm}")
+    # None is today's layout, which is what "flattened" means, so the two compare equal.
+    if (previous.head_scope or "flattened") != (current.head_scope or "flattened"):
+        differences.append(
+            f"head layout changed: {previous.head_scope or 'flattened'} -> "
+            f"{current.head_scope or 'flattened'}")
     if previous.label_space != current.label_space:
         added = sorted(set(current.label_space) - set(previous.label_space))
         removed = sorted(set(previous.label_space) - set(current.label_space))
@@ -876,9 +988,6 @@ def _diff_context_signature(
             + (f"; added {', '.join(added)}" if added else "")
             + (f"; removed {', '.join(removed)}" if removed else "")
         )
-    if previous.ancestors != current.ancestors:
-        differences.append(
-            f"ancestors changed: {previous.ancestors} -> {current.ancestors}")
     if previous.wildcard_sources != current.wildcard_sources:
         added = sorted(set(current.wildcard_sources) - set(previous.wildcard_sources))
         removed = sorted(set(previous.wildcard_sources) - set(current.wildcard_sources))
@@ -892,6 +1001,19 @@ def _diff_context_signature(
             f"escalation ({WILDCARD_LABEL}) class presence changed: "
             f"{previous.expects_wildcard_label} -> {current.expects_wildcard_label}"
         )
+    if previous.not_here_samples != current.not_here_samples:
+        if previous.not_here_samples is None:
+            differences.append(
+                "no recorded not-here samples in the version being carried from")
+        else:
+            previous_samples = previous.not_here_samples
+            current_samples = current.not_here_samples or {}
+            moved = sorted(
+                name for name in set(previous_samples) | set(current_samples)
+                if previous_samples.get(name) != current_samples.get(name)
+            )
+            differences.append(
+                "not-here samples changed for: " + ", ".join(moved))
     return differences
 
 
@@ -904,6 +1026,41 @@ def _full_retrain(candidates: list[str], reason: str) -> TrainingPlan:
     )
 
 
+def dirty_heads_from_signatures(
+    previous: TrainingSignature,
+    current: TrainingSignature,
+    context_commands: dict[str, set[str]],
+    *,
+    only_commands: Iterable[str] = (),
+) -> tuple[set[str], dict[str, list[str]]]:
+    """The changed commands and every head's reasons to retrain, from two signatures alone.
+
+    This is the planner's per-head decision, pure over the two signatures and the label maps, so a
+    test can drive it on hand-built signatures. It has three parts:
+
+    * the command closure: a changed or added or removed command dirties the heads its change
+      reaches (``close_dirty_contexts``);
+    * the sample diff: a head whose recorded not-here sample for some foreign command moved, or
+      was never recorded, is dirty (``_diff_context_signature``); and
+    * the context-model diff, which catches a label-space change with no command file touched.
+
+    Returns ``(dirty command names, context name -> reasons)``.
+    """
+    dirty: set[str] = set(only_commands) | changed_commands(
+        previous.command_fingerprints,
+        current.command_fingerprints,
+    )
+    structural = set(previous.command_fingerprints) ^ set(current.command_fingerprints)
+    reasons = close_dirty_contexts(dirty, context_commands, structural_commands=structural)
+    for context_name in sorted(current.contexts):
+        for difference in _diff_context_signature(
+            previous.contexts.get(context_name),
+            current.contexts[context_name],
+        ):
+            reasons.setdefault(context_name, []).append(difference)
+    return dirty, reasons
+
+
 def compute_training_plan(
     workflow_folderpath: str,
     candidate_contexts: Iterable[str],
@@ -913,6 +1070,8 @@ def compute_training_plan(
     seed: Optional[int] = None,
     carry_forward_from: Optional[str] = None,
     cache_mode: Optional[str] = None,
+    reserved_class_arm: Optional[str] = None,
+    head_scope: Optional[str] = None,
 ) -> tuple[TrainingPlan, TrainingSignature]:
     """Decide which contexts to retrain and which to carry forward.
 
@@ -931,10 +1090,28 @@ def compute_training_plan(
     the caller because it must be written into the version that this plan produces,
     and recomputing it after training could pick up a source edit made mid-run.
     """
+    from fastworkflow.model_pipeline_training import arm_for_workflow
+
     candidates = sorted(candidate_contexts)
+    # The internal CME keeps its control construction whatever the caller passes (see arm_for_workflow).
+    reserved_class_arm = arm_for_workflow(workflow_folderpath, reserved_class_arm)
+    # The utterance-cache mode decides whether recorded samples may be reused (design 2.50):
+    # --regenerate-utterances chooses every sample again.
+    cache_mode = cache_mode or _resolve_cache_mode()
+
+    previous_signature = load_training_signature(
+        workflow_folderpath, carry_forward_from)
+    recorded_samples = None
+    if previous_signature is not None and cache_mode == _MODE_REUSE:
+        recorded_samples = {
+            context_name: context_signature.not_here_samples
+            for context_name, context_signature in previous_signature.contexts.items()
+        }
 
     current_signature, unresolved = compute_training_signature(
-        workflow_folderpath, candidates, seed=seed)
+        workflow_folderpath, candidates, seed=seed,
+        reserved_class_arm=reserved_class_arm, head_scope=head_scope,
+        recorded_samples=recorded_samples)
 
     if not (only_commands or only_contexts or changed_only):
         return (
@@ -942,8 +1119,6 @@ def compute_training_plan(
             current_signature,
         )
 
-    previous_signature = load_training_signature(
-        workflow_folderpath, carry_forward_from)
     if carry_forward_from is None:
         return (
             _full_retrain(
@@ -962,11 +1137,9 @@ def compute_training_plan(
 
     # `--regenerate-utterances` (and the `off`/`aggregate` cache modes) change the
     # generated utterances of every command the run touches. A retrained context would
-    # then be built on fresh text while a carried-forward context keeps the old text --
-    # including in its wildcard class, which is assembled from its ancestors'
-    # utterances. That is exactly the internally inconsistent version AR3 warns about,
-    # so the two features are mutually exclusive rather than merely discouraged.
-    cache_mode = cache_mode or _resolve_cache_mode()
+    # then be built on fresh text while a carried-forward context keeps the old text.
+    # That is exactly the internally inconsistent version AR3 warns about, so the two
+    # features are mutually exclusive rather than merely discouraged.
     if cache_mode != _MODE_REUSE:
         plan = _full_retrain(
             candidates,
@@ -983,39 +1156,35 @@ def compute_training_plan(
         plan.global_reasons.extend(global_differences)
         return plan, current_signature
 
-    dirty: set[str] = set(only_commands or ())
-    dirty |= changed_commands(
-        previous_signature.command_fingerprints,
-        current_signature.command_fingerprints,
+    context_commands, _ = build_context_maps(workflow_folderpath, candidates)
+    dirty, reasons = dirty_heads_from_signatures(
+        previous_signature, current_signature, context_commands,
+        only_commands=only_commands or (),
     )
 
-    context_commands, context_ancestors, _ = build_context_maps(
-        workflow_folderpath, candidates)
-    reasons = close_dirty_contexts(dirty, context_commands, context_ancestors)
+    # EXPERIMENT (Phase 9 step 3). Under either head layout the persona holdout is ONE split over
+    # every command, so one changed command moves the training rows of every head, not only the
+    # heads that own it. Carrying the others forward would keep models trained on text that the
+    # current split no longer holds out. Retrain everything instead.
+    if head_scope is not None and dirty:
+        return (
+            _full_retrain(
+                candidates,
+                f"full retrain (head layout {head_scope}: the persona holdout spans every "
+                f"command, so a changed command moves every head's training rows)"),
+            current_signature,
+        )
 
-    # An explicitly named context is retrained, and so is every descendant, because
-    # the named context's utterances constitute those descendants' wildcard class.
+    # An explicitly named context is retrained. Nothing else is: no head's wildcard class
+    # is built from another head's utterances any more, so no descendant is pulled in.
     for context_name in only_contexts or []:
         reasons.setdefault(context_name, []).append("explicitly requested")
-        for descendant in sorted(descendants_of(context_name, context_ancestors)):
-            reasons.setdefault(descendant, []).append(
-                f"wildcard class is stale: ancestor '{context_name}' was retrained"
-            )
 
     for context_name in candidates:
         # A context the context model could not describe is a context whose closure
         # was computed on incomplete information.
         for reason in unresolved.get(context_name, []):
             reasons.setdefault(context_name, []).append(reason)
-
-        # The signature comparison is INDEPENDENT of the closure above and catches
-        # what the closure structurally cannot: changes to the context models
-        # themselves, which move a label space without moving any command file.
-        for difference in _diff_context_signature(
-            previous_signature.contexts.get(context_name),
-            current_signature.contexts[context_name],
-        ):
-            reasons.setdefault(context_name, []).append(difference)
 
         # Last: are the bytes we would carry forward actually there and complete?
         if context_name not in reasons and not context_artifacts_complete(
@@ -1037,7 +1206,7 @@ def compute_training_plan(
     # inconsistent version AR3 says versioning cannot detect and this must prevent.
     if to_train and carried:
         if uncached := _shared_commands_absent_from_cache(
-            workflow_folderpath, to_train, carried, context_commands, context_ancestors
+            workflow_folderpath, to_train, carried, context_commands
         ):
             plan = _full_retrain(
                 candidates,
@@ -1377,17 +1546,13 @@ def merge_heldout_evaluation(
 def _commands_contributing_to(
     context_name: str,
     context_commands: dict[str, set[str]],
-    context_ancestors: dict[str, set[str]],
 ) -> set[str]:
-    """Every command whose utterances end up in *context_name*'s training data.
+    """Every command whose GENERATED utterances end up in *context_name*'s training data.
 
-    Its own commands, plus its ancestors' -- an ancestor's utterances constitute
-    this context's wildcard class, which is why a change upstream is a change here.
+    Its own label space. The sparse wildcard class draws hand-written seeds of foreign
+    commands, not cached generated text, so it adds nothing here.
     """
-    contributing = set(context_commands.get(context_name) or ())
-    for ancestor in context_ancestors.get(context_name) or ():
-        contributing |= set(context_commands.get(ancestor) or ())
-    return contributing
+    return set(context_commands.get(context_name) or ())
 
 
 def _generation_eligible_commands(workflow_folderpath: str) -> set[str]:
@@ -1420,7 +1585,6 @@ def _shared_commands_absent_from_cache(
     to_train: Iterable[str],
     carried: Iterable[str],
     context_commands: dict[str, set[str]],
-    context_ancestors: dict[str, set[str]],
     generation_eligible: Optional[set[str]] = None,
 ) -> set[str]:
     """Commands feeding BOTH a retrained and a carried-forward context, with no cache.
@@ -1435,11 +1599,9 @@ def _shared_commands_absent_from_cache(
     shared: set[str] = set()
     retrained_side: set[str] = set()
     for context_name in to_train:
-        retrained_side |= _commands_contributing_to(
-            context_name, context_commands, context_ancestors)
+        retrained_side |= _commands_contributing_to(context_name, context_commands)
     for context_name in carried:
-        shared |= retrained_side & _commands_contributing_to(
-            context_name, context_commands, context_ancestors)
+        shared |= retrained_side & _commands_contributing_to(context_name, context_commands)
 
     # "No cache entry" only means "will be regenerated" for a command that has
     # something to generate. A command with no seed utterances -- set_root_context

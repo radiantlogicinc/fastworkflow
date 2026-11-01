@@ -178,6 +178,14 @@ class ChatSession:
         if startup_command and startup_action:
             raise ValueError("Cannot provide both startup_command and startup_action")
 
+        # Phase 9 step 4: artifacts trained before the sparse "not here" construction are refused
+        # at load, for the app and for the internal CME workflow whose heads it also loads.
+        # Training never comes through here, so `fastworkflow train` can still retrain them.
+        from fastworkflow.train.artifact_versioning import require_construction_record
+        require_construction_record(workflow_folderpath)
+        require_construction_record(
+            fastworkflow.get_internal_workflow_path("command_metadata_extraction"))
+
         litellm.drop_params = True  # See https://docs.litellm.ai/docs/completion/drop_params
 
         # Create the workflow

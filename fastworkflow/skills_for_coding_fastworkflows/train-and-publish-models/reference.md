@@ -50,7 +50,6 @@ Any difference here forces a **full** retrain. Recorded per version in
 | `persona_source` | the active persona source label |
 | `generator_source_digest` | source of the synthetic-generation module |
 | `trainer_source_digest` | source of the model-pipeline-training module |
-| `class_balance_source_digest` | source of the class-balance module |
 | `parameter_value_placeholders_sha256` | the reserved parameter-value placeholder set |
 
 `INTENT_DETECTION_TINY_MODEL` and `INTENT_DETECTION_LARGE_MODEL` are read with code defaults, so a

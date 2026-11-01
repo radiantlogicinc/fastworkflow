@@ -922,11 +922,8 @@ def compute_commands_source_fingerprint(workflow_folderpath: str) -> str:
                 st = p.stat()
                 entries.append((str(p), st.st_size, st.st_mtime_ns))
 
-    # Routing also depends on the hierarchy model at the workflow root.
-    hierarchy = Path(workflow_folderpath) / "context_hierarchy_model.json"
-    if hierarchy.is_file():
-        st = hierarchy.stat()
-        entries.append((str(hierarchy), st.st_size, st.st_mtime_ns))
+    # No hierarchy file is fingerprinted: parents come from the live chain, and a leftover
+    # context_hierarchy_model.json is ignored (see CommandContextModel.load).
 
     return hashlib.sha256(repr(sorted(entries)).encode("utf-8")).hexdigest()
 

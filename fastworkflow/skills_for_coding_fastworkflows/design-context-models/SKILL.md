@@ -1,8 +1,9 @@
 ---
 name: design-context-models
 description: >-
-  Design and tune the context inheritance (`base`) and context hierarchy (`parent`) models of a
-  fastWorkflow command tree so intent routing stays accurate as the tree grows and a task takes the
+  Design and tune the context inheritance (`base`) model of a fastWorkflow command tree, and the
+  enclosing record each context's `get_parent` returns, so intent routing stays accurate as the tree
+  grows and a task takes the
   fewest commands. Covers deriving the containment graph from code, sizing base contexts to the
   parameter producers commands actually declare, removing duplicate commands, writing seed
   utterances that separate colliding labels, and verifying a retrain without being fooled by
@@ -17,72 +18,80 @@ description: >-
 
 Two files, two unrelated effects. Confusing them makes every later decision guesswork.
 
-| File | Key | Effect |
+| File or source | Key | Effect |
 |---|---|---|
 | `_commands/context_inheritance_model.json` | `base` | Adds the base context's commands to the child's **callable surface**. Controls reachability. |
-| `context_hierarchy_model.json` | `parent` | **No runtime navigation effect at all.** Read at training time only. |
+| `get_parent` in `_commands/<Context>/_<Context>.py` | the enclosing object | **The only parent source.** Each call reads the live object chain at run time. |
+
+There is no `context_hierarchy_model.json`. A workflow that still has one loads, logs a warning that
+the file is ignored and can be deleted, and routes the same way. `fastworkflow build` does not
+generate it.
 
 A context's classifier does not choose among its surface. Its label set is:
 
 ```
 own commands
 + inherited commands (transitive over `base`)
-+ framework core commands + `wildcard`
-+ every ancestor's surface, trained as `wildcard`     <- this comes from the `parent` axis
++ framework core commands
++ `wildcard`, the reserved "not here" class
 ```
 
-`go_up` and escalation both walk the **live object's** parent — the `Context.get_parent` callback
-returning `obj.parent` — never the JSON. The `parent` axis exists to teach a context which
-utterances are not its own, so it answers `wildcard`, which makes the runtime climb the live chain
-and re-predict there.
+The "not here" class is built from **one hand-written seed of every command that is not one of the
+context's own or inherited labels**, planning commands included. Ancestor commands are not labels of
+their own; they are foreign commands, so each contributes one seed to the class. The internal CME
+workflow has no "not here" class. Each head records which seed it used for each foreign command, in
+its training signature.
 
-Three consequences drive everything below:
+Enclosing commands are reached at run time by walking the **live object's** parents: the current
+context and its bases, then each enclosing record and its bases, then the global commands. A
+"not here" answer moves the walk to the next scope; the nearest scope that recognises the request wins.
+A command found in an enclosing scope runs on that record and is filed under it.
 
-- A `parent` edge no command can produce is **pure cost**. It can never be walked at runtime, and it
-  still enlarges the wildcard class.
-- A missing `parent` edge that *is* produced at runtime is **worse**. The child was never taught to
-  reject that ancestor's utterances, so it confidently misroutes instead of escalating.
+Consequences that drive everything below:
+
+- A `get_parent` that returns the wrong object, or `None` where an enclosing record exists, hides
+  every command of that record from the walk. Check it first when an enclosing command never runs.
 - Only a **lone** confident `wildcard` escalates. `wildcard` returned beside real candidates raises
   an ambiguity prompt instead, so "escalation" and "routing" trade against each other and must be
   scored separately.
+- The "not here" class grows with the number of commands in the workflow, one seed each, not with the
+  depth of the context tree.
 
 ## Planning commands follow the same visibility
 
 A planning command is visible exactly where a command of the same folder is. A file
 `_commands/<Context>/<name>.py` is the planning command `<Context>/<name>`, and it is matched in the
-context it sits in and wherever that context's commands are reachable:
+context it sits in and wherever that context's commands are reachable, on the same lookup path as an
+execution command:
 
 1. the active context;
 2. its bases, from `context_inheritance_model.json` `base`, transitively;
-3. each live ancestor's context, and that ancestor's bases;
-4. the root (`""`), where `_commands/<name>.py` planning commands sit.
+3. each enclosing record on the live chain, and that record's bases;
+4. the global commands, in the `_commands/` root.
 
-`workflow_agent.py` `planning_scopes` gives this order, and the matcher offers each scope's planning
-commands in turn. So a planning command in a base context reaches every context that inherits the
-base, and one in a child context is not offered from a sibling. Moving or renaming a planning command
+For a natural-language request the global head is asked first: a confident global command wins and
+runs bound to the root object; otherwise the current context's head is asked and the climb continues.
+An exact command name skips this step and takes the nearest scope. So a planning command in a base
+context reaches every context that inherits the base, and one in a child context is not offered from a
+sibling. Moving or renaming a planning command
 changes its qualified name, exactly as for a command, so its `from_` edges and previews move with it.
 
-## Rule 1 — derive the hierarchy from code, never hand-maintain it
+## Rule 1 — keep `get_parent` honest; there is no second copy to maintain
 
-The true `parent` graph is whatever each command constructs and assigns as the current context. Scan
-for the assignment to `current_command_context` and record the class being entered; that set *is*
-the containment graph. Diff it against the declared JSON and fix both directions: drop edges nothing
-produces, add edges something produces.
-
-Hand-maintained hierarchies drift silently, because a stale edge breaks nothing — it only costs
-accuracy. Re-derive it whenever commands are added or deleted.
+The parent of a context is what its `get_parent` returns for the live object. There is no JSON copy
+to drift from it. Check each `get_parent` against the object it should return: a record's parent is
+the record that holds it, and the root returns `None`. The scan that the earlier design used
+(recording which class each command assigns to `current_command_context`) still shows which contexts
+a command can enter, which is what `descends_to` and the shortlist need.
 
 ## Rule 2 — cutting the `parent` axis is free; cutting `base` is not
 
 This is what resolves the tension between a small surface and a short path.
 
-- **`parent` trimming costs no path length.** Reachability does not come from this file. Trim it to
-  exactly the derived graph and the only thing that changes is that each classifier stops learning
-  to reject things that could never reach it.
-- **`base` trimming costs a real round trip** — but only sometimes. A command removed from a
-  context's surface is still reachable *in place*, with no extra turn, if it lives in a **live
-  ancestor**, because escalation will find it. It becomes genuinely unreachable if it only lives in
-  a **sibling**.
+- **Reachability comes from `base` and from `get_parent`, never from a second file.** A command
+  removed from a context's surface is still reachable *in place*, with no extra turn, if it lives in
+  a **live enclosing record**, because the walk climbs to it. It becomes genuinely unreachable if it
+  only lives in a **sibling**.
 
 So the safe cut depends on depth:
 
@@ -143,11 +152,13 @@ cannot be separated no matter how the other side is worded.
 ## Rule 6 — collisions are directional; anchor the ancestor side
 
 Two commands only compete when both land in the **same** model. That happens two ways: both on one
-surface, or one of them arriving as an ancestor's `wildcard` negative. Work out which:
+surface, or one of them arriving as a seed of the other head's `wildcard` ("not here") class. Work out
+which:
 
-> `X` competes inside `Y` if `X` is on `Y`'s surface, or `X` belongs to an ancestor of `Y`.
+> `X` competes inside `Y` if `X` is on `Y`'s surface, or `X` is a foreign command of `Y` (one seed in
+> `Y`'s "not here" class).
 
-Parent-child pairs are therefore **one-directional**. If `Parent/list_things` is a wildcard negative
+Parent-child pairs are therefore **one-directional**. If `Parent/list_things` is a "not here" seed
 down in `Child`, but `Child/list_things` never reaches `Parent`, then:
 
 - Anchor the **ancestor** side to its entity noun in every seed.
@@ -158,8 +169,8 @@ Anchoring both sides is unnecessary and throws away the low-content register for
 
 ## Rule 7 — a global command lands in every context's wildcard class
 
-Root-level navigation verbs are ancestors of everything, so their seeds are trained as `wildcard`
-almost everywhere. A global verb whose seeds carry the vocabulary of the workspace it opens will
+Root-level navigation verbs are foreign to every context, so their seeds are trained as `wildcard`
+almost everywhere: each global command contributes one seed to every head's "not here" class. A global verb whose seeds carry the vocabulary of the workspace it opens will
 make that workspace's own commands lose to `wildcard`.
 
 Keep global navigation seeds **strictly navigational** — where to go, not what to do once there. A
@@ -168,17 +179,17 @@ command asked verbatim; "sign up for a report" is its subscribe command.
 
 ## Rule 8 — shrinking a surface raises the wildcard share
 
-Ancestor rows do not shrink when a surface does. Halve a context's commands and `wildcard` can
-become several times the size of any single command class. That imbalance is tolerable when the
-context's commands are lexically distant from its ancestors', and dangerous when they are close — so
-after narrowing a base, check the narrowed context for over-escalation (its own commands losing to a
-lone `wildcard`) before assuming the change was free.
+The "not here" class holds one seed per foreign command. Halving a context's commands raises its
+share of foreign seeds, so `wildcard` can become several times the size of any single command class.
+That imbalance is tolerable when the context's commands are lexically distant from the foreign ones,
+and dangerous when they are close — so after narrowing a base, check the narrowed context for
+over-escalation (its own commands losing to a lone `wildcard`) before assuming the change was free.
 
 ## Procedure
 
 ```
-- [ ] 1. Derive the containment graph from the command bodies
-- [ ] 2. Diff it against context_hierarchy_model.json; fix edges in both directions
+- [ ] 1. Check each context's get_parent against the live object it should return
+- [ ] 2. Check which contexts each command enters (current_command_context assignments)
 - [ ] 3. Per context, list surface vs. the producers its own commands declare
 - [ ] 4. For each unused inherited command, check Rule 2 depth before cutting
 - [ ] 5. Split fat base contexts; chain the wide base onto the narrow ones
@@ -195,7 +206,10 @@ colliding pair can cost a context more than its entire label count does.
 
 Retraining is mandatory after any of this: the label set is baked into each context's artifact, and
 at inference a predicted label is looked up in a dict built from the *current* surface, so a stale
-label fails hard rather than degrading.
+label fails hard rather than degrading. An artifact trained before scoped lookup refuses to load and
+says to retrain with `fastworkflow train`; the first train after that is a full retrain. After that,
+editing one command's seeds retrains only the heads that hold it (plus any head that recorded its
+seed), and adding or removing a command retrains every head.
 
 Then read the results carefully. Four traps, all of which will otherwise produce a false conclusion:
 

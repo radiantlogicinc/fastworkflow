@@ -1,5 +1,7 @@
+import contextlib
+import hashlib
 import os
-from typing import Callable, ClassVar, Iterable, Optional
+from typing import Callable, ClassVar, Iterable, Mapping, Optional
 from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
 from torch.optim import AdamW
 from sklearn.decomposition import PCA
@@ -15,7 +17,7 @@ from torch.utils.data import random_split
 import fastworkflow
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from typing import List, Dict, NamedTuple, Optional, Tuple,Union
+from typing import List, Dict, NamedTuple, Optional, Sequence, Tuple, Union
 import pickle
 import threading
 from pathlib import Path
@@ -28,7 +30,6 @@ from fastworkflow.train.determinism import (
     get_provenance_recorder,
 )
 from fastworkflow.train.selective_training import contexts_for_training
-from fastworkflow.train import class_balance
 from fastworkflow.utils.logging import logger
 from fastworkflow.nlu_labels import (
     PARAMETER_VALUE_LABEL,
@@ -1239,6 +1240,7 @@ def _record_wildcard_context_training(
     always_include_rows: list[str],
     selected_budget: Optional[int],
     coverage_floor: int,
+    sampled_commands: Optional[int] = None,
 ) -> None:
     """Record escalation-class rows and every denominator used to select them."""
     recorder = get_provenance_recorder()
@@ -1258,7 +1260,7 @@ def _record_wildcard_context_training(
         reason=(
             "reserved escalation class"
             if included
-            else "context has no non-local ancestor utterances"
+            else "no escalation class (the internal CME has no wildcard class)"
         ),
         own_row_count=own_row_count,
         raw_candidate_count=raw_candidate_count,
@@ -1269,6 +1271,7 @@ def _record_wildcard_context_training(
         coverage_floor_applied=(
             coverage_floor > own_row_count if included else False
         ),
+        sampled_commands=sampled_commands,
     )
 
 
@@ -1299,44 +1302,14 @@ def _record_parameter_value_context_training(
     )
 
 
-def cache_ancestor_utterances(
-    context_name: str, 
-    crd: RoutingDefinition, 
-    workflow: fastworkflow.Workflow,
-    cache: dict,
-    command_cache: Optional[dict[str, list[str]]] = None,
-) -> list[str]:
-    """
-    Collects utterances for the 'wildcard' context.
-    
-    This includes the base 'wildcard' command's utterances, plus all utterances
-    from every command (except 'wildcard') belonging to any of the current 
-    context's ancestors.
-    """
-    workflow_folderpath = workflow.folderpath
-    cmd_dir = crd.command_directory
-    if command_cache is None:
-        command_cache = {}
+def own_command_names(crd: RoutingDefinition, ctx_name: str) -> set[str]:
+    """A context's OWN commands: its ``"/"`` list in the context model, not inherited ones.
 
-    ancestor_utterances = set()
-    ancestor_contexts = crd.context_model.get_ancestor_contexts(context_name)
-    for ancestor_ctx in ancestor_contexts:
-        if ancestor_ctx in cache:
-            for cmd_name in cache[ancestor_ctx]:
-                ancestor_utterances |= set(cache[ancestor_ctx][cmd_name])    
-            continue
-        cache[ancestor_ctx] = {}
-        ancestor_commands = crd.context_model.commands(ancestor_ctx)
-        for cmd in ancestor_commands:
-            if cmd.split('/')[-1] == 'wildcard':
-                continue            
-            utterances = _get_cached_command_utterances(
-                workflow, workflow_folderpath, cmd_dir, cmd, command_cache
-            )
-            cache[ancestor_ctx][cmd] = utterances   
-            ancestor_utterances |= set(utterances)    
-
-    return ancestor_utterances
+    Read from the model's private table because the scoped layout (Phase 9 step 3) needs the
+    own list and ``crd.contexts`` only holds the inherited union. Unknown contexts give ``set()``.
+    """
+    entry = crd.context_model._command_contexts.get(ctx_name) or {}
+    return set(entry.get("/") or [])
 
 
 def trained_command_labels(ctx_name: str, crd: RoutingDefinition) -> set[str]:
@@ -1347,10 +1320,21 @@ def trained_command_labels(ctx_name: str, crd: RoutingDefinition) -> set[str]:
     this function names and callers must not have to know which half supplies the core
     commands. Shared by `train()` and by the escalation tests so the two cannot disagree
     about the label space, which is the disagreement AR5 was.
+
+    EXPERIMENT-ONLY (Phase 9 step 3): under the ``scoped`` head layout the base is the
+    context's own list and action-only commands (no ``Signature.Input``) are left out.
+    Those never had rows, so the flattened label set is unchanged in practice.
     """
     cmd_dir = crd.command_directory
+    if active_experiment_head_scope() == SCOPED:
+        candidates = {
+            name for name in own_command_names(crd, ctx_name)
+            if not _is_action_only(cmd_dir, name)
+        }
+    else:
+        candidates = set(crd.contexts[ctx_name])
     labels: set[str] = set()
-    for name in set(crd.contexts[ctx_name]) | set(cmd_dir.core_command_names):
+    for name in candidates | set(cmd_dir.core_command_names):
         try:
             if cmd_dir.get_command_metadata(name).is_planning:
                 continue
@@ -1370,23 +1354,16 @@ def cache_context_command_utterances(
     """Populate ``cache[ctx_name]`` for every label this context trains, and return them.
 
     One loop over every label, using the cache when it already holds the command and
-    GENERATING when it does not. The previous shape had two branches: a cached branch
-    that silently skipped commands absent from the cache, and a generate-everything
-    branch that only ran when the cached branch produced nothing at all. A context
-    previously visited as an ancestor has a cache holding only
-    `context_model.commands()`, so the cached branch dropped every core command for it
-    -- making those commands unroutable in that context.
-
-    The returned mapping is restricted to the labels asked for, so an entry an earlier
-    ancestor visit left behind for some other command can never become a label this
-    context trains.
+    GENERATING when it does not. The returned mapping is restricted to the labels asked
+    for, so an entry an earlier visit left behind for some other command can never become
+    a label this context trains.
     """
     workflow_folderpath = workflow.folderpath
     cmd_dir = crd.command_directory
     map_cmd_2_uttlist = cache.setdefault(ctx_name, {})
 
-    # `label_of` is the same split form cache_ancestor_utterances uses, so both paths
-    # agree on what the reserved label is regardless of qualification.
+    # `label_of` splits off the context qualifier, so the reserved label is recognised
+    # whether or not a command name is qualified.
     wanted = sorted(
         cmd
         for cmd in trained_command_labels(ctx_name, crd)
@@ -1407,13 +1384,490 @@ def cache_context_command_utterances(
     return {cmd_name: map_cmd_2_uttlist[cmd_name] for cmd_name in wanted}
 
 
+#: Hand-written seeds per foreign command in the sparse "not here" class (Phase 9 step 1,
+#: design 2.15 and 3.9). A trainer constant, deliberately not a setting or an env var.
+#: Phase 9 step 4 made the sparse_1 construction (one seed) the shipped one; step 1 measured
+#: 8 as ``sparse_8``.
+NOT_HERE_SEEDS = 1
+
+#: The shipped construction: what every real training run builds when no experiment
+#: override is in force. ``resolve_reserved_class_arm`` returns it for ``None``.
+SHIPPED_ARM = "sparse_1"
+
+#: arm -> (construction, ratio, seeds per foreign command). Every arm is the sparse
+#: ``"not_here"`` class: a few seeds of every foreign command, with no ancestor sampling and
+#: no fill. ``None`` for seeds means ``NOT_HERE_SEEDS``, so ``sparse_1`` (the shipped arm)
+#: follows the trainer constant, while ``sparse_8`` is pinned at 8 whatever the constant
+#: says. The ratio column is unused and kept as ``None`` for the shape of the record.
+RESERVED_CLASS_ARMS: dict[str, tuple[str, Optional[float], Optional[int]]] = {
+    SHIPPED_ARM: ("not_here", None, None),
+    "sparse_8": ("not_here", None, 8),
+}
+
+#: Arms that existed for the Phase 9 step 1 measurement and no longer do (Phase 9 step 5).
+#: The ancestor construction they trained is gone, so naming one is refused with this text.
+#: The recorded step 1 and step 3 results stay as history; they are not reproducible.
+RETIRED_ARMS: dict[str, str] = {
+    "control": (
+        "the ancestor construction was retired in Phase 9 step 5; the sparse 'not here' "
+        "class is the only escalation class (use sparse_1, the shipped arm)"
+    ),
+    "ratio_0_5": (
+        "the ancestor construction was retired in Phase 9 step 5; the sparse 'not here' "
+        "class is the only escalation class (use sparse_1, the shipped arm)"
+    ),
+}
+
+#: The internal command_metadata_extraction workflow. It has no wildcard class at all: none of
+#: its contexts has a parent, and the sparse class is an APP construction (design 2.15, 3.9).
+#: Set only by ``arm_for_workflow``; it is not selectable as an experiment arm.
+INTERNAL_CME_ARM = "internal_cme"
+
+#: The construction label of each arm, as recorded in the not-here construction record and
+#: the manifests. ``INTERNAL_CME_ARM`` is ``"none"``: no wildcard class, by design.
+_INTERNAL_CONSTRUCTIONS: dict[str, str] = {INTERNAL_CME_ARM: "none"}
+
+#: EXPERIMENT-ONLY (Phase 9 step 1). Never a public setting and never read from the
+#: environment. The Phase 9 measurement script sets it through
+#: ``experiment_reserved_class_arm``; tests pass ``reserved_class_arm=`` to
+#: ``select_escalation_rows`` instead. ``None`` is the shipped construction (``SHIPPED_ARM``),
+#: which every real training run uses. ``resolve_reserved_class_arm`` is the only reader.
+_EXPERIMENT_RESERVED_CLASS_ARM: Optional[str] = None
+
+
+def active_experiment_arm() -> Optional[str]:
+    """The experiment override for this process, or None for a shipped run.
+
+    Used for provenance and the holdout export only. The selection itself is read by
+    ``resolve_reserved_class_arm``.
+    """
+    return _EXPERIMENT_RESERVED_CLASS_ARM
+
+
+#: EXPERIMENT-ONLY. While a dict, ``train()`` fills it with each head's persona-holdout
+#: split (see ``_export_holdout``); ``train_workflow`` sets it only under an active arm and
+#: writes it to ``___command_info/not_here_holdout.json``. ``None`` means nothing is exported.
+_HOLDOUT_EXPORT: Optional[dict] = None
+
+HOLDOUT_EXPORT_FILENAME = "not_here_holdout.json"
+
+
+def _export_holdout(ctx_name: str, own_labels: set[str], split) -> None:
+    """Record one head's persona holdout for the not-here scorer (no effect unless exporting)."""
+    export = _HOLDOUT_EXPORT
+    if export is None:
+        return
+    export[ctx_name] = {
+        "own_labels": sorted(own_labels),
+        "own_heldout": [
+            {"utterance": record.utterance, "label": record.label, "persona": record.persona}
+            for record in split.heldout
+            if record.label in own_labels
+            and record.label not in (WILDCARD_LABEL, PARAMETER_VALUE_LABEL)
+        ],
+        # the not-here rows this head was TRAINED on, after the persona split removed the held-out ones
+        "not_here_training": sorted({
+            record.utterance for record in split.train if record.label == WILDCARD_LABEL
+        }),
+        # every row this head trains on, after the split: what the no-leak check reads
+        "training_utterances": sorted({record.utterance for record in split.train}),
+    }
+
+
+def write_holdout_export(workflow_folderpath: str, arm: str, seed: int) -> str:
+    """Write the exported holdouts of one arm run; returns the path."""
+    folder = os.path.join(workflow_folderpath, "___command_info")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, HOLDOUT_EXPORT_FILENAME)
+    heads: dict = {}
+    # A selective run retrains only some heads. Keep the holdouts of the others from the
+    # previous run under the same arm; a different arm starts a fresh export.
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as handle:
+            previous = json.load(handle)
+        if previous.get("reserved_class_arm") == arm:
+            heads.update(previous.get("heads", {}))
+    heads.update(_HOLDOUT_EXPORT or {})
+    document = {
+        "schema": 1,
+        "reserved_class_arm": arm,
+        "seed": seed,
+        "heads": dict(sorted(heads.items())),
+    }
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(document, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    return path
+
+
+def resolve_reserved_class_arm(explicit: Optional[str] = None) -> str:
+    """The arm in force: the explicit argument, else the experiment override, else the shipped arm.
+
+    With no override this is ``SHIPPED_ARM`` (sparse_1), the production construction. A retired
+    arm (``RETIRED_ARMS``) is refused with the reason, not reported as an unknown name.
+    """
+    arm = explicit if explicit is not None else _EXPERIMENT_RESERVED_CLASS_ARM
+    if arm is None:
+        return SHIPPED_ARM
+    if arm in RETIRED_ARMS:
+        raise ValueError(f"reserved-class arm {arm!r} is retired: {RETIRED_ARMS[arm]}")
+    if arm == INTERNAL_CME_ARM:  # already resolved by arm_for_workflow; never an experiment arm
+        return arm
+    if arm not in RESERVED_CLASS_ARMS:
+        raise ValueError(
+            f"unknown reserved-class arm {arm!r}; expected one of {sorted(RESERVED_CLASS_ARMS)}"
+        )
+    return arm
+
+
+def arm_construction(arm: str) -> str:
+    """The construction an arm builds: ``"not_here"`` (sparse) or ``"none"`` (internal CME).
+
+    ``arm`` must be a resolved arm (from ``resolve_reserved_class_arm`` or ``arm_for_workflow``).
+    """
+    if arm in _INTERNAL_CONSTRUCTIONS:
+        return _INTERNAL_CONSTRUCTIONS[arm]
+    return RESERVED_CLASS_ARMS[arm][0]
+
+
+def is_internal_cme_folder(folderpath: str) -> bool:
+    """True when *folderpath* is the internal command_metadata_extraction workflow (or inside it).
+
+    Compared by resolved path, the same test the trainer's CME check uses.
+    """
+    cme = os.path.realpath(fastworkflow.get_internal_workflow_path("command_metadata_extraction"))
+    real = os.path.realpath(folderpath)
+    return real == cme or real.startswith(cme + os.sep)
+
+
+def arm_for_workflow(folderpath: Optional[str], explicit: Optional[str] = None) -> str:
+    """The reserved-class arm a workflow trains under.
+
+    The sparse "not here" class is an APP construction (design 2.15 and 3.9: app heads). The
+    internal CME workflow has no wildcard class at all (``INTERNAL_CME_ARM``, construction
+    ``"none"``). No experiment override reaches the CME. Every other workflow resolves as
+    ``resolve_reserved_class_arm``.
+    """
+    if folderpath is not None and is_internal_cme_folder(folderpath):
+        return INTERNAL_CME_ARM
+    return resolve_reserved_class_arm(explicit)
+
+
+def not_here_construction(explicit: Optional[str] = None, folderpath: Optional[str] = None) -> dict:
+    """The construction record for the arm in force, as written into every trained artifact.
+
+    The shipped app construction is ``{"construction": "sparse", "seeds_per_command": 1}``.
+    The internal CME records ``{"construction": "none", "reason": ...}``: it has no wildcard
+    class. A version without this record is refused at load (see
+    ``artifact_versioning.construction_record_problem``).
+    """
+    arm = arm_for_workflow(folderpath, explicit)
+    if arm_construction(arm) == "none":
+        return {"construction": "none", "reason": "internal workflow: no wildcard class"}
+    _, _, seeds = RESERVED_CLASS_ARMS[arm]
+    return {
+        "construction": "sparse",
+        "seeds_per_command": NOT_HERE_SEEDS if seeds is None else seeds,
+    }
+
+
+def construction_records(
+    arm: Optional[str] = None,
+    head_scope: Optional[str] = None,
+    folderpath: Optional[str] = None,
+) -> tuple[dict, dict]:
+    """The records every training run writes: ``(manifest fields, provenance run metadata)``.
+
+    The trainer writes the first into the version manifest and the second into the run's
+    provenance, so both carry the same not-here construction.
+    """
+    from fastworkflow.train.artifact_versioning import NOT_HERE_RECORD_KEY
+    from fastworkflow.train.determinism import get_train_seed
+
+    not_here = not_here_construction(arm, folderpath)
+    run_metadata = {
+        "reserved_class_arm": arm_for_workflow(folderpath, arm),
+        "train_seed": get_train_seed(),
+        "not_here": not_here,
+    }
+    if head_scope is not None:
+        run_metadata["head_scope"] = head_scope
+    return {NOT_HERE_RECORD_KEY: not_here}, run_metadata
+
+
+@contextlib.contextmanager
+def experiment_reserved_class_arm(arm: Optional[str]):
+    """EXPERIMENT-ONLY: select a reserved-class arm for the duration of a ``with`` block."""
+    global _EXPERIMENT_RESERVED_CLASS_ARM
+    if arm == INTERNAL_CME_ARM:
+        raise ValueError(f"{INTERNAL_CME_ARM!r} is the internal CME's arm and is not selectable")
+    resolve_reserved_class_arm(arm)  # validates the name before anything changes
+    previous = _EXPERIMENT_RESERVED_CLASS_ARM
+    _EXPERIMENT_RESERVED_CLASS_ARM = arm
+    try:
+        yield
+    finally:
+        _EXPERIMENT_RESERVED_CLASS_ARM = previous
+
+
+#: EXPERIMENT-ONLY (Phase 9 step 3). The two head layouts that step 3 compares. ``flattened``
+#: is today: a head learns its own and inherited commands, and the runtime climbs the parent
+#: chain on "not here". ``scoped`` (design 3.9): a head learns only its own "/" commands, plus
+#: the core commands, ``parameter_value`` and ``wildcard``; the sparse not-here class covers
+#: every other command, and the persona holdout is one split over the whole workflow.
+FLATTENED = "flattened"
+SCOPED = "scoped"
+HEAD_SCOPES = (FLATTENED, SCOPED)
+
+#: EXPERIMENT-ONLY. Never a public setting and never read from the environment. ``None`` is
+#: today's layout, which every real training run uses. ``resolve_head_scope`` and
+#: ``active_experiment_head_scope`` are the readers.
+_EXPERIMENT_HEAD_SCOPE: Optional[str] = None
+
+#: The global, action-only command that starts a session. It has no ``Signature.Input``, so
+#: it is never a head label, never a training row and never a holdout case.
+STARTUP_COMMAND = "startup"
+
+#: Written by ``train()`` under the scoped layout, once per run, into ``___command_info``.
+LOOKUP_HOLDOUT_FILENAME = "lookup_holdout.json"
+
+
+def active_experiment_head_scope() -> Optional[str]:
+    """The experiment head layout for this process, or None for today's layout."""
+    return _EXPERIMENT_HEAD_SCOPE
+
+
+def _require_sparse_arm() -> None:
+    """Any active head scope needs the sparse arm: its one global persona holdout is only
+    defined alongside the sparse not-here class, which both layouts train with."""
+    arm = _EXPERIMENT_RESERVED_CLASS_ARM
+    if arm is None:
+        raise ValueError(
+            "a head scope needs a reserved-class arm: enter experiment_reserved_class_arm() "
+            "around it (sparse_1 or sparse_8)"
+        )
+    if arm_construction(arm) != "not_here":
+        raise ValueError(
+            f"a head scope needs a sparse (not_here) arm, not {arm!r}"
+        )
+
+
+def resolve_head_scope(explicit: Optional[str] = None) -> str:
+    """The head layout in force: the explicit argument, else the experiment override, else flattened."""
+    scope = explicit if explicit is not None else _EXPERIMENT_HEAD_SCOPE
+    if scope is None:
+        return FLATTENED
+    if scope not in HEAD_SCOPES:
+        raise ValueError(f"unknown head scope {scope!r}; expected one of {list(HEAD_SCOPES)}")
+    _require_sparse_arm()
+    return scope
+
+
+@contextlib.contextmanager
+def experiment_head_scope(scope: Optional[str]):
+    """EXPERIMENT-ONLY: select a head layout for the duration of a ``with`` block.
+
+    ``None`` restores today's layout. Any other layout must be entered INSIDE
+    ``experiment_reserved_class_arm`` with a sparse arm, and raises ValueError otherwise.
+    """
+    global _EXPERIMENT_HEAD_SCOPE
+    if scope is not None and scope not in HEAD_SCOPES:
+        raise ValueError(f"unknown head scope {scope!r}; expected one of {list(HEAD_SCOPES)}")
+    previous = _EXPERIMENT_HEAD_SCOPE
+    _EXPERIMENT_HEAD_SCOPE = scope
+    try:
+        if scope is not None:
+            _require_sparse_arm()
+        yield
+    finally:
+        _EXPERIMENT_HEAD_SCOPE = previous
+
+
+def _is_action_only(cmd_dir: object, name: str) -> bool:
+    """True for ``startup`` and any command without ``Signature.Input``: never a label or a row."""
+    return name == STARTUP_COMMAND or not _requires_utterances(cmd_dir, name)
+
+
+def _stable_rank(context_name: str, command_name: str, seed: str) -> str:
+    """A process-independent sort key for one seed under one head (never Python's salted hash)."""
+    payload = "\x00".join((context_name, command_name, seed))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def choose_not_here_sample(
+    context_name: str, command_name: str, seeds: Sequence[str], count: int
+) -> list[str]:
+    """Up to *count* seeds of *command_name*, chosen for one head (design 2.50).
+
+    The lowest stable hash of (head, command, seed) first. Chosen this way, not as the first
+    seed, so a command's sample does not always fall on the same phrasing position, and the
+    head name is part of the key, so two heads need not record the same sample. Deterministic
+    in any process: it reads nothing but its arguments.
+    """
+    if count <= 0:
+        return []
+    ranked = sorted(
+        set(seeds),
+        key=lambda seed: _stable_rank(context_name, command_name, seed),
+    )
+    return ranked[:count]
+
+
+def resolve_not_here_sample(
+    context_name: str,
+    command_name: str,
+    seeds: Sequence[str],
+    count: int,
+    recorded: Optional[Sequence[str]],
+) -> list[str]:
+    """The sample a head uses for *command_name*: the recorded one while it still holds, else a new choice.
+
+    The recorded sample is reused whenever every recorded seed text still exists among the
+    command's seeds and it is no larger than *count*. If any recorded seed was edited away, the
+    command's sample is chosen again (that is the only way a head's sample for a command moves
+    without ``--regenerate-utterances``).
+    """
+    if recorded:
+        present = set(seeds)
+        if len(recorded) <= count and all(text in present for text in recorded):
+            return list(recorded)
+    return choose_not_here_sample(context_name, command_name, seeds, count)
+
+
+def _is_planning_name(cmd_dir: object, name: str) -> bool:
+    try:
+        return bool(cmd_dir.get_command_metadata(name).is_planning)
+    except KeyError:
+        return False
+
+
+def not_here_seed_rows(
+    workflow_folderpath: str,
+    crd: RoutingDefinition,
+    head_labels: set[str],
+    seeds_per_command: int,
+    *,
+    context_name: str = "",
+    recorded: Optional[Mapping[str, Sequence[str]]] = None,
+) -> tuple[dict[str, list[str]], int]:
+    """``({foreign command: up to N seeds}, available foreign seed count)`` for one head.
+
+    A foreign command is every command of the workflow that the head does not label:
+    execution commands from the routing definition (never the reserved wildcard, never
+    a planning command), then planning commands, whose seeds are read exactly as their
+    utterances are read today (``workflow_agent.planning_command_utterances``). Only
+    hand-written seeds are used, so no LLM generation runs for this class.
+
+    ``recorded`` maps a command to the sample this head recorded for it in its last train
+    (design 2.50). Each command's sample is ``resolve_not_here_sample``: the recorded one while
+    it still holds, else chosen again. ``None`` chooses every sample afresh.
+    """
+    from fastworkflow.workflow_agent import planning_command_utterances
+
+    cmd_dir = crd.command_directory
+    execution: set[str] = set(cmd_dir.core_command_names)
+    for names in crd.contexts.values():
+        execution |= set(names)
+
+    picks: dict[str, list[str]] = {}
+    available = 0
+    for name in sorted(execution - set(head_labels)):
+        if label_of(name) == WILDCARD_LABEL or _is_planning_name(cmd_dir, name):
+            continue
+        seeds = list(_get_seed_utterances(cmd_dir, name))
+        available += len(seeds)
+        picks[name] = resolve_not_here_sample(
+            context_name, name, seeds, seeds_per_command, (recorded or {}).get(name))
+
+    for name, seeds in sorted(planning_command_utterances(workflow_folderpath).items()):
+        if name in head_labels or name in picks or label_of(name) == WILDCARD_LABEL:
+            continue
+        seeds = list(seeds)
+        available += len(seeds)
+        picks[name] = resolve_not_here_sample(
+            context_name, name, seeds, seeds_per_command, (recorded or {}).get(name))
+    return picks, available
+
+
+def not_here_samples_for_context(
+    workflow_folderpath: str,
+    crd: RoutingDefinition,
+    ctx_name: str,
+    reserved_class_arm: Optional[str] = None,
+    recorded: Optional[Mapping[str, Sequence[str]]] = None,
+) -> Optional[dict[str, list[str]]]:
+    """The not-here samples one head records: ``{foreign command: its sample}``, or None.
+
+    None when the arm builds no not-here class (the internal CME). Commands with no seeds have
+    no sample and are left out. The planner and the trainer both call this, so the signature
+    records exactly what the trainer uses.
+    """
+    arm = arm_for_workflow(workflow_folderpath, reserved_class_arm)
+    if arm_construction(arm) == "none":
+        return None
+    picks, _available = not_here_seed_rows(
+        workflow_folderpath,
+        crd,
+        trained_command_labels(ctx_name, crd),
+        _seeds_per_command(arm),
+        context_name=ctx_name,
+        recorded=recorded,
+    )
+    return {name: list(rows) for name, rows in sorted(picks.items()) if rows}
+
+
+def _seeds_per_command(arm: str) -> int:
+    _, _, seeds = RESERVED_CLASS_ARMS[arm]
+    return NOT_HERE_SEEDS if seeds is None else seeds
+
+
+def _get_seed_utterances(cmd_dir: object, cmd_name: str) -> list[str]:
+    """A command's hand-written seeds (``Signature.plain_utterances``); none without an Input."""
+    if not _requires_utterances(cmd_dir, cmd_name):
+        return []
+    metadata = cmd_dir.get_utterance_metadata(cmd_name)
+    return list(metadata.plain_utterances) if metadata else []
+
+
+def _not_here_selection(
+    ctx_name: str,
+    crd: RoutingDefinition,
+    workflow: fastworkflow.Workflow,
+    *,
+    context_utterances: set[str],
+    seeds_per_command: int,
+    recorded: Optional[Mapping[str, Sequence[str]]] = None,
+) -> "EscalationSelection":
+    """The sparse "not here" class for one head (experiment arm; see RESERVED_CLASS_ARMS)."""
+    picks, available = not_here_seed_rows(
+        workflow.folderpath,
+        crd,
+        trained_command_labels(ctx_name, crd),
+        seeds_per_command,
+        context_name=ctx_name,
+        recorded=recorded,
+    )
+    chosen = {row for rows in picks.values() for row in rows}
+    rows = sorted(chosen - set(context_utterances))
+    return EscalationSelection(
+        rows=rows,
+        included=bool(rows),
+        raw_candidate_count=available,
+        deduplicated_candidate_count=len(rows),
+        always_include_rows=[],
+        budget=None,
+        coverage_floor=0,
+        not_here_samples={name: list(rows_) for name, rows_ in sorted(picks.items()) if rows_},
+    )
+
+
 class EscalationSelection(NamedTuple):
     """One context's escalation-class rows and every denominator that chose them."""
 
     #: Rows labelled `WILDCARD_LABEL`, sorted. Empty when no class is emitted.
     rows: list[str]
-    #: False when the context has no non-local ancestor utterances at all, which is a
-    #: different thing from a class that came out empty after selection.
+    #: False when no class is emitted (the internal CME, which has no wildcard class), which
+    #: is a different thing from a class that came out empty after selection.
     included: bool
     raw_candidate_count: int
     deduplicated_candidate_count: int
@@ -1421,109 +1875,49 @@ class EscalationSelection(NamedTuple):
     #: None when nothing was emitted, so no budget was computed.
     budget: Optional[int]
     coverage_floor: int
+    #: The sparse class's samples for this head, ``{foreign command: its sample}`` (design 2.50),
+    #: or None when no not-here class is built. These are what the head's signature records.
+    not_here_samples: Optional[dict[str, list[str]]] = None
 
 
 def select_escalation_rows(
     ctx_name: str,
     crd: RoutingDefinition,
     workflow: fastworkflow.Workflow,
-    cache: dict,
-    command_cache: dict[str, list[str]],
     *,
     context_utterances: set[str],
-    own_row_count: int,
-    wildcard_utterances: set[str],
+    reserved_class_arm: Optional[str] = None,
+    recorded_samples: Optional[Mapping[str, Sequence[str]]] = None,
 ) -> EscalationSelection:
-    """Choose the escalation-class rows for one context, and report every denominator.
+    """Choose the escalation-class (``wildcard``) rows for one context, and report every denominator.
 
-    Extracted from `train()` so the whole escalation-row decision is one callable. It
-    reads the shared utterance cache, which every other context in the run also writes, so it is
-    where a visit-order dependence can show up in the training rows -- and a test that
-    drives this drives the shipped decision, where one that reimplements the arithmetic
-    does not.
+    ``reserved_class_arm`` is EXPERIMENT-ONLY (see ``RESERVED_CLASS_ARMS``). Left at
+    ``None`` it resolves to the experiment override, then to ``SHIPPED_ARM`` (sparse_1),
+    which is what every real training run builds. Every sparse arm samples seeds of the
+    foreign commands (``not_here_seed_rows``), so no ancestor is read. The internal CME has
+    no wildcard class and returns an empty, not-included selection.
 
-    `core_command_names` is passed to `group_ancestor_utterances` as `skip_commands`, so
-    a core command is never an escalation source no matter which path filled the cache
-    (the derivation is in `class_balance`'s module docstring).
-
-    WILDCARD_LABEL is the ESCALATION signal: "an ancestor context can serve this". It is
-    emitted only where that can be true. In a context with no ancestors the class would
-    collapse to the single humanised command name, and a one-row class cannot satisfy the
-    class-aware split in `train()`: it needs one training row and one evaluation row.
-    Escalation is meaningless there anyway: the runtime parent walk terminates
-    immediately at the response generation root, so the turn can only ever reach
-    you_misunderstood, which an unconfident classifier already reaches.
+    Extracted from `train()` so the whole escalation-row decision is one callable, and a test
+    that drives it drives the shipped decision.
     """
-    ancestor_utterances = cache_ancestor_utterances(
-        ctx_name,
-        crd,
-        workflow,
-        cache,
-        command_cache,
-    )
-    net_ancestor_utterances = ancestor_utterances - context_utterances
-    grouped_ancestor_rows = class_balance.group_ancestor_utterances(
-        crd.context_model.get_ancestor_contexts(ctx_name),
-        cache,
-        skip_labels=(WILDCARD_LABEL,),
-        skip_commands=crd.command_directory.core_command_names,
-    )
-    raw_candidate_count, deduplicated_candidate_count = (
-        class_balance.reserved_candidate_counts(
-            grouped_ancestor_rows,
-            exclude=context_utterances,
-        )
-    )
-    coverage_floor = class_balance.coverage_floor_of(grouped_ancestor_rows)
-
-    if not net_ancestor_utterances:
+    arm = arm_for_workflow(workflow.folderpath, reserved_class_arm)
+    if arm_construction(arm) == "none":
         return EscalationSelection(
             rows=[],
             included=False,
-            raw_candidate_count=raw_candidate_count,
-            deduplicated_candidate_count=deduplicated_candidate_count,
+            raw_candidate_count=0,
+            deduplicated_candidate_count=0,
             always_include_rows=[],
             budget=None,
-            coverage_floor=coverage_floor,
+            coverage_floor=0,
         )
-
-    # R7.2: bound the escalation class against this context's own row count, so
-    # training time stays linear in workflow size, but never below one row per
-    # ancestor command -- an ancestor that contributes no row cannot be escalated
-    # to at all. Round-robin over (ancestor context, command) is what stops one
-    # verbose ancestor from spending the budget the others need.
-    #
-    # `exclude` carries the `net_` semantics the flat set expression used to carry:
-    # an utterance that means something HERE must not also train the "ask my
-    # parent" class, or the same string would be trained under two labels.
-    # `own_row_count` is counted BEFORE the escalation rows are appended, which is what
-    # makes the ratio mean "multiplier on this context's own training cost".
-    # 1.0 is the fixed cost invariant: escalation may add at most as many rows
-    # as the context's real commands, so reserved rows can at most double cost.
-    # It is not an accuracy-tuned value; weighting the reserved rows measured
-    # null and is intentionally not shipped.
-    budget = class_balance.reserved_class_budget(
-        own_row_count,
-        coverage_floor,
-        ratio=1.0,
-    )
-    always_include_rows = sorted(wildcard_utterances - context_utterances)
-    rows = sorted(
-        class_balance.select_reserved_rows(
-            grouped_ancestor_rows,
-            budget,
-            always_include=always_include_rows,
-            exclude=context_utterances,
-        )
-    )
-    return EscalationSelection(
-        rows=rows,
-        included=True,
-        raw_candidate_count=raw_candidate_count,
-        deduplicated_candidate_count=deduplicated_candidate_count,
-        always_include_rows=always_include_rows,
-        budget=budget,
-        coverage_floor=coverage_floor,
+    return _not_here_selection(
+        ctx_name,
+        crd,
+        workflow,
+        context_utterances=context_utterances,
+        seeds_per_command=_seeds_per_command(arm),
+        recorded=recorded_samples,
     )
 
 
@@ -1552,6 +1946,146 @@ def _recorded_persona_batches(recorder) -> Optional[list[list[str]]]:
     return batches or None
 
 
+def lookup_split_command_names(crd: RoutingDefinition, contexts: Iterable[str]) -> list[str]:
+    """The commands the scoped layout's ONE persona holdout is drawn over (sorted).
+
+    Every command any context OWNS, once each, minus planning commands and action-only
+    commands (``startup``): those are never held out. Inherited commands are not added
+    separately because each is owned by exactly one context.
+    """
+    cmd_dir = crd.command_directory
+    names: set[str] = set()
+    for context_name in contexts:
+        names |= own_command_names(crd, context_name)
+    return sorted(
+        name for name in names
+        if label_of(name) != WILDCARD_LABEL
+        and not _is_planning_name(cmd_dir, name)
+        and not _is_action_only(cmd_dir, name)
+    )
+
+
+def lookup_holdout_split(
+    labeled: Sequence[heldout_evaluation.LabeledUtterance],
+    seed: int,
+    persona_batches: Optional[list[list[str]]],
+) -> heldout_evaluation.PersonaSplit:
+    """The ONE persona split of a scoped run. Same ``split_by_persona`` and seed as step 1."""
+    return heldout_evaluation.split_by_persona(
+        list(labeled), seed=seed, persona_batches=persona_batches)
+
+
+def scoped_head_split(
+    global_split: heldout_evaluation.PersonaSplit,
+    head_rows: Sequence[heldout_evaluation.LabeledUtterance],
+    head_labels: set[str],
+) -> heldout_evaluation.PersonaSplit:
+    """One head's view of the global split.
+
+    ``train``: this head's rows (own, not-here, wildcard, parameter_value) minus EVERY globally
+    held-out utterance text. ``heldout``: the global held-out rows whose label this head
+    trains, so the per-head scoring is unchanged. Pure: it reads nothing but its arguments,
+    which is what makes "the same split whichever head asks" a checkable property.
+    """
+    held_texts = {record.utterance for record in global_split.heldout}
+    train = [record for record in head_rows if record.utterance not in held_texts]
+    heldout = [record for record in global_split.heldout if record.label in head_labels]
+    return heldout_evaluation.PersonaSplit(
+        train=train,
+        heldout=heldout,
+        train_personas=list(global_split.train_personas),
+        heldout_personas=sorted({record.persona for record in heldout}),
+        notes=list(global_split.notes),
+    )
+
+
+def write_lookup_holdout_export(
+    workflow_folderpath: str,
+    arm: str,
+    seed: int,
+    split: heldout_evaluation.PersonaSplit,
+    *,
+    head_scope: str,
+    command_names: Sequence[str],
+) -> str:
+    """Write ``___command_info/lookup_holdout.json`` for one run under any head scope."""
+    folder = os.path.join(workflow_folderpath, "___command_info")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, LOOKUP_HOLDOUT_FILENAME)
+    notes = [
+        f"one persona split over {len(command_names)} owned command(s); planning and "
+        f"action-only commands (startup) are not held out",
+        *split.notes,
+    ]
+    document = {
+        "schema": 1,
+        "head_scope": head_scope,
+        "arm": arm,
+        "seed": seed,
+        "heldout": [
+            {"utterance": record.utterance, "label": record.label, "persona": record.persona}
+            for record in split.heldout
+        ],
+        "heldout_personas": sorted(split.heldout_personas),
+        "notes": notes,
+    }
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(document, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    return path
+
+
+def _compute_lookup_split(
+    workflow: fastworkflow.Workflow,
+    crd: RoutingDefinition,
+    contexts: Iterable[str],
+    command_cache: dict[str, list[str]],
+    seed: int,
+    head_scope: str,
+) -> Optional[heldout_evaluation.PersonaSplit]:
+    """Compute the run's global split BEFORE any head trains, under either head layout.
+
+    Generation (or the utterance cache) is reached through ``_get_cached_command_utterances``,
+    which fills ``command_cache`` and the provenance recorder for every owned command. Each
+    head later reads the same cache, so no command is generated twice. Returns None when no
+    provenance recorder is active, which is the same condition under which today's per-head
+    split is skipped.
+    """
+    recorder = get_provenance_recorder()
+    if recorder is None:
+        print("Scoped layout: no provenance recorder, so no persona holdout is drawn")
+        return None
+    names = lookup_split_command_names(crd, contexts)
+    rows: list[tuple[str, str]] = []
+    for name in names:
+        for utterance in _get_cached_command_utterances(
+            workflow, workflow.folderpath, crd.command_directory, name, command_cache
+        ):
+            rows.append((utterance, name))
+    persona_by_utterance: dict[str, str] = {}
+    for provenance in recorder.records.values():
+        persona_by_utterance.update(provenance.utterance_personas)
+    labeled = [
+        heldout_evaluation.LabeledUtterance(
+            utterance=utterance,
+            label=label,
+            persona=persona_by_utterance.get(utterance, heldout_evaluation.SEED_PERSONA_ID),
+        )
+        for utterance, label in rows
+    ]
+    split = lookup_holdout_split(labeled, seed, _recorded_persona_batches(recorder))
+    arm = active_experiment_arm()
+    if arm is None:  # unreachable: resolve_head_scope refuses scoped without an arm
+        raise ValueError("scoped layout reached the holdout without an arm")
+    path = write_lookup_holdout_export(
+        workflow.folderpath, arm, seed, split, head_scope=head_scope, command_names=names)
+    print(
+        f"Head scope {head_scope}: one persona holdout over {len(labeled)} rows of {len(names)} "
+        f"command(s); {len(split.heldout)} held out -> {path}"
+    )
+    return split
+
+
 def _score_heldout_context(
     report: heldout_evaluation.HeldoutReport,
     heldout_records: list[heldout_evaluation.LabeledUtterance],
@@ -1566,9 +2100,7 @@ def _score_heldout_context(
         # Escalation-class rows are appended to the training tuples before the
         # persona split is drawn, so they arrive here carrying real persona
         # attribution and used to be scored as routes. Split them onto their own
-        # axis (D2) rather than dropping them: in a context with ancestors they
-        # are most of the population, and losing them would trade a wrong number
-        # for a blind spot.
+        # axis (D2) rather than dropping them, so the class is measured, not hidden.
         if split_for_calibration is not None:
             report.leak_calibration = heldout_evaluation.calibrate_leak(
                 split_for_calibration)
@@ -1664,7 +2196,7 @@ def preflight_benchmark(
     # A benchmark case can also be defective in a way that has nothing to do with
     # leakage: a routing case naming a label the context does not have can never
     # pass, and an "escalation" case whose command is not actually absent here and
-    # present in an ancestor is not testing escalation at all. Either one drags the
+    # present elsewhere in the workflow is not testing escalation at all. Either one drags the
     # reported score down for a reason that is not the model's fault, so both are
     # reported before the run rather than discovered as a mysteriously low number.
     core_command_names = set(cmd_dir.core_command_names)
@@ -1672,15 +2204,11 @@ def preflight_benchmark(
         context_name: set(command_list) | core_command_names
         for context_name, command_list in crd.contexts.items()
     }
-    ancestor_map = {
-        context_name: list(crd.context_model.get_ancestor_contexts(context_name))
-        for context_name in crd.contexts
-    }
     for problem in (
         heldout_evaluation.validate_routing_cases(
             benchmark_cases, context_label_space)
         + heldout_evaluation.validate_escalation_cases(
-            benchmark_cases, context_label_space, ancestor_map)
+            benchmark_cases, context_label_space)
     ):
         logger.warning(f"Benchmark defect: {problem}")
 
@@ -1693,7 +2221,8 @@ def train(
     contexts_to_train: Optional[set[str]] = None,
     *,
     stop_before_fit: bool = False,
-):
+    not_here_samples: Optional[Mapping[str, Optional[Mapping[str, Sequence[str]]]]] = None,
+) -> dict[str, dict[str, list[str]]]:
     """Train intent-classification models **per command context**.
 
     ``contexts_to_train`` is the selective-retraining hook. ``None`` trains every
@@ -1709,18 +2238,28 @@ def train(
     provenance recording, but skips model loading, fitting, evaluation, and artifact
     writes. It is a cheap support seam for checking trainer orchestration without
     downloading or fitting HuggingFace models.
+
+    ``not_here_samples`` maps each context to the not-here samples its signature recorded
+    (design 2.50). A head reuses a recorded sample while it still holds and chooses again
+    otherwise; ``None`` chooses every sample afresh. Returns the samples each trained head
+    used, ``{context: {foreign command: its sample}}``, which the caller checks against the
+    signature it writes.
     """
 
     import time
 
-    from fastworkflow.train.determinism import get_training_seed, seed_everything
+    from fastworkflow.train.determinism import get_model_seed, get_split_seed, seed_everything
 
     # Seed before anything samples: utterance generation picks personas, torch initialises
     # classifier heads, and the train/test split shuffles. Seeding is necessary but NOT
     # sufficient for reproducibility -- the iteration order of the sets feeding the split
     # matters just as much, which is why the loops below sort (fix-9mo).
-    seed = seed_everything(get_training_seed())
-    print(f"Training seed: {seed}")
+    # Model randomness (weight init, shuffling, dropout) follows --train-seed when one is set.
+    # The persona split below does not: it uses get_split_seed(), so every seed and arm holds
+    # out the same cases.
+    seed = seed_everything(get_model_seed())
+    split_seed = get_split_seed()
+    print(f"Training seed: {seed} (persona split seed: {split_seed})")
 
     heldout_reports: list[heldout_evaluation.HeldoutReport] = []
 
@@ -1745,6 +2284,20 @@ def train(
     # planner never considered would be neither retrained nor carried forward, and that
     # presents as part of a workflow silently becoming untrained.
     context_set_for_training = contexts_for_training(workflow_folderpath)
+    used_not_here_samples: dict[str, dict[str, list[str]]] = {}
+
+    # EXPERIMENT-ONLY (Phase 9 step 3). Under ANY active head layout the persona holdout is ONE
+    # split over every owned command of the workflow, drawn here before any head trains, so a
+    # head trained first and a head trained last hold out the same utterances, and flattened and
+    # scoped runs hold out the same cases. It is computed over ALL contexts, not only the ones this
+    # call retrains, so a selective run holds out the same cases as a full one. The commands are
+    # generated (or read from the cache) here, once.
+    lookup_split: Optional[heldout_evaluation.PersonaSplit] = None
+    scope = active_experiment_head_scope()
+    if scope is not None:
+        scope = resolve_head_scope()  # refuses any layout without a sparse arm, before generation
+        lookup_split = _compute_lookup_split(
+            workflow, crd, context_set_for_training, command_utterance_cache, split_seed, scope)
 
     if contexts_to_train is not None:
         requested = set(contexts_to_train)
@@ -1753,9 +2306,6 @@ def train(
         if skipped:
             print(f"Selective training: skipping {len(skipped)} context(s) whose "
                   f"artifacts the caller will carry forward: {', '.join(skipped)}")
-
-    wildcard_utterances = set(_get_utterances(
-        workflow, workflow.folderpath, crd.command_directory, 'wildcard'))
 
     # Only iterate through contexts defined in this specific workflow.
     # sorted(): context_set_for_training is a set, and a context visited first as an
@@ -1805,12 +2355,14 @@ def train(
             ctx_name,
             crd,
             workflow,
-            context_utterance_cache,
-            command_utterance_cache,
             context_utterances=context_utterances,
-            own_row_count=own_rows,
-            wildcard_utterances=wildcard_utterances,
+            recorded_samples=(
+                None if not_here_samples is None
+                else not_here_samples.get(ctx_name)
+            ),
         )
+        if escalation.not_here_samples is not None:
+            used_not_here_samples[ctx_name] = escalation.not_here_samples
         if escalation.included:
             utterance_command_tuples.extend(
                 list(zip(escalation.rows, [WILDCARD_LABEL] * len(escalation.rows)))
@@ -1824,6 +2376,10 @@ def train(
             always_include_rows=escalation.always_include_rows,
             selected_budget=escalation.budget,
             coverage_floor=escalation.coverage_floor,
+            sampled_commands=(
+                None if escalation.not_here_samples is None
+                else len(escalation.not_here_samples)
+            ),
         )
 
         # PARAMETER_VALUE_LABEL is the PARAMETER_EXTRACTION stage's bare-value catcher and
@@ -1875,11 +2431,43 @@ def train(
                 )
                 for utterance, label in utterance_command_tuples
             ]
-            split = heldout_evaluation.split_by_persona(
-                labeled,
-                seed=seed,
-                persona_batches=_recorded_persona_batches(recorder),
-            )
+            if lookup_split is not None:
+                # EXPERIMENT (Phase 9 step 3, scoped layout). The one global split, seen from this
+                # head: every globally held-out text is removed from this head's rows, wildcard
+                # and parameter_value rows included. Set here, not in the shared block below,
+                # because a head with no held-out cases of its own must still drop the others'.
+                split = scoped_head_split(lookup_split, labeled, train_cmds)
+                utterance_command_tuples = [(record.utterance, record.label) for record in split.train]
+            else:
+                # Phase 9. The held-out cases must not depend on the reserved class, so this
+                # head's persona split is taken over its OWN rows only (its own commands, the
+                # same under every arm and under the shipped sparse_1 construction). The reserved
+                # rows (not-here and bare values) are always trained, except any text the split
+                # holds out. Production and the experiment arms take this one path.
+                own_rows = [
+                    record for record in labeled
+                    if record.label in train_cmds
+                    and record.label not in (WILDCARD_LABEL, PARAMETER_VALUE_LABEL)
+                ]
+                own_split = heldout_evaluation.split_by_persona(
+                    own_rows,
+                    seed=split_seed,
+                    persona_batches=_recorded_persona_batches(recorder),
+                )
+                held_out_texts = {record.utterance for record in own_split.heldout}
+                reserved_rows = [
+                    record for record in labeled
+                    if record.label in (WILDCARD_LABEL, PARAMETER_VALUE_LABEL)
+                    and record.utterance not in held_out_texts
+                ]
+                split = heldout_evaluation.PersonaSplit(
+                    train=[*own_split.train, *reserved_rows],
+                    heldout=own_split.heldout,
+                    train_personas=own_split.train_personas,
+                    heldout_personas=own_split.heldout_personas,
+                    notes=own_split.notes,
+                )
+            _export_holdout(ctx_name, train_cmds, split)
             if split.heldout:
                 # Held-out personas are removed from training entirely. Without this
                 # the score below would be measuring the training set.
@@ -2276,12 +2864,12 @@ def train(
     # End of context loop
 
     if stop_before_fit:
-        return None
+        return used_not_here_samples
 
     if heldout_reports:
         print(heldout_evaluation.format_report(heldout_reports))
         _write_heldout_report(workflow_folderpath, heldout_reports)
-    return None
+    return used_not_here_samples
 
 
 def _write_heldout_report(

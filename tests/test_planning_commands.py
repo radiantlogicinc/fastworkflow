@@ -828,12 +828,14 @@ def test_library_author_books_from_real_module_runs_fan_out(library_proof_env):
     assert out.success is True
     assert out.command_response.output is None
     assert author in out.command_response.response
+    # 3.9: open_book is a Library command, on the path from the Book it opened, so it runs in
+    # place (bound to the library) and no go_up is inserted before the second book.
     assert library_proof_env.runner.sent == [
         "find_book query=Frank Herbert",
         "open_book book_uid=b1",
-        "go_up",
         "open_book book_uid=b2",
     ]
+    assert library_proof_env.wf.current_command_context.uid == "b2"
     spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_PLANNING_COMMAND_PHASE)
     assert [s.attributes["phase"] for s in spans[:3]] == ["find", "book", "book"]
 
@@ -1257,7 +1259,8 @@ def test_library_planning_command_in_planner_catalog_of_its_context_with_templat
         navigation_workflow=wf,
     )
 
-    deferred_start = text.index("Commands available after entering the * context")
+    # The global scope is on every lookup path: its commands are callable here (3.9, Catalogs).
+    deferred_start = text.index("Commands available here from the global scope")
     assert text.index(_BOOK_LOANS_PLANNER_ENTRY) < deferred_start
     assert "- library_hours\n" in text[deferred_start:]
 
@@ -1467,8 +1470,9 @@ def _refusal(workflow, command: str) -> str:
 def test_a_planning_command_is_available_only_where_it_is_runnable(planning_catalog_library):
     """Phase 5 step 1: a planning command follows its context as an execution command does. Startup
     leaves the workflow in Library, where loan_report (Book) and record_notes (Record, a base of
-    Book and Member) are out of context. Opening a book makes it a Book, where both are in context,
-    and book_by_title (Library) is not."""
+    Book and Member) are out of context. Opening a book makes it a Book, where both are in context.
+    book_by_title (Library, the enclosing record of a Book) is on the lookup path from there, so it is
+    called by its name, bound to the library (3.9, "Calls by exact name")."""
     wf = planning_catalog_library.wf
     assert home_contexts(wf, "loan_report") == ["Book"]
     assert home_contexts(wf, "record_notes") == ["Book", "Member"]
@@ -1479,7 +1483,7 @@ def test_a_planning_command_is_available_only_where_it_is_runnable(planning_cata
     assert wf.current_command_context_name == "Book"
     assert _explicit_agent_command("loan_report", wf) == "loan_report"
     assert _explicit_agent_command("record_notes", wf) == "record_notes"
-    assert "It is available in: 'Library'." in _refusal(wf, "book_by_title")
+    assert _explicit_agent_command("book_by_title", wf) == "book_by_title"
 
 
 def test_an_out_of_context_planning_command_gets_the_execution_refusal_text(planning_catalog_library):

@@ -33,7 +33,9 @@ from fastworkflow.entry_declarations import (
     CONTEXT_ENTER_COMMAND_ATTRS,
     declared_entry_commands,
 )
-from fastworkflow.nlu_labels import is_escalation, is_non_routable
+from fastworkflow.nlu_labels import (
+    PARAMETER_VALUE_LABEL, is_escalation, is_non_routable, label_of,
+)
 from fastworkflow.train.artifact_versioning import VERSIONS_DIRNAME
 
 from fastworkflow.utils.fuzzy_match import find_best_matches
@@ -377,6 +379,11 @@ class CommandNamePrediction:
         # prediction leaves them None and nothing reads them.
         known_name_owner_contexts: Optional[list[str]] = None
         routing_hint: Optional[str] = None
+        # True when this context's head answered `parameter_value`: the utterance is
+        # a bare value, not a command here or anywhere else. Such an answer ends the
+        # parent-context walk where it is given (design 2.18, 3.9 step 4). A null
+        # command_name alone cannot tell it from a decline, which is why this exists.
+        answered_bare_value: bool = False
 
     def __init__(self, cme_workflow: fastworkflow.Workflow):
         self.cme_workflow = cme_workflow
@@ -555,13 +562,21 @@ class CommandNamePrediction:
         nlu_trace["escalation_outcome"] = ESCALATION_OUTCOME_NOT_EVALUATED
 
         model_artifact_path = f"{self.app_workflow_folderpath}/___command_info/{command_context_name}"
-        command_router = CommandRouter(model_artifact_path)
+        # The router is built only where a classifier or the embedding cache is consulted (below),
+        # never for an exact command name: an exact name needs no model, and a context with no
+        # trained model (the global scope of a workflow with no global model) must still take one (3.9).
+        command_router = None
+        modelpipeline = None
 
-        # Re-use the already-built ModelPipeline attached to the router
-        # instead of instantiating a fresh one.  This avoids reloading HF
-        # checkpoints and transferring tensors each time we see a new
-        # message for the same context.
-        modelpipeline = command_router.modelpipeline
+        def ensure_router():
+            # Re-use the already-built ModelPipeline attached to the router instead of
+            # instantiating a fresh one. This avoids reloading HF checkpoints and transferring
+            # tensors each time we see a new message for the same context.
+            nonlocal command_router, modelpipeline
+            if command_router is None:
+                command_router = CommandRouter(model_artifact_path)
+                modelpipeline = command_router.modelpipeline
+            return command_router
 
         crd = fastworkflow.RoutingRegistry.get_definition(
             self.cme_workflow.folderpath)
@@ -731,6 +746,7 @@ class CommandNamePrediction:
                 # but the number it was compared against is no longer discarded
                 # (FW-REQ-021 clause 1). A hit is a 2-tuple, a miss is still None,
                 # so the walrus test behaves exactly as it did.
+                ensure_router()
                 if cache_result := cache_match(
                     self.path, command, modelpipeline, 0.85, return_details=True
                 ):
@@ -802,6 +818,9 @@ class CommandNamePrediction:
             # default that replaces it is one command, chosen by the code.
             nlu_trace["candidate_count"] = 1
 
+        answered_bare_value = (
+            command_name is not None and label_of(command_name) == PARAMETER_VALUE_LABEL
+        )
         fully_qualified_command_name = self.resolve_fully_qualified_command_name(
             command_name, command_name_dict)
         if fully_qualified_command_name is None:
@@ -826,11 +845,13 @@ class CommandNamePrediction:
             and not fully_qualified_command_name.endswith('you_misunderstood')
         ):
             command = self.cme_workflow.context["command"]
+            ensure_router()
             store_utterance_cache(self.path, command, command_name, modelpipeline)
 
         return CommandNamePrediction.Output(
             command_name=fully_qualified_command_name,
-            is_cme_command=is_cme_command
+            is_cme_command=is_cme_command,
+            answered_bare_value=answered_bare_value,
         )
 
     @staticmethod

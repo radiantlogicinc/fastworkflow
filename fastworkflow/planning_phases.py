@@ -160,8 +160,9 @@ import contextvars
 import inspect
 import json
 import re
+import types
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, Union, get_args, get_origin
 
 from pydantic import BaseModel
 
@@ -197,6 +198,39 @@ class _FromList(list):
 def is_from_source(value: Any) -> bool:
     """Whether *value* was constructed by :func:`from_`."""
     return isinstance(value, (_FromStr, _FromList))
+
+
+def output_members(annotation: Any) -> tuple[type[BaseModel], ...]:
+    """The pydantic models a phase output annotation stands for, in order.
+
+    A model is its own one member. A union (``X | Y``, ``Union[X, Y]``, and ``Optional[X]``
+    with None skipped) is its members (design 3.12: a plain name several contexts define).
+    Empty for anything else, or for a union with a member that is not a model.
+    """
+    if inspect.isclass(annotation) and issubclass(annotation, BaseModel):
+        return (annotation,)
+    if get_origin(annotation) not in (Union, types.UnionType):
+        return ()
+    members: list[type[BaseModel]] = []
+    for arg in get_args(annotation):
+        if arg is type(None):
+            continue
+        if not (inspect.isclass(arg) and issubclass(arg, BaseModel)):
+            return ()
+        members.append(arg)
+    return tuple(members)
+
+
+def placeholder_member(annotation: Any, field: Optional[str] = None) -> Any:
+    """The model a phase's placeholder output is built from. A union's: the first member that
+    has *field* (a field a later phase reads), else the first member; which member a run gives
+    is decided when it runs. Any other annotation is returned as it is."""
+    members = output_members(annotation)
+    if not members:
+        return annotation
+    if field is not None:
+        return next((m for m in members if field in m.model_fields), members[0])
+    return members[0]
 
 
 def from_(source: str | Sequence[str], **field_kwargs: Any) -> Any:
@@ -873,7 +907,7 @@ def check_bindings(phases: Sequence[Phase], where: str = "plan()") -> dict[tuple
     the function keeps) is not a fact parameter and is not returned.
     """
     defaults: dict[tuple[str, str, str], bool] = {}
-    with_output: dict[str, type[BaseModel]] = {}
+    with_output: dict[str, tuple[type[BaseModel], ...]] = {}
     earlier_names: set[str] = set()
     for phase in phases:
         reference = phase.over_reference
@@ -882,9 +916,13 @@ def check_bindings(phases: Sequence[Phase], where: str = "plan()") -> dict[tuple
             if source not in with_output:
                 raise PhaseError(f"{where}: phase {phase.name!r}: over={phase.over!r} names "
                                  f"{source!r}, which is not an earlier phase with an output")
-            if field_name not in with_output[source].model_fields:
+            members = with_output[source]
+            if not any(field_name in member.model_fields for member in members):
+                # a member's module is its command's file: find_book.Output, not Output
+                names = " | ".join(f"{member.__module__.rsplit('.', 1)[-1]}.{member.__name__}"
+                                   for member in members) or "no model"
                 raise PhaseError(f"{where}: phase {phase.name!r}: over={phase.over!r}: "
-                                 f"{with_output[source].__name__} has no field {field_name!r}")
+                                 f"{names} has no field {field_name!r}")
         if phase.fans_out and phase.item in with_output:
             raise PhaseError(f"{where}: phase {phase.name!r}: its item parameter {phase.item!r} "
                              "is also an earlier phase's name; give item= another name")
@@ -920,7 +958,7 @@ def check_bindings(phases: Sequence[Phase], where: str = "plan()") -> dict[tuple
                         + (" (or this phase, which has an output)" if what == "until" else "")
                         + "; give the parameter a default")
         if phase.output is not None:
-            with_output[phase.name] = phase.output
+            with_output[phase.name] = output_members(phase.output)
         earlier_names.add(phase.name)
     return defaults
 

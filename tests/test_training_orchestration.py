@@ -19,6 +19,7 @@ import pytest
 import fastworkflow
 from fastworkflow.command_directory import CommandDirectory
 from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
+from fastworkflow import model_pipeline_training
 from fastworkflow.model_pipeline_training import TrainingDataError
 from fastworkflow.train import __main__ as train_orchestration
 from fastworkflow.train import artifact_versioning as av
@@ -206,6 +207,15 @@ def test_cme_readiness_checks_only_contexts_the_trainer_produces(cme_copy):
     selective_training.save_training_signature(str(cme_workflow), version_id, signature)
     av._write_pointer(str(cme_workflow), version_id, "test")
 
+    # The not-here construction record is part of readiness (Phase 9 step 4, design 2.23):
+    # a version without it is refused at load, so the CME is not "trained" either.
+    av.write_manifest(str(cme_workflow), version_id)
+    assert not train_orchestration.is_fast_workflow_trained(str(package_root))
+    record_fields, _ = model_pipeline_training.construction_records(
+        folderpath=str(cme_workflow)
+    )
+    av.write_manifest(str(cme_workflow), version_id, **record_fields)
+
     assert train_orchestration.is_fast_workflow_trained(str(package_root))
     assert not (command_info / "ErrorCorrection").exists()
 
@@ -304,6 +314,24 @@ def test_nonempty_full_retrain_plan_is_always_formatted():
     )
 
 
+def test_trains_the_fastworkflow_package_is_a_path_test_not_a_substring_test(tmp_path):
+    """A workflow inside a checkout named 'fastworkflow' must still get the CME check.
+
+    The old substring test skipped the CME check for every such workflow, which made the
+    CME unretrainable through `fastworkflow train <app>` there (fix-3rsq.9.6).
+    """
+    decoy = tmp_path / "fastworkflow" / "my_app"
+    decoy.mkdir(parents=True)
+
+    assert not train_orchestration._trains_the_fastworkflow_package(str(decoy))
+    assert train_orchestration._trains_the_fastworkflow_package(
+        os.path.realpath(fastworkflow.get_fastworkflow_package_path())
+    )
+    assert train_orchestration._trains_the_fastworkflow_package(
+        fastworkflow.get_internal_workflow_path("command_metadata_extraction")
+    )
+
+
 def test_regeneration_flag_is_forwarded_only_inside_existing_cme_condition():
     function = _function_tree(train_orchestration.train_main)
     cme_if = next(
@@ -314,7 +342,10 @@ def test_regeneration_flag_is_forwarded_only_inside_existing_cme_condition():
         in ast.unparse(node.test)
     )
     condition = ast.unparse(cme_if.test)
-    assert "'fastworkflow' not in workflow_path" in condition
+    # Phase 9 step 4 (fix-3rsq.9.6): the old substring test ("'fastworkflow' not in
+    # workflow_path") is replaced by _trains_the_fastworkflow_package, which compares
+    # resolved paths and the internal CME folder. See test below for the behaviour.
+    assert "not _trains_the_fastworkflow_package(workflow_path)" in condition
     assert "not is_fast_workflow_trained(fastworkflow_folderpath)" in condition
 
     calls = [

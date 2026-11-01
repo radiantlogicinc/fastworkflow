@@ -51,6 +51,14 @@ Standing on the book Dune, that is:
 
 A scope that appears twice (a base shared by two records on the chain) is asked once.
 
+For a request in natural language, the global commands are asked **first**. If the global
+scope names one command with confidence, that command runs, bound to the root object, and the
+lookup stops there. Otherwise the scopes above are asked in order, as the table shows. An exact
+command name (below) is not affected: it always takes the nearest scope.
+
+A bare value (a reply such as "Dune" that names no command) ends the lookup: no enclosing scope
+is asked about it.
+
 **A command found in an enclosing scope runs on that scope's object**, and the workflow does
 not move. "How many loans are overdue?", said on Dune, is recognised by the `Library` scope
 and runs `count_overdue` on the library; the workflow is still on Dune afterwards, and the
@@ -61,6 +69,13 @@ library's members, say) reads the right one.
 **The same path serves a command named exactly**, by the agent or the user: `count_overdue`
 typed on Dune runs on the library. The nearest scope wins, so a command hides one of the same
 name farther out. A qualified name (`Library/count_overdue`) must name a context on the path.
+Re-issuing a command that opens the record the workflow already stands on runs it in place; it is
+not refused as "already in context".
+
+**For authors:** the first word of a request is matched against command names along the whole
+path. A one-word command name in an enclosing context can therefore capture a request that only
+starts with that word. Give commands names that a sentence about something else does not begin
+with, or name the context in the request.
 
 ## A planning command of a context
 
@@ -119,10 +134,10 @@ between, "not here", or a bare value (a reply such as "Dune" that names no comma
 
 - **Execution commands** are answered by a small classifier per context, which knows the
   context's own commands, the four core commands (`go_up`, `reset_context`, `what_can_i_do`,
-  `what_is_current_context`) and a "not here" label. "Not here" is trained on a few
-  `plain_utterances` of every other command of the workflow, planning commands included. So
-  write `plain_utterances` for a planning command as you would for an execution command:
-  they also teach every other context that the request is not theirs.
+  `what_is_current_context`) and a "not here" label. "Not here" is trained on one hand-written
+  seed of every other command of the workflow, planning commands included. So write
+  `plain_utterances` for a planning command as you would for an execution command: its seed also
+  teaches every other context that the request is not theirs.
 - **Planning commands** are chosen by the agent as it plans, from its list of commands, where
   it sees each one with its `Signature` and its template (page 1), and uses it as the next
   section shows. With `JEV_API_KEY` in `fastworkflow.passwords.env`, the Jev decision model
@@ -131,16 +146,16 @@ between, "not here", or a bare value (a reply such as "Dune" that names no comma
   first. Jev is TypeSafe's service, so this sends the request and the planning commands'
   descriptions to TypeSafe. The key is optional: without it the agent finds the planning
   command itself, and the `verify` option checks nothing (page 9).
-- **An unsure answer that includes "not here"** keeps its candidates and the walk goes on;
-  the user is asked once, at the end, among all the candidates kept, each named with its
-  scope.
+- **An answer that is unsure between commands** stops the walk: the user is asked which one
+  is meant. **A "not here" answer** moves the walk on to the next scope.
 
 `fastworkflow train` trains one classifier per context. Each context's "not here" class holds
-a few seeds of every other command, chosen once, when that command first joins the
-workflow. So adding or removing a command retrains every classifier, while editing a
-command's seeds retrains only its own; `fastworkflow train --regenerate-utterances` chooses
-the seeds again. A workflow trained by a release before scoped lookup does not load, and
-says to retrain with `fastworkflow train`.
+one hand-written seed of every other command, planning commands included. The seed is chosen
+once, when that command first joins the context, and the classifier records which seed it used.
+So editing one command's seeds retrains only the classifiers that hold that command (and any
+that recorded its seed), while adding or removing a command retrains every classifier.
+`fastworkflow train --regenerate-utterances` chooses the seeds again. A workflow trained by an
+earlier release does not load, and says to retrain with `fastworkflow train`.
 
 ## How a request is planned
 
@@ -193,6 +208,10 @@ from: a `from_` or a `descends_to` you leave out is a path neither of them is sh
 The planner writes each plan from the list of commands it is shown: for a part of a
 request a planning command covers, as above, and for one no planning command covers, from
 execution commands alone. No plan is kept for the next request.
+
+The list shows the commands of the enclosing records and the global commands as callable
+here, each with its scope, so the plan never names a command the executor would refuse. A
+step that names one of them runs it on the record that owns it, as an exact name does.
 
 **While the workflow is small, the list holds every command.** The library's commands fit
 whole, so for "list Mia Chen's loans and note that she was reminded", which `member_report`

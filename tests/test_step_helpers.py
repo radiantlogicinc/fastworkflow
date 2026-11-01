@@ -642,7 +642,17 @@ class LibraryRunner:
                     response=f"Context is now '{wf.current_command_context_displayname}'"
                 ),
             )
-        qualified = _qualified(wf, name)
+        # As the CME walk does (3.9): a name on the lookup path runs bound to the record
+        # of its scope; a name of the current scope runs on the current object.
+        from fastworkflow.context_navigation import command_on_path
+
+        found = command_on_path(wf, name)
+        if found is not None and len(found[1]) == 1:
+            scope, (qualified,) = found
+            bound_record = scope.record
+        else:
+            qualified = _qualified(wf, name)
+            bound_record = wf.current_command_context
         routing = fastworkflow.RoutingRegistry.get_definition(wf.folderpath)
         cls = routing.get_command_class(qualified, fastworkflow.ModuleType.COMMAND_PARAMETERS_CLASS)
         gen_cls = routing.get_command_class(
@@ -657,7 +667,7 @@ class LibraryRunner:
                 )
                 or ParameterExtraction._extract_parameters_from_bare(command, cls, name)
             )
-        wf.command_context_for_response_generation = wf.current_command_context
+        wf.command_context_for_response_generation = bound_record
         raw = call_response_generator(gen_cls(), wf, command, params)
         if isinstance(raw, fastworkflow.CommandOutput):
             out = raw
@@ -738,9 +748,16 @@ def script_command_extraction(monkeypatch, wf, extracted: dict[str, dict] | None
                                                           command=action.command))
             core.command_response.artifacts["command_handled"] = True
             return core
-        # What the CME's wildcard command does for a routed command: the context the
-        # response generator reads is the one the workflow is on.
-        wf.command_context_for_response_generation = wf.current_command_context
+        # What the CME's wildcard command does for a routed command (3.9): a name on the lookup
+        # path runs bound to the record of its scope; any other name runs on the current object.
+        from fastworkflow.context_navigation import command_on_path
+
+        found = command_on_path(wf, name)
+        if found is not None and len(found[1]) == 1:
+            qualified = found[1][0]
+            wf.command_context_for_response_generation = found[0].record
+        else:
+            wf.command_context_for_response_generation = wf.current_command_context
         routing = fastworkflow.RoutingRegistry.get_definition(wf.folderpath)
         cls_params = routing.get_command_class(
             qualified, fastworkflow.ModuleType.COMMAND_PARAMETERS_CLASS)
