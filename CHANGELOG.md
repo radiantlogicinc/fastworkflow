@@ -2,7 +2,33 @@
 
 ## Unreleased
 
+### Upgrading to Phase 9 scoped lookup
+
+1. Retrain every workflow with `fastworkflow train`. Old artifacts refuse to load until you do,
+   and the first train is a full retrain.
+2. Delete `context_hierarchy_model.json` from each workflow, if it is still there.
+3. Review one-word command names of each context. A request that starts with a name that
+   matches a command of an enclosing context now reaches that command.
+
 ### Added
+
+- **Scoped lookup: a request finds its command along the live chain** (fix-3rsq.9).
+  A command is found on the path a request walks: the current context and its bases, then
+  each enclosing record on the live object chain and its bases, then the global commands.
+  The first scope that recognises the request wins, and the command runs on that scope's
+  object; a run of an enclosing record's command is filed under that record. The same path
+  serves a command named exactly. A qualified name must name a context on the path.
+  Upgrade checklist below.
+
+- **Not-here seeds are recorded per head** (fix-3rsq.9.8, `docs/tutorials/planning_commands/14`).
+  Each classifier records which seed it used for each command that is not one of its labels.
+  Editing one command's seeds retrains only the classifiers that hold that command (and any
+  that recorded its seed); adding or removing a command retrains every classifier.
+  `fastworkflow train --regenerate-utterances` chooses the seeds again.
+
+- **`fastworkflow command preview` renders a union-typed phase output as variants** (fix-3rsq.phase7-union-preview). A phase whose output is a union of models (`FindBook.Output |
+  FindMember.Output`) is rendered as one variant per member instead of failing.
+
 
 - **A migration guide for app workflows** (fix-3rsq.8,
   `docs/migrating_skills_to_commands.md`): moving `_skills/` into
@@ -486,6 +512,12 @@
 
 ### Removed
 
+- **`context_hierarchy_model.json`** (fix-3rsq.9). The file is no longer read. A workflow
+  that still has one loads, logs one warning that the file is ignored and can be deleted,
+  and routes the same way. Parents come from each context's `get_parent`, read from the live
+  object chain. `fastworkflow build` does not generate the file.
+
+
 - **`fastworkflow.skill`** (fix-3rsq.8): the module planning commands import
   is `fastworkflow.planning`; there is no alias.
 
@@ -548,6 +580,42 @@
   A folder under `_skills` is not a skill (see the skill-context note above).
 
 ### Changed
+
+- **Every trained workflow must be retrained** (fix-3rsq.9). A workflow trained by an
+  earlier release refuses to load and says "retrain with `fastworkflow train`". The first
+  train after upgrading is a full retrain.
+
+- **The reserved "not here" class is one seed per foreign command** (fix-3rsq.9.6). Each
+  context's `wildcard` (not-here) class is built from one hand-written seed of every command
+  that is not one of the context's own or inherited labels, planning commands included.
+  Ancestor sampling and the ratio fill are gone. The internal CME workflow has no not-here
+  class. `--regenerate-utterances` chooses the seeds again.
+
+- **Confident global commands run first for natural language** (fix-3rsq.9). For a request
+  in natural language, the global scope is asked before the current context. If it names one
+  command with confidence, that command runs, bound to the root object. Otherwise the
+  context's own scope is asked and the climb continues as before. Exact command names are
+  unaffected: they take the nearest scope.
+
+- **A bare value ends the lookup** (fix-3rsq.9). When a context answers `parameter_value`, no
+  enclosing scope is asked about the request.
+
+- **The planner and executor listings show enclosing and global commands** (fix-3rsq.9). The
+  planner's list shows the commands of enclosing contexts and the global commands as callable
+  here, each with its scope. A plan never names a command the executor would refuse.
+
+- **Navigation messages name the root context** (fix-3rsq.9). A message about going back
+  up names the root context on the way back, for example when a record was opened under the
+  root.
+
+- **Re-issuing "open this record" from inside that record runs in place** (fix-3rsq.9). A
+  command that opens the record the workflow already stands on runs there, instead of being
+  refused "already in context".
+
+- **Authors: one-word command names reach across the path** (fix-3rsq.9). The first word of
+  a request is matched against command names along the whole path. A one-word command name in
+  an enclosing context can capture a request that starts with that word. Review such names.
+
 
 - **Skills are planning commands, by name** (fix-3rsq.8). Modules:
   `skill_commands` → `planning_commands`, `skill_phases` → `planning_phases`,
