@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Upgrading to Phase 11 (check options, one validation step)
+
+1. **Declare the checks a field needs.** The framework no longer checks a `str` or an `int` by its
+   type alone. A `str` or `int` field is checked only when it carries `in_request` (the value must be
+   written in the request) or `subject` (a `str` naming a record the request names). Add those options
+   to each field that needed the check before. A field with neither is taken as the extractor gives it.
+2. **Call one validation step.** `validate_call` is removed. A caller runs
+   `check_arguments` and then the command's `validate_parameters`, which is the only validation step
+   for both kinds of command. Replace each `validate_call` call with those two.
+3. **Fix any check option on the wrong type.** A load error names the command, the field and the
+   option. `in_request` takes a `str`, an `int` or a `list[str]`. `subject` and `strip` take a `str`.
+   `means` takes an enum. `verify` takes a `bool`, an enum or a subject `str`. A `means` block needs
+   `verify` too, because `means` gives the verify check each value's meaning.
+4. **Check the defaults of `bool` fields with `verify`.** A `bool` may now default to true. The
+   extractor is then told "False only when the request asks against it."
+5. **Check the previews.** An open-ended type (such as a `float`, a `list[str]` or a `str`) shows one
+   sample value in the preview.
+
 ### Upgrading to Phase 10 (matching contract, approvals, return forms)
 
 1. **Retrain every workflow that has planning commands**, with `fastworkflow train`. Their
@@ -42,6 +60,12 @@
 
 ### Added
 
+- **Check options on any command's `Input`** (fix-3rsq.11). `in_request`, `subject`, `strip`,
+  `verify` and `means` apply to an execution command's `Input` field as well as a planning
+  command's. Each option is checked by the same rule for both kinds.
+- **Typed inputs `float` and `list[str]`** (fix-3rsq.11). A planning command's `Input` takes a
+  `float` or a `list[str]`. A `list[str]` with `in_request` keeps only the items the request writes.
+  A `bool` may default to true.
 - **Planning commands are ordinary classifier labels** (fix-3rsq.10.12). A planning command is a
   label of every classifier whose scope holds it, so a request reaches it the way it reaches an
   execution command. The experiment switch `PLANNING_HEADS_LABELLED` remains for

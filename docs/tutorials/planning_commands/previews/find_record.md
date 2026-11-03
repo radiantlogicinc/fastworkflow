@@ -16,6 +16,8 @@ Depth: 1 (lower bound; open steps name no command)
 | `name` | str | required | `<name>` |  |  | the name to look for |
 | `kind` | one of book, member | `book` | `book` |  |  | whether the request is about a book or a member |
 
+- `name` must be written in the request (`in_request`).
+
 ## Example requests
 
 - do you have a book called Emma

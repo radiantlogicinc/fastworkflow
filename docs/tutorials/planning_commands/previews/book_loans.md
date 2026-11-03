@@ -15,6 +15,8 @@ Depth: 1 (lower bound; open steps name no command)
 |---|---|---|---|---|---|---|
 | `title` | str | required | `<title>` |  |  | the book's title |
 
+- `title` must be written in the request (`in_request`).
+
 ## Example requests
 
 - who has borrowed Dune

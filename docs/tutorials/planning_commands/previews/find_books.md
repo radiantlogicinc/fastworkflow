@@ -15,6 +15,8 @@ Depth: 1 (lower bound; open steps name no command)
 |---|---|---|---|---|---|---|
 | `query` | str | required | `<query>` |  |  | the title or author words |
 
+- `query` must be written in the request (`in_request`).
+
 ## Example requests
 
 - find books by Jane Austen

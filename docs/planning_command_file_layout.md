@@ -171,7 +171,7 @@ on planning commands today; `fastworkflow.planning_commands` has the full rules.
   argument again from the request alone, and its answer replaces the planner's when it is sure
   enough. It needs `JEV_API_KEY`: without it nothing is checked, and the load logs one INFO line
   that says so.
-- `means` (an enum): a dict giving each value's meaning, which `verify` reads.
+- `means` (an enum, with `verify`): a dict giving each value's meaning, which `verify` reads. Without `verify` it is a load error.
 - `in_request: True` (a `str` or an `int`): a `str` must appear in the request as a verbatim
   substring; an `int` must be a number the request writes. Otherwise the one value the request
   writes is taken, or the default when that is written; with several candidates the call is

@@ -15,6 +15,8 @@ Depth: 1 (lower bound; open steps name no command)
 |---|---|---|---|---|---|---|
 | `author` | str | required | `<author>` |  |  | the author's name |
 
+- `author` must be written in the request (`in_request`).
+
 ## Example requests
 
 - what do you have by Frank Herbert, and how many copies of each
