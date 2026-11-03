@@ -16,7 +16,16 @@ class Signature:
         copies: int = Field(description="how many copies the library owns")
         on_loan: int = Field(description="how many copies are on loan")
 
-    plain_utterances = ["show this book", "which branch holds it"]
+    plain_utterances = [
+        "show this book",
+        "which branch holds it",
+        "give me the details of this book",
+        "who wrote this one, and how many do we own",
+        "what is this book's branch and copy count",
+        "how many copies of this one are out right now",
+        "describe the book we have open",
+        "show me the record for this title",
+    ]
 
 
 class ResponseGenerator:

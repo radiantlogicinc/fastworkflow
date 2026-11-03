@@ -82,7 +82,26 @@ The parent of a context is what its `get_parent` returns for the live object. Th
 to drift from it. Check each `get_parent` against the object it should return: a record's parent is
 the record that holds it, and the root returns `None`. The scan that the earlier design used
 (recording which class each command assigns to `current_command_context`) still shows which contexts
-a command can enter, which is what `descends_to` and the shortlist need.
+a command can enter, which is what `descends_to` needs, and what the shortlist will need when it is on.
+
+## Rule 1a — navigation is declared once, with `descends_to`, on the command
+
+A command that moves the workflow into another context declares it on its own class:
+`descends_to = "<Context>"` on its `ResponseGenerator` or `PlanGenerator`. Do not write
+`enter_command` or `enter_commands` on a context class. That is a load error, and it names the command
+and the fix. A command that moves the workflow into a context it does not declare logs one warning per
+command and target. Planning and the run's listing read only the `descends_to` declarations.
+
+## Rule 1b — `approval` is a command attribute too, and it is a gate
+
+Next to `descends_to`, a command's class may declare `approval = "mandatory"` or
+`approval = "delegatable"` (on its `ResponseGenerator`, or a planning command's `PlanGenerator`).
+Absent means the agent decides, with no gate. It is validated at load and shown in the listings
+with a marker. A `mandatory` command asks before every run, including a run the user typed; a
+`delegatable` command asks until a standing approval exists. The reply is bound to the exact
+parameters, is single-use and expires. It does not change navigation, and it is not read/write
+gating: an easy-to-undo write needs no annotation. See `docs/planning_command_file_layout.md`,
+"Approval annotation".
 
 ## Rule 2 — cutting the `parent` axis is free; cutting `base` is not
 

@@ -54,7 +54,7 @@ from jwt.exceptions import PyJWTError as JWTError
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow import state_paths
+from fastworkflow import approval_binding, state_paths
 from fastworkflow.experiment.readiness import runtime_readiness_snapshot
 from fastworkflow.utils.logging import logger
 
@@ -111,6 +111,7 @@ from .turns import (
     compute_idempotency_key,
 )
 from . import server_memory
+from . import jwt_manager
 from .parent_watch import start_parent_liveness_watch
 from .jwt_manager import (
     create_access_token,
@@ -1626,17 +1627,30 @@ async def invoke_agent(
 
             ctx = runtime.execution_context
             user_query = request.user_query.lstrip('/')
+            # Approval binding (ADR-EXP-025): an HTTP or MCP request is a host surface. Its identity
+            # is verified only when the JWT signature is checked (owner answer 2).
+            approval_surface = approval_binding.Surface(
+                kind="host", verified=bool(jwt_manager.EXPECT_ENCRYPTED_JWT), uid=user_id)
+            delivered: dict = {}
+
+            def _work():
+                output = ctx.process_turn(
+                    user_query, unattended=request.unattended,
+                    approval_surface=approval_surface, approval_token=request.approval_token)
+                delivered.update(approval_binding.take_host_delivery(ctx.app_workflow))
+                return output
+
             execn = await _submit_turn_endpoint(
                 runtime,
                 kind="invoke_agent",
-                work_fn=lambda: ctx.process_turn(
-                    user_query, unattended=request.unattended),
+                work_fn=_work,
                 # A retry differing only in `unattended` is a different turn.
                 idempotency_args=(user_query, *(("unattended",) if request.unattended else ())),
                 wait_seconds=request.timeout_seconds,
                 user_id=user_id,
                 http_bearer_token=session.http_bearer_token,
             )
+            execn.live_extras = delivered
             return _turn_json_response(execn, channel_id)
 
     except HTTPException:
@@ -2034,15 +2048,25 @@ async def perform_action(
                 ) from e
 
             ctx = runtime.execution_context
+            perform_surface = approval_binding.Surface(
+                kind="host", verified=bool(jwt_manager.EXPECT_ENCRYPTED_JWT), uid=user_id)
+            delivered: dict = {}
+
+            def _perform():
+                output = ctx.process_action_turn(action, approval_surface=perform_surface)
+                delivered.update(approval_binding.take_host_delivery(ctx.app_workflow))
+                return output
+
             execn = await _submit_turn_endpoint(
                 runtime,
                 kind="perform_action",
-                work_fn=lambda: ctx.process_action_turn(action),
+                work_fn=_perform,
                 idempotency_args=(request.action,),
                 wait_seconds=request.timeout_seconds,
                 user_id=user_id,
                 http_bearer_token=session.http_bearer_token,
             )
+            execn.live_extras = delivered
             return _turn_json_response(execn, channel_id)
 
     except HTTPException:

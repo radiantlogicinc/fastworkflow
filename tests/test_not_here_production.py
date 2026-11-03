@@ -23,16 +23,22 @@ from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.model_pipeline_training import (
     INTERNAL_CME_ARM,
     NOT_HERE_SEEDS,
+    PLANNING_HEADS_NOT_HERE,
     RETIRED_ARMS,
     SHIPPED_ARM,
     construction_records,
+    experiment_planning_heads,
     experiment_reserved_class_arm,
     not_here_construction,
+    not_here_samples_for_context,
     not_here_seed_rows,
+    planning_command_names_of,
+    planning_head_labels,
     resolve_reserved_class_arm,
     select_escalation_rows,
     trained_command_labels,
 )
+from fastworkflow.workflow_agent import planning_command_utterances
 from fastworkflow.train import artifact_versioning as av
 from fastworkflow.train import selective_training
 from tests.test_not_here_class import (
@@ -356,3 +362,223 @@ def test_the_internal_cme_keeps_today_s_construction_with_no_wildcard_class(tmp_
     recorded = str(tmp_path / "cme_recorded")
     _write_version(recorded, "20990101T000000Z-cmerec", manifest=manifest_fields)
     assert av.construction_record_problem(recorded) is None
+
+
+# ---------------------------------------------------------------- Phase 10 step 1: planning labels in production
+
+#: The three workflows of the step: the library (planning commands in two scopes), the tutorial
+#: (planning commands at the root only, so all in the global head) and the todo list (none).
+LIBRARY_SOURCE = os.path.join("fastworkflow", "examples", "library")
+TUTORIAL_SOURCE = os.path.join(os.path.dirname(__file__), "planning_tutorial_workflow")
+TODO_SOURCE = os.path.join(os.path.dirname(__file__), "todo_list_workflow")
+PLANNING_RECORD = {"construction": "sparse", "seeds_per_command": 1, "planning_heads": "labelled"}
+PLANNING_RECORD_BASELINE = {"construction": "sparse", "seeds_per_command": 1, "planning_heads": "not_here"}
+
+#: The planning labels each head holds in production, written out by hand from the scopes.
+LIBRARY_PLANNING_LABELS = {
+    "*": set(),
+    "Book": {"Book/loan_report", "Book/shelf_report"},
+    "IntentDetection": set(),
+    "Library": {
+        "Library/author_books", "Library/book_by_title", "Library/book_loans", "Library/count_books",
+        "Library/find_record", "Library/member_report", "Library/note_member", "Library/overdue_summary",
+    },
+    "Member": set(),
+    "Record": set(),
+}
+TUTORIAL_ROOT_PLANNING = {
+    "author_books", "book_by_title", "book_details", "book_loans", "book_report", "count_books",
+    "find_books", "find_record", "list_books", "member_loans", "overdue_summary",
+}
+
+
+@pytest.fixture
+def library_copy_for_step(tmp_path) -> str:
+    path = _private_copy(tmp_path, LIBRARY_SOURCE, "library_step1")
+    yield path
+    RoutingRegistry.clear_registry()
+
+
+@pytest.fixture
+def tutorial_copy(tmp_path) -> str:
+    path = _private_copy(tmp_path, TUTORIAL_SOURCE, "tutorial_step1")
+    yield path
+    RoutingRegistry.clear_registry()
+
+
+@pytest.fixture
+def todo_copy(tmp_path) -> str:
+    path = _private_copy(tmp_path, TODO_SOURCE, "todo_step1")
+    yield path
+    RoutingRegistry.clear_registry()
+
+
+def _pre_step_labels(crd, ctx: str) -> set[str]:
+    """Today's label set before Phase 10 step 1 (the baseline formula): execution, core, no planning."""
+    return {
+        name for name in set(crd.contexts[ctx]) | set(crd.command_directory.core_command_names)
+        if not _is_planning(crd, name)
+    }
+
+
+def test_production_label_sets_on_the_library_copy(library_copy_for_step):
+    RoutingRegistry.clear_registry()
+    crd = RoutingRegistry.get_definition(library_copy_for_step)
+    for ctx in sorted(crd.contexts):
+        labels = trained_command_labels(ctx, crd)
+        assert labels == _pre_step_labels(crd, ctx) | LIBRARY_PLANNING_LABELS[ctx], ctx
+        assert planning_head_labels(ctx, crd) == LIBRARY_PLANNING_LABELS[ctx], ctx
+
+
+def test_production_label_sets_on_the_tutorial_copy_put_root_planning_commands_in_the_global_head(tutorial_copy):
+    RoutingRegistry.clear_registry()
+    crd = RoutingRegistry.get_definition(tutorial_copy)
+    assert {n for n in planning_command_names_of(crd)} == TUTORIAL_ROOT_PLANNING
+    for ctx in sorted(crd.contexts):
+        labels = trained_command_labels(ctx, crd)
+        if ctx == "*":
+            assert labels & TUTORIAL_ROOT_PLANNING == TUTORIAL_ROOT_PLANNING
+        else:
+            assert not (labels & TUTORIAL_ROOT_PLANNING), ctx
+        assert labels == _pre_step_labels(crd, ctx) | (TUTORIAL_ROOT_PLANNING if ctx == "*" else set()), ctx
+
+
+def test_production_label_sets_on_the_todo_copy_are_unchanged(todo_copy):
+    """The todo list has no planning commands, so no label set moves."""
+    RoutingRegistry.clear_registry()
+    crd = RoutingRegistry.get_definition(todo_copy)
+    assert planning_command_names_of(crd) == []
+    for ctx in sorted(crd.contexts):
+        assert trained_command_labels(ctx, crd) == _pre_step_labels(crd, ctx), ctx
+        assert planning_head_labels(ctx, crd) == set(), ctx
+
+
+def test_the_baseline_arm_is_exactly_the_pre_step_label_sets_on_all_three_copies(
+        library_copy_for_step, tutorial_copy, todo_copy):
+    for folder in (library_copy_for_step, tutorial_copy, todo_copy):
+        RoutingRegistry.clear_registry()
+        crd = RoutingRegistry.get_definition(folder)
+        with experiment_reserved_class_arm("sparse_1"), experiment_planning_heads(PLANNING_HEADS_NOT_HERE):
+            for ctx in sorted(crd.contexts):
+                assert trained_command_labels(ctx, crd) == _pre_step_labels(crd, ctx), (folder, ctx)
+
+
+def test_a_planning_label_of_the_head_is_never_a_not_here_row_and_the_others_still_are(library_copy_for_step):
+    RoutingRegistry.clear_registry()
+    crd = RoutingRegistry.get_definition(library_copy_for_step)
+    planning = set(planning_command_names_of(crd))
+    samples = {}
+    for ctx in sorted(crd.contexts):
+        labels = trained_command_labels(ctx, crd)
+        picks, _available = not_here_seed_rows(library_copy_for_step, crd, labels, NOT_HERE_SEEDS, context_name=ctx)
+        assert not (set(picks) & labels), ctx
+        # every planning command the head does not label, with seeds, is in its not-here rows
+        seeded = {name for name in planning if planning_command_utterances(library_copy_for_step).get(name)}
+        assert (seeded - labels) <= set(picks), ctx
+        samples[ctx] = picks
+    # Library holds its own planning labels, so only Book's two are its not-here planning rows
+    assert set(samples["Library"]) & planning == {"Book/loan_report", "Book/shelf_report"}
+    # Book holds its two, so every Library planning command (all with seeds) is its not-here row
+    assert set(samples["Book"]) & planning == LIBRARY_PLANNING_LABELS["Library"]
+    # a recorded sample for a planning command the head LABELS is not reused: it is not a row at all
+    recorded = {"Library/note_member": ["a seed the Book head once recorded"]}
+    with_record, _ = not_here_seed_rows(
+        library_copy_for_step, crd, trained_command_labels("Book", crd), NOT_HERE_SEEDS,
+        context_name="Book", recorded=recorded)
+    assert "Library/note_member" in with_record  # Book does not label it: still a not-here row
+    assert with_record["Library/note_member"] != recorded["Library/note_member"]  # the stale sample is redrawn
+    labelled_recorded, _ = not_here_seed_rows(
+        library_copy_for_step, crd, trained_command_labels("Library", crd), NOT_HERE_SEEDS,
+        context_name="Library", recorded={"Library/note_member": ["a seed"]})
+    assert "Library/note_member" not in labelled_recorded
+
+
+def test_not_here_samples_for_context_drop_the_head_planning_labels(library_copy_for_step):
+    RoutingRegistry.clear_registry()
+    crd = RoutingRegistry.get_definition(library_copy_for_step)
+    for ctx in ("Library", "Book", "Member"):
+        samples = not_here_samples_for_context(library_copy_for_step, crd, ctx, "sparse_1")
+        assert samples is not None
+        assert not (set(samples) & LIBRARY_PLANNING_LABELS[ctx]), ctx
+        others = set().union(*LIBRARY_PLANNING_LABELS.values()) - LIBRARY_PLANNING_LABELS[ctx]
+        assert set(samples) & others, f"{ctx} keeps the planning commands of other scopes"
+
+
+def test_the_record_carries_the_head_layout_only_for_a_workflow_with_planning_commands(
+        library_copy_for_step, todo_copy):
+    assert not_here_construction(folderpath=library_copy_for_step) == PLANNING_RECORD
+    _manifest, run_metadata = construction_records(None, None, library_copy_for_step)
+    assert _manifest == {"not_here": PLANNING_RECORD}
+    assert run_metadata["planning_heads"] == "labelled"
+    with experiment_reserved_class_arm("sparse_1"), experiment_planning_heads(PLANNING_HEADS_NOT_HERE):
+        assert not_here_construction(folderpath=library_copy_for_step) == PLANNING_RECORD_BASELINE
+    assert not_here_construction(folderpath=todo_copy) == SHIPPED_RECORD
+    with experiment_reserved_class_arm("sparse_1"), experiment_planning_heads(PLANNING_HEADS_NOT_HERE):
+        assert not_here_construction(folderpath=todo_copy) == SHIPPED_RECORD  # no planning command, no field
+
+
+def test_the_selective_signature_carries_the_record_and_the_library_and_tutorial_labels(
+        library_copy_for_step, tutorial_copy):
+    RoutingRegistry.clear_registry()
+    contexts = selective_training.contexts_for_training(library_copy_for_step)
+    signature, unresolved = selective_training.compute_training_signature(library_copy_for_step, contexts, seed=7)
+    assert signature.global_inputs()["not_here"] == PLANNING_RECORD
+    assert not any(unresolved.values())
+    for ctx, context_signature in signature.contexts.items():
+        assert set(context_signature.label_space) == _pre_step_labels(
+            RoutingRegistry.get_definition(library_copy_for_step), ctx) | LIBRARY_PLANNING_LABELS[ctx], ctx
+
+    RoutingRegistry.clear_registry()
+    tutorial_contexts = selective_training.contexts_for_training(tutorial_copy)
+    tutorial_signature, _ = selective_training.compute_training_signature(
+        tutorial_copy, tutorial_contexts, seed=7)
+    assert tutorial_signature.global_inputs()["not_here"] == PLANNING_RECORD
+    assert set(tutorial_signature.contexts["*"].label_space) >= TUTORIAL_ROOT_PLANNING
+
+
+def test_load_refuses_a_planning_workflow_whose_record_lacks_the_head_layout(library_copy_for_step, todo_copy):
+    RoutingRegistry.clear_registry()
+    RoutingRegistry.get_definition(library_copy_for_step)  # writes the command directory snapshot
+    RoutingRegistry.get_definition(todo_copy)
+
+    _write_version(library_copy_for_step, "20260101T000000Z-plnold", manifest={"not_here": SHIPPED_RECORD})
+    problem = av.construction_record_problem(library_copy_for_step)
+    assert problem is not None and "has planning commands" in problem
+    assert "retrain with `fastworkflow train`" in problem
+    with pytest.raises(av.StaleArtifactError, match=r"retrain with `fastworkflow train`"):
+        av.require_construction_record(library_copy_for_step)
+
+    _write_version(library_copy_for_step, "20260201T000000Z-plnbase",
+                   manifest={"not_here": PLANNING_RECORD_BASELINE})
+    assert av.construction_record_problem(library_copy_for_step) is not None  # the baseline is not production
+
+    _write_version(library_copy_for_step, "20260301T000000Z-plnnew", manifest={"not_here": PLANNING_RECORD})
+    assert av.construction_record_problem(library_copy_for_step) is None
+
+    # a workflow without planning commands keeps loading on the record it already has
+    _write_version(todo_copy, "20260101T000000Z-todold", manifest={"not_here": SHIPPED_RECORD})
+    assert av.construction_record_problem(todo_copy) is None
+
+
+def test_the_first_train_after_the_change_fully_retrains_a_planning_workflow_only(
+        library_copy_for_step, todo_copy, tmp_path):
+    """The selective planner: an artifact without the head layout is a header mismatch, a full retrain."""
+    for folder, expect_full in ((library_copy_for_step, True), (todo_copy, False)):
+        RoutingRegistry.clear_registry()
+        contexts = selective_training.contexts_for_training(folder)
+        current, _unresolved = selective_training.compute_training_signature(folder, contexts, seed=7)
+        old = current.model_dump()
+        old["not_here"] = dict(SHIPPED_RECORD)  # trained before the field existed
+        workflow = str(tmp_path / ("old_" + os.path.basename(folder)))
+        shutil.copytree(folder, workflow, ignore=shutil.ignore_patterns("___*"))
+        version = "20260101T000000Z-oldpln"
+        _write_version(workflow, version, manifest={"seed": 7}, signature=old)
+        plan, _signature = selective_training.compute_training_plan(
+            workflow, contexts, changed_only=True, seed=7,
+            carry_forward_from=version, cache_mode="reuse")
+        if expect_full:
+            assert plan.is_full_retrain is True
+            assert sorted(plan.contexts_to_train) == sorted(contexts)
+            assert any("not_here" in reason for reason in plan.global_reasons)
+        else:
+            assert not any("not_here" in reason for reason in plan.global_reasons)

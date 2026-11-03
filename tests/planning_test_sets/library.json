@@ -1,0 +1,4033 @@
+{
+  "cases": [
+    {
+      "expected": "Book/loan_report",
+      "head": "Book",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Book/loan_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "who has this book"
+    },
+    {
+      "expected": "Book/loan_report",
+      "head": "Book",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Book/loan_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "when is it due back"
+    },
+    {
+      "expected": "Book/loan_report",
+      "head": "Book",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Book/loan_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "is this book out, and until when"
+    },
+    {
+      "expected": "Book/loan_report",
+      "head": "Book",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Book/loan_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "who is holding this one right now and what's the return date"
+    },
+    {
+      "expected": "Book/loan_report",
+      "head": "Book",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Book/loan_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "tell me who borrowed this book and when it comes back"
+    },
+    {
+      "expected": "Book/loan_report",
+      "head": "Book",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Book/loan_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "is this one on loan to anyone"
+    },
+    {
+      "expected": "Book/loan_report",
+      "head": "Book",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Book/loan_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "when will this copy be returned, and to whom"
+    },
+    {
+      "expected": "Book/loan_report",
+      "head": "Book",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Book/loan_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "who's got this book at the moment"
+    },
+    {
+      "expected": "Book/loan_report",
+      "head": "Book",
+      "kind": "planning",
+      "origin": "docstring",
+      "related": "Book/loan_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "Say who has this book on loan and when each loan is due back."
+    },
+    {
+      "expected": "Book/loan_report",
+      "head": "Book",
+      "kind": "planning",
+      "related": "Book/loan_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "is this copy checked out, and to whom"
+    },
+    {
+      "expected": "Book/loan_report",
+      "head": "Book",
+      "kind": "planning",
+      "related": "Book/loan_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "who currently holds this title"
+    },
+    {
+      "expected": "Book/loan_report",
+      "head": "Book",
+      "kind": "planning",
+      "related": "Book/loan_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "who borrowed this book and when does it come back"
+    },
+    {
+      "expected": "Book/loan_report",
+      "head": "Book",
+      "kind": "planning",
+      "related": "Book/loan_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "when does the current borrower have to return it"
+    },
+    {
+      "expected": "Book/loan_report",
+      "head": "Book",
+      "kind": "planning",
+      "related": "Book/loan_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "tell me who's got this one and the return date"
+    },
+    {
+      "expected": "Book/loan_report",
+      "head": "Book",
+      "kind": "planning",
+      "related": "Book/loan_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "is anyone holding this book right now"
+    },
+    {
+      "expected": "Book/loan_report",
+      "head": "Book",
+      "kind": "planning",
+      "related": "Book/loan_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "due dates for everyone who has this book out"
+    },
+    {
+      "expected": "Book/loan_report",
+      "head": "Book",
+      "kind": "planning",
+      "related": "Book/loan_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "who is reading this book at the moment"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "head": "Book",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Book/shelf_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "where is this book kept, and who has it"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "head": "Book",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Book/shelf_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "is this book in"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "head": "Book",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Book/shelf_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "which branch keeps this book, how many copies, and who is borrowing it"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "head": "Book",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Book/shelf_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "where do we keep this title and is any copy out"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "head": "Book",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Book/shelf_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "shelf location and loan status for this one"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "head": "Book",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Book/shelf_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "is there a copy in the building right now"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "head": "Book",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Book/shelf_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "tell me where this book sits and who holds the copies"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "head": "Book",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Book/shelf_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "give me the shelf status of this title"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "head": "Book",
+      "kind": "planning",
+      "origin": "docstring",
+      "related": "Book/shelf_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "Say where this book is held, how many copies there are, and who has it on loan."
+    },
+    {
+      "expected": "Book/shelf_report",
+      "head": "Book",
+      "kind": "planning",
+      "related": "Book/shelf_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "which shelf is this book on"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "head": "Book",
+      "kind": "planning",
+      "related": "Book/shelf_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how many copies of this book do we own"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "head": "Book",
+      "kind": "planning",
+      "related": "Book/shelf_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "where can I find this book in the library"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "head": "Book",
+      "kind": "planning",
+      "related": "Book/shelf_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "is there a copy on the shelf and who has the others"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "head": "Book",
+      "kind": "planning",
+      "related": "Book/shelf_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "shelf location and copy count for this book"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "head": "Book",
+      "kind": "planning",
+      "related": "Book/shelf_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "do we have copies of this one at the branch"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "head": "Book",
+      "kind": "planning",
+      "related": "Book/shelf_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "where is it kept and is it out"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "head": "Book",
+      "kind": "planning",
+      "related": "Book/shelf_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how many of these are checked out"
+    },
+    {
+      "expected": "Library/author_books",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "what do you have by Frank Herbert, and how many copies of each"
+    },
+    {
+      "expected": "Library/author_books",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "list every Austen book we own with its copies"
+    },
+    {
+      "expected": "Library/author_books",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "what Herbert titles are on the shelves, and how many of each"
+    },
+    {
+      "expected": "Library/author_books",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "give me each book by Jane Austen with the copy count"
+    },
+    {
+      "expected": "Library/author_books",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "all the books by Frank Herbert, with copies"
+    },
+    {
+      "expected": "Library/author_books",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "name each title by Austen and how many copies it has"
+    },
+    {
+      "expected": "Library/author_books",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "which books by Jane Austen do we hold, copies included"
+    },
+    {
+      "expected": "Library/author_books",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "catalogue of Frank Herbert's books and copies"
+    },
+    {
+      "expected": "Library/author_books",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "docstring",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "Name each book by an author, with how many copies the library owns."
+    },
+    {
+      "expected": "Library/author_books",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/author_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "which books has Jane Austen written that we carry"
+    },
+    {
+      "expected": "Library/author_books",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/author_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "list every book we have by Mark Twain and the copy counts"
+    },
+    {
+      "expected": "Library/author_books",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/author_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "what titles do we hold by Agatha Christie"
+    },
+    {
+      "expected": "Library/author_books",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/author_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "show the Tolkien books in the catalog"
+    },
+    {
+      "expected": "Library/author_books",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/author_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how many copies of each Ursula Le Guin book do we own"
+    },
+    {
+      "expected": "Library/author_books",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/author_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "books by Toni Morrison in stock"
+    },
+    {
+      "expected": "Library/author_books",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/author_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "everything we carry by George Orwell"
+    },
+    {
+      "expected": "Library/author_books",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/author_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "what has Isaac Asimov written here and how many copies"
+    },
+    {
+      "expected": "Library/book_by_title",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/book_by_title",
+      "source": "seed",
+      "split": "train",
+      "utterance": "who wrote Dune"
+    },
+    {
+      "expected": "Library/book_by_title",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/book_by_title",
+      "source": "seed",
+      "split": "train",
+      "utterance": "how many copies of Dune Messiah are there"
+    },
+    {
+      "expected": "Library/book_by_title",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/book_by_title",
+      "source": "seed",
+      "split": "train",
+      "utterance": "who is the author of Persuasion, and how many copies do we have"
+    },
+    {
+      "expected": "Library/book_by_title",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/book_by_title",
+      "source": "seed",
+      "split": "train",
+      "utterance": "tell me about the book Emma"
+    },
+    {
+      "expected": "Library/book_by_title",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/book_by_title",
+      "source": "seed",
+      "split": "train",
+      "utterance": "what is Dune Messiah by, and how many copies"
+    },
+    {
+      "expected": "Library/book_by_title",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/book_by_title",
+      "source": "seed",
+      "split": "train",
+      "utterance": "give me the author and copy count for the title Emma"
+    },
+    {
+      "expected": "Library/book_by_title",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/book_by_title",
+      "source": "seed",
+      "split": "train",
+      "utterance": "does the library own Persuasion, and who wrote it"
+    },
+    {
+      "expected": "Library/book_by_title",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/book_by_title",
+      "source": "seed",
+      "split": "train",
+      "utterance": "how many copies of Emma do we own and who wrote it"
+    },
+    {
+      "expected": "Library/book_by_title",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "docstring",
+      "related": "Library/book_by_title",
+      "source": "seed",
+      "split": "train",
+      "utterance": "Show who wrote a book, and how many copies the library owns, given its title."
+    },
+    {
+      "expected": "Library/book_by_title",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/book_by_title",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "who is the author of Pride and Prejudice"
+    },
+    {
+      "expected": "Library/book_by_title",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/book_by_title",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "who wrote The Hobbit and how many copies do we have"
+    },
+    {
+      "expected": "Library/book_by_title",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/book_by_title",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "copy count for Frankenstein"
+    },
+    {
+      "expected": "Library/book_by_title",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/book_by_title",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "author of 1984 please"
+    },
+    {
+      "expected": "Library/book_by_title",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/book_by_title",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "is there more than one copy of Moby-Dick"
+    },
+    {
+      "expected": "Library/book_by_title",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/book_by_title",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "who wrote Middlemarch"
+    },
+    {
+      "expected": "Library/book_by_title",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/book_by_title",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how many copies of Dracula are on the shelves"
+    },
+    {
+      "expected": "Library/book_loans",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/book_loans",
+      "source": "seed",
+      "split": "train",
+      "utterance": "who has borrowed Dune"
+    },
+    {
+      "expected": "Library/book_loans",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/book_loans",
+      "source": "seed",
+      "split": "train",
+      "utterance": "is anyone reading Emma right now"
+    },
+    {
+      "expected": "Library/book_loans",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/book_loans",
+      "source": "seed",
+      "split": "train",
+      "utterance": "who is reading Persuasion at the moment"
+    },
+    {
+      "expected": "Library/book_loans",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/book_loans",
+      "source": "seed",
+      "split": "train",
+      "utterance": "which patrons have Dune Messiah out"
+    },
+    {
+      "expected": "Library/book_loans",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/book_loans",
+      "source": "seed",
+      "split": "train",
+      "utterance": "is anyone holding a copy of Emma"
+    },
+    {
+      "expected": "Library/book_loans",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/book_loans",
+      "source": "seed",
+      "split": "train",
+      "utterance": "names of everyone who borrowed Persuasion"
+    },
+    {
+      "expected": "Library/book_loans",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/book_loans",
+      "source": "seed",
+      "split": "train",
+      "utterance": "has anybody got Dune out, and until when"
+    },
+    {
+      "expected": "Library/book_loans",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/book_loans",
+      "source": "seed",
+      "split": "train",
+      "utterance": "who currently holds the title Dune Messiah"
+    },
+    {
+      "expected": "Library/book_loans",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "docstring",
+      "related": "Library/book_loans",
+      "source": "seed",
+      "split": "train",
+      "utterance": "Say who has a book on loan, given its title."
+    },
+    {
+      "expected": "Library/book_loans",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/book_loans",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "who is borrowing Frankenstein"
+    },
+    {
+      "expected": "Library/book_loans",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/book_loans",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "does anyone have Moby-Dick out"
+    },
+    {
+      "expected": "Library/book_loans",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/book_loans",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "who has Middlemarch checked out"
+    },
+    {
+      "expected": "Library/book_loans",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/book_loans",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "is The Hobbit on loan, and to whom"
+    },
+    {
+      "expected": "Library/book_loans",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/book_loans",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "who has the book Dracula right now"
+    },
+    {
+      "expected": "Library/book_loans",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/book_loans",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "is Pride and Prejudice currently borrowed"
+    },
+    {
+      "expected": "Library/book_loans",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/book_loans",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "who's got 1984"
+    },
+    {
+      "expected": "Library/book_loans",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/book_loans",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "who has taken out Emma"
+    },
+    {
+      "expected": "Library/count_books",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/count_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "how many books by Jane Austen do you have"
+    },
+    {
+      "expected": "Library/count_books",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/count_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "how many Herbert books are in the catalogue"
+    },
+    {
+      "expected": "Library/count_books",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/count_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "what is the number of titles that mention Dune"
+    },
+    {
+      "expected": "Library/count_books",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/count_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "count how many books we hold with Persuasion in the title"
+    },
+    {
+      "expected": "Library/count_books",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/count_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "total of books matching Austen"
+    },
+    {
+      "expected": "Library/count_books",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/count_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "how big is our Austen collection"
+    },
+    {
+      "expected": "Library/count_books",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/count_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "how many titles have Emma in them"
+    },
+    {
+      "expected": "Library/count_books",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/count_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "tell me the count of Herbert titles we carry"
+    },
+    {
+      "expected": "Library/count_books",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "docstring",
+      "related": "Library/count_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "Count the books whose title or author holds some words."
+    },
+    {
+      "expected": "Library/count_books",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/count_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how many books have Austen in the title"
+    },
+    {
+      "expected": "Library/count_books",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/count_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "count the titles that mention ocean"
+    },
+    {
+      "expected": "Library/count_books",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/count_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how many books do we have with 'night' in their name"
+    },
+    {
+      "expected": "Library/count_books",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/count_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how many books match the word history"
+    },
+    {
+      "expected": "Library/count_books",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/count_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how many titles contain dragon"
+    },
+    {
+      "expected": "Library/count_books",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/count_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "count the catalog entries mentioning war"
+    },
+    {
+      "expected": "Library/count_books",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/count_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how many books have Tolkien as author"
+    },
+    {
+      "expected": "Library/count_books",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/count_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how many books are about space"
+    },
+    {
+      "expected": "Library/find_record",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/find_record",
+      "source": "seed",
+      "split": "train",
+      "utterance": "do you have a book called Emma"
+    },
+    {
+      "expected": "Library/find_record",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/find_record",
+      "source": "seed",
+      "split": "train",
+      "utterance": "is there a member named Lee"
+    },
+    {
+      "expected": "Library/find_record",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/find_record",
+      "source": "seed",
+      "split": "train",
+      "utterance": "do we have any member called Patel"
+    },
+    {
+      "expected": "Library/find_record",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/find_record",
+      "source": "seed",
+      "split": "train",
+      "utterance": "is there a book called Dune Messiah"
+    },
+    {
+      "expected": "Library/find_record",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/find_record",
+      "source": "seed",
+      "split": "train",
+      "utterance": "does anyone go by the name Mia"
+    },
+    {
+      "expected": "Library/find_record",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/find_record",
+      "source": "seed",
+      "split": "train",
+      "utterance": "is a title called Persuasion in the catalogue"
+    },
+    {
+      "expected": "Library/find_record",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/find_record",
+      "source": "seed",
+      "split": "train",
+      "utterance": "is there a patron named Raj"
+    },
+    {
+      "expected": "Library/find_record",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/find_record",
+      "source": "seed",
+      "split": "train",
+      "utterance": "check whether we have a book titled Dune and name the matches"
+    },
+    {
+      "expected": "Library/find_record",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "docstring",
+      "related": "Library/find_record",
+      "source": "seed",
+      "split": "train",
+      "utterance": "Say whether a book or a member goes by a name, and name each match."
+    },
+    {
+      "expected": "Library/find_record",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/find_record",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "is there a book called Dune"
+    },
+    {
+      "expected": "Library/find_record",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/find_record",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "do we have a member named Ann Lee"
+    },
+    {
+      "expected": "Library/find_record",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/find_record",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "is there a record for Raj Patel"
+    },
+    {
+      "expected": "Library/find_record",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/find_record",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "is anything called Emma in the system"
+    },
+    {
+      "expected": "Library/find_record",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/find_record",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "any member or book named Lee"
+    },
+    {
+      "expected": "Library/find_record",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/find_record",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "look whether Ann Lee is a member or a book"
+    },
+    {
+      "expected": "Library/find_record",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/find_record",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "is Mia Chen on file"
+    },
+    {
+      "expected": "Library/find_record",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/find_record",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "do we have a book titled Moby-Dick"
+    },
+    {
+      "expected": "Library/member_report",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "tell me about Raj Patel"
+    },
+    {
+      "expected": "Library/member_report",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "what has Ann Lee borrowed"
+    },
+    {
+      "expected": "Library/member_report",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "any notes on Mia Chen's record"
+    },
+    {
+      "expected": "Library/member_report",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "give me the summary for Ann Lee, loans and notes included"
+    },
+    {
+      "expected": "Library/member_report",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "how many books does Raj Patel have out, and what does his record say"
+    },
+    {
+      "expected": "Library/member_report",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "report on Mia Chen's account"
+    },
+    {
+      "expected": "Library/member_report",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "what is on Ann Lee's record, including her loans"
+    },
+    {
+      "expected": "Library/member_report",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "full picture for Mia Chen please"
+    },
+    {
+      "expected": "Library/member_report",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "docstring",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "Show a member's loans, and the notes on their record when asked. One member per call."
+    },
+    {
+      "expected": "Library/member_report",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "show me Ann Lee's loans and notes"
+    },
+    {
+      "expected": "Library/member_report",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "what does Raj Patel have out right now"
+    },
+    {
+      "expected": "Library/member_report",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how many books has Mia Chen got on loan"
+    },
+    {
+      "expected": "Library/member_report",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "any notes on Ann Lee's record and what they borrowed"
+    },
+    {
+      "expected": "Library/member_report",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "give me the loan history for Raj Patel"
+    },
+    {
+      "expected": "Library/member_report",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "check Mia Chen's record"
+    },
+    {
+      "expected": "Library/member_report",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "what has Raj Patel got and any notes"
+    },
+    {
+      "expected": "Library/member_report",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how is Ann Lee doing with her loans"
+    },
+    {
+      "expected": "Library/note_member",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/note_member",
+      "source": "seed",
+      "split": "train",
+      "utterance": "note on Raj Patel's record that he prefers email reminders"
+    },
+    {
+      "expected": "Library/note_member",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/note_member",
+      "source": "seed",
+      "split": "train",
+      "utterance": "put a note on Ann Lee: card renewed"
+    },
+    {
+      "expected": "Library/note_member",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/note_member",
+      "source": "seed",
+      "split": "train",
+      "utterance": "put on Mia Chen's record that she wants large print"
+    },
+    {
+      "expected": "Library/note_member",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/note_member",
+      "source": "seed",
+      "split": "train",
+      "utterance": "add to Raj Patel's record: moved address"
+    },
+    {
+      "expected": "Library/note_member",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/note_member",
+      "source": "seed",
+      "split": "train",
+      "utterance": "leave a note for Ann Lee saying her card is due for renewal"
+    },
+    {
+      "expected": "Library/note_member",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/note_member",
+      "source": "seed",
+      "split": "train",
+      "utterance": "write a note about Mia Chen: prefers pickup at Riverside"
+    },
+    {
+      "expected": "Library/note_member",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/note_member",
+      "source": "seed",
+      "split": "train",
+      "utterance": "record for Raj Patel that he asked for a call back"
+    },
+    {
+      "expected": "Library/note_member",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/note_member",
+      "source": "seed",
+      "split": "train",
+      "utterance": "attach to Ann Lee's record a note about the damaged card"
+    },
+    {
+      "expected": "Library/note_member",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "docstring",
+      "related": "Library/note_member",
+      "source": "seed",
+      "split": "train",
+      "utterance": "Add a note to a member's record."
+    },
+    {
+      "expected": "Library/note_member",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/note_member",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "add a note to Mia Chen saying she moved"
+    },
+    {
+      "expected": "Library/note_member",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/note_member",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "record that Raj Patel asked for a call back"
+    },
+    {
+      "expected": "Library/note_member",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/note_member",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "put a note on Ann Lee's account about her new address"
+    },
+    {
+      "expected": "Library/note_member",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/note_member",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "note that Mia Chen returned her books late"
+    },
+    {
+      "expected": "Library/note_member",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/note_member",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "leave a comment on Raj Patel's file"
+    },
+    {
+      "expected": "Library/note_member",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/note_member",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "log a note for Ann Lee: prefers text messages"
+    },
+    {
+      "expected": "Library/note_member",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/note_member",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "add to Mia Chen's record: lost card, replaced"
+    },
+    {
+      "expected": "Library/note_member",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/note_member",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "write in Raj Patel's notes that he is a teacher"
+    },
+    {
+      "expected": "Library/overdue_summary",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "give me the library overview"
+    },
+    {
+      "expected": "Library/overdue_summary",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "how is the library doing"
+    },
+    {
+      "expected": "Library/overdue_summary",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "a status report on the library: branches and overdue loans"
+    },
+    {
+      "expected": "Library/overdue_summary",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "summarize the branches and how many loans are late"
+    },
+    {
+      "expected": "Library/overdue_summary",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "overall picture of the library, please"
+    },
+    {
+      "expected": "Library/overdue_summary",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "run the library summary"
+    },
+    {
+      "expected": "Library/overdue_summary",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "branches and overdue count for the whole library"
+    },
+    {
+      "expected": "Library/overdue_summary",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "how is everything at the library, including late loans"
+    },
+    {
+      "expected": "Library/overdue_summary",
+      "head": "Library",
+      "kind": "planning",
+      "origin": "docstring",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "List the library's branches, then say how many loans are overdue across the library."
+    },
+    {
+      "expected": "Library/overdue_summary",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/overdue_summary",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how many loans are overdue and where"
+    },
+    {
+      "expected": "Library/overdue_summary",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/overdue_summary",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "give me the branch list and overdue count"
+    },
+    {
+      "expected": "Library/overdue_summary",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/overdue_summary",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how is the library doing with late books"
+    },
+    {
+      "expected": "Library/overdue_summary",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/overdue_summary",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "overdue loans across all branches"
+    },
+    {
+      "expected": "Library/overdue_summary",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/overdue_summary",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "status of the library: branches and overdue books"
+    },
+    {
+      "expected": "Library/overdue_summary",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/overdue_summary",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "which branches exist and how many books are late"
+    },
+    {
+      "expected": "Library/overdue_summary",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/overdue_summary",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "a summary of overdue loans and our branches"
+    },
+    {
+      "expected": "Library/overdue_summary",
+      "head": "Library",
+      "kind": "planning",
+      "related": "Library/overdue_summary",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how many items are late in every branch"
+    },
+    {
+      "expected": "Book/list_loans",
+      "head": "Book",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Book/loan_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "list this book's loans"
+    },
+    {
+      "expected": "Book/list_loans",
+      "head": "Book",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Book/loan_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "give me page two of this title's loans"
+    },
+    {
+      "expected": "Book/list_loans",
+      "head": "Book",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Book/loan_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "how many loans does this book have"
+    },
+    {
+      "expected": "Book/list_loans",
+      "head": "Book",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Book/loan_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "give me the full loan list for this title"
+    },
+    {
+      "expected": "Book/list_loans",
+      "head": "Book",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Book/loan_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "read out the borrowers and due dates of this book, row by row"
+    },
+    {
+      "expected": "Book/list_loans",
+      "head": "Book",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Book/loan_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "list the loans on this one, starting from row 11"
+    },
+    {
+      "expected": "Book/list_loans",
+      "head": "Book",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Book/loan_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "every loan this title has, please"
+    },
+    {
+      "expected": "Book/list_loans",
+      "head": "Book",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Book/loan_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "what loans are open on this book"
+    },
+    {
+      "expected": "Book/list_loans",
+      "head": "Book",
+      "kind": "callee",
+      "origin": "docstring",
+      "related": "Book/loan_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "List the loans of the open book: each borrower and the due date."
+    },
+    {
+      "expected": "Book/list_loans",
+      "head": "Book",
+      "kind": "callee",
+      "related": "Book/loan_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how many people are holding this book"
+    },
+    {
+      "expected": "Book/list_loans",
+      "head": "Book",
+      "kind": "callee",
+      "related": "Book/loan_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "what are the loans on this title"
+    },
+    {
+      "expected": "Book/list_loans",
+      "head": "Book",
+      "kind": "callee",
+      "related": "Book/loan_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "who owes this book back"
+    },
+    {
+      "expected": "Book/list_loans",
+      "head": "Book",
+      "kind": "callee",
+      "related": "Book/loan_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "list the people who have this book out and when it is due"
+    },
+    {
+      "expected": "Book/list_loans",
+      "head": "Book",
+      "kind": "callee",
+      "related": "Book/loan_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "which patrons have it right now"
+    },
+    {
+      "expected": "Book/list_loans",
+      "head": "Book",
+      "kind": "callee",
+      "related": "Book/loan_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "give the borrowers of the open book"
+    },
+    {
+      "expected": "Book/list_loans",
+      "head": "Book",
+      "kind": "callee",
+      "related": "Book/loan_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "is it out with anyone, and until when"
+    },
+    {
+      "expected": "Book/list_loans",
+      "head": "Book",
+      "kind": "callee",
+      "related": "Book/loan_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "loan status of this title"
+    },
+    {
+      "expected": "Book/show_book",
+      "head": "Book",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Book/shelf_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "show this book"
+    },
+    {
+      "expected": "Book/show_book",
+      "head": "Book",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Book/shelf_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "which branch holds it"
+    },
+    {
+      "expected": "Book/show_book",
+      "head": "Book",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Book/shelf_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "give me the details of this book"
+    },
+    {
+      "expected": "Book/show_book",
+      "head": "Book",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Book/shelf_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "who wrote this one, and how many do we own"
+    },
+    {
+      "expected": "Book/show_book",
+      "head": "Book",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Book/shelf_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "what is this book's branch and copy count"
+    },
+    {
+      "expected": "Book/show_book",
+      "head": "Book",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Book/shelf_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "how many copies of this one are out right now"
+    },
+    {
+      "expected": "Book/show_book",
+      "head": "Book",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Book/shelf_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "describe the book we have open"
+    },
+    {
+      "expected": "Book/show_book",
+      "head": "Book",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Book/shelf_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "show me the record for this title"
+    },
+    {
+      "expected": "Book/show_book",
+      "head": "Book",
+      "kind": "callee",
+      "origin": "docstring",
+      "related": "Book/shelf_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "Show the open book: its title, author, branch, copies and how many are on loan."
+    },
+    {
+      "expected": "Book/show_book",
+      "head": "Book",
+      "kind": "callee",
+      "related": "Book/shelf_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "what's the author of this book"
+    },
+    {
+      "expected": "Book/show_book",
+      "head": "Book",
+      "kind": "callee",
+      "related": "Book/shelf_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how many copies does the library have of it"
+    },
+    {
+      "expected": "Book/show_book",
+      "head": "Book",
+      "kind": "callee",
+      "related": "Book/shelf_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "what branch is this book in"
+    },
+    {
+      "expected": "Book/show_book",
+      "head": "Book",
+      "kind": "callee",
+      "related": "Book/shelf_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "tell me about the book I have open"
+    },
+    {
+      "expected": "Book/show_book",
+      "head": "Book",
+      "kind": "callee",
+      "related": "Book/shelf_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "show me the title and copies"
+    },
+    {
+      "expected": "Book/show_book",
+      "head": "Book",
+      "kind": "callee",
+      "related": "Book/shelf_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "which book is open right now"
+    },
+    {
+      "expected": "Book/show_book",
+      "head": "Book",
+      "kind": "callee",
+      "related": "Book/shelf_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how many of its copies are out right now"
+    },
+    {
+      "expected": "Library/count_overdue",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "how many loans are overdue"
+    },
+    {
+      "expected": "Library/count_overdue",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "count the overdue loans at Central"
+    },
+    {
+      "expected": "Library/count_overdue",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "how many books are past their due date"
+    },
+    {
+      "expected": "Library/count_overdue",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "number of overdue loans at Riverside"
+    },
+    {
+      "expected": "Library/count_overdue",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "tally the late loans across all branches"
+    },
+    {
+      "expected": "Library/count_overdue",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "how many of our loans are late"
+    },
+    {
+      "expected": "Library/count_overdue",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "give me the late-loan count for Riverside"
+    },
+    {
+      "expected": "Library/count_overdue",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "are there overdue books at Central"
+    },
+    {
+      "expected": "Library/count_overdue",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "docstring",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "Count the overdue loans, in one branch or across the library."
+    },
+    {
+      "expected": "Library/count_overdue",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/overdue_summary",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how many books are late back"
+    },
+    {
+      "expected": "Library/count_overdue",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/overdue_summary",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how many are overdue at Central"
+    },
+    {
+      "expected": "Library/count_overdue",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/overdue_summary",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "count the late loans in the whole library"
+    },
+    {
+      "expected": "Library/count_overdue",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/overdue_summary",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "any overdue items at the branch"
+    },
+    {
+      "expected": "Library/count_overdue",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/overdue_summary",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "how many returns are past due"
+    },
+    {
+      "expected": "Library/find_book",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "find the book Dune"
+    },
+    {
+      "expected": "Library/find_book",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "look up books by Jane Austen"
+    },
+    {
+      "expected": "Library/find_book",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "search the catalogue for anything with Persuasion in it"
+    },
+    {
+      "expected": "Library/find_book",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "which titles mention Herbert"
+    },
+    {
+      "expected": "Library/find_book",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "any books with Messiah in the name"
+    },
+    {
+      "expected": "Library/find_book",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "run a search for Dune across titles and authors"
+    },
+    {
+      "expected": "Library/find_book",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "show the next page of search results for Austen"
+    },
+    {
+      "expected": "Library/find_book",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "list the catalogue entries that contain Jane"
+    },
+    {
+      "expected": "Library/find_book",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "docstring",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "Find books by title or author."
+    },
+    {
+      "expected": "Library/find_book",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/author_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "search the catalog for dragons"
+    },
+    {
+      "expected": "Library/find_book",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/author_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "find books written by Isaac Asimov"
+    },
+    {
+      "expected": "Library/find_book",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/author_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "show me the titles matching Pride"
+    },
+    {
+      "expected": "Library/find_member",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/find_record",
+      "source": "seed",
+      "split": "train",
+      "utterance": "find the member Ann Lee"
+    },
+    {
+      "expected": "Library/find_member",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/find_record",
+      "source": "seed",
+      "split": "train",
+      "utterance": "search the members for Raj"
+    },
+    {
+      "expected": "Library/find_member",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/find_record",
+      "source": "seed",
+      "split": "train",
+      "utterance": "look up patrons whose name has Chen in it"
+    },
+    {
+      "expected": "Library/find_member",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/find_record",
+      "source": "seed",
+      "split": "train",
+      "utterance": "which members have Lee in their name"
+    },
+    {
+      "expected": "Library/find_member",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/find_record",
+      "source": "seed",
+      "split": "train",
+      "utterance": "any member named Patel"
+    },
+    {
+      "expected": "Library/find_member",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/find_record",
+      "source": "seed",
+      "split": "train",
+      "utterance": "find members matching Ann"
+    },
+    {
+      "expected": "Library/find_member",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/find_record",
+      "source": "seed",
+      "split": "train",
+      "utterance": "search the member list, page two"
+    },
+    {
+      "expected": "Library/find_member",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/find_record",
+      "source": "seed",
+      "split": "train",
+      "utterance": "pull up the members called Mia"
+    },
+    {
+      "expected": "Library/find_member",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "docstring",
+      "related": "Library/find_record",
+      "source": "seed",
+      "split": "train",
+      "utterance": "Find library members by name."
+    },
+    {
+      "expected": "Library/find_member",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/find_record",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "look up Ann Lee"
+    },
+    {
+      "expected": "Library/find_member",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/find_record",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "is there a member called Raj Patel"
+    },
+    {
+      "expected": "Library/find_member",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/find_record",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "who is the member Lee"
+    },
+    {
+      "expected": "Library/find_member",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/find_record",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "find the patron named Chen"
+    },
+    {
+      "expected": "Library/find_member",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/find_record",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "locate Raj's membership"
+    },
+    {
+      "expected": "Library/find_member",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/find_record",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "search for a member named Ann"
+    },
+    {
+      "expected": "Library/find_member",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/find_record",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "find the library card holder Mia Chen"
+    },
+    {
+      "expected": "Library/list_branches",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "which branches does the library have"
+    },
+    {
+      "expected": "Library/list_branches",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "list the branches"
+    },
+    {
+      "expected": "Library/list_branches",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "what branches do you have"
+    },
+    {
+      "expected": "Library/list_branches",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "name every branch of the library"
+    },
+    {
+      "expected": "Library/list_branches",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "how many branches are there"
+    },
+    {
+      "expected": "Library/list_branches",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "which locations make up the library"
+    },
+    {
+      "expected": "Library/list_branches",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "tell me the branch names"
+    },
+    {
+      "expected": "Library/list_branches",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "is there more than one site, and what are they called"
+    },
+    {
+      "expected": "Library/list_branches",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "docstring",
+      "related": "Library/overdue_summary",
+      "source": "seed",
+      "split": "train",
+      "utterance": "List the library's branches."
+    },
+    {
+      "expected": "Library/list_branches",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/overdue_summary",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "what locations does the library have"
+    },
+    {
+      "expected": "Library/list_branches",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/overdue_summary",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "list the branch names"
+    },
+    {
+      "expected": "Library/list_branches",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/overdue_summary",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "what branches are there"
+    },
+    {
+      "expected": "Library/list_branches",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/overdue_summary",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "which libraries belong to this system"
+    },
+    {
+      "expected": "Library/list_branches",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/overdue_summary",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "where are the library locations"
+    },
+    {
+      "expected": "Library/list_branches",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/overdue_summary",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "show all the branch names"
+    },
+    {
+      "expected": "Library/list_branches",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/overdue_summary",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "list our sites"
+    },
+    {
+      "expected": "Library/open_book",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "open book b1"
+    },
+    {
+      "expected": "Library/open_book",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "go to the book Dune"
+    },
+    {
+      "expected": "Library/open_book",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "open the book with uid b3"
+    },
+    {
+      "expected": "Library/open_book",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "make b2 the current book"
+    },
+    {
+      "expected": "Library/open_book",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "select b2 so I can act on it"
+    },
+    {
+      "expected": "Library/open_book",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "I want to act on b3 now"
+    },
+    {
+      "expected": "Library/open_book",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "make the Dune Messiah book the open one"
+    },
+    {
+      "expected": "Library/open_book",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "load uid b4 as the current book"
+    },
+    {
+      "expected": "Library/open_book",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "docstring",
+      "related": "Library/author_books",
+      "source": "seed",
+      "split": "train",
+      "utterance": "Open one book by its uid, so that the book's own commands act on it."
+    },
+    {
+      "expected": "Library/open_book",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/author_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "bring up the book with uid b4"
+    },
+    {
+      "expected": "Library/open_book",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/author_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "open the book Dracula"
+    },
+    {
+      "expected": "Library/open_book",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/author_books",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "select book b8"
+    },
+    {
+      "expected": "Library/open_member",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "open member m1"
+    },
+    {
+      "expected": "Library/open_member",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "go to Ann Lee's record"
+    },
+    {
+      "expected": "Library/open_member",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "make patron m3 the open record"
+    },
+    {
+      "expected": "Library/open_member",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "set patron m2 as the current record"
+    },
+    {
+      "expected": "Library/open_member",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "select m3 so I can act on the patron"
+    },
+    {
+      "expected": "Library/open_member",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "I want to work on Raj Patel's account now"
+    },
+    {
+      "expected": "Library/open_member",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "pull up Mia Chen's record"
+    },
+    {
+      "expected": "Library/open_member",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "load uid m2 as the open member"
+    },
+    {
+      "expected": "Library/open_member",
+      "head": "Library",
+      "kind": "callee",
+      "origin": "docstring",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "Open one member by their uid, so that the member's own commands act on them."
+    },
+    {
+      "expected": "Library/open_member",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "open the record of member m1"
+    },
+    {
+      "expected": "Library/open_member",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "go to Raj Patel's account"
+    },
+    {
+      "expected": "Library/open_member",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "switch to Ann Lee's file"
+    },
+    {
+      "expected": "Library/open_member",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "work on member m2 now"
+    },
+    {
+      "expected": "Library/open_member",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "open Mia Chen"
+    },
+    {
+      "expected": "Library/open_member",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "select the member with uid m3"
+    },
+    {
+      "expected": "Library/open_member",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "bring up Raj's record"
+    },
+    {
+      "expected": "Library/open_member",
+      "head": "Library",
+      "kind": "callee",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "open the account for member 7"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "head": "Member",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "what has this member borrowed"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "head": "Member",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "show the next page of loans for this member"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "head": "Member",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "how many books does this member have out"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "head": "Member",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "give me the full list of their borrowed titles with due dates"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "head": "Member",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "which books are on loan to this patron, and when are they due"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "head": "Member",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "list the books this member currently holds"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "head": "Member",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "every title this member has checked out, please"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "head": "Member",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "what titles does this member have on loan, row by row"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "head": "Member",
+      "kind": "callee",
+      "origin": "docstring",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "List the books the open member has on loan, with their due dates."
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "head": "Member",
+      "kind": "callee",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "which books does this patron have out"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "head": "Member",
+      "kind": "callee",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "list the loans of the member I opened"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "head": "Member",
+      "kind": "callee",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "what is on loan to this person"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "head": "Member",
+      "kind": "callee",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "show the borrowed books with due dates for this member"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "head": "Member",
+      "kind": "callee",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "what do they have checked out"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "head": "Member",
+      "kind": "callee",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "which items are with this member"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "head": "Member",
+      "kind": "callee",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "list what this patron still has"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "head": "Member",
+      "kind": "callee",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "what titles has this member taken"
+    },
+    {
+      "expected": "Record/add_note",
+      "head": "Record",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/note_member",
+      "source": "seed",
+      "split": "train",
+      "utterance": "add a note: card renewed"
+    },
+    {
+      "expected": "Record/add_note",
+      "head": "Record",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/note_member",
+      "source": "seed",
+      "split": "train",
+      "utterance": "note that the cover is torn"
+    },
+    {
+      "expected": "Record/add_note",
+      "head": "Record",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/note_member",
+      "source": "seed",
+      "split": "train",
+      "utterance": "record a note that the spine is cracked"
+    },
+    {
+      "expected": "Record/add_note",
+      "head": "Record",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/note_member",
+      "source": "seed",
+      "split": "train",
+      "utterance": "append this to the notes: returned late twice"
+    },
+    {
+      "expected": "Record/add_note",
+      "head": "Record",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/note_member",
+      "source": "seed",
+      "split": "train",
+      "utterance": "put a note on this record saying the binding is loose"
+    },
+    {
+      "expected": "Record/add_note",
+      "head": "Record",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/note_member",
+      "source": "seed",
+      "split": "train",
+      "utterance": "jot down that the member asked for large print"
+    },
+    {
+      "expected": "Record/add_note",
+      "head": "Record",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/note_member",
+      "source": "seed",
+      "split": "train",
+      "utterance": "add a remark: the copy needs cleaning"
+    },
+    {
+      "expected": "Record/add_note",
+      "head": "Record",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/note_member",
+      "source": "seed",
+      "split": "train",
+      "utterance": "log a note here: reserved for the reading group"
+    },
+    {
+      "expected": "Record/add_note",
+      "head": "Record",
+      "kind": "callee",
+      "origin": "docstring",
+      "related": "Library/note_member",
+      "source": "seed",
+      "split": "train",
+      "utterance": "Add a note to the open record."
+    },
+    {
+      "expected": "Record/add_note",
+      "head": "Record",
+      "kind": "callee",
+      "related": "Library/note_member",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "add a note: the cover is torn"
+    },
+    {
+      "expected": "Record/add_note",
+      "head": "Record",
+      "kind": "callee",
+      "related": "Library/note_member",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "record that the copy was damaged"
+    },
+    {
+      "expected": "Record/add_note",
+      "head": "Record",
+      "kind": "callee",
+      "related": "Library/note_member",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "note the shelf was rearranged"
+    },
+    {
+      "expected": "Record/add_note",
+      "head": "Record",
+      "kind": "callee",
+      "related": "Library/note_member",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "put a remark on this record"
+    },
+    {
+      "expected": "Record/add_note",
+      "head": "Record",
+      "kind": "callee",
+      "related": "Library/note_member",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "write a note here about the loan"
+    },
+    {
+      "expected": "Record/show_notes",
+      "head": "Record",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "show the notes on this record"
+    },
+    {
+      "expected": "Record/show_notes",
+      "head": "Record",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "any notes here"
+    },
+    {
+      "expected": "Record/show_notes",
+      "head": "Record",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "what notes are on this one"
+    },
+    {
+      "expected": "Record/show_notes",
+      "head": "Record",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "read me the notes"
+    },
+    {
+      "expected": "Record/show_notes",
+      "head": "Record",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "list the remarks on this record, oldest first"
+    },
+    {
+      "expected": "Record/show_notes",
+      "head": "Record",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "how many notes does this record hold"
+    },
+    {
+      "expected": "Record/show_notes",
+      "head": "Record",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "is there anything written about this record"
+    },
+    {
+      "expected": "Record/show_notes",
+      "head": "Record",
+      "kind": "callee",
+      "origin": "plain_utterances",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "let me see the note history"
+    },
+    {
+      "expected": "Record/show_notes",
+      "head": "Record",
+      "kind": "callee",
+      "origin": "docstring",
+      "related": "Library/member_report",
+      "source": "seed",
+      "split": "train",
+      "utterance": "Show the notes on the open record."
+    },
+    {
+      "expected": "Record/show_notes",
+      "head": "Record",
+      "kind": "callee",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "do the notes say anything"
+    },
+    {
+      "expected": "Record/show_notes",
+      "head": "Record",
+      "kind": "callee",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "display the record's notes"
+    },
+    {
+      "expected": "Record/show_notes",
+      "head": "Record",
+      "kind": "callee",
+      "related": "Library/member_report",
+      "source": "hand-written",
+      "split": "heldout",
+      "utterance": "any comments recorded here"
+    }
+  ],
+  "counts": {
+    "by_kind": {
+      "callee": 163,
+      "planning": 169
+    },
+    "by_source": {
+      "hand-written": 143,
+      "seed": 189
+    },
+    "by_split": {
+      "heldout": 143,
+      "train": 189
+    },
+    "heldout_by_kind": {
+      "callee": 64,
+      "planning": 79
+    },
+    "total": 332
+  },
+  "dropped": [
+    {
+      "expected": "Book/loan_report",
+      "reason": "equals a seed or trained row of Book/loan_report",
+      "source": "persona-holdout",
+      "utterance": "is this copy out on loan to anyone at the moment"
+    },
+    {
+      "expected": "Book/loan_report",
+      "reason": "equals a seed or trained row of Book/loan_report",
+      "source": "persona-holdout",
+      "utterance": "who's holding this one right now, and when does it come back"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "reason": "equals a seed or trained row of Book/shelf_report",
+      "source": "persona-holdout",
+      "utterance": "give me the shelf status and borrowing details for this book"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "reason": "equals a seed or trained row of Book/shelf_report",
+      "source": "persona-holdout",
+      "utterance": "is any copy of this book in the building, and who has it"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "reason": "equals a seed or trained row of Book/shelf_report",
+      "source": "persona-holdout",
+      "utterance": "tell me the shelf location and loan status for this title"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "reason": "equals a seed or trained row of Book/shelf_report",
+      "source": "persona-holdout",
+      "utterance": "where do we keep this one and is it out on loan"
+    },
+    {
+      "expected": "Book/shelf_report",
+      "reason": "equals a seed or trained row of Book/shelf_report",
+      "source": "persona-holdout",
+      "utterance": "which branch holds this book and how many copies are there right now"
+    },
+    {
+      "expected": "Library/author_books",
+      "reason": "equals a seed or trained row of Library/author_books",
+      "source": "persona-holdout",
+      "utterance": "give me a catalogue of all Austen books and how many copies we hold"
+    },
+    {
+      "expected": "Library/author_books",
+      "reason": "equals a seed or trained row of Library/author_books",
+      "source": "persona-holdout",
+      "utterance": "list every Frank Herbert title on the shelves with its copy count"
+    },
+    {
+      "expected": "Library/author_books",
+      "reason": "equals a seed or trained row of Library/author_books",
+      "source": "persona-holdout",
+      "utterance": "name each book by Frank Herbert with its copies included"
+    },
+    {
+      "expected": "Library/author_books",
+      "reason": "equals a seed or trained row of Library/author_books",
+      "source": "persona-holdout",
+      "utterance": "what books do we have by Jane Austen and how many copies of each"
+    },
+    {
+      "expected": "Library/author_books",
+      "reason": "equals a seed or trained row of Library/author_books",
+      "source": "persona-holdout",
+      "utterance": "which Herbert titles are in stock and how many of each do we have"
+    },
+    {
+      "expected": "Library/book_by_title",
+      "reason": "equals a seed or trained row of Library/book_by_title",
+      "source": "persona-holdout",
+      "utterance": "how many copies of Dune does the library own"
+    },
+    {
+      "expected": "Library/book_by_title",
+      "reason": "equals a seed or trained row of Library/book_by_title",
+      "source": "persona-holdout",
+      "utterance": "tell me about Persuasion and its author"
+    },
+    {
+      "expected": "Library/book_by_title",
+      "reason": "equals a seed or trained row of Library/book_by_title",
+      "source": "persona-holdout",
+      "utterance": "what can you tell me about Dune Messiah and who wrote it"
+    },
+    {
+      "expected": "Library/book_by_title",
+      "reason": "equals a seed or trained row of Library/book_by_title",
+      "source": "persona-holdout",
+      "utterance": "who wrote Emma and how many copies do we have"
+    },
+    {
+      "expected": "Library/book_by_title",
+      "reason": "near a seed or trained row of Library/book_by_title (ratio 0.93)",
+      "source": "hand-written",
+      "utterance": "how many copies of Emma does the library own"
+    },
+    {
+      "expected": "Library/book_loans",
+      "reason": "equals a seed or trained row of Library/book_loans",
+      "source": "persona-holdout",
+      "utterance": "has anybody got Dune Messiah out, and until when"
+    },
+    {
+      "expected": "Library/book_loans",
+      "reason": "equals a seed or trained row of Library/book_loans",
+      "source": "persona-holdout",
+      "utterance": "has anybody got Emma out right now"
+    },
+    {
+      "expected": "Library/book_loans",
+      "reason": "equals a seed or trained row of Library/book_loans",
+      "source": "persona-holdout",
+      "utterance": "is anyone holding the title Dune Messiah"
+    },
+    {
+      "expected": "Library/book_loans",
+      "reason": "equals a seed or trained row of Library/book_loans",
+      "source": "persona-holdout",
+      "utterance": "is anyone reading Emma at the moment"
+    },
+    {
+      "expected": "Library/book_loans",
+      "reason": "equals a seed or trained row of Library/book_loans",
+      "source": "persona-holdout",
+      "utterance": "names of everyone currently holding the title Emma"
+    },
+    {
+      "expected": "Library/book_loans",
+      "reason": "equals a seed or trained row of Library/book_loans",
+      "source": "persona-holdout",
+      "utterance": "names of everyone who has Persuasion out now"
+    },
+    {
+      "expected": "Library/book_loans",
+      "reason": "equals a seed or trained row of Library/book_loans",
+      "source": "persona-holdout",
+      "utterance": "which patrons have borrowed Persuasion at the moment"
+    },
+    {
+      "expected": "Library/book_loans",
+      "reason": "equals a seed or trained row of Library/book_loans",
+      "source": "persona-holdout",
+      "utterance": "which patrons have borrowed Persuasion right now"
+    },
+    {
+      "expected": "Library/book_loans",
+      "reason": "equals a seed or trained row of Library/book_loans",
+      "source": "persona-holdout",
+      "utterance": "who currently holds a copy of Dune and until when"
+    },
+    {
+      "expected": "Library/book_loans",
+      "reason": "equals a seed or trained row of Library/book_loans",
+      "source": "persona-holdout",
+      "utterance": "who has currently got a copy of Dune out"
+    },
+    {
+      "expected": "Library/count_books",
+      "reason": "equals a seed or trained row of Library/count_books",
+      "source": "persona-holdout",
+      "utterance": "count how many titles we hold with Emma in them"
+    },
+    {
+      "expected": "Library/count_books",
+      "reason": "equals a seed or trained row of Library/count_books",
+      "source": "persona-holdout",
+      "utterance": "how big is our collection of Herbert books"
+    },
+    {
+      "expected": "Library/count_books",
+      "reason": "equals a seed or trained row of Library/count_books",
+      "source": "persona-holdout",
+      "utterance": "how many books by Jane Austen do we carry in the catalogue"
+    },
+    {
+      "expected": "Library/count_books",
+      "reason": "equals a seed or trained row of Library/count_books",
+      "source": "persona-holdout",
+      "utterance": "tell me the total number of titles that mention biotechnology"
+    },
+    {
+      "expected": "Library/count_books",
+      "reason": "equals a seed or trained row of Library/count_books",
+      "source": "persona-holdout",
+      "utterance": "what is the number of Dune books we have"
+    },
+    {
+      "expected": "Library/note_member",
+      "reason": "equals a seed or trained row of Library/note_member",
+      "source": "persona-holdout",
+      "utterance": "add a note on Raj Patel's record that he prefers email reminders for equipment updates"
+    },
+    {
+      "expected": "Library/note_member",
+      "reason": "equals a seed or trained row of Library/note_member",
+      "source": "persona-holdout",
+      "utterance": "attach to Mia Chen's record that she wants large print documentation for the new system"
+    },
+    {
+      "expected": "Library/note_member",
+      "reason": "equals a seed or trained row of Library/note_member",
+      "source": "persona-holdout",
+      "utterance": "leave a note for Mia Chen saying she prefers pickup at Riverside for all equipment orders"
+    },
+    {
+      "expected": "Library/note_member",
+      "reason": "equals a seed or trained row of Library/note_member",
+      "source": "persona-holdout",
+      "utterance": "put on Raj Patel's record that he moved address and asked for a call back"
+    },
+    {
+      "expected": "Library/note_member",
+      "reason": "equals a seed or trained row of Library/note_member",
+      "source": "persona-holdout",
+      "utterance": "write a note about Ann Lee: her card is due for renewal next month"
+    },
+    {
+      "expected": "Book/show_book",
+      "reason": "equals a seed or trained row of Book/show_book",
+      "source": "persona-holdout",
+      "utterance": "describe the book we have open right now"
+    },
+    {
+      "expected": "Book/show_book",
+      "reason": "equals a seed or trained row of Book/show_book",
+      "source": "persona-holdout",
+      "utterance": "describe the record we have open for this title"
+    },
+    {
+      "expected": "Book/show_book",
+      "reason": "equals a seed or trained row of Book/show_book",
+      "source": "persona-holdout",
+      "utterance": "give me the details on this book and how many we own"
+    },
+    {
+      "expected": "Book/show_book",
+      "reason": "equals a seed or trained row of Book/show_book",
+      "source": "persona-holdout",
+      "utterance": "give me the record for this book's branch and copies out"
+    },
+    {
+      "expected": "Book/show_book",
+      "reason": "equals a seed or trained row of Book/show_book",
+      "source": "persona-holdout",
+      "utterance": "how many copies of this model do we have right now"
+    },
+    {
+      "expected": "Book/show_book",
+      "reason": "equals a seed or trained row of Book/show_book",
+      "source": "persona-holdout",
+      "utterance": "show me the details for this vehicle"
+    },
+    {
+      "expected": "Book/show_book",
+      "reason": "equals a seed or trained row of Book/show_book",
+      "source": "persona-holdout",
+      "utterance": "show me the details of this title"
+    },
+    {
+      "expected": "Book/show_book",
+      "reason": "equals a seed or trained row of Book/show_book",
+      "source": "persona-holdout",
+      "utterance": "which branch has this one in stock"
+    },
+    {
+      "expected": "Book/show_book",
+      "reason": "equals a seed or trained row of Book/show_book",
+      "source": "persona-holdout",
+      "utterance": "which branch holds this one and how many copies do we own"
+    },
+    {
+      "expected": "Book/show_book",
+      "reason": "equals a seed or trained row of Book/show_book",
+      "source": "persona-holdout",
+      "utterance": "who wrote this and what is the copy count"
+    },
+    {
+      "expected": "Library/count_overdue",
+      "reason": "equals a seed or trained row of Library/count_overdue",
+      "source": "persona-holdout",
+      "utterance": "are there any past due loans at Central right now"
+    },
+    {
+      "expected": "Library/count_overdue",
+      "reason": "equals a seed or trained row of Library/count_overdue",
+      "source": "persona-holdout",
+      "utterance": "how many books are late across all our branches"
+    },
+    {
+      "expected": "Library/count_overdue",
+      "reason": "equals a seed or trained row of Library/count_overdue",
+      "source": "persona-holdout",
+      "utterance": "how many overdue loans are there across all branches"
+    },
+    {
+      "expected": "Library/count_overdue",
+      "reason": "equals a seed or trained row of Library/count_overdue",
+      "source": "persona-holdout",
+      "utterance": "tally up our overdue loans for Riverside"
+    },
+    {
+      "expected": "Library/find_book",
+      "reason": "equals a seed or trained row of Library/find_book",
+      "source": "persona-holdout",
+      "utterance": "find any books that mention Kubrick in the title"
+    },
+    {
+      "expected": "Library/find_book",
+      "reason": "equals a seed or trained row of Library/find_book",
+      "source": "persona-holdout",
+      "utterance": "list catalogue entries that have Truffaut in them"
+    },
+    {
+      "expected": "Library/find_book",
+      "reason": "equals a seed or trained row of Library/find_book",
+      "source": "persona-holdout",
+      "utterance": "look up titles containing Bergman across authors and names"
+    },
+    {
+      "expected": "Library/find_book",
+      "reason": "equals a seed or trained row of Library/find_book",
+      "source": "persona-holdout",
+      "utterance": "search the catalogue for works by my mentor's favorite auteur"
+    },
+    {
+      "expected": "Library/find_book",
+      "reason": "equals a seed or trained row of Library/find_book",
+      "source": "persona-holdout",
+      "utterance": "show books by Pauline Kael and anything with her name in it"
+    },
+    {
+      "expected": "Library/find_member",
+      "reason": "equals a seed or trained row of Library/find_member",
+      "source": "persona-holdout",
+      "utterance": "look up any member called Mia"
+    },
+    {
+      "expected": "Library/find_member",
+      "reason": "equals a seed or trained row of Library/find_member",
+      "source": "persona-holdout",
+      "utterance": "pull up patrons with Lee in their name"
+    },
+    {
+      "expected": "Library/find_member",
+      "reason": "equals a seed or trained row of Library/find_member",
+      "source": "persona-holdout",
+      "utterance": "search members list for Patel"
+    },
+    {
+      "expected": "Library/find_member",
+      "reason": "near a seed or trained row of Library/find_member (ratio 0.92)",
+      "source": "hand-written",
+      "utterance": "search the members for Mia"
+    },
+    {
+      "expected": "Library/list_branches",
+      "reason": "equals a seed or trained row of Library/list_branches",
+      "source": "persona-holdout",
+      "utterance": "list all the library locations"
+    },
+    {
+      "expected": "Library/list_branches",
+      "reason": "equals a seed or trained row of Library/list_branches",
+      "source": "persona-holdout",
+      "utterance": "list every location this library calls home"
+    },
+    {
+      "expected": "Library/list_branches",
+      "reason": "equals a seed or trained row of Library/list_branches",
+      "source": "persona-holdout",
+      "utterance": "name all the library sites for me"
+    },
+    {
+      "expected": "Library/list_branches",
+      "reason": "equals a seed or trained row of Library/list_branches",
+      "source": "persona-holdout",
+      "utterance": "name every branch available"
+    },
+    {
+      "expected": "Library/list_branches",
+      "reason": "equals a seed or trained row of Library/list_branches",
+      "source": "persona-holdout",
+      "utterance": "what branches does the library have"
+    },
+    {
+      "expected": "Library/list_branches",
+      "reason": "equals a seed or trained row of Library/list_branches",
+      "source": "persona-holdout",
+      "utterance": "what branches does the library have, man?"
+    },
+    {
+      "expected": "Library/list_branches",
+      "reason": "equals a seed or trained row of Library/list_branches",
+      "source": "persona-holdout",
+      "utterance": "which locations make up the whole library?"
+    },
+    {
+      "expected": "Library/list_branches",
+      "reason": "equals a seed or trained row of Library/list_branches",
+      "source": "persona-holdout",
+      "utterance": "which sites make up the library network"
+    },
+    {
+      "expected": "Library/open_book",
+      "reason": "equals a seed or trained row of Library/open_book",
+      "source": "persona-holdout",
+      "utterance": "I want to act on b4 so select it"
+    },
+    {
+      "expected": "Library/open_book",
+      "reason": "equals a seed or trained row of Library/open_book",
+      "source": "persona-holdout",
+      "utterance": "go to the Dune book"
+    },
+    {
+      "expected": "Library/open_book",
+      "reason": "equals a seed or trained row of Library/open_book",
+      "source": "persona-holdout",
+      "utterance": "load uid b2 as the open book"
+    },
+    {
+      "expected": "Library/open_book",
+      "reason": "equals a seed or trained row of Library/open_book",
+      "source": "persona-holdout",
+      "utterance": "make b3 the current one"
+    },
+    {
+      "expected": "Library/open_book",
+      "reason": "equals a seed or trained row of Library/open_book",
+      "source": "persona-holdout",
+      "utterance": "open b1 now"
+    },
+    {
+      "expected": "Library/open_book",
+      "reason": "near a seed or trained row of Library/open_book (ratio 0.92)",
+      "source": "hand-written",
+      "utterance": "open book b7"
+    },
+    {
+      "expected": "Library/open_member",
+      "reason": "equals a seed or trained row of Library/open_member",
+      "source": "persona-holdout",
+      "utterance": "I want to go to Raj Patel's record now"
+    },
+    {
+      "expected": "Library/open_member",
+      "reason": "equals a seed or trained row of Library/open_member",
+      "source": "persona-holdout",
+      "utterance": "load uid m1 as the open patron"
+    },
+    {
+      "expected": "Library/open_member",
+      "reason": "equals a seed or trained row of Library/open_member",
+      "source": "persona-holdout",
+      "utterance": "open member m3 as the current record"
+    },
+    {
+      "expected": "Library/open_member",
+      "reason": "equals a seed or trained row of Library/open_member",
+      "source": "persona-holdout",
+      "utterance": "pull up m2 so I can work on their account"
+    },
+    {
+      "expected": "Library/open_member",
+      "reason": "equals a seed or trained row of Library/open_member",
+      "source": "persona-holdout",
+      "utterance": "set Mia Chen's account as the active record"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "reason": "equals a seed or trained row of Member/list_member_loans",
+      "source": "persona-holdout",
+      "utterance": "give me every title they have on loan, please"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "reason": "equals a seed or trained row of Member/list_member_loans",
+      "source": "persona-holdout",
+      "utterance": "how many books does this member have out right now"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "reason": "equals a seed or trained row of Member/list_member_loans",
+      "source": "persona-holdout",
+      "utterance": "show me the full list of loans for this patron, with due dates"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "reason": "equals a seed or trained row of Member/list_member_loans",
+      "source": "persona-holdout",
+      "utterance": "what titles does this member currently have checked out"
+    },
+    {
+      "expected": "Member/list_member_loans",
+      "reason": "equals a seed or trained row of Member/list_member_loans",
+      "source": "persona-holdout",
+      "utterance": "which books are currently borrowed by this member and when are they due"
+    },
+    {
+      "expected": "Record/add_note",
+      "reason": "equals a seed or trained row of Record/add_note",
+      "source": "persona-holdout",
+      "utterance": "Add a note here: the spine is cracked, I noticed it straight away"
+    },
+    {
+      "expected": "Record/add_note",
+      "reason": "equals a seed or trained row of Record/add_note",
+      "source": "persona-holdout",
+      "utterance": "Append to the notes: reserved for the reading group, if that's quite alright"
+    },
+    {
+      "expected": "Record/add_note",
+      "reason": "equals a seed or trained row of Record/add_note",
+      "source": "persona-holdout",
+      "utterance": "Jot down that this copy needs a good cleaning, dear"
+    },
+    {
+      "expected": "Record/add_note",
+      "reason": "equals a seed or trained row of Record/add_note",
+      "source": "persona-holdout",
+      "utterance": "Log a remark that the member returned it late twice, I must say"
+    },
+    {
+      "expected": "Record/add_note",
+      "reason": "equals a seed or trained row of Record/add_note",
+      "source": "persona-holdout",
+      "utterance": "Put a note on this record saying the cover is torn, such a shame"
+    },
+    {
+      "expected": "Record/show_notes",
+      "reason": "equals a seed or trained row of Record/show_notes",
+      "source": "persona-holdout",
+      "utterance": "are there any remarks written about this one"
+    },
+    {
+      "expected": "Record/show_notes",
+      "reason": "equals a seed or trained row of Record/show_notes",
+      "source": "persona-holdout",
+      "utterance": "how many notes does this record hold about my fees"
+    },
+    {
+      "expected": "Record/show_notes",
+      "reason": "equals a seed or trained row of Record/show_notes",
+      "source": "persona-holdout",
+      "utterance": "is there anything here written about this account"
+    },
+    {
+      "expected": "Record/show_notes",
+      "reason": "equals a seed or trained row of Record/show_notes",
+      "source": "persona-holdout",
+      "utterance": "list the note history on this record, oldest first"
+    },
+    {
+      "expected": "Record/show_notes",
+      "reason": "equals a seed or trained row of Record/show_notes",
+      "source": "persona-holdout",
+      "utterance": "show me any notes on this account record"
+    },
+    {
+      "expected": "Record/show_notes",
+      "reason": "near a seed or trained row of Record/show_notes (ratio 0.92)",
+      "source": "hand-written",
+      "utterance": "what notes are on this"
+    },
+    {
+      "expected": "Record/show_notes",
+      "reason": "near a seed or trained row of Record/show_notes (ratio 0.90)",
+      "source": "hand-written",
+      "utterance": "read me the notes on this record"
+    }
+  ],
+  "notes": [
+    "persona split is unaligned with generation batches (persona_batches not read)",
+    "persona split: Holdout is NOT batch-aligned (no generation batch composition was supplied), so a held-out persona may share a completion with a training persona. Treat the resulting routing number as optimistic.",
+    "persona split: Dropped 1 held-out utterance(s) that were also produced by a training persona; they would have measured memorisation.",
+    "persona split: 4 label(s) have no held-out rows and are therefore unmeasured on the routing axis: Book/list_loans, Library/find_record, Library/member_report, Library/overdue_summary",
+    "dedupe (ratio >= 0.9, casefold, whitespace collapsed): dropped 96 held-out candidate(s) before filling: 2 equals a seed or trained row of Book/loan_report; 5 equals a seed or trained row of Book/shelf_report; 10 equals a seed or trained row of Book/show_book; 5 equals a seed or trained row of Library/author_books; 4 equals a seed or trained row of Library/book_by_title; 10 equals a seed or trained row of Library/book_loans; 5 equals a seed or trained row of Library/count_books; 4 equals a seed or trained row of Library/count_overdue; 5 equals a seed or trained row of Library/find_book; 3 equals a seed or trained row of Library/find_member; 8 equals a seed or trained row of Library/list_branches; 5 equals a seed or trained row of Library/note_member; 5 equals a seed or trained row of Library/open_book; 5 equals a seed or trained row of Library/open_member; 5 equals a seed or trained row of Member/list_member_loans; 5 equals a seed or trained row of Record/add_note; 5 equals a seed or trained row of Record/show_notes; 1 near a seed or trained row of Library/book_by_title; 1 near a seed or trained row of Library/find_member; 1 near a seed or trained row of Library/open_book; 2 near a seed or trained row of Record/show_notes",
+    "Library/book_loans calls planning command Library/book_by_title: it is not scored as a callee",
+    "9 target(s) short of 8 heldout requests: Library/book_by_title, Book/show_book, Library/count_overdue, Library/find_book, Library/find_member, Library/list_branches, Library/open_book, Record/add_note, Record/show_notes"
+  ],
+  "per_command": 8,
+  "planning_commands": [
+    "Book/loan_report",
+    "Book/shelf_report",
+    "Library/author_books",
+    "Library/book_by_title",
+    "Library/book_loans",
+    "Library/count_books",
+    "Library/find_record",
+    "Library/member_report",
+    "Library/note_member",
+    "Library/overdue_summary"
+  ],
+  "schema": 1,
+  "targets": {
+    "Book/list_loans": {
+      "callers": [
+        "Book/loan_report",
+        "Book/shelf_report",
+        "Library/book_loans"
+      ],
+      "heldout": 8,
+      "in_sample": 9,
+      "kind": "callee",
+      "related": "Book/loan_report",
+      "shortfall": 0
+    },
+    "Book/loan_report": {
+      "callees": [
+        "Book/list_loans"
+      ],
+      "heldout": 8,
+      "in_sample": 9,
+      "kind": "planning",
+      "related": "Book/loan_report",
+      "shortfall": 0
+    },
+    "Book/shelf_report": {
+      "callees": [
+        "Book/list_loans",
+        "Book/show_book"
+      ],
+      "heldout": 8,
+      "in_sample": 9,
+      "kind": "planning",
+      "related": "Book/shelf_report",
+      "shortfall": 0
+    },
+    "Book/show_book": {
+      "callers": [
+        "Book/shelf_report"
+      ],
+      "heldout": 7,
+      "in_sample": 9,
+      "kind": "callee",
+      "related": "Book/shelf_report",
+      "shortfall": 1
+    },
+    "Library/author_books": {
+      "callees": [
+        "Library/find_book",
+        "Library/open_book"
+      ],
+      "heldout": 8,
+      "in_sample": 9,
+      "kind": "planning",
+      "related": "Library/author_books",
+      "shortfall": 0
+    },
+    "Library/book_by_title": {
+      "callees": [
+        "Library/find_book",
+        "Library/open_book"
+      ],
+      "heldout": 7,
+      "in_sample": 9,
+      "kind": "planning",
+      "related": "Library/book_by_title",
+      "shortfall": 1
+    },
+    "Library/book_loans": {
+      "callees": [
+        "Book/list_loans"
+      ],
+      "heldout": 8,
+      "in_sample": 9,
+      "kind": "planning",
+      "related": "Library/book_loans",
+      "shortfall": 0
+    },
+    "Library/count_books": {
+      "callees": [
+        "Library/find_book"
+      ],
+      "heldout": 8,
+      "in_sample": 9,
+      "kind": "planning",
+      "related": "Library/count_books",
+      "shortfall": 0
+    },
+    "Library/count_overdue": {
+      "callers": [
+        "Library/overdue_summary"
+      ],
+      "heldout": 5,
+      "in_sample": 9,
+      "kind": "callee",
+      "related": "Library/overdue_summary",
+      "shortfall": 3
+    },
+    "Library/find_book": {
+      "callers": [
+        "Library/author_books",
+        "Library/book_by_title",
+        "Library/count_books",
+        "Library/find_record"
+      ],
+      "heldout": 3,
+      "in_sample": 9,
+      "kind": "callee",
+      "related": "Library/author_books",
+      "shortfall": 5
+    },
+    "Library/find_member": {
+      "callers": [
+        "Library/find_record",
+        "Library/member_report",
+        "Library/note_member"
+      ],
+      "heldout": 7,
+      "in_sample": 9,
+      "kind": "callee",
+      "related": "Library/find_record",
+      "shortfall": 1
+    },
+    "Library/find_record": {
+      "callees": [
+        "Library/find_book",
+        "Library/find_member"
+      ],
+      "heldout": 8,
+      "in_sample": 9,
+      "kind": "planning",
+      "related": "Library/find_record",
+      "shortfall": 0
+    },
+    "Library/list_branches": {
+      "callers": [
+        "Library/overdue_summary"
+      ],
+      "heldout": 7,
+      "in_sample": 9,
+      "kind": "callee",
+      "related": "Library/overdue_summary",
+      "shortfall": 1
+    },
+    "Library/member_report": {
+      "callees": [
+        "Library/find_member",
+        "Library/open_member",
+        "Member/list_member_loans",
+        "Record/show_notes"
+      ],
+      "heldout": 8,
+      "in_sample": 9,
+      "kind": "planning",
+      "related": "Library/member_report",
+      "shortfall": 0
+    },
+    "Library/note_member": {
+      "callees": [
+        "Library/find_member",
+        "Library/open_member",
+        "Record/add_note"
+      ],
+      "heldout": 8,
+      "in_sample": 9,
+      "kind": "planning",
+      "related": "Library/note_member",
+      "shortfall": 0
+    },
+    "Library/open_book": {
+      "callers": [
+        "Library/author_books",
+        "Library/book_by_title"
+      ],
+      "heldout": 3,
+      "in_sample": 9,
+      "kind": "callee",
+      "related": "Library/author_books",
+      "shortfall": 5
+    },
+    "Library/open_member": {
+      "callers": [
+        "Library/member_report",
+        "Library/note_member"
+      ],
+      "heldout": 8,
+      "in_sample": 9,
+      "kind": "callee",
+      "related": "Library/member_report",
+      "shortfall": 0
+    },
+    "Library/overdue_summary": {
+      "callees": [
+        "Library/count_overdue",
+        "Library/list_branches"
+      ],
+      "heldout": 8,
+      "in_sample": 9,
+      "kind": "planning",
+      "related": "Library/overdue_summary",
+      "shortfall": 0
+    },
+    "Member/list_member_loans": {
+      "callers": [
+        "Library/member_report"
+      ],
+      "heldout": 8,
+      "in_sample": 9,
+      "kind": "callee",
+      "related": "Library/member_report",
+      "shortfall": 0
+    },
+    "Record/add_note": {
+      "callers": [
+        "Library/note_member"
+      ],
+      "heldout": 5,
+      "in_sample": 9,
+      "kind": "callee",
+      "related": "Library/note_member",
+      "shortfall": 3
+    },
+    "Record/show_notes": {
+      "callers": [
+        "Library/member_report"
+      ],
+      "heldout": 3,
+      "in_sample": 9,
+      "kind": "callee",
+      "related": "Library/member_report",
+      "shortfall": 5
+    }
+  },
+  "workflow": "library"
+}

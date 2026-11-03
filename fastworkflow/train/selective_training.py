@@ -529,23 +529,30 @@ def build_context_maps(
     context_commands: dict[str, set[str]] = {}
     unresolved: dict[str, list[str]] = {}
 
+    # Lazy: model_pipeline_training imports torch, and this module must not.
+    from fastworkflow.model_pipeline_training import planning_labels_in_layout
+
     for context_name in context_names:
         if scoped:
             # EXPERIMENT (Phase 9 step 3): under the scoped layout a head's label space is its
             # own "/" list, so the signature records exactly what the head trains.
-            context_commands[context_name] = own_command_names(crd, context_name) | core_commands
-            continue
-        try:
-            effective = set(context_model.commands(context_name))
-        except Exception as exc:  # noqa: BLE001
-            # `crd.contexts` is the trainer's own source for the label space, so it is
-            # the right fallback -- but the disagreement itself is reported, because a
-            # context the model cannot resolve is a context whose closure we cannot
-            # trust.
-            effective = set(crd.contexts.get(context_name, []))
-            unresolved.setdefault(context_name, []).append(
-                f"context model could not resolve commands: {exc}")
-        context_commands[context_name] = effective | core_commands
+            effective = own_command_names(crd, context_name)
+        else:
+            try:
+                effective = set(context_model.commands(context_name))
+            except Exception as exc:  # noqa: BLE001
+                # `crd.contexts` is the trainer's own source for the label space, so it is
+                # the right fallback -- but the disagreement itself is reported, because a
+                # context the model cannot resolve is a context whose closure we cannot
+                # trust.
+                effective = set(crd.contexts.get(context_name, []))
+                unresolved.setdefault(context_name, []).append(
+                    f"context model could not resolve commands: {exc}")
+        # Phase 10 step 1: under the production layout a planning command is a label of the heads
+        # on its lookup path. The context model never lists them, so they are added here, where
+        # the signature reads the label space.
+        context_commands[context_name] = (
+            effective | core_commands | planning_labels_in_layout(context_name, crd))
 
     return context_commands, unresolved
 

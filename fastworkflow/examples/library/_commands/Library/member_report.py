@@ -19,8 +19,16 @@ from .open_member import Signature as OpenMember
 class Signature:
     """Show a member's loans, and the notes on their record when asked. One member per call."""
 
-    plain_utterances = ["tell me about Raj Patel", "what has Ann Lee borrowed",
-                        "any notes on Mia Chen's record"]
+    plain_utterances = [
+        "tell me about Raj Patel",
+        "what has Ann Lee borrowed",
+        "any notes on Mia Chen's record",
+        "give me the summary for Ann Lee, loans and notes included",
+        "how many books does Raj Patel have out, and what does his record say",
+        "report on Mia Chen's account",
+        "what is on Ann Lee's record, including her loans",
+        "full picture for Mia Chen please",
+    ]
 
     class Input(BaseModel):
         member: str = Field(description="the member's name",

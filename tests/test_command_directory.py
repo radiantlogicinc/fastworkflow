@@ -45,6 +45,11 @@ class TestCommandDirectory:
             "IntentDetection/what_can_i_do",
             "IntentDetection/reset_context",
             "IntentDetection/what_is_current_context",
+            # Framework commands shipped with the review engine (fastworkflow/_framework_commands,
+            # fix-3rsq.10 / Phase 9-10 review_plan, review_subtasks, review_proposal).
+            "review_plan",
+            "review_subtasks",
+            "review_proposal",
         }
         # The commands are now stored with their context prefix for core commands
         assert command_keys == expected_commands

@@ -582,8 +582,8 @@ def test_missing_jev_key_logs_an_info_line_once_per_workflow_folder(tmp_path, ca
 
     # 3.9's INFO line; this library's planning commands have no verify field, so none is named.
     expected = (
-        f"{folder}: planning commands are not matched without JEV_API_KEY; "
-        "the text planner plans and may name them as steps."
+        f"{folder}: planning commands are matched by intent detection; without JEV_API_KEY, "
+        "Jev's planning-match candidates are off."
     )
     infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
     assert infos.count(expected) == 1
@@ -697,8 +697,8 @@ def test_the_jev_info_line_names_the_verify_fields_and_is_logged_once_per_folder
         workflow_agent._warn_missing_jev_key(folder)
         workflow_agent._warn_missing_jev_key(folder)
 
-    expected = (f"{folder}: planning commands are not matched without JEV_API_KEY; "
-                f"the text planner plans and may name them as steps; the verify checks of {RULE_CHECK}.loaned are off.")
+    expected = (f"{folder}: planning commands are matched by intent detection; without JEV_API_KEY, "
+                f"Jev's planning-match candidates and the verify checks of {RULE_CHECK}.loaned are off.")
     infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
     assert infos.count(expected) == 1
     assert not any(r.levelno >= logging.WARNING and "JEV_API_KEY" in r.getMessage()

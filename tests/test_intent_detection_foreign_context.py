@@ -613,20 +613,20 @@ def test_the_current_context_is_never_its_own_foreign_owner(inventory_predictor)
 # The hint at the end of the walk (owner-approved scope addition, 2026-09-15)
 # ---------------------------------------------------------------------------
 
-def _declare_enter_command(workflow_path, context_name: str, declaration: str) -> None:
-    """Write an `enter_command` declaration into a COPY of the test workflow.
+def _declare_descends_to(workflow_path, command_file: str, context_name: str) -> None:
+    """Write `descends_to = "<Context>"` on a COPY's command, the one that enters the context.
 
-    The copy is what the fixture built in tmp_path, so the real
-    `get_context_class` loads a real module with a real class attribute and
-    nothing here stubs the lookup being tested. The shared fixture on disk is
-    untouched.
+    Phase 10 (design 3.15): `enter_command` on the context class is a load error, so the
+    entering command declares the move itself. The copy is what the fixture built in tmp_path,
+    so the real routing and navigation read a real class attribute, and nothing here stubs the
+    lookup being tested. The shared fixture on disk is untouched.
     """
-    path = workflow_path / "_commands" / context_name / f"_{context_name}.py"
+    path = workflow_path / "_commands" / command_file
     source = path.read_text()
-    marker = "class Context:\n"
+    marker = "class ResponseGenerator:\n"
     assert marker in source, path
     path.write_text(source.replace(
-        marker, f"class Context:\n    enter_command = {declaration!r}\n", 1))
+        marker, f'class ResponseGenerator:\n    descends_to = "{context_name}"\n', 1))
 
 
 class TestTheHintTextItself:
@@ -764,10 +764,13 @@ class TestTheHintIsComposedAndRecorded:
 
 
 class TestTheDeclaredEnteringCommandIsRead:
-    """The declaration is read off the context's own callback class."""
+    """The entering command is read from the descend edges (`descends_to` on the command)."""
 
     @pytest.fixture
     def declared_workflows(self, tmp_path):
+        # The command-class cache is keyed by command name alone, so a class another copy
+        # loaded (without descends_to) would answer for this one.
+        fastworkflow.RoutingRegistry.clear_registry()
         workflow_path = tmp_path / "todo_list_workflow"
         shutil.copytree(
             os.path.join(os.path.dirname(__file__), "todo_list_workflow"),
@@ -777,8 +780,7 @@ class TestTheDeclaredEnteringCommandIsRead:
                 "__pycache__",
             ),
         )
-        _declare_enter_command(workflow_path, "TodoList",
-                               "get_todo_list <todo_list_id>")
+        _declare_descends_to(workflow_path, "TodoListManager/get_todo_list.py", "TodoList")
         app_workflow = fastworkflow.Workflow.create(
             workflow_folderpath=str(workflow_path),
             workflow_id_str=f"enter-command-{tmp_path.name}",
@@ -800,14 +802,13 @@ class TestTheDeclaredEnteringCommandIsRead:
             intent_detection, "CommandRouter", _refusing_router([]))
         predictor = CommandNamePrediction(cme_workflow)
 
-        assert predictor.enter_commands_for("TodoList") == [
-            "get_todo_list <todo_list_id>"]
+        assert predictor.enter_commands_for("TodoList") == ["get_todo_list <id>"]
         output = predictor.predict(
             "TodoItem", "mark_completed", INTENT_DETECTION)
 
         assert output.command_name is None
         assert "TodoList context" in output.routing_hint
-        assert "get_todo_list <todo_list_id>" in output.routing_hint
+        assert "get_todo_list <id>" in output.routing_hint
 
     def test_an_undeclared_context_resolves_to_no_entering_command(
         self, declared_workflows, setup_test_environment
@@ -1018,8 +1019,8 @@ def test_a_foreign_name_in_the_misunderstanding_reply_is_declined_with_its_owner
 
 class TestTheHintPathOnARealWorkflow:
     """The real CME wildcard command, executor and `you_misunderstood`, over a
-    copy of `tests/todo_list_workflow` whose TodoList declares its entering
-    command. Only the classifier is replaced; no LLM is called and no trained
+    copy of `tests/todo_list_workflow` whose get_todo_list declares `descends_to`
+    TodoList. Only the classifier is replaced; no LLM is called and no trained
     model is read.
 
     From TodoListManager the chain is `TodoListManager -> *`, and
@@ -1028,6 +1029,8 @@ class TestTheHintPathOnARealWorkflow:
 
     @pytest.fixture
     def workflows(self, tmp_path):
+        # See declared_workflows: the command-class cache is keyed by command name alone.
+        fastworkflow.RoutingRegistry.clear_registry()
         workflow_path = tmp_path / "todo_list_workflow"
         shutil.copytree(
             os.path.join(os.path.dirname(__file__), "todo_list_workflow"),
@@ -1037,8 +1040,7 @@ class TestTheHintPathOnARealWorkflow:
                 "__pycache__",
             ),
         )
-        _declare_enter_command(workflow_path, "TodoList",
-                               "get_todo_list <todo_list_id>")
+        _declare_descends_to(workflow_path, "TodoListManager/get_todo_list.py", "TodoList")
         app_workflow = fastworkflow.Workflow.create(
             workflow_folderpath=str(workflow_path),
             workflow_id_str=f"hint-path-{tmp_path.name}",
@@ -1066,7 +1068,7 @@ class TestTheHintPathOnARealWorkflow:
         assert output.success is False
         assert output.command_handled is True
         assert "'get_properties' is a command of the TodoItem, TodoList contexts" in response
-        assert "'get_todo_list <todo_list_id>'" in response
+        assert "'get_todo_list <id>'" in response
         assert "I couldn't determine" not in response
 
         # Doing what the hint says: the next message is the entering command,
@@ -1122,7 +1124,7 @@ class TestTheHintPathOnARealWorkflow:
         assert output.success is False
         assert output.command_handled is True
         assert "'get_properties' is a command of the TodoItem, TodoList contexts" in response
-        assert "Enter TodoList with: 'get_todo_list <todo_list_id>'." in response
+        assert "Enter TodoList with: 'get_todo_list <id>'." in response
         assert cme_workflow.context["NLU_Pipeline_Stage"] == INTENT_DETECTION
         assert "command" not in cme_workflow.context
 

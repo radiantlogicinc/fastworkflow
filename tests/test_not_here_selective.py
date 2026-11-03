@@ -182,11 +182,13 @@ def test_the_sparse_sources_are_every_foreign_command_and_nothing_else(tmp_path)
 
 # ---------------------------------------------------------------- planner, library (planning commands)
 
-def test_a_planning_seed_edit_that_no_head_recorded_dirties_no_head(tmp_path):
-    """Design 2.50: a planning command has no own head, so only a recorded sample can dirty one.
+def test_a_planning_seed_edit_dirties_only_the_head_that_labels_it(tmp_path):
+    """Design 2.50, Phase 10 step 1: a planning command is a label of the heads on its lookup path.
 
-    The edit adds a seed that no head recorded, so every head's sample still holds and every head
-    carries forward. The shipped arm behaves the same way.
+    ``Book/loan_report`` is a label of the Book head, so its seed edit changes that head's training
+    rows and only Book retrains. Every other head holds it as a not-here sample, and the edit adds a
+    seed that no head recorded, so those heads' samples still hold and they carry forward. The
+    shipped arm behaves the same way.
     """
     workflow = _copy(tmp_path, LIBRARY, "library_planning")
     sparse_version = _publish_baseline(workflow, arm="sparse_8")
@@ -194,12 +196,14 @@ def test_a_planning_seed_edit_that_no_head_recorded_dirties_no_head(tmp_path):
     _edit_seed(planning_file)
 
     plan = _plan(workflow, sparse_version, arm="sparse_8")
-    assert plan.contexts_to_train == []
+    assert plan.contexts_to_train == ["Book"]
+    assert sorted(plan.contexts_carried_forward) == ["*", "Library", "Member", "Record"]
 
     shipped_workflow = _copy(tmp_path, LIBRARY, "library_planning_shipped")
     shipped_version = _publish_baseline(shipped_workflow, arm="sparse_1")
     _edit_seed(Path(shipped_workflow) / "_commands" / "Book" / "loan_report.py")
-    assert _plan(shipped_workflow, shipped_version, arm="sparse_1").contexts_to_train == []
+    shipped = _plan(shipped_workflow, shipped_version, arm="sparse_1")
+    assert shipped.contexts_to_train == ["Book"]
 
 
 # ---------------------------------------------------------------- publish-time check

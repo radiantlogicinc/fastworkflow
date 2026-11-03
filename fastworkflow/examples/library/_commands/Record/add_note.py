@@ -12,7 +12,16 @@ class Signature:
     class Output(BaseModel):
         total: int = Field(description="how many notes the record holds now")
 
-    plain_utterances = ["add a note: card renewed", "note that the cover is torn"]
+    plain_utterances = [
+        "add a note: card renewed",
+        "note that the cover is torn",
+        "record a note that the spine is cracked",
+        "append this to the notes: returned late twice",
+        "put a note on this record saying the binding is loose",
+        "jot down that the member asked for large print",
+        "add a remark: the copy needs cleaning",
+        "log a note here: reserved for the reading group",
+    ]
 
 
 class ResponseGenerator:

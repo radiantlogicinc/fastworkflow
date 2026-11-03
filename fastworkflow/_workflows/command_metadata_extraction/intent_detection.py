@@ -22,17 +22,9 @@ from fastworkflow.model_pipeline_training import (
     CommandRouter,
     GLOBAL_CONTEXT_FOLDER,
 )
-# `entry_declarations` owns the entry-command declaration contract: one
-# canonical source for "which command enters this context", read here by the
-# foreign-context hint. Nothing in the routing definition or the context model
-# records the fact, and inferring it from a command's NAME would bake one
-# workflow's spelling conventions into the framework.
-# `CONTEXT_ENTER_COMMAND_ATTRS` is re-exported because this module is where the
-# foreign-context callers already look for it.
-from fastworkflow.entry_declarations import (
-    CONTEXT_ENTER_COMMAND_ATTRS,
-    declared_entry_commands,
-)
+# The commands that enter a context are read from the descend edges (`descends_to`
+# on each command, design 3.15), the one navigation declaration.
+from fastworkflow.context_navigation import entering_commands
 from fastworkflow.nlu_labels import (
     PARAMETER_VALUE_LABEL, is_escalation, is_non_routable, label_of,
 )
@@ -125,8 +117,8 @@ def foreign_context_hint(
     the workflow's state on the strength of a guess about what was meant.
 
     Generic by construction. The owning contexts come from the routing
-    definition, and the entering command only from a context's own
-    `enter_command` declaration -- never from the shape of a command's name.
+    definition, and the entering command only from a command's own
+    `descends_to` declaration -- never from the shape of a command's name.
 
     *enter_commands* is keyed by owning context. With one owner the entering
     commands are simply listed; with several, each is named beside the context
@@ -497,16 +489,14 @@ class CommandNamePrediction:
     def enter_commands_for(self, context_name: str) -> list[str]:
         """The command(s) a workflow declares as entering *context_name*.
 
-        Read through `entry_declarations.declared_entry_commands`, which owns the
-        declaration contract; the context's own callback class is the only
-        place the fact is recorded. Empty when the workflow declares nothing,
-        when the context has no callback class, or when loading it fails -- a
-        hint that names the context alone is worth more than a failed turn, so
-        nothing here is allowed to raise.
+        Read from the descend edges (`context_navigation.entering_commands`): each
+        command whose `descends_to` names the context, with the values it needs.
+        Empty when no command declares it. Nothing here is allowed to raise: a hint
+        that names the context alone is worth more than a failed turn.
         """
         if context_name in self._enter_commands:
             return self._enter_commands[context_name]
-        declared = declared_entry_commands(self.app_workflow_folderpath, context_name)
+        declared = entering_commands(self.app_workflow_folderpath, context_name)
         self._enter_commands[context_name] = declared
         return declared
 

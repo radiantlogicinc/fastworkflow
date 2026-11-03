@@ -500,10 +500,10 @@ def _load_command_directory(
     through `perform_action` and is deliberately not a classifier label.
 
     The third set is the planning commands (`CommandMetadata.is_planning`, serialised
-    as the same flag). `model_pipeline_training.trained_command_labels` drops them from
-    the label space, so they never receive training rows and must not be listed as
-    untrained. They are kept out of the second map as well, so no reader of this module
-    can rediscover them as trainable labels.
+    as the same flag). They are head labels of the heads on their lookup path (Phase 10
+    step 1), but this report does not list them as rows: their training is not a
+    per-command provenance row. They are kept out of the second map as well, so no reader
+    of this module can rediscover them as trainable execution labels.
     """
     data = _read_json(
         command_info_dir(workflow_folderpath) / COMMAND_DIRECTORY_FILENAME,
@@ -520,6 +520,9 @@ def _load_command_directory(
     if isinstance(metadata, dict):
         for name, entry in metadata.items():
             if not isinstance(entry, dict):
+                continue
+            if entry.get("framework"):
+                # Framework machinery (fastworkflow/_framework_commands) is not trained, reported or gated.
                 continue
             if entry.get("is_planning"):
                 planning.add(str(name))
@@ -742,7 +745,7 @@ def build_report(
     # that generated utterances but vanished from routing is as interesting as the
     # reverse, and silently reporting the intersection would hide both.
     context_commands = {command for _context, command in context_training}
-    # Planning commands are not labels (see `_load_command_directory`), so they are
+    # Planning commands are not reported rows (see `_load_command_directory`), so they are
     # subtracted from the union here as well: a stray provenance or routing entry for one
     # must not turn it back into a "missing" row.
     all_commands = (

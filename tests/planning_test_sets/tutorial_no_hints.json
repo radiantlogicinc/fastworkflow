@@ -1,0 +1,192 @@
+{
+  "cases": [
+    {
+      "utterance": "list the books by Ursula Le Guin",
+      "expected": "author_books"
+    },
+    {
+      "utterance": "what titles did Octavia Butler write",
+      "expected": "author_books"
+    },
+    {
+      "utterance": "show every book by this author in the library",
+      "expected": "author_books"
+    },
+    {
+      "utterance": "who wrote Dune",
+      "expected": "book_by_title"
+    },
+    {
+      "utterance": "how many copies of Foundation do we own",
+      "expected": "book_by_title"
+    },
+    {
+      "utterance": "tell me about the book Emma",
+      "expected": "book_by_title"
+    },
+    {
+      "utterance": "give me the details of this book",
+      "expected": "book_details"
+    },
+    {
+      "utterance": "everything the library knows about this title",
+      "expected": "book_details"
+    },
+    {
+      "utterance": "full record for the book",
+      "expected": "book_details"
+    },
+    {
+      "utterance": "who has Dune on loan",
+      "expected": "book_loans"
+    },
+    {
+      "utterance": "is Emma checked out and to whom",
+      "expected": "book_loans"
+    },
+    {
+      "utterance": "which members are holding Foundation",
+      "expected": "book_loans"
+    },
+    {
+      "utterance": "give me the report on this book",
+      "expected": "book_report"
+    },
+    {
+      "utterance": "summarise the loans and shelf for Dune",
+      "expected": "book_report"
+    },
+    {
+      "utterance": "book report for Emma",
+      "expected": "book_report"
+    },
+    {
+      "utterance": "how many books have Dune in the title",
+      "expected": "count_books"
+    },
+    {
+      "utterance": "count books by Tolkien",
+      "expected": "count_books"
+    },
+    {
+      "utterance": "how many titles mention ocean",
+      "expected": "count_books"
+    },
+    {
+      "utterance": "find books about space",
+      "expected": "find_books"
+    },
+    {
+      "utterance": "search the catalogue for dragons",
+      "expected": "find_books"
+    },
+    {
+      "utterance": "look up books with Hobbit in the name",
+      "expected": "find_books"
+    },
+    {
+      "utterance": "is Jane a member or a book",
+      "expected": "find_record"
+    },
+    {
+      "utterance": "look up Jane Doe",
+      "expected": "find_record"
+    },
+    {
+      "utterance": "find the record named Dune",
+      "expected": "find_record"
+    },
+    {
+      "utterance": "list all the books",
+      "expected": "list_books"
+    },
+    {
+      "utterance": "show me the catalogue",
+      "expected": "list_books"
+    },
+    {
+      "utterance": "what books do we have",
+      "expected": "list_books"
+    },
+    {
+      "utterance": "what does Jane have on loan",
+      "expected": "member_loans"
+    },
+    {
+      "utterance": "list the loans for member Jane Doe",
+      "expected": "member_loans"
+    },
+    {
+      "utterance": "which books has Sam borrowed",
+      "expected": "member_loans"
+    },
+    {
+      "utterance": "how many loans are overdue",
+      "expected": "overdue_summary"
+    },
+    {
+      "utterance": "summarise the overdue books across branches",
+      "expected": "overdue_summary"
+    },
+    {
+      "utterance": "overdue report for the north branch",
+      "expected": "overdue_summary"
+    },
+    {
+      "utterance": "find the book called Emma",
+      "expected": "find_book"
+    },
+    {
+      "utterance": "look for a book named Dune",
+      "expected": "find_book"
+    },
+    {
+      "utterance": "show me the book with uid b7",
+      "expected": "show_book"
+    },
+    {
+      "utterance": "display book b12",
+      "expected": "show_book"
+    },
+    {
+      "utterance": "list the loans for this book",
+      "expected": "list_loans"
+    },
+    {
+      "utterance": "show all loans of this title",
+      "expected": "list_loans"
+    },
+    {
+      "utterance": "find member Jane",
+      "expected": "find_member"
+    },
+    {
+      "utterance": "look up the member named Sam",
+      "expected": "find_member"
+    },
+    {
+      "utterance": "list loans for member m1",
+      "expected": "list_member_loans"
+    },
+    {
+      "utterance": "what loans does this member have",
+      "expected": "list_member_loans"
+    },
+    {
+      "utterance": "count overdue loans at the central branch",
+      "expected": "count_overdue"
+    },
+    {
+      "utterance": "how many loans are overdue",
+      "expected": "count_overdue"
+    },
+    {
+      "utterance": "list the branches",
+      "expected": "list_branches"
+    },
+    {
+      "utterance": "which branches do we have",
+      "expected": "list_branches"
+    }
+  ]
+}

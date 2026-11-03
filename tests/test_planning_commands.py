@@ -25,6 +25,7 @@ from fastworkflow.context_navigation import home_contexts
 from fastworkflow.mcp_server import FastWorkflowMCPServer
 from fastworkflow.model_pipeline_training import trained_command_labels
 from fastworkflow.plan_frame import TURN_MAX_STEPS_ENV
+from fastworkflow.planning_needs_agent import planning_command_needs_agent, refusal_message
 from fastworkflow.utils.signatures import InputForParamExtraction
 from fastworkflow.workflow_agent import (
     _explicit_agent_command,
@@ -1031,7 +1032,7 @@ ASSISTANT_PLANNING_REFUSAL = (
 
 @pytest.fixture
 def planning_dispatch_library(tmp_path, initialized_fastworkflow):
-    """Library copy with ``Library/count_books``; real ``CommandExecutor`` dispatch."""
+    """Library copy with ``Library/count_books`` and ``Library/note_member``; real ``CommandExecutor`` dispatch."""
     from fastworkflow.command_metadata_api import CommandMetadataAPI
     from fastworkflow.command_routing import RoutingRegistry
     from fastworkflow.mcp_server import FastWorkflowMCPServer
@@ -1039,7 +1040,8 @@ def planning_dispatch_library(tmp_path, initialized_fastworkflow):
     from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
     folder = _library_workflow(
-        tmp_path, extra_commands=("_commands/Library/count_books.py",)
+        tmp_path, extra_commands=("_commands/Library/count_books.py",
+                                  "_commands/Library/note_member.py")
     )
     RoutingRegistry.clear_registry()
     RoutingRegistry.get_definition(folder, load_cached=False)
@@ -1064,19 +1066,27 @@ def planning_dispatch_library(tmp_path, initialized_fastworkflow):
 
 
 def test_assistant_mode_refuses_planning_command(planning_dispatch_library):
+    # Changed (fix-3rsq.10.8): count_books is mechanical, so assistant mode runs it (covered in
+    # test_assistant_mode_planning). A needs-agent command, note_member (a prose step and no
+    # __result__), is still refused, with its reasons.
     ctx = planning_dispatch_library.ctx
     ctx._cme_workflow.context["is_assistant_mode_command"] = True
-    out = CommandExecutor.invoke_command(ctx, "count_books how many")
+    out = CommandExecutor.invoke_command(ctx, "note_member Lee note=hello")
+    needs, reasons = planning_command_needs_agent(planning_dispatch_library.folder, "Library/note_member")
+    assert needs is True
     assert out.success is False
-    assert out.command_response.response == ASSISTANT_PLANNING_REFUSAL
+    assert out.command_response.response == refusal_message("Library/note_member", reasons)
 
 
 def test_slash_prefixed_refuses_planning_command(planning_dispatch_library):
+    # Changed (fix-3rsq.10.8): the slash form of a needs-agent command, note_member (count_books runs).
     ctx = planning_dispatch_library.ctx
-    ctx._prepare_message_routing("/count_books how many")
-    out = CommandExecutor.invoke_command(ctx, "/count_books how many")
+    ctx._prepare_message_routing("/note_member Lee note=hello")
+    out = CommandExecutor.invoke_command(ctx, "/note_member Lee note=hello")
+    needs, reasons = planning_command_needs_agent(planning_dispatch_library.folder, "Library/note_member")
+    assert needs is True
     assert out.success is False
-    assert out.command_response.response == ASSISTANT_PLANNING_REFUSAL
+    assert out.command_response.response == refusal_message("Library/note_member", reasons)
 
 
 def test_perform_action_refuses_planning_command(planning_dispatch_library):
@@ -1320,12 +1330,25 @@ def test_routing_contexts_keep_execution_commands_only(planning_catalog_library)
     assert "Library/book_loans" not in crd.contexts["Library"]
 
 
-def test_library_planning_commands_not_among_trained_labels(planning_catalog_library):
+def test_library_planning_commands_are_trained_labels_of_their_head(planning_catalog_library):
+    """Phase 10 step 1 (production): a planning command labels the heads on its lookup path."""
+    from fastworkflow.model_pipeline_training import (
+        PLANNING_HEADS_NOT_HERE,
+        experiment_planning_heads,
+        experiment_reserved_class_arm,
+    )
+
     crd = RoutingRegistry.get_definition(planning_catalog_library.folder, load_cached=False)
     labels = trained_command_labels("Library", crd)
     assert "Library/find_book" in labels
-    assert "Library/book_loans" not in labels
-    assert "Library/book_by_title" not in labels
+    assert "Library/book_loans" in labels
+    assert "Library/book_by_title" in labels
+    # the baseline arm keeps the pre-step-1 rule: planning commands are not head labels
+    with experiment_reserved_class_arm("sparse_1"), experiment_planning_heads(PLANNING_HEADS_NOT_HERE):
+        baseline = trained_command_labels("Library", crd)
+    assert "Library/find_book" in baseline
+    assert "Library/book_loans" not in baseline
+    assert "Library/book_by_title" not in baseline
 
 
 # ----------------------------------------------------------------------
@@ -1358,15 +1381,27 @@ def test_training_seed_collection_excludes_planning_commands(library_training_wo
     assert "Library/count_books" not in seeds
 
 
-def test_trained_command_labels_exclude_planning_commands(library_training_workflow):
+def test_trained_command_labels_hold_planning_commands_on_their_lookup_path(library_training_workflow):
+    """Phase 10 step 1 (production): Library takes its planning command, never the Book one."""
     from fastworkflow.command_routing import RoutingRegistry
-    from fastworkflow.model_pipeline_training import trained_command_labels
+    from fastworkflow.model_pipeline_training import (
+        PLANNING_HEADS_NOT_HERE,
+        experiment_planning_heads,
+        experiment_reserved_class_arm,
+        trained_command_labels,
+    )
 
     crd = RoutingRegistry.get_definition(library_training_workflow, load_cached=False)
     library_labels = trained_command_labels("Library", crd)
     assert "Library/find_book" in library_labels
-    assert "Library/count_books" not in library_labels
-    assert "Book/loan_report" not in library_labels
+    assert "Library/count_books" in library_labels
+    assert "Book/loan_report" not in library_labels  # Book's scope is not on Library's lookup path
+    # the baseline arm keeps the pre-step-1 rule
+    with experiment_reserved_class_arm("sparse_1"), experiment_planning_heads(PLANNING_HEADS_NOT_HERE):
+        baseline = trained_command_labels("Library", crd)
+    assert "Library/find_book" in baseline
+    assert "Library/count_books" not in baseline
+    assert "Book/loan_report" not in baseline
 
 
 def test_duplicate_capability_contexts_exclude_planning_commands(library_training_workflow):
@@ -1510,15 +1545,16 @@ def test_planning_command_parameter_fields_and_utterances_follow_the_planner_hin
     # A planning command's utterances come from its Signature, as an execution command's do, and
     # they reach the words the planner's catalog text is matched on.
     utterances = planning_commands.command_utterances(folder)
-    assert utterances["book_loans"] == ["who has borrowed Dune", "is anyone reading Emma right now"]
-    assert utterances["loan_report"] == ["who has this book", "when is it due back"]
+    assert utterances["book_loans"] == ["who has borrowed Dune", "is anyone reading Emma right now", "who is reading Persuasion at the moment", "which patrons have Dune Messiah out", "is anyone holding a copy of Emma", "names of everyone who borrowed Persuasion", "has anybody got Dune out, and until when", "who currently holds the title Dune Messiah"]
+    assert utterances["loan_report"] == ["who has this book", "when is it due back", "is this book out, and until when", "who is holding this one right now and what's the return date", "tell me who borrowed this book and when it comes back", "is this one on loan to anyone", "when will this copy be returned, and to whom", "who's got this book at the moment"]
     catalog = _what_can_i_do(planning_catalog_library.ctx)
     texts = planning_commands.command_texts(catalog, folder)
     desc_only = planning_commands.command_texts(catalog)
     # The hint is the union: the description's words (what it had before its utterances were read)
     # plus the words that recur in its texts. Utterances add words; they never take one away.
     assert desc_only["book_loans"] == "book given loan say title"
-    assert texts["book_loans"] == "book given loan say title"
+    assert texts["book_loans"] == ("anyone book borrowed dune emma given holding holds loan "
+                                   "messiah out persuasion reading say title")
     assert set(desc_only["book_loans"].split()) <= set(texts["book_loans"].split())
     # book_by_title's two utterances both say "Dune", so that word joins its hint.
     assert set(desc_only["book_by_title"].split()) <= set(texts["book_by_title"].split())

@@ -56,8 +56,30 @@ OWN_CANDIDATES = [
     "what are the details of this book",
 ]
 
-#: Phrasings the global head is not confident on (probed: it answers wildcard or is ambiguous).
-UNSURE = "when are you open"
+#: Candidate phrasings for the unsure path. The copy's global head is probed with each (see
+#: _unsure_phrasing): the one it is not confident on, and the Book head is not confident on either, so
+#: the walk ends at the Book head and never reaches parameter extraction (no model call).
+UNSURE_CANDIDATES = [
+    "when are you open",
+    "what is the weather like today",
+    "tell me something nice",
+    "can you do the thing with the stuff",
+    "how do I feel about rain",
+    "the quick brown fox jumps",
+]
+
+
+def _unsure_phrasing(cme, heads=("*", "Book")) -> str:
+    """A candidate that none of *heads* (the copy's real heads) is confident on, so it never reaches
+    parameter extraction."""
+    predictor = intent_detection.CommandNamePrediction(cme)
+    for phrasing in UNSURE_CANDIDATES:
+        if all(not (out.command_name and not out.error_msg)
+               for out in (predictor.predict(head, phrasing, NLUPipelineStage.INTENT_DETECTION)
+                           for head in heads)):
+            return phrasing
+    pytest.skip(f"no one of {len(UNSURE_CANDIDATES)} unsure candidates is unanswered by "
+                f"{', '.join(heads)} on this copy: nothing to route")
 
 
 #: Natural phrasings for the global command set_root_context (messaging_app_4), probed, not trusted.
@@ -215,9 +237,10 @@ def test_a_phrasing_the_global_head_is_unsure_about_falls_through_to_todays_flow
     """The global head answers ambiguous: its result is discarded, '*' is not asked again, and the
     current head and the climb are asked as today (Book, then its root Library)."""
     app, cme, library = library_on_a_book
+    unsure = _unsure_phrasing(cme)
     asked = _heads_asked(monkeypatch)
 
-    out = _route(cme, UNSURE)
+    out = _route(cme, unsure)
 
     # Observed on the copy: the Book head answers ambiguous, and the walk ends there, as it does
     # today (the climb to Library is not reached). '*' is asked once, first.
@@ -242,7 +265,7 @@ def test_without_a_trained_global_head_the_global_ask_is_skipped_silently(
     assert wildcard._global_head_trained(app) is False
     asked = _heads_asked(monkeypatch)
 
-    _route(cme, UNSURE)
+    _route(cme, _unsure_phrasing(cme, heads=("Book",)))
 
     assert "*" not in asked
     assert asked[0] == "Book"

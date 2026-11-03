@@ -11,8 +11,16 @@ from fastworkflow.planning import pick, run
 class Signature:
     """Add a note to a member's record."""
 
-    plain_utterances = ["note on Raj Patel's record that he prefers email reminders",
-                        "add a note to Ann Lee: card renewed"]
+    plain_utterances = [
+        "note on Raj Patel's record that he prefers email reminders",
+        "put a note on Ann Lee: card renewed",
+        "put on Mia Chen's record that she wants large print",
+        "add to Raj Patel's record: moved address",
+        "leave a note for Ann Lee saying her card is due for renewal",
+        "write a note about Mia Chen: prefers pickup at Riverside",
+        "record for Raj Patel that he asked for a call back",
+        "attach to Ann Lee's record a note about the damaged card",
+    ]
 
     class Input(BaseModel):
         member: str = Field(description="the member's name",

@@ -16,7 +16,16 @@ from .find_member import Signature as FindMember
 class Signature:
     """Say whether a book or a member goes by a name, and name each match."""
 
-    plain_utterances = ["do you have a book called Emma", "is there a member named Lee"]
+    plain_utterances = [
+        "do you have a book called Emma",
+        "is there a member named Lee",
+        "do we have any member called Patel",
+        "is there a book called Dune Messiah",
+        "does anyone go by the name Mia",
+        "is a title called Persuasion in the catalogue",
+        "is there a patron named Raj",
+        "check whether we have a book titled Dune and name the matches",
+    ]
 
     class Input(BaseModel):
         name: str = Field(description="the name to look for",

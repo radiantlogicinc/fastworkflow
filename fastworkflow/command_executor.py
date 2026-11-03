@@ -1,6 +1,13 @@
+import inspect
+import logging
+from contextlib import nullcontext
+
 import fastworkflow
+from pydantic import BaseModel
 from fastworkflow import tracing
+from fastworkflow import approval_binding
 from fastworkflow.command_interfaces import CommandExecutorInterface
+from fastworkflow.context_navigation import declared_descends_to
 
 from fastworkflow import Action, CommandOutput, ChatSession
 from fastworkflow.observability.execution_recorder import record_execution, recorder_for
@@ -13,13 +20,139 @@ from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.command_directory import CommandDirectory
 
 
-def call_response_generator(response_generator, *args):
-    """``response_generator(*args)``; a ``fastworkflow.Refused`` it raises is its answer:
-    a failed CommandOutput with the refusal's message."""
+def _generator_arguments(response_generator, args: tuple) -> tuple:
+    """The arguments a ``ResponseGenerator.__call__`` takes, out of ``(workflow, command, command_parameters)``.
+
+    Design 3.14: the executor always has the three, and passes ``command_parameters`` (the filled
+    ``Input``, or None for a command with no ``Input``) when ``__call__`` declares a third
+    positional parameter. A two-argument ``__call__`` is called without it, as it always was.
+    """
     try:
-        return response_generator(*args)
+        parameters = list(inspect.signature(response_generator.__call__).parameters.values())
+    except (TypeError, ValueError):
+        return args
+    if any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in parameters):
+        return args
+    takes = sum(
+        p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        for p in parameters
+    )
+    if len(args) == 3 and takes < 3:
+        return args[:2]
+    if len(args) == 2 and takes >= 3:
+        return (*args, None)
+    return args
+
+
+def _declared_output_model(response_generator_class) -> type | None:
+    """The command's own ``Signature.Output`` class, or None when its module declares none.
+
+    Read from the globals of the ``__call__`` that the class defines, so it does not depend on the
+    module being registered in ``sys.modules``.
+    """
+    call = getattr(response_generator_class, "__call__", None)
+    namespace = getattr(call, "__globals__", None) or {}
+    signature = namespace.get("Signature")
+    if signature is None:
+        signature = getattr(inspect.getmodule(response_generator_class), "Signature", None)
+    output = getattr(signature, "Output", None)
+    return output if inspect.isclass(output) and issubclass(output, BaseModel) else None
+
+
+def frame_command_result(result, *, command_name: str, output_model: type | None) -> CommandOutput:
+    """Wrap what a ``ResponseGenerator.__call__`` returned in a CommandOutput (design 3.14).
+
+    - a ``CommandOutput`` (shipped, not taught): as returned;
+    - a ``CommandResponse``: a CommandOutput around it, as returned (its own text, output, artifacts);
+    - a ``str``: the text of the response;
+    - the command's own ``Signature.Output``: ``response`` is the Output as JSON and ``output`` the
+      instance.
+
+    ``success`` stays the framework's: True, unless the command raised ``Refused`` (handled by
+    ``call_response_generator``) or the long form said otherwise. Any other value fails the call,
+    naming the command and the type it returned.
+    """
+    if isinstance(result, CommandOutput):
+        return result
+    if isinstance(result, fastworkflow.CommandResponse):
+        return CommandOutput(command_response=result)
+    if isinstance(result, str):
+        return CommandOutput(command_response=fastworkflow.CommandResponse(response=result))
+    if output_model is not None and type(result) is output_model:
+        return CommandOutput(
+            command_response=fastworkflow.CommandResponse(
+                response=result.model_dump_json(), output=result
+            )
+        )
+    returned = f"{type(result).__module__}.{type(result).__qualname__}"
+    if output_model is None:
+        declared = "its ResponseGenerator declares no Signature.Output"
+    else:
+        declared = f"its Signature.Output is {output_model.__qualname__}"
+    raise TypeError(
+        f"{command_name} returned {returned}, which is not a value its ResponseGenerator may return "
+        f"({declared}): return that Output, a str, a CommandResponse or a CommandOutput, "
+        f"or raise fastworkflow.Refused"
+    )
+
+
+def call_response_generator(response_generator, *args, command_name: str = ""):
+    """Call ``response_generator`` with ``(workflow, command[, command_parameters])`` and frame its result.
+
+    A ``fastworkflow.Refused`` it raises is its answer: a failed CommandOutput with the refusal's
+    message. Any other return is framed by ``frame_command_result``.
+    """
+    arguments = _generator_arguments(response_generator, args)
+    try:
+        result = response_generator(*arguments)
     except fastworkflow.Refused as refusal:
         return refusal.as_output()
+    return frame_command_result(
+        result,
+        command_name=command_name or type(response_generator).__qualname__,
+        output_model=_declared_output_model(type(response_generator)),
+    )
+
+
+logger = logging.getLogger(__name__)
+
+#: (command, target context) pairs already reported, so each undeclared move is logged once per process.
+_UNDECLARED_MOVES_WARNED: set[tuple[str, str]] = set()
+
+
+def _warn_undeclared_move(routing, command_name: str, workflow, context_before) -> None:
+    """Warn once when a command moved the workflow into a context its ``descends_to`` does not name.
+
+    Design 3.15: the comparison is the one the `now_in` note makes (the current object before and
+    after), made here so assistant mode reports it too. Core commands (go_up, reset_context) are
+    exempt, and nothing here may fail the command.
+    """
+    try:
+        if workflow.current_command_context is context_before:
+            return
+        if command_name in _core_command_names():
+            return
+        target = workflow.current_command_context_name
+        if declared_descends_to(routing, command_name) == target:
+            return
+        key = (command_name, target)
+        if key in _UNDECLARED_MOVES_WARNED:
+            return
+        _UNDECLARED_MOVES_WARNED.add(key)
+        short = command_name.split("/")[-1]
+        logger.warning(
+            f'{short} moved the workflow into {target} but declares no descends_to; '
+            f'declare descends_to = "{target}" so plans can reach {target}\'s commands'
+        )
+    except Exception:  # noqa: BLE001 - a warning about navigation must not fail the command
+        logger.debug("undeclared-move check skipped for %r", command_name, exc_info=True)
+
+
+def _core_command_names() -> frozenset[str]:
+    # Lazy: workflow_agent imports this module.
+    from fastworkflow.workflow_agent import core_command_names
+
+    return core_command_names()
 
 
 # ------------------------------------------------------------------
@@ -65,11 +198,14 @@ def _planning_command_refusal_output(
     qualified_name: str,
     *,
     workflow: fastworkflow.Workflow | None = None,
+    message: str | None = None,
 ) -> CommandOutput:
-    """The refusal for a planning command reached outside agent mode: assistant-mode
-    ``/`` commands and the direct and MCP paths. In agent mode a planning command's
-    steps run it (WorkflowExecutionContext.run_planning_command)."""
-    message = f"{qualified_name} is a planning command; it runs in agent mode."
+    """The refusal for a planning command reached outside agent mode: the direct and MCP paths,
+    and assistant-mode ``/`` commands that need the agent (``message`` then carries the reasons,
+    design 3.4). In agent mode a planning command's steps run it
+    (WorkflowExecutionContext.run_planning_command)."""
+    if message is None:
+        message = f"{qualified_name} is a planning command; it runs in agent mode."
     command_output = CommandOutput(
         command_response=fastworkflow.CommandResponse(response=message, success=False),
         command_name=qualified_name,
@@ -78,6 +214,30 @@ def _planning_command_refusal_output(
         command_output.workflow_name = workflow.folderpath.split("/")[-1]
         command_output.context = workflow.current_command_context_displayname
     return command_output
+
+
+def _assistant_planning_refusal(
+    folderpath: str, qualified_name: str, workflow: fastworkflow.Workflow
+) -> CommandOutput | None:
+    """Assistant mode's answer for an exactly named planning command (fix-3rsq.10.8, design 3.4).
+
+    None when the planning command is MECHANICAL: it then runs through the normal run path. A
+    refusal (the 3.4 message with its reasons) when it NEEDS THE AGENT, or when it cannot be
+    classified at all: a command the framework cannot read is refused rather than run.
+    """
+    from fastworkflow.planning_needs_agent import planning_command_needs_agent, refusal_message
+
+    try:
+        needs_agent, reasons = planning_command_needs_agent(folderpath, qualified_name)
+    except ValueError as error:
+        return _planning_command_refusal_output(
+            qualified_name, workflow=workflow,
+            message=f"{qualified_name} is a planning command; it cannot be checked for assistant "
+                    f"mode: {error}.")
+    if not needs_agent:
+        return None
+    return _planning_command_refusal_output(
+        qualified_name, workflow=workflow, message=refusal_message(qualified_name, reasons))
 
 
 def _annotate_exception(exc: BaseException, **fields) -> None:
@@ -301,9 +461,10 @@ class CommandExecutor(CommandExecutorInterface):
         command: str,
     ) -> fastworkflow.CommandOutput:
         app_workflow = chat_session.get_active_workflow()
-        # Assistant mode refuses a planning command by its name, before any extraction.
-        # In agent mode the name goes through the extraction hop below and runs as a
-        # planning command (run_planning_command).
+        # Assistant mode answers an exactly named planning command before any extraction: a
+        # command that needs the agent is refused with its reasons. A mechanical one falls
+        # through to the extraction hop below, and the post-extraction branch runs it. In agent
+        # mode the name goes through the extraction hop and runs as a planning command.
         if app_workflow is not None and (
             "is_assistant_mode_command" in chat_session.cme_workflow._context
         ):
@@ -311,10 +472,11 @@ class CommandExecutor(CommandExecutorInterface):
             if planning_name := _resolve_planning_command_name(
                 app_workflow.folderpath, token
             ):
-                return _planning_command_refusal_output(
-                    planning_name,
-                    workflow=app_workflow,
+                refusal = _assistant_planning_refusal(
+                    app_workflow.folderpath, planning_name, app_workflow
                 )
+                if refusal is not None:
+                    return refusal
 
         command_output = cls.perform_action(
             chat_session.cme_workflow, 
@@ -344,17 +506,29 @@ class CommandExecutor(CommandExecutorInterface):
         if planning_name := _resolve_planning_command_name(
             workflow.folderpath, command_name
         ):
-            if "is_assistant_mode_command" in chat_session.cme_workflow._context:
-                del chat_session.cme_workflow._context["is_assistant_mode_command"]
-                return _planning_command_refusal_output(
-                    planning_name,
-                    workflow=workflow,
+            assistant = "is_assistant_mode_command" in chat_session.cme_workflow._context
+            if assistant:
+                refusal = _assistant_planning_refusal(
+                    workflow.folderpath, planning_name, workflow
                 )
+                if refusal is not None:
+                    del chat_session.cme_workflow._context["is_assistant_mode_command"]
+                    return refusal
             # Agent mode: the step's arguments were extracted above; the planning command
-            # runs them as a nested frame. Its output is the step's observation.
-            planning_output = chat_session.run_planning_command(
-                planning_name, input_obj, command
-            )
+            # runs them as a nested frame. Its output is the step's observation. Assistant mode
+            # runs a mechanical planning command the same way, with its steps gated as
+            # agent-originated (ADR-EXP-025 section 5: a planning command's steps are the agent's
+            # calls), and without suspension, since no agent is asking.
+            try:
+                origin = (approval_binding.origin_scope(approval_binding.Origin.AGENT_DIRECT)
+                          if assistant else nullcontext())
+                with origin:
+                    planning_output = chat_session.run_planning_command(
+                        planning_name, input_obj, command
+                    )
+            finally:
+                if assistant and "is_assistant_mode_command" in chat_session.cme_workflow._context:
+                    del chat_session.cme_workflow._context["is_assistant_mode_command"]
             planning_output.workflow_name = workflow.folderpath.split("/")[-1]
             planning_output.context = workflow.current_command_context_displayname
             planning_output.command_name = planning_name
@@ -373,21 +547,29 @@ class CommandExecutor(CommandExecutorInterface):
             raise ValueError(
                 f"Response generation class not found for command name '{command_name}' "
             )
+        # Approval gate (ADR-EXP-025): the one choke point the agent's calls and planning-command
+        # steps reach. Unannotated and user-originated calls pass straight through.
+        held = approval_binding.gate(chat_session, workflow, command_name, input_obj, command)
+        if held is not None:
+            return held
+
         response_generation_object = response_generation_class()
 
         raw_user_message = command
         if "raw_user_message" in workflow.context:
             raw_user_message = workflow.context['raw_user_message']
 
+        context_before = workflow.current_command_context
         try:
-            if command_parameters_class := (
-                command_routing_definition.get_command_class(
-                    command_name, ModuleType.COMMAND_PARAMETERS_CLASS
-                )
-            ):
-                command_output = call_response_generator(response_generation_object, workflow, raw_user_message, input_obj)
-            else:
-                command_output = call_response_generator(response_generation_object, workflow, raw_user_message)
+            # command_parameters is the filled Input, or None for a command with no Input (3.14).
+            command_parameters_class = command_routing_definition.get_command_class(
+                command_name, ModuleType.COMMAND_PARAMETERS_CLASS
+            )
+            command_output = call_response_generator(
+                response_generation_object, workflow, raw_user_message,
+                input_obj if command_parameters_class else None,
+                command_name=command_name,
+            )
         except BaseException as exc:
             # Routing resolved this identity above; the assignments that would
             # publish it onto the CommandOutput sit below the raise, so on
@@ -402,6 +584,8 @@ class CommandExecutor(CommandExecutorInterface):
                 _fw_context=context,
             )
             raise
+
+        _warn_undeclared_move(command_routing_definition, command_name, workflow, context_before)
 
         # Set the additional attributes
         command_output.workflow_name = workflow_name
@@ -471,9 +655,18 @@ class CommandExecutor(CommandExecutorInterface):
             )
         )
         if not command_parameters_class:
+            if action.command_name != "wildcard":
+                held = approval_binding.gate(tracing.current_host(), workflow, action.command_name,
+                                             None, action.command)
+                if held is not None:
+                    held.command_call_id = call_id
+                    return held
             try:
                 with tracing.call_scope(call_id, command_name=action.command_name):
-                    command_output = call_response_generator(response_generation_object, workflow, action.command)
+                    command_output = call_response_generator(
+                        response_generation_object, workflow, action.command, None,
+                        command_name=action.command_name,
+                    )
             except BaseException as exc:
                 # Same seam as `_invoke_command_impl`, for the entry point the
                 # other one never reaches: perform_action is the direct-action,
@@ -529,9 +722,19 @@ class CommandExecutor(CommandExecutorInterface):
                 f"Invalid action parameters for command '{action.command_name}'\n{error_msg}"
             )
 
+        if action.command_name != "wildcard":
+            held = approval_binding.gate(tracing.current_host(), workflow, action.command_name,
+                                         input_obj, action.command)
+            if held is not None:
+                held.command_call_id = call_id
+                return held
+
         try:
             with tracing.call_scope(call_id, command_name=action.command_name):
-                command_output = call_response_generator(response_generation_object, workflow, action.command, input_obj)
+                command_output = call_response_generator(
+                    response_generation_object, workflow, action.command, input_obj,
+                    command_name=action.command_name,
+                )
         except BaseException as exc:
             # Same seam as `_invoke_command_impl`, for the entry point the
             # other one never reaches: perform_action is the direct-action,
@@ -561,6 +764,7 @@ class CommandExecutor(CommandExecutorInterface):
         command_output.workflow_name = workflow_name
         command_output.context = context
         command_output.command_name = action.command_name
+        command_output.command_parameters = input_obj or None
         command_output.command_call_id = call_id
 
         fastworkflow.turn.warn_on_missing_declared_output(
@@ -599,8 +803,10 @@ class CommandExecutor(CommandExecutorInterface):
                 parameters=dict(tool_call.arguments.items()),
             )
 
-            # Execute using existing perform_action method
-            command_output = cls.perform_action(workflow, action)
+            # Execute using existing perform_action method. An MCP tool call is agent-originated
+            # (owner answer 3); the MCP caller cannot be suspended, so an ask returns its prompt.
+            with approval_binding.origin_scope(approval_binding.Origin.AGENT_DIRECT):
+                command_output = cls.perform_action(workflow, action)
 
             # Convert to MCP format
             return command_output.to_mcp_result()

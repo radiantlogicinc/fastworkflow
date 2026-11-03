@@ -69,6 +69,13 @@ Three consumers, and they behave differently:
 Only `Input` fields are read. The edge is surfaced **only when the field is missing**, so it never
 substitutes for `description`; write both.
 
+**Above the listing size.** A workflow too large to list whole can show the planner a shortlist
+instead: the commands that match the request, plus the producers of their inputs. A producer edge is
+what brings a producer onto that shortlist, and a `descends_to` brings in the way to a context. The
+shortlist is built but **off** in this release, so the planner sees the full command list and the
+edges work as described above. Write the edges as if the shortlist were on, because it is expected to
+be switched on with the plan review round.
+
 ## Rule 1: name a producer the caller can actually reach
 
 A hint naming a command the caller cannot invoke is worse than no hint: it sends the planner down a

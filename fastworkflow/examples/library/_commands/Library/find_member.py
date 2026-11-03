@@ -17,7 +17,16 @@ class Signature:
         names: list[str] = Field(description="the name of each member found, in row order")
         total: int = Field(description="how many members match")
 
-    plain_utterances = ["find the member Ann Lee"]
+    plain_utterances = [
+        "find the member Ann Lee",
+        "search the members for Raj",
+        "look up patrons whose name has Chen in it",
+        "which members have Lee in their name",
+        "any member named Patel",
+        "find members matching Ann",
+        "search the member list, page two",
+        "pull up the members called Mia",
+    ]
 
 
 class ResponseGenerator:

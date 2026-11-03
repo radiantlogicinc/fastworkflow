@@ -51,6 +51,13 @@ gate, and everything after publication is cleanup.
 Steps 2 and 3 sit before every paid call deliberately: a leaked benchmark used to abort a run
 that had already spent money on every command with parameters.
 
+**Planning commands are classifier labels.** Each classifier whose scope holds a planning command
+has it as a label, trained from its seed utterances. So the first train of a workflow with planning
+commands after an upgrade is a full retrain that **generates** utterances for each planning command
+(step 7, an LLM cost that earlier releases did not incur). A workflow trained by an earlier release
+refuses to load and says to retrain with `fastworkflow train`. A workflow with no planning commands
+is unaffected by this change.
+
 ## Rule 1 — the seed is fixed, so a cache miss is the only source of drift
 
 `get_training_seed()` returns **42**, always. It is not configurable, and a `TRAINING_SEED`

@@ -21,7 +21,16 @@ class Signature:
         titles: list[str] = Field(description="the title of each book found, in row order")
         total: int = Field(description="how many books match, on every page")
 
-    plain_utterances = ["find the book Dune", "look up books by Jane Austen"]
+    plain_utterances = [
+        "find the book Dune",
+        "look up books by Jane Austen",
+        "search the catalogue for anything with Persuasion in it",
+        "which titles mention Herbert",
+        "any books with Messiah in the name",
+        "run a search for Dune across titles and authors",
+        "show the next page of search results for Austen",
+        "list the catalogue entries that contain Jane",
+    ]
 
 
 class ResponseGenerator:

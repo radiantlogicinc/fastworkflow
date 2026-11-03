@@ -23,14 +23,16 @@ import threading
 from pathlib import Path
 from collections import Counter
 
-from fastworkflow.command_routing import RoutingDefinition
+from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
 from fastworkflow.train import heldout_evaluation
 from fastworkflow.train.determinism import (
     ContextTrainingStatus,
     get_provenance_recorder,
 )
+from fastworkflow.train.artifact_versioning import PLANNING_HEADS_PRODUCTION, PLANNING_HEADS_RECORD_KEY
 from fastworkflow.train.selective_training import contexts_for_training
 from fastworkflow.utils.logging import logger
+from fastworkflow.command_directory import is_visible_planning
 from fastworkflow.nlu_labels import (
     PARAMETER_VALUE_LABEL,
     PARAMETER_VALUE_PLACEHOLDERS,
@@ -1341,6 +1343,7 @@ def trained_command_labels(ctx_name: str, crd: RoutingDefinition) -> set[str]:
         except KeyError:
             pass
         labels.add(name)
+    labels |= planning_labels_in_layout(ctx_name, crd)
     return labels
 
 
@@ -1565,10 +1568,16 @@ def not_here_construction(explicit: Optional[str] = None, folderpath: Optional[s
     if arm_construction(arm) == "none":
         return {"construction": "none", "reason": "internal workflow: no wildcard class"}
     _, _, seeds = RESERVED_CLASS_ARMS[arm]
-    return {
+    record = {
         "construction": "sparse",
         "seeds_per_command": NOT_HERE_SEEDS if seeds is None else seeds,
     }
+    # Only a workflow WITH planning commands records the head layout: for any other workflow the
+    # record, and so the selective-training signature, is exactly what it was before.
+    if folderpath is not None and planning_command_names_of(
+            RoutingRegistry.get_definition(folderpath)):
+        record[PLANNING_HEADS_RECORD_KEY] = active_planning_heads()
+    return record
 
 
 def construction_records(
@@ -1592,6 +1601,8 @@ def construction_records(
     }
     if head_scope is not None:
         run_metadata["head_scope"] = head_scope
+    # The scorer refuses a trained copy whose layout is not the arm's (score_planning_match).
+    run_metadata["planning_heads"] = active_planning_heads()
     return {NOT_HERE_RECORD_KEY: not_here}, run_metadata
 
 
@@ -1683,6 +1694,89 @@ def experiment_head_scope(scope: Optional[str]):
         _EXPERIMENT_HEAD_SCOPE = previous
 
 
+#: The planning-command head layouts. ``LABELLED`` is PRODUCTION (Phase 10 step 1 decision,
+#: fix-3rsq.10.12): a planning command is a label of every head whose lookup path holds its scope
+#: (``planning_head_labels``). ``NOT_HERE`` is the EXPERIMENT BASELINE the step-1 arms compare
+#: against: planning commands only in the sparse "not here" class. Intent detection makes no
+#: planning/execution distinction, so no real run selects ``NOT_HERE``.
+PLANNING_HEADS_LABELLED = PLANNING_HEADS_PRODUCTION
+PLANNING_HEADS_NOT_HERE = "not_here"
+PLANNING_HEADS_MODES = (PLANNING_HEADS_LABELLED, PLANNING_HEADS_NOT_HERE)
+
+#: EXPERIMENT-ONLY. ``None`` means production (``PLANNING_HEADS_LABELLED``). Never read from the
+#: environment. ``active_planning_heads`` and ``trained_command_labels`` are the readers.
+_EXPERIMENT_PLANNING_HEADS: Optional[str] = None
+
+
+def active_experiment_planning_heads() -> Optional[str]:
+    """The experiment planning-head override for this process, or None for production."""
+    return _EXPERIMENT_PLANNING_HEADS
+
+
+def active_planning_heads() -> str:
+    """The planning-head layout in force: the experiment override, else production (labelled)."""
+    override = active_experiment_planning_heads()
+    return PLANNING_HEADS_LABELLED if override is None else override
+
+
+@contextlib.contextmanager
+def experiment_planning_heads(mode: Optional[str]):
+    """EXPERIMENT-ONLY: select a planning-head layout for the duration of a ``with`` block.
+
+    ``None`` restores production (labelled). ``PLANNING_HEADS_NOT_HERE`` is the baseline arm.
+    Any non-None mode must be entered INSIDE ``experiment_reserved_class_arm`` with a sparse arm,
+    and raises ValueError otherwise.
+    """
+    global _EXPERIMENT_PLANNING_HEADS
+    if mode is not None and mode not in PLANNING_HEADS_MODES:
+        raise ValueError(f"unknown planning-head mode {mode!r}; expected one of {list(PLANNING_HEADS_MODES)}")
+    previous = _EXPERIMENT_PLANNING_HEADS
+    _EXPERIMENT_PLANNING_HEADS = mode
+    try:
+        if mode is not None:
+            _require_sparse_arm()
+        yield
+    finally:
+        _EXPERIMENT_PLANNING_HEADS = previous
+
+
+def planning_head_labels(ctx_name: str, crd: RoutingDefinition) -> set[str]:
+    """The planning commands head *ctx_name* labels under ``PLANNING_HEADS_LABELLED``.
+
+    A planning command is a label of a head whose lookup path holds its scope: the head's own
+    context and the contexts it inherits (``inherited_base_contexts``). A root planning command
+    (no scope) belongs to the global head ``*`` only, as root execution commands do. Every
+    planning command in scope is a label, whether or not it declares parameters: its seeds are
+    its rows, as a command's seeds are an execution command's. Pure in its arguments apart from
+    the metadata reads.
+    """
+    if ctx_name == "*":  # the global head holds the root scope only
+        scopes = {""}
+    else:
+        scopes = {ctx_name} | set(crd.context_model.inherited_base_contexts(ctx_name))
+    return {name for name in planning_command_names_of(crd) if name.rpartition("/")[0] in scopes}
+
+
+def planning_labels_in_layout(ctx_name: str, crd: RoutingDefinition) -> set[str]:
+    """The planning commands *ctx_name* labels in the layout in force: its labels when labelled, else none."""
+    if active_planning_heads() == PLANNING_HEADS_LABELLED:
+        return planning_head_labels(ctx_name, crd)
+    return set()
+
+
+def planning_command_names_of(crd: RoutingDefinition) -> list[str]:
+    """Every planning command the routing definition's directory holds, sorted."""
+    cmd_dir = crd.command_directory
+    names = []
+    for name in sorted(cmd_dir.get_commands()):
+        try:
+            if is_visible_planning(cmd_dir.get_command_metadata(name)):
+                names.append(name)
+        except KeyError:
+            continue
+    return names
+
+
 def _is_action_only(cmd_dir: object, name: str) -> bool:
     """True for ``startup`` and any command without ``Signature.Input``: never a label or a row."""
     return name == STARTUP_COMMAND or not _requires_utterances(cmd_dir, name)
@@ -1736,7 +1830,7 @@ def resolve_not_here_sample(
 
 def _is_planning_name(cmd_dir: object, name: str) -> bool:
     try:
-        return bool(cmd_dir.get_command_metadata(name).is_planning)
+        return bool(is_visible_planning(cmd_dir.get_command_metadata(name)))
     except KeyError:
         return False
 

@@ -18,7 +18,16 @@ class Signature:
         due_dates: list[str] = Field(description="each loan's due date, in row order")
         total: int = Field(description="how many loans the book has, on every page")
 
-    plain_utterances = ["list this book's loans"]
+    plain_utterances = [
+        "list this book's loans",
+        "give me page two of this title's loans",
+        "how many loans does this book have",
+        "give me the full loan list for this title",
+        "read out the borrowers and due dates of this book, row by row",
+        "list the loans on this one, starting from row 11",
+        "every loan this title has, please",
+        "what loans are open on this book",
+    ]
 
 
 class ResponseGenerator:

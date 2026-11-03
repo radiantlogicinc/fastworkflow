@@ -8,12 +8,15 @@ from typing import Optional
 from pathlib import Path
 from functools import lru_cache
 
-from pydantic import BaseModel, field_validator, model_validator, ConfigDict, Field, ValidationInfo
+from pydantic import BaseModel, field_validator, model_serializer, model_validator, ConfigDict, Field, ValidationInfo
 
 from fastworkflow.utils import python_utils
 from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_inheritance_model import WorkflowInheritanceModel
 
+
+#: The framework-provided planning commands (global scope, lowest precedence).
+FRAMEWORK_PLANNING_COMMANDS_DIR = Path(__file__).resolve().parent / "_framework_commands"
 
 class CommandMetadata(BaseModel):
     """Command metadata"""
@@ -26,6 +29,20 @@ class CommandMetadata(BaseModel):
     response_generation_module_path: str
     response_generation_class_name: str
     is_planning: bool = False
+    # A framework-provided command (fastworkflow/_framework_commands, fix-3rsq.plan-review.1): system machinery.
+    # Loaded and callable by name through the executor and loader, but never listed to the planner, the agent or
+    # the user, never a head label, and never counted by the artifact construction check.
+    framework: bool = False
+    # The command's ``approval`` annotation ("mandatory" | "delegatable"), set from its class when the
+    # routing definition loads (approval_annotations). None is agent discretion and is not serialised.
+    approval: Optional[str] = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_approval(self, handler):
+        data = handler(self)
+        if isinstance(data, dict) and data.get("approval") is None:
+            data.pop("approval", None)
+        return data
 
     @model_validator(mode="after")
     def validate_parameter_extraction_fields(self) -> "CommandMetadata":
@@ -137,6 +154,12 @@ class ContextMetadata(BaseModel):
         return v
 
 
+def is_visible_planning(metadata: "CommandMetadata") -> bool:
+    """A planning command the planner, the agent, the listings, the labels and the artifact check see:
+    a planning command that is not framework machinery."""
+    return bool(metadata.is_planning) and not metadata.framework
+
+
 class CommandDirectory(BaseModel):
     """
     Centralized directory for all command implementations.
@@ -167,7 +190,7 @@ class CommandDirectory(BaseModel):
         return [
             name
             for name, metadata in self.map_command_2_metadata.items()
-            if not metadata.is_planning
+            if not metadata.is_planning and not metadata.framework
         ]
 
     def get_command_metadata(self, command_name: str) -> CommandMetadata:
@@ -246,20 +269,24 @@ class CommandDirectory(BaseModel):
         for path in (*base_paths, workflow_folderpath):
             check_no_planning_commands_folder(path)
         
-        # Step 2: Process base workflows first (in order of precedence)
+        # Step 2: framework-provided planning commands, at the LOWEST precedence (fix-3rsq.plan-review.1):
+        # loaded first, so a base or app command of the same global name replaces them.
+        cls._load_framework_planning_commands(command_directory)
+
+        # Step 3: Process base workflows (in order of precedence)
         for base_path in base_paths:
             cls._load_commands_from_path(command_directory, base_path)
         
-        # Step 3: Process current workflow commands (highest precedence for user commands)
+        # Step 4: Process current workflow commands (highest precedence for user commands)
         cls._load_commands_from_path(command_directory, workflow_folderpath)
 
-        # Step 4: Populate utterance metadata when available (optional; defers imports)
+        # Step 5: Populate utterance metadata when available (optional; defers imports)
         if hydrate_utterances:
             for command_key in command_directory.map_command_2_metadata:
                 if utterance_metadata := command_directory.get_utterance_metadata(command_key):
                     command_directory.register_utterance_metadata(command_key, utterance_metadata)
 
-        # Step 5: Register core commands (processed last, lowest precedence)
+        # Step 6: Register core commands (processed last, lowest precedence)
         cls._register_core_commands(command_directory)
 
         return command_directory
@@ -273,6 +300,26 @@ class CommandDirectory(BaseModel):
             best_effort_inheritance=True,
         )
     
+    @classmethod
+    def _load_framework_planning_commands(cls, command_directory: "CommandDirectory") -> None:
+        """Register the framework's global planning commands: the ``.py`` files directly in
+        ``fastworkflow/_framework_commands`` (no context folder, so the global ``*`` scope). They are
+        ordinary planning commands in every other respect (the same loader as an app's).
+        """
+        root = FRAMEWORK_PLANNING_COMMANDS_DIR
+        if not root.is_dir():
+            return
+        # The framework's own internal workflows (the command metadata extraction workflow, which holds the
+        # core commands) do not take the global planning commands: their trained artifacts predate them.
+        import fastworkflow  # inline: the module is imported before the package is ready
+        if os.path.abspath(command_directory.workflow_folderpath) in {
+                os.path.abspath(fastworkflow.get_internal_workflow_path("command_metadata_extraction"))}:
+            return
+        for item_path in sorted(root.glob("*.py")):
+            if item_path.is_file() and not item_path.name.startswith("_"):
+                cls._register_command(command_directory, item_path.stem, item_path, str(root))
+                command_directory.map_command_2_metadata[item_path.stem].framework = True
+
     @classmethod
     def _load_commands_from_path(cls, command_directory: "CommandDirectory", path: str):
         """

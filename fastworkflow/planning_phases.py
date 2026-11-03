@@ -1962,6 +1962,13 @@ def parameter_classes(routing: Any, planning: Optional[Mapping[str, Any]] = None
                  if name != "wildcard" and plain_command_name(name).lower() == command.lower()]
         found += [planning_command.input_model for name, planning_command in planning.items()
                   if plain_command_name(name).lower() == command.lower()]
+        # Framework execution commands (review_proposal) are not routed, but a framework plan step names them.
+        directory = getattr(routing, "command_directory", None)
+        if directory is not None:
+            found += [routing.get_command_class(name, ModuleType.COMMAND_PARAMETERS_CLASS)
+                      for name, meta in directory.map_command_2_metadata.items()
+                      if meta.framework and not meta.is_planning
+                      and plain_command_name(name).lower() == command.lower()]
         return found
 
     return classes

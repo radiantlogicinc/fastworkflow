@@ -10,7 +10,16 @@ class Signature:
         notes: list[str] = Field(description="each note, oldest first")
         total: int = Field(description="how many notes the record holds")
 
-    plain_utterances = ["show the notes on this record", "any notes here"]
+    plain_utterances = [
+        "show the notes on this record",
+        "any notes here",
+        "what notes are on this one",
+        "read me the notes",
+        "list the remarks on this record, oldest first",
+        "how many notes does this record hold",
+        "is there anything written about this record",
+        "let me see the note history",
+    ]
 
 
 class ResponseGenerator:

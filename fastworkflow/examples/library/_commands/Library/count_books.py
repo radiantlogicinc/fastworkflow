@@ -13,7 +13,16 @@ from .find_book import Signature as FindBook
 class Signature:
     """Count the books whose title or author holds some words."""
 
-    plain_utterances = ["how many books by Jane Austen do you have"]
+    plain_utterances = [
+        "how many books by Jane Austen do you have",
+        "how many Herbert books are in the catalogue",
+        "what is the number of titles that mention Dune",
+        "count how many books we hold with Persuasion in the title",
+        "total of books matching Austen",
+        "how big is our Austen collection",
+        "how many titles have Emma in them",
+        "tell me the count of Herbert titles we carry",
+    ]
 
     class Input(BaseModel):
         query: str = Field(description="words of the title or the author's name",

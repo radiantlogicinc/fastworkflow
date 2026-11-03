@@ -16,6 +16,7 @@ from jwt.exceptions import PyJWTError as JWTError
 from pydantic import BaseModel, Field, field_validator
 
 import fastworkflow
+from fastworkflow import approval_binding
 from fastworkflow.session_state_store import (
     IncompatibleSessionState,
     PendingReapOutcome,
@@ -229,6 +230,8 @@ class InvokeRequest(BaseModel):
     # This turn runs with nobody to answer: the agent gets no ask_user tool.
     # Per turn, never sticky; omitted means attended.
     unattended: bool = False
+    # The token of a pending approval (ADR-EXP-025), carried back on the reply that answers it.
+    approval_token: Optional[str] = None
 
 
 _dspy_cache_enabled: Optional[bool] = None
@@ -1095,7 +1098,9 @@ def persist_pending_after_turn(
     # has_open_command(): a mid-parameter-extraction session is not
     # awaiting_user but still holds partially extracted parameters (see the
     # twin in turns.persist_pending_after_turn).
-    if ctx.awaiting_user or _is_awaiting_user_output(output) or ctx.has_open_command():
+    # A pending approval (ADR-EXP-025) is durable suspended state too: it survives eviction and restart.
+    pending_approval = approval_binding.active_record(ctx.app_workflow) is not None
+    if ctx.awaiting_user or _is_awaiting_user_output(output) or ctx.has_open_command() or pending_approval:
         try:
             state = ctx.serialize_state(channel_id=runtime.channel_id)
         except StateEncodingError as exc:
@@ -1749,6 +1754,9 @@ class ChannelSessionManager:
                 )
                 continue
 
+            # Eviction is not session end: pending approvals live in the session's stored state and
+            # survive it (ADR-EXP-025 answer 4, section 6.4 token hash only), so they are not cleared here.
+
             try:
                 generation = checkpoint.publish(
                     self.checkpoint_store, runtime, eligibility, self._launch_context
@@ -1817,9 +1825,18 @@ class ChannelSessionManager:
             await self._evict_oldest_if_needed()
             return runtime
 
+    def _clear_pending_approvals(self, channel_id: str, runtime: "ChannelRuntime") -> bool:
+        """Cancel the session's pending approvals and drop their stored state. True when any were cancelled."""
+        cancelled = runtime.execution_context.cancel_pending_approvals()
+        if cancelled:
+            self.session_state_store.clear(channel_id)
+        return bool(cancelled)
+
     async def remove_session(self, channel_id: str) -> None:
         async with self._lock:
             if runtime := self._sessions.pop(channel_id, None):
+                # Session end: pending approvals end with the session (owner 2026-11-01).
+                self._clear_pending_approvals(channel_id, runtime)
                 runtime.execution_context.close()
 
     async def evict_live_session(self, channel_id: str) -> None:

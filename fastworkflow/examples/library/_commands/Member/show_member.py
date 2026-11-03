@@ -13,7 +13,16 @@ class Signature:
         name: str = Field(description="the member's name")
         on_loan: int = Field(description="how many books the member has on loan")
 
-    plain_utterances = ["show this member"]
+    plain_utterances = [
+        "show this member",
+        "show me this patron's details",
+        "who is this member, and how many books do they have out",
+        "give me their name and loan count",
+        "what's this member's name",
+        "display the open member's card",
+        "show the member record I'm on",
+        "tell me about the member we have open",
+    ]
 
 
 class ResponseGenerator:

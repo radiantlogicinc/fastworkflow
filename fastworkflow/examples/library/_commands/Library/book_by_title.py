@@ -20,7 +20,16 @@ from .open_book import Signature as OpenBook
 class Signature:
     """Show who wrote a book, and how many copies the library owns, given its title."""
 
-    plain_utterances = ["who wrote Dune", "how many copies of Dune Messiah are there"]
+    plain_utterances = [
+        "who wrote Dune",
+        "how many copies of Dune Messiah are there",
+        "who is the author of Persuasion, and how many copies do we have",
+        "tell me about the book Emma",
+        "what is Dune Messiah by, and how many copies",
+        "give me the author and copy count for the title Emma",
+        "does the library own Persuasion, and who wrote it",
+        "how many copies of Emma do we own and who wrote it",
+    ]
 
     class Input(BaseModel):
         title: str = Field(description="the book's title",

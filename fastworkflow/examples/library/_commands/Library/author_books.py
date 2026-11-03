@@ -15,7 +15,16 @@ from .open_book import Signature as OpenBook
 class Signature:
     """Name each book by an author, with how many copies the library owns."""
 
-    plain_utterances = ["what do you have by Frank Herbert, and how many copies of each"]
+    plain_utterances = [
+        "what do you have by Frank Herbert, and how many copies of each",
+        "list every Austen book we own with its copies",
+        "what Herbert titles are on the shelves, and how many of each",
+        "give me each book by Jane Austen with the copy count",
+        "all the books by Frank Herbert, with copies",
+        "name each title by Austen and how many copies it has",
+        "which books by Jane Austen do we hold, copies included",
+        "catalogue of Frank Herbert's books and copies",
+    ]
 
     class Input(BaseModel):
         author: str = Field(description="the author's name",

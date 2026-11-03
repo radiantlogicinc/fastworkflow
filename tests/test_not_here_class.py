@@ -29,6 +29,7 @@ from fastworkflow.model_pipeline_training import (
     cache_context_command_utterances,
     experiment_reserved_class_arm,
     not_here_seed_rows,
+    planning_head_labels,
     resolve_reserved_class_arm,
     select_escalation_rows,
     trained_command_labels,
@@ -123,7 +124,11 @@ def test_sparse_construction_takes_at_most_n_seeds_and_includes_planning_command
     assert all(len(rows) <= 8 for rows in eight.values())
     assert sum(len(r) for r in eight.values()) >= sum(len(r) for r in one.values())
 
-    # planning commands are foreign to every head and are picked like execution commands
+    # Phase 10 step 1 (production): a planning command that labels HEAD is a label, not a not-here
+    # row; every other planning command is foreign to HEAD and is picked like an execution command.
+    head_planning = planning_with_seeds & set(planning_head_labels(HEAD, crd))
+    assert head_planning, "Book has planning labels with seeds"
+    assert head_planning <= labels and not (head_planning & (set(eight) | set(one)))
     assert planning_with_seeds - labels <= set(eight), "a planning command was left out of the not-here class"
     assert planning_with_seeds - labels <= set(one)
 

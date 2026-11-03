@@ -738,7 +738,8 @@ def _get_commands_with_parameters(json_path):
     
     # Iterate through each command entry
     for command_key, metadata in commands_metadata.items():
-        if metadata.get("is_planning"):
+        if metadata.get("framework") or metadata.get("is_planning"):
+            # Framework machinery is never trained; a planning command has no parameter examples here.
             continue
         # Check if command_parameters_class is not null
         if metadata.get("command_parameters_class") is not None:

@@ -23,8 +23,10 @@ from typing import Any, Dict, Optional, Set, Type, ClassVar
 from pydantic import BaseModel, ConfigDict
 
 from fastworkflow import ModuleType
+from fastworkflow.entry_declarations import check_retired_entry_declarations
 from fastworkflow.command_directory import (
     CommandDirectory,
+    is_visible_planning,
     UtteranceMetadata,
     compute_commands_source_fingerprint,
     get_cached_command_directory,
@@ -95,7 +97,7 @@ class RoutingDefinition(BaseModel):
         """
         planning = sorted(
             name for name, metadata in self.command_directory.map_command_2_metadata.items()
-            if metadata.is_planning
+            if is_visible_planning(metadata)
         )
         if not planning:
             return []
@@ -362,6 +364,14 @@ class RoutingDefinition(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
+def _check_approval_annotations(workflow_folderpath: str, definition: "RoutingDefinition") -> None:
+    """Validate and snapshot each command's ``approval`` annotation (imported lazily: approval_annotations
+    imports this module)."""
+    from fastworkflow.approval_annotations import check_approval_annotations
+
+    check_approval_annotations(workflow_folderpath, definition)
+
+
 class RoutingRegistry:
     """
     A registry that holds a single, active RoutingDefinition per workflow.
@@ -397,12 +407,19 @@ class RoutingRegistry:
             if definition is None:
                 definition = RoutingDefinition.build(workflow_folderpath)
                 definition.save()
+            # Checked on every path, a persisted definition included: one saved before the
+            # retirement of enter_command would otherwise load without the load error (design 3.15).
+            check_retired_entry_declarations(workflow_folderpath, definition.context_model)
+            _check_approval_annotations(workflow_folderpath, definition)
             cls._definitions[workflow_folderpath] = definition
             return definition
-        
+
         # build fresh definition and persist via .save()
-        cls._definitions[workflow_folderpath] = RoutingDefinition.build(workflow_folderpath)
-        return cls._definitions[workflow_folderpath]
+        definition = RoutingDefinition.build(workflow_folderpath)
+        check_retired_entry_declarations(workflow_folderpath, definition.context_model)
+        _check_approval_annotations(workflow_folderpath, definition)
+        cls._definitions[workflow_folderpath] = definition
+        return definition
 
     @staticmethod
     def _persisted_definition_is_fresh(workflow_folderpath: str) -> bool:

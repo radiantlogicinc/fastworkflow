@@ -3,6 +3,8 @@ Agent integration module for fastWorkflow.
 Provides workflow tool agent functionality for intelligent tool selection.
 """
 
+import contextlib
+import contextvars
 import dataclasses
 import functools
 import json
@@ -11,7 +13,7 @@ import re
 import threading
 import time
 import traceback
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,6 +24,7 @@ from dspy.experimental import Choice, TypeSafe
 
 import fastworkflow
 from fastworkflow import tracing
+from fastworkflow import approval_binding
 from fastworkflow import planning_commands
 from fastworkflow.planning_commands import (
     PlanningCommandCommand, PlanningCommandFormatError, PlanningCommandInputError, typed_planning_call, refusal_question)
@@ -377,6 +380,45 @@ def core_command_names() -> frozenset[str]:
                      for name in cme.get_command_names(context))
 
 
+#: Set while the framework itself runs a planning command (WorkflowExecutionContext.run_framework_planning_command):
+#: the framework's plan steps may then name a framework execution command (review_proposal) by exact name. The
+#: agent's own calls never run in this scope, so they are still refused.
+_framework_call_var: contextvars.ContextVar[bool] = contextvars.ContextVar("fw_framework_call", default=False)
+
+
+@contextlib.contextmanager
+def framework_call_scope():
+    token = _framework_call_var.set(True)
+    try:
+        yield
+    finally:
+        _framework_call_var.reset(token)
+
+
+def _framework_execution_names(app) -> list[str]:
+    return [name for name, meta in app.command_directory.map_command_2_metadata.items()
+            if meta.framework and not meta.is_planning]
+
+
+def _framework_call_name(command: str, workflow) -> str | None:
+    """The framework execution command *command* names, when the framework itself is calling it; else None."""
+    if not _framework_call_var.get() or workflow is None:
+        return None
+    token = command.strip().split(maxsplit=1)[0] if command.strip() else ""
+    app = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
+    hits = [name for name in _framework_execution_names(app) if name == token or name.split("/")[-1] == token]
+    return hits[0] if len(hits) == 1 else None
+
+
+_FRAMEWORK_PARAMETER = re.compile(r'(\w+)=(?:"([^"]*)"|(\S+))')
+
+
+def _framework_action_parameters(command: str) -> dict:
+    """``name=value`` (value quoted or not) pairs of a framework step's command text."""
+    return {match.group(1): match.group(2) if match.group(2) is not None else match.group(3)
+            for match in _FRAMEWORK_PARAMETER.finditer(command)}
+
+
 def _explicit_agent_command(command: str, workflow) -> str:
     """Resolve the agent tool's command token against its current command surface.
 
@@ -396,6 +438,11 @@ def _explicit_agent_command(command: str, workflow) -> str:
     available = (set(app.get_command_names(current_context))
                  | set(app.get_planning_command_names(current_context))
                  | core_command_names())
+    if _framework_call_var.get():
+        framework_hits = [name for name in _framework_execution_names(app)
+                          if _command_name_matches(token, name)]
+        if len(framework_hits) == 1:
+            return framework_hits[0] + (" " + parts[1] if len(parts) > 1 else "")
     matches = [name for name in available if _command_name_matches(token, name)]
     if not matches and (on_path := command_on_path(workflow, token)) is not None:
         # 3.9, "Calls by exact name": a command of an enclosing record or of the global
@@ -644,7 +691,16 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     started = datetime.now(timezone.utc)
     try:
         resolved_command = _explicit_agent_command(command, chat_session_obj.get_active_workflow())
-        command_output = CommandExecutor.invoke_command(chat_session_obj, resolved_command)
+        framework_name = _framework_call_name(resolved_command, chat_session_obj.get_active_workflow())
+        if framework_name is not None:
+            # A framework execution command (review_proposal) is not routed, so the intent path cannot name it:
+            # the framework's own step calls it by exact name, through the executor.
+            command_output = CommandExecutor.perform_action(
+                chat_session_obj.get_active_workflow(),
+                fastworkflow.Action(command_name=framework_name, command=resolved_command,
+                                    parameters=_framework_action_parameters(resolved_command)))
+        else:
+            command_output = CommandExecutor.invoke_command(chat_session_obj, resolved_command)
     except BaseException as e:
         # BaseException, not CommandCancelledError. This arm used to name only
         # that one exception, and the comment beside it even observed that
@@ -983,6 +1039,12 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         return _what_can_i_do(chat_session_obj=chat_session_obj)
 
     def run_execute_workflow_query(command: str) -> str:
+        # The agent's own call (and the planning-command steps it runs): agent-originated for the
+        # approval gate (ADR-EXP-025 section 5). Suspendable, so an ask suspends this tool call.
+        with approval_binding.origin_scope(approval_binding.Origin.AGENT):
+            return _run_execute_workflow_query_unscoped(command)
+
+    def _run_execute_workflow_query_unscoped(command: str) -> str:
         # Check if this command originated from user input (iteration_counter == 0)
         # Set flag in workflow context so validate_extracted_parameters can access it
         is_user_command = chat_session_obj.workflow_tool_agent.iteration_counter <= 0 
@@ -1714,6 +1776,37 @@ def planner_commands_text(current_workflow) -> str:
     )
 
 
+def planner_listing_text(current_workflow, sub_task: str,
+                         planning_probabilities: Mapping[str, float] | None = None) -> str:
+    """The planner's listing for *sub_task* (run_listing.run_listing_text). Production (no experiment arm, the default
+    FULL): ``planner_commands_text``, byte for byte. The experiment selector ``THRESHOLD`` gives it while it is at most
+    ``run_listing.FULL_LISTING_MAX_CHARS``, else the trained-head shortlist; ``COMMAND_SHORTLIST`` gives the shortlist.
+    *planning_probabilities*: the turn's planning-command match distribution (None without JEV_API_KEY)."""
+    from fastworkflow import run_listing
+
+    arm = run_listing.effective_listing_arm()
+    if arm == run_listing.FULL:
+        return planner_commands_text(current_workflow)
+    return run_listing.run_listing_text(current_workflow, sub_task, arm=arm,
+                                        planning_probabilities=planning_probabilities)
+
+
+def sub_task_commands_text(chat_session_obj, sub_task: str,
+                           planning_probabilities: Mapping[str, float] | None = None) -> str:
+    """The ``available_commands`` of a sub-task's run (run_listing.run_listing_text). Production (no experiment arm,
+    the default FULL): ``_what_can_i_do``, byte for byte. The experiment selector ``THRESHOLD`` gives it while it is at
+    most ``run_listing.FULL_LISTING_MAX_CHARS``, else the trained-head shortlist; ``COMMAND_SHORTLIST`` gives the
+    shortlist. *planning_probabilities*: the turn's planning-command match distribution (None without JEV_API_KEY)."""
+    from fastworkflow import run_listing
+
+    arm = run_listing.effective_listing_arm()
+    full = _what_can_i_do(chat_session_obj)
+    if arm == run_listing.FULL:
+        return full
+    return run_listing.run_listing_text(chat_session_obj.get_active_workflow(), sub_task, arm=arm,
+                                        planning_probabilities=planning_probabilities, full=full)
+
+
 #: A section header of the planner's listing: the active context's, the one a command enters, or the
 #: scope of a command callable here by its name (3.9, Catalogs: an enclosing context, or the global scope).
 _LISTING_SECTION = re.compile(
@@ -1801,15 +1894,15 @@ def _jev_lm():
 @functools.lru_cache(maxsize=None)
 def _warn_missing_jev_key(workflow_folderpath: str) -> None:
     """The INFO line of design 3.9, once per workflow folder per process, when a workflow has
-    planning commands (``_commands``) and ``JEV_API_KEY`` is not set: planning commands are not
-    matched, so the text planner plans the request (it may name them as steps), and the ``verify``
-    checks of the fields that name them are off.
+    planning commands (``_commands``) and ``JEV_API_KEY`` is not set. Planning commands are ordinary
+    intent labels, so intent detection still matches them; without the key, Jev's planning-match
+    candidates are off, and so are the ``verify`` checks of the fields that name planning commands.
     """
     fields = planning_commands.verify_field_names(workflow_folderpath)
-    checks_clause = f"; the verify checks of {', '.join(fields)} are off" if fields else ""
+    checks_clause = f" and the verify checks of {', '.join(fields)}" if fields else ""
     logger.info(
-        f"{workflow_folderpath}: planning commands are not matched without JEV_API_KEY; "
-        f"the text planner plans and may name them as steps{checks_clause}."
+        f"{workflow_folderpath}: planning commands are matched by intent detection; without "
+        f"JEV_API_KEY, Jev's planning-match candidates{checks_clause} are off."
     )
 
 
@@ -1853,7 +1946,8 @@ def _planning_command_matcher(workflow_folderpath: str):
 
 
 def match_planning_command(text: str, workflow_folderpath: str,
-                scopes: tuple[str, ...] = ("",)) -> tuple[str, tuple[str, ...]] | None:
+                scopes: tuple[str, ...] = ("",), *, distribution: dict[str, float] | None = None
+                ) -> tuple[str, tuple[str, ...]] | None:
     """``(name, steps)`` of the planning command ``text`` asks for along ``scopes`` (``""`` for root),
     when Jev is confident; None otherwise.
 
@@ -1861,6 +1955,10 @@ def match_planning_command(text: str, workflow_folderpath: str,
     scope's planning commands plus ``"none"``; the first confident match (>= ``PLANNING_COMMAND_MATCH_THRESHOLD``)
     wins and later scopes are not asked. Never raises: a failed match only means the
     planner gets no template.
+
+    ``distribution`` (optional, filled in place): the options' probabilities of each scope asked, the max per option,
+    so the listing can take the unsure candidates (run_listing.planning_candidates). No extra model call: it is the
+    same choice the match already made. Left empty when no match runs (no JEV_API_KEY, no planning commands).
     """
     try:
         matcher = _planning_command_matcher(workflow_folderpath)
@@ -1884,6 +1982,10 @@ def match_planning_command(text: str, workflow_folderpath: str,
             with dspy.context(lm=jev_lm):
                 choice = predictor(subtask=text, job_types=job_types).job
             value, probability = _choice_value_and_probability(choice)
+            if distribution is not None:
+                for option, option_probability in (choice.probabilities or {value: probability}).items():
+                    key = str(option)
+                    distribution[key] = max(distribution.get(key, 0.0), float(option_probability))
             scope_label = scope or "root"
             logger.info(f"planning command match in scope {scope_label!r} for {text!r}: {value} (confidence {probability:.2f})")
             if value in scope_steps and probability >= PLANNING_COMMAND_MATCH_THRESHOLD:
@@ -1901,14 +2003,15 @@ def _template_text(steps: tuple[str, ...]) -> str:
 
 
 def planner_planning_command_for(text: str, workflow_folderpath: str,
-                      scopes: tuple[str, ...] = ("",)) -> tuple[str, PlanningCommandCommand | None]:
+                      scopes: tuple[str, ...] = ("",), *, distribution: dict[str, float] | None = None
+                      ) -> tuple[str, PlanningCommandCommand | None]:
     """``(template, command)`` for the planning command ``text`` asks for along ``scopes`` (``""`` for root).
 
     ``template`` is ``plan_template_for``'s text ("" when no planning command matches); ``command`` is
     the matched planning command's parsed form (None when no planning command matches). A matched planning command's call runs
     through the phase runner, whatever its shape.
     """
-    matched = match_planning_command(text, workflow_folderpath, scopes=scopes)
+    matched = match_planning_command(text, workflow_folderpath, scopes=scopes, distribution=distribution)
     if matched is None:
         return "", None
     name, steps = matched
@@ -2154,7 +2257,8 @@ def build_query_with_next_steps(user_query: str,
     planner_user_query: str | None = None,
     plan_template: str | None = None,
     done_only: bool = False,
-    planning_command: PlanningCommandCommand | None = None) -> str:
+    planning_command: PlanningCommandCommand | None = None,
+    planning_probabilities: Mapping[str, float] | None = None) -> str:
     """
     Generate a todo list.
     Return a string that combine the user query and todo list
@@ -2210,7 +2314,8 @@ def build_query_with_next_steps(user_query: str,
         )
         next_steps: str = dspy.OutputField(desc="task descriptions as a numbered list of short sentences separated by line breaks")
 
-    available_commands = planner_commands_text(current_workflow)
+    available_commands = planner_listing_text(current_workflow, user_query,
+                                              planning_probabilities=planning_probabilities)
 
     # Use provided planner_lm if available (distillation mode), else build from env
     if planner_lm is None:

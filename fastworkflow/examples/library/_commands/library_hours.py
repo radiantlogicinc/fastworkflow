@@ -15,7 +15,16 @@ class Signature:
         branches: list[str] = Field(description="each branch named, in row order")
         hours: list[str] = Field(description="each branch's opening hours, in row order")
 
-    plain_utterances = ["when are you open", "what are Riverside's opening hours"]
+    plain_utterances = [
+        "when are you open",
+        "what are Riverside's opening hours",
+        "what time do you close on Saturdays",
+        "hours for Central",
+        "is the library open on Tuesday",
+        "what time do you open tomorrow",
+        "opening times at the Riverside branch",
+        "when does Central shut",
+    ]
 
 
 class ResponseGenerator:

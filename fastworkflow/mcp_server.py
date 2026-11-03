@@ -72,6 +72,7 @@ class FastWorkflowMCPServer:
             for qualified_name in command_names
             if not cmd_directory.map_command_2_metadata.get(qualified_name)
             or not cmd_directory.map_command_2_metadata[qualified_name].is_planning
+            or cmd_directory.map_command_2_metadata[qualified_name].framework
         ]
 
         # Centralized command metadata (docstrings, inputs, plain_utterances)

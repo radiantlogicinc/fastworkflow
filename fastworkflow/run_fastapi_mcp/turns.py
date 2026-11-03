@@ -42,6 +42,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 import fastworkflow
+from fastworkflow import approval_binding
 from fastworkflow.state_serialization import StateEncodingError
 from fastworkflow.turn import TurnStatus
 from fastworkflow.utils.logging import logger
@@ -180,6 +181,10 @@ class TurnExecution:
     # where ChannelBusyError cannot fire at admission time.
     http_status_on_error: Optional[int] = None
     traces: list[dict[str, Any]] = field(default_factory=list)
+    # Live-only fields the host attaches to the response of the request that produced the result
+    # (the approval token, ADR-EXP-025 section 6.4). Never persisted and never in TurnResult: it is
+    # rendered once, on the first terminal response, and then cleared.
+    live_extras: Optional[dict[str, Any]] = None
     user_id: Optional[str] = None
     # Carried on the execution, never written to shared workflow state by the
     # dependency that authenticated the request. Two requests on one channel
@@ -533,7 +538,9 @@ def _persist_after_turn(
     # completed with an error asking for the missing values -- but it holds the
     # partially extracted parameters, and clearing here would drop them the
     # moment it is evicted between turns.
-    if awaiting or ctx.has_open_command():
+    # A pending approval (ADR-EXP-025) is durable suspended state: it survives eviction and restart.
+    pending_approval = approval_binding.active_record(ctx.app_workflow) is not None
+    if awaiting or ctx.has_open_command() or pending_approval:
         try:
             state = ctx.serialize_state(channel_id=runtime.channel_id)
         except StateEncodingError as exc:
@@ -1201,4 +1208,7 @@ def render_turn_response(execn: TurnExecution) -> tuple[int, dict[str, Any]]:
     }
     if execn.traces:
         body["traces"] = execn.traces
+    if execn.live_extras:
+        body.update(execn.live_extras)
+        execn.live_extras = None
     return 200, body

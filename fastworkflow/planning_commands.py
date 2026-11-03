@@ -2180,6 +2180,24 @@ def _resolve_field_sources_cached(folder: str, _source_fingerprint: str) -> Fiel
     )
 
 
+def is_framework_planning_command(command: "PlanningCommandCommand") -> bool:
+    """True for a framework-provided planning command (fastworkflow/_framework_commands): system machinery, not
+    trained, not inventoried, not listed. It stays loadable and callable by name (``planning_command``)."""
+    import fastworkflow.command_directory as command_directory
+
+    source = os.path.abspath(command.path) if command.path else ""
+    root = os.path.abspath(str(command_directory.FRAMEWORK_PLANNING_COMMANDS_DIR))
+    return source == root or source.startswith(root + os.sep)
+
+
+def visible_planning_commands(workflow_folderpath: str) -> dict[str, "PlanningCommandCommand"]:
+    """The planning commands an inventory counts (the test-set builder, the scoring listings): every loaded planning
+    command except the framework's own."""
+    return {name: command for name, command in
+            resolve_field_sources(workflow_folderpath).planning_commands.items()
+            if not is_framework_planning_command(command)}
+
+
 def planning_command(workflow_folderpath: str, qualified_name: str) -> PlanningCommandCommand | None:
     """The loaded planning command *qualified_name* of a workflow, or None when it has none
     (not a planning command, or its module does not load)."""
@@ -3066,7 +3084,7 @@ def check_arguments(command: PlanningCommandCommand, raw: dict, request: str,
                 notes.append(f"{p.name}={shown!r} -> {exact!r}")
             args[p.name] = exact
     for p in command.params:
-        if not p.in_request:
+        if not p.in_request or p.type != "int":   # a str's in_request is the text check below, not a number
             continue
         written = _request_numbers(request, args, command)
         if not written or args[p.name] in written:

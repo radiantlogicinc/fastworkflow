@@ -322,11 +322,14 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # only a pronoun or only a kind word or field name of the workflow, and was treated as not given. A
 # span recorded before this carries no such key.
 #
+# v31: fw.approval v1 (new) -- one span per approval-binding transition (ADR-EXP-025 section 12):
+# the gate's refuse, queue, ask, shadow and each resolution. It carries hashes, state and the
+# identity class and reference, never the token or the raw parameters.
 # v30: fw.planner.plan / fw.planner.replan v8 and fw.agent.execute v3 -- the Phase 6 arms were removed
 # by owner decision 2026-10-30. `experiment_arm`, `fast_path` and `recipe_choice` (the v25 keys of the
 # planner span) and `fast_path_refusal_asked` (the v28 key of the executor span) are no longer declared
 # or written. A span recorded before this carries them as it wrote them; nothing reads them as a live path.
-SPAN_CONTRACT_VERSION = 30
+SPAN_CONTRACT_VERSION = 31
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -402,6 +405,9 @@ RESERVED_V2_SPAN_NAMES = frozenset(
 # to the turn root and no pass's cost roll-up can claim them.
 SPAN_DISTILLATION_PASS = "fw.distillation.pass"
 
+# One span per approval-binding transition (approval_binding._audit).
+SPAN_APPROVAL = "fw.approval"
+
 # The attribute a pass-stamping producer records, and the one
 # `comparison.discover_pass_selectors` / `selection_api.DEFAULT_PASS_ATTRIBUTE`
 # already look for. Dotted like a span name rather than named `pass` because it
@@ -466,6 +472,30 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "failure_reason",
                 "suspended_ms",
                 "context_mutations",
+            }
+        ),
+    ),
+    # v1: one per approval-binding transition (ADR-EXP-025 section 12).
+    SPAN_APPROVAL: SpanContract(
+        version=1,
+        attributes=frozenset(
+            {
+                "approval_record_id",
+                "approval_command",
+                "approval_annotation",
+                "approval_state_before",
+                "approval_state_after",
+                "approval_reason",
+                "approval_outcome",
+                "approval_fingerprint",
+                "approval_rendering_hash",
+                "approval_channel",
+                "approval_identity_class",
+                "approval_identity_ref",
+                "approval_surface",
+                "approval_origin",
+                "approval_mode",
+                "approval_shadow",
             }
         ),
     ),

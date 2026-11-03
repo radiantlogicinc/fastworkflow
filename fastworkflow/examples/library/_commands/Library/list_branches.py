@@ -12,7 +12,16 @@ class Signature:
         names: list[str] = Field(description="the branch names")
         total: int = Field(description="how many branches there are")
 
-    plain_utterances = ["which branches does the library have"]
+    plain_utterances = [
+        "which branches does the library have",
+        "list the branches",
+        "what branches do you have",
+        "name every branch of the library",
+        "how many branches are there",
+        "which locations make up the library",
+        "tell me the branch names",
+        "is there more than one site, and what are they called",
+    ]
 
 
 class ResponseGenerator:

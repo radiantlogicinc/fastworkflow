@@ -14,7 +14,7 @@ context instance*. It is deliberately generic. fastWorkflow has no framework
 notion of a context instance's identity -- the current context is an arbitrary
 application object whose only framework-visible fact is its class name -- so the
 identity has to be DECLARED by the workflow, on the same context callback class
-that already declares ``get_parent``, ``get_displayname`` and ``enter_command``:
+that already declares ``get_parent`` and ``get_displayname``:
 
 * ``instance_label(command_context_object) -> str`` -- a classmethod (or any
   callable attribute) returning a short identity for this instance; or

@@ -15,7 +15,16 @@ from .show_book import Signature as ShowBook
 class Signature:
     """Say where this book is held, how many copies there are, and who has it on loan."""
 
-    plain_utterances = ["where is this book kept, and who has it", "is this book in"]
+    plain_utterances = [
+        "where is this book kept, and who has it",
+        "is this book in",
+        "which branch keeps this book, how many copies, and who is borrowing it",
+        "where do we keep this title and is any copy out",
+        "shelf location and loan status for this one",
+        "is there a copy in the building right now",
+        "tell me where this book sits and who holds the copies",
+        "give me the shelf status of this title",
+    ]
 
 
 class Shelf(BaseModel):

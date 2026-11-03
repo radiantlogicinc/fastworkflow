@@ -14,7 +14,16 @@ class Signature:
     class Output(BaseModel):
         total: int = Field(description="how many loans are overdue")
 
-    plain_utterances = ["how many loans are overdue", "count the overdue loans at Central"]
+    plain_utterances = [
+        "how many loans are overdue",
+        "count the overdue loans at Central",
+        "how many books are past their due date",
+        "number of overdue loans at Riverside",
+        "tally the late loans across all branches",
+        "how many of our loans are late",
+        "give me the late-loan count for Riverside",
+        "are there overdue books at Central",
+    ]
 
 
 class ResponseGenerator:

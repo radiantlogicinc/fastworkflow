@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import heapq
 import logging
-import re
 from dataclasses import dataclass
 
 from typing import Iterable
@@ -21,11 +20,9 @@ from typing import Iterable
 import fastworkflow
 from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.entry_declarations import declared_entry_commands, declared_occupiable
+from fastworkflow.entry_declarations import declared_occupiable
 
 logger = logging.getLogger(__name__)
-
-_PLACEHOLDER = re.compile(r"<([A-Za-z_][A-Za-z0-9_]*)>")
 
 #: ``go_up`` is tried before ``reset_context`` when both cost the same, because
 #: ``go_up`` is the move that lands on the live parent. ``reset_context`` still
@@ -540,11 +537,12 @@ def render_already_in_context(token: str, current: str, workflow) -> str:
 
 
 def collect_descend_edges(workflow_folderpath: str) -> tuple[DescendEdge, ...]:
-    """Descend commands declared by ``descends_to`` and by ``enter_command``.
+    """The navigation edges, declared by ``descends_to`` on each command and nothing else.
 
-    ``enter_command`` supplies the parameter names ``descends_to`` does not
-    (``open_account_by_uid <account_uid>``). It is an edge into its context unless
-    the command's own ``descends_to`` names a different context.
+    ``descend_parameter`` makes the edge conditional: the parameter is then required to enter
+    (``required_to_enter``). The parameters the command needs to run come from its required
+    ``Input`` fields (``needs``), as ``_required_parameters`` reads them (design 3.15). A context
+    class's ``enter_command`` is no longer read; it is a load error (``entry_declarations``).
     """
     try:
         routing = RoutingRegistry.get_definition(workflow_folderpath)
@@ -566,37 +564,42 @@ def collect_descend_edges(workflow_folderpath: str) -> tuple[DescendEdge, ...]:
                 if source == target:
                     continue
                 shown = _shown_command(source, command_key, contexts)
-                _put(raw, _RawEdge(source, shown, command_key, target, gate, ()))
-
-    for context_name, names in contexts.items():
-        if not _enterable(context_name, occupiable):
-            continue
-        for declaration in declared_entry_commands(workflow_folderpath, context_name):
-            token, placeholders = _parse_enter(declaration)
-            if not token:
-                continue
-            effect = _effect_for_token(token, effects, contexts)
-            if effect is not None and context_name not in effect.declared_targets():
-                continue
-            for source, routing_name in _sources_for_token(token, contexts):
-                if source == context_name:
-                    continue
-                shown = _shown_command(source, routing_name, contexts)
-                _put(raw, _RawEdge(
-                    source, shown, routing_name, context_name, None, placeholders))
+                _put(raw, _RawEdge(source, shown, command_key, target, gate))
 
     schema: dict[str, tuple[str, ...] | None] = {}
     edges: dict[tuple[str, str, str], DescendEdge] = {}
     for record in raw.values():
         if record.routing_name not in schema:
             schema[record.routing_name] = _required_parameters(routing, record.routing_name)
-        needs, required = _classify(
-            schema[record.routing_name], record.placeholders, record.gate)
+        needs, required = _classify(schema[record.routing_name], record.gate)
         key = (record.source, record.command, record.target)
-        edge = DescendEdge(record.source, record.command, record.target, needs, required)
-        existing = edges.get(key)
-        edges[key] = edge if existing is None else _merge_edge(existing, edge)
+        edges[key] = DescendEdge(record.source, record.command, record.target, needs, required)
     return tuple(edges.values())
+
+
+def entering_commands(workflow_folderpath: str, context_name: str) -> list[str]:
+    """The commands that enter *context_name*, as a hint shows them: the name, then the values it needs.
+
+    Read from the descend edges, so a command's parameters are the ones its ``Input`` declares
+    (``get_todo_list <id>``). Empty when no command declares that it enters the context.
+    """
+    try:
+        edges = collect_descend_edges(workflow_folderpath)
+    except Exception:
+        logger.debug("entering commands unread for %r", context_name, exc_info=True)
+        return []
+    shown = {
+        " ".join([edge.command, *(f"<{name}>" for name in _union(edge.needs, edge.required_to_enter))])
+        for edge in edges
+        if edge.target == context_name
+    }
+    return sorted(shown)
+
+
+def declared_descends_to(routing, command_name: str) -> str | None:
+    """The context a command declares it enters with ``descends_to``, or None."""
+    descend = _declared_descend(routing, command_name)
+    return descend.target if descend is not None else None
 
 
 @dataclass(frozen=True)
@@ -606,7 +609,6 @@ class _RawEdge:
     routing_name: str
     target: str
     gate: str | None
-    placeholders: tuple[str, ...]
 
 
 def _put(raw: dict[tuple[str, str, str], _RawEdge], record: _RawEdge) -> None:
@@ -621,7 +623,6 @@ def _put(raw: dict[tuple[str, str, str], _RawEdge], record: _RawEdge) -> None:
         existing.routing_name or record.routing_name,
         record.target,
         existing.gate or record.gate,
-        _union(existing.placeholders, record.placeholders),
     )
 
 
@@ -694,27 +695,6 @@ def _contexts_for_command_key(
     return tuple(name for name, names in contexts.items() if command_key in names)
 
 
-def _sources_for_token(
-    token: str, contexts: dict[str, list[str]],
-) -> tuple[tuple[str, str], ...]:
-    found: list[tuple[str, str]] = []
-    for context_name, names in contexts.items():
-        for name in names:
-            if name.split("/")[-1] == token:
-                found.append((context_name, name))
-                break
-    return tuple(found)
-
-
-def _effect_for_token(token: str, effects: dict, contexts: dict[str, list[str]]):
-    for command_key, effect in effects.items():
-        if command_key.split("/")[-1] != token:
-            continue
-        if _contexts_for_command_key(command_key, contexts):
-            return effect
-    return None
-
-
 def _shown_command(
     source: str, routing_name: str, contexts: dict[str, list[str]],
 ) -> str:
@@ -729,13 +709,6 @@ def _shown_command(
     if routing_name in collisions:
         return routing_name
     return collisions[0]
-
-
-def _parse_enter(declaration: str) -> tuple[str, tuple[str, ...]]:
-    parts = declaration.split(None, 1)
-    if not parts:
-        return "", ()
-    return parts[0], tuple(_PLACEHOLDER.findall(declaration))
 
 
 def _required_parameters(routing, command_name: str) -> tuple[str, ...] | None:
@@ -764,26 +737,18 @@ def _required_parameters(routing, command_name: str) -> tuple[str, ...] | None:
 
 def _classify(
     schema_required: tuple[str, ...] | None,
-    placeholders: tuple[str, ...],
     gate: str | None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Split parameters into 'must pass to run' and 'must pass to enter'.
 
-    A required input is ``needs``. ``when_parameter_present`` on an optional
-    field is the second kind: the command runs without it and stays put.
-    Placeholders on ``enter_command`` join that second kind when the schema
-    does not already call them required, so a signature that failed to import
-    still names the value.
+    A required input is ``needs``. ``descend_parameter`` on an optional field is the
+    second kind: the command runs without it and stays put.
     """
     needs = tuple(schema_required or ())
-    required: list[str] = []
+    required: tuple[str, ...] = ()
     if gate and gate not in needs:
-        required.append(gate)
-    for name in placeholders:
-        if name in needs or name in required:
-            continue
-        required.append(name)
-    return needs, tuple(required)
+        required = (gate,)
+    return needs, required
 
 
 def _union(left: tuple[str, ...], right: tuple[str, ...]) -> tuple[str, ...]:
@@ -794,15 +759,6 @@ def _union(left: tuple[str, ...], right: tuple[str, ...]) -> tuple[str, ...]:
             seen.add(name)
             merged.append(name)
     return tuple(merged)
-
-
-def _merge_edge(left: DescendEdge, right: DescendEdge) -> DescendEdge:
-    needs = _union(left.needs, right.needs)
-    required = tuple(
-        name for name in _union(left.required_to_enter, right.required_to_enter)
-        if name not in needs
-    )
-    return DescendEdge(left.source, left.command, left.target, needs, required)
 
 
 def _format_step(step: NavStep) -> str:

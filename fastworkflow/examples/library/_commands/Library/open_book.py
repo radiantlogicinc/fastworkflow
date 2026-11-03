@@ -18,7 +18,16 @@ class Signature:
         author: str = Field(description="the book's author")
         copies: int = Field(description="how many copies the library owns")
 
-    plain_utterances = ["open book b1", "go to the book Dune"]
+    plain_utterances = [
+        "open book b1",
+        "go to the book Dune",
+        "open the book with uid b3",
+        "make b2 the current book",
+        "select b2 so I can act on it",
+        "I want to act on b3 now",
+        "make the Dune Messiah book the open one",
+        "load uid b4 as the current book",
+    ]
 
 
 class ResponseGenerator:

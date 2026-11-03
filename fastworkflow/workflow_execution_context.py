@@ -35,6 +35,7 @@ import dspy
 import fastworkflow
 import fastworkflow.turn
 from fastworkflow import active_workflow, metrics, planning_commands, tracing
+from fastworkflow import approval_binding
 from fastworkflow.observation_offloading.state import current_execute_alias
 from fastworkflow.session_state_store import SCHEMA_VERSION, IncompatibleSessionState
 from fastworkflow.state_serialization import validate_state
@@ -663,6 +664,7 @@ class WorkflowExecutionContext:
         self._suspend_began_at = None
         self._turn_agent_result = None
         self._turn_history_baseline = len(self.conversation_history.messages)
+        approval_binding.on_new_turn(self, self._app_workflow, unattended=self._turn_unattended)
 
         self._turn_entry_workflow_name = ""
         self._turn_entry_context = ""
@@ -1090,6 +1092,8 @@ class WorkflowExecutionContext:
                 self._app_workflow.folderpath if self._app_workflow else None
             ),
             "awaiting_user": self._awaiting_user,
+            # Additive (ADR-EXP-025 section 7): the session's approval records and turn clock.
+            "approval": self._approval_state_payload(),
             "suspended_user_message": self._suspended_user_message,
             "pending_clarification_request": self._pending_clarification_request,
             "skill_refusal_pending": self._planning_command_refusal_pending,
@@ -1158,6 +1162,9 @@ class WorkflowExecutionContext:
                 raise IncompatibleSessionState(found)
 
         self._awaiting_user = bool(state.get("awaiting_user"))
+        # Absent from blobs written before approval binding: no records.
+        if state.get("approval") and self._app_workflow is not None:
+            approval_binding.store_for(self._app_workflow).load_state(state["approval"])
         self._suspended_user_message = state.get("suspended_user_message")
         self._pending_clarification_request = state.get(
             "pending_clarification_request"
@@ -1353,8 +1360,9 @@ class WorkflowExecutionContext:
 
         Returns True if a pending clarification was cleared, False otherwise.
         """
+        cancelled_approvals = self.cancel_pending_approvals()
         if not self._awaiting_user:
-            return False
+            return cancelled_approvals > 0
         self._reset_agent_suspension()
         self._suspend_began_at = None
         self._turn_suspended_ms = 0
@@ -1492,7 +1500,9 @@ class WorkflowExecutionContext:
     # ------------------------------------------------------------------
 
     def process_turn(
-        self, message: str, *, unattended: bool = False
+        self, message: str, *, unattended: bool = False,
+        approval_surface: "approval_binding.Surface | None" = None,
+        approval_token: Optional[str] = None,
     ) -> "fastworkflow.TurnOutput":
         """
         Execute one user message synchronously and return the public TurnOutput.
@@ -1507,9 +1517,11 @@ class WorkflowExecutionContext:
         full internal TurnResult is built and projected onto the slim public
         TurnOutput (see docs/turn_result_design_final.md section 1a).
         """
+        self._note_approval_inbound(approval_surface, approval_token, unattended)
         try:
             command_output = self._execute_message(message, unattended=unattended)
         except Exception as exc:
+            approval_binding.clear_inbound(self._app_workflow)
             # A turn that raised is still a turn: record it as failed, with its
             # spans closed under it, before the error propagates. Without this
             # the turn had no record at all and read as lost.
@@ -1520,6 +1532,7 @@ class WorkflowExecutionContext:
             except Exception:  # noqa: BLE001 - never mask the turn's own error
                 logger.warning("could not record the failed turn", exc_info=True)
             raise
+        approval_binding.clear_inbound(self._app_workflow)
         turn_result = self._build_turn_result(command_output)
         return turn_result.turn_output
 
@@ -1540,6 +1553,14 @@ class WorkflowExecutionContext:
 
         self.push_active_workflow(self._app_workflow)
         try:
+            awaiting = approval_binding.active_record(self._app_workflow)
+            if awaiting is None or not awaiting.suspended_agent:
+                managed = approval_binding.management_reply(self, self._app_workflow, message)
+                if managed is not None:
+                    return self._approval_text_output(managed)
+            if awaiting is not None and (not awaiting.suspended_agent
+                                         or message.strip() == approval_binding.CANCEL_COMMAND):
+                return self._resume_approval_direct(message)
             self._prepare_message_routing(message)
             if self._should_run_agent_for_message(message):
                 if self._awaiting_user:
@@ -1592,6 +1613,8 @@ class WorkflowExecutionContext:
                 # not by status/failure_reason.
                 answer = self._turn_outputs[-1].command_response.response
 
+        # The approval token is never in an output: it reaches the host through
+        # approval_binding.take_delivery, once, on the live response (ADR section 6.4).
         turn_output = fastworkflow.TurnOutput(
             turn_key=self._turn_key or mint_turn_key(),
             status=status,
@@ -1853,7 +1876,8 @@ class WorkflowExecutionContext:
                 self._app_workflow.flush()
 
     def process_action_turn(
-        self, action: fastworkflow.Action
+        self, action: fastworkflow.Action, *,
+        approval_surface: "approval_binding.Surface | None" = None,
     ) -> "fastworkflow.TurnOutput":
         """
         Execute one direct action synchronously and return the public TurnOutput.
@@ -1865,7 +1889,11 @@ class WorkflowExecutionContext:
         turn registry) store exactly one result type across both the message and
         action paths.
         """
-        command_output = self.process_action(action)
+        self._note_approval_inbound(approval_surface, None, False)
+        try:
+            command_output = self.process_action(action)
+        finally:
+            approval_binding.clear_inbound(self._app_workflow)
         if self._awaiting_user:
             # The refusal: the suspended turn's record was emitted when it suspended and
             # stands; building the result again would emit it once more with the refusal.
@@ -2124,14 +2152,16 @@ class WorkflowExecutionContext:
         of its sub-task before it); it defaults to ``first_step``.
         """
         from fastworkflow.workflow_agent import (
-            build_query_with_next_steps, _what_can_i_do, planner_planning_command_for, planning_scopes)
+            build_query_with_next_steps, sub_task_commands_text, planner_planning_command_for, planning_scopes)
 
         # One planning command match gives both the template and its parsed form; a hand-off continuation
         # (query differs from its original text) plans from the template only, since the planning command
         # call would plan the whole job again.
+        # The match's option distribution (empty without JEV_API_KEY) feeds the listings' gathering (run_listing).
+        planning_distribution: dict[str, float] = {}
         plan_template, planning_command = (
             planner_planning_command_for(template_text or query, self._app_workflow.folderpath,
-                              scopes=planning_scopes(self._app_workflow))
+                              scopes=planning_scopes(self._app_workflow), distribution=planning_distribution)
             if self._app_workflow is not None else ("", None))
         if template_text is not None and template_text != query:
             planning_command = None
@@ -2145,6 +2175,7 @@ class WorkflowExecutionContext:
             planner_user_query=planner_user_query,
             plan_template=plan_template or None,
             planning_command=planning_command,
+            planning_probabilities=planning_distribution or None,
         )
         refusal, self._planning_command_refusal = self._planning_command_refusal, None
         if refusal is not None:
@@ -2156,7 +2187,7 @@ class WorkflowExecutionContext:
         if phased is not None:
             # A planning command call: its phases run as sub-plans, with no hand-off.
             return self._start_planning_command_phases(query, *phased, first_step=first_step or 0)
-        available_commands = _what_can_i_do(self)
+        available_commands = sub_task_commands_text(self, query, planning_probabilities=planning_distribution or None)
         step_kwargs = {} if first_step is None else {"first_step": first_step}
         self._attach_finish_check(
             evidence_floor if evidence_floor is not None else (first_step or 0))
@@ -2540,6 +2571,35 @@ class WorkflowExecutionContext:
         """
         return len(self._frame_stack()) > 1 and self._turn_steps_used >= turn_max_steps()
 
+    def run_framework_planning_command(self, qualified_name: str, params: Any, step_text: str):
+        """The framework's own entry point for a framework planning command (fix-3rsq.plan-review.1).
+
+        Runs *qualified_name* (review_subtasks, review_plan) as one turn, through the same nested frame
+        and executor a planning step uses, without the agent's explicit-name resolution (which refuses
+        framework commands). Returns the command's output, or the awaiting output when the review asks the
+        user (its replies come as ordinary messages on this session).
+        """
+        from fastworkflow.utils.react import AskUserSuspend
+
+        from fastworkflow.workflow_agent import framework_call_scope
+
+        self._ensure_agent_initialized()
+        self._begin_turn(step_text, unattended=False)
+        # The turn frame has no agent step of its own: when the call finishes, its output is the turn's answer.
+        self._turn_frame().framework_entry = True
+        self._note_approval_inbound(None, None, False)
+        self.push_active_workflow(self._app_workflow)
+        try:
+            with framework_call_scope():
+                output = self.run_planning_command(qualified_name, params, step_text)
+        except AskUserSuspend as asked:
+            self._awaiting_user = True
+            return self._awaiting_user_output(asked.clarification_request)
+        finally:
+            self.pop_active_workflow()
+        self.append_turn_output(output)
+        return output
+
     def run_planning_command(self, qualified_name: str, params: Any,
                              step_text: str) -> fastworkflow.CommandOutput:
         """Run planning command *qualified_name* as a nested frame, for the step *step_text*.
@@ -2670,6 +2730,17 @@ class WorkflowExecutionContext:
             output.context = active.current_command_context_displayname
         return output
 
+    def _finish_framework_call(self, result) -> fastworkflow.CommandOutput:
+        """The framework's own call (run_framework_planning_command) finished after a suspension: its planning
+        command's typed output is the turn's answer, and its frame is closed."""
+        frame = self._top_frame()
+        command = planning_commands.planning_command(self._app_workflow.folderpath, frame.command_name)
+        output = self._close_planning_call(frame, result, planning_commands.input_instance(command, frame.call_args))
+        self._pop_frame(frame)
+        self._awaiting_user = False
+        self.append_turn_output(output)
+        return output
+
     def _finish_nested_frame(self, result) -> str:
         """Close the nested call on top, which finished after a suspension, and return the
         observation of the step it was called from.
@@ -2751,6 +2822,10 @@ class WorkflowExecutionContext:
         try:
             routing = fastworkflow.RoutingRegistry.get_definition(folderpath)
             names += list(routing.routing_definition_map)
+            # Framework execution commands (review_proposal) are not agent-visible, but a plan step may
+            # call them by exact name: the framework's own review steps.
+            names += [name for name, meta in routing.command_directory.map_command_2_metadata.items()
+                      if meta.framework and not meta.is_planning]
         except Exception:  # noqa: BLE001 - read the steps with what is known
             pass
         names += list(self._planning_commands())
@@ -3274,6 +3349,85 @@ class WorkflowExecutionContext:
         self._reset_agent_suspension()
         return self._settle_agent_result(message, self._run_agent(message))
 
+    def _approval_state_payload(self) -> Optional[dict]:
+        store = approval_binding.store_for(self._app_workflow)
+        if store is None or not store.records and not store.turn_seq:
+            return None
+        return store.to_state()
+
+    def _note_approval_inbound(self, surface, token: Optional[str], unattended: bool) -> None:
+        """Record the surface, token and turn kind the approval gate reads for this message."""
+        store = approval_binding.store_for(self._app_workflow)
+        if store is None:
+            return
+        store.surface = surface or approval_binding.CHANNEL_SURFACE
+        store.inbound_token = token
+        store.channel = str(self._channel_id or "")
+        store.task = str(self._session_key or self._channel_id or "")
+
+    def _resume_approval_direct(self, message: str) -> fastworkflow.CommandOutput:
+        """The reply to an approval raised outside the agent's loop (an MCP tool call), or a
+        /cancel_pending for a suspended one: the record resolves here, and its outcome is this
+        turn's output."""
+        awaiting = approval_binding.active_record(self._app_workflow)
+        was_suspended = awaiting is not None and awaiting.suspended_agent
+        resolution = approval_binding.resolve_reply(self, self._app_workflow, message)
+        if not resolution.done:
+            self._awaiting_user = True
+            return self._awaiting_user_output(resolution.text)
+        self._awaiting_user = False
+        if was_suspended:
+            self._reset_agent_suspension()
+        output = resolution.output
+        if output is None:
+            output = fastworkflow.CommandOutput(
+                command_response=fastworkflow.CommandResponse(response=resolution.text))
+        self.append_turn_output(output)
+        return output
+
+    def _approval_text_output(self, text: str) -> fastworkflow.CommandOutput:
+        """A plain text output for the user's approval management messages (never agent-visible)."""
+        output = fastworkflow.CommandOutput(command_response=fastworkflow.CommandResponse(response=text))
+        if self._app_workflow is not None:
+            output.workflow_name = self._app_workflow.folderpath.split("/")[-1]
+        self.append_turn_output(output)
+        return output
+
+    def cancel_pending_approvals(self) -> int:
+        """Invalidate every awaiting approval on this session (session end, eviction, /cancel_pending).
+
+        A suspended approval also abandons the agent's suspended tool call, so a later message is
+        never taken as its answer. Returns how many records were cancelled.
+        """
+        if self._app_workflow is None:
+            return 0
+        awaiting = approval_binding.active_record(self._app_workflow)
+        cancelled = approval_binding.cancel_all(self, self._app_workflow, reason="cancelled")
+        if awaiting is not None and awaiting.suspended_agent and self._awaiting_user:
+            self._reset_agent_suspension()
+        return cancelled
+
+    def _hold_resumed_approval_run(self, output: fastworkflow.CommandOutput) -> None:
+        """Hold the run an approval reply executed under the step it suspended (fix-3rsq.approval-finish-check).
+
+        The approved call runs through approval_binding._execute_stored (perform_action), not the
+        agent's execute path, so nothing holds its run for the step's archive row. Without that row
+        the finish check reads the step as not run and sends the agent back to run it again. The
+        step is the suspended agent's in-flight execute step: the nested frame's agent when the
+        suspension is inside a planning command, else the turn's agent. Never raises.
+        """
+        from fastworkflow.workflow_agent import _held_context, _hold_command_run
+
+        try:
+            agent = self._top_frame().agent or self._workflow_tool_agent
+            alias = current_execute_alias(agent)
+            if alias is None:
+                return
+            clause, name = _held_context(self, output, *self._current_record())
+            _hold_command_run(self, output, clause, name, alias=alias)
+        except Exception:  # noqa: BLE001 - holding a record must not fail the approved command
+            logger.debug("could not hold the approved run for its archive row", exc_info=True)
+
     def _resume_agent_message(self, user_answer: str) -> fastworkflow.CommandOutput:
         self._ensure_agent_initialized()
         if self._planning_command_refusal_pending:
@@ -3286,20 +3440,40 @@ class WorkflowExecutionContext:
             raise NoSuspendedAgentStateError(
                 "No suspended ReAct state to resume"
             )
-        self._note_agent_resume()
+        awaiting = approval_binding.active_record(self._app_workflow)
+        approval_resumed = awaiting is not None and awaiting.suspended_agent
+        if approval_resumed:
+            # The suspended tool call is an approval (ADR-EXP-025): the reply resolves it, and
+            # the resolution is the observation. Nothing else reads the reply.
+            resolution = approval_binding.resolve_reply(self, self._app_workflow, user_answer)
+            if not resolution.done:
+                return self._awaiting_user_output(resolution.text)
+            self._note_agent_resume()
+            self.complete_ask_user_entry(user_answer)
+            if resolution.output is not None:
+                self.append_turn_output(resolution.output)
+                self._hold_resumed_approval_run(resolution.output)
+            self._workflow_tool_agent.iteration_counter = -1
+            observation = resolution.text
+        else:
+            self._note_agent_resume()
 
-        from fastworkflow.workflow_agent import _post_ask_user_response
+            from fastworkflow.workflow_agent import _post_ask_user_response
 
-        self._workflow_tool_agent.iteration_counter = -1
-        observation = _post_ask_user_response(
-            self._pending_clarification_request,
-            user_answer,
-            self,
-        )
-        agent_result = self._resume_top_frame(observation)
+            self._workflow_tool_agent.iteration_counter = -1
+            observation = _post_ask_user_response(
+                self._pending_clarification_request,
+                user_answer,
+                self,
+            )
+        # An approval's observation is the approved command's own run: the step completes as one
+        # that returned normally, so its completion hook archives the run held above.
+        agent_result = self._resume_top_frame(observation, completes_step=approval_resumed)
         # The suspension may be nested: each call that finishes hands its run to the step it
         # was called from, which resumes next, until the turn frame is on top again.
         while len(self._frame_stack()) > 1 and getattr(agent_result, "suspended", None) is not True:
+            if getattr(self._turn_frame(), "framework_entry", False) and len(self._frame_stack()) == 2:
+                return self._finish_framework_call(agent_result)
             observation = self._finish_nested_frame(agent_result)
             agent_result = self._resume_top_frame(observation, completes_step=True)
         if self._subtasks and getattr(agent_result, "suspended", None) is not True:

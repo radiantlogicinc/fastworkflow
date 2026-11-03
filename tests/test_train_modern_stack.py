@@ -205,6 +205,11 @@ def _preseed_fixed_utterance_cache(workflow_path: str) -> dict[str, list[str]]:
     for command_name in sorted(commands):
         if command_name.split("/")[-1] == "wildcard":
             continue
+        # Framework machinery (fastworkflow/_framework_commands, e.g. review_plan) is not trained, so it
+        # has no provenance record (train.training_report: "not trained, reported or gated").
+        framework_meta = cmd_dir.map_command_2_metadata.get(command_name)
+        if framework_meta is not None and getattr(framework_meta, "framework", None):
+            continue
         cmd_dir.ensure_command_hydrated(command_name)
         metadata = cmd_dir.get_utterance_metadata(command_name)
         corpus = _fixed_generated_corpus(command_name)
@@ -360,6 +365,12 @@ def test_benchmark_that_leaks_a_seed_utterance_fails_fast(tmp_path_factory):
         cmd_dir = CommandDirectory.load(workflow_path)
         leaked = None
         for command_key in cmd_dir.get_utterance_keys():
+            # The leaked seed must be one the model trains on: framework commands
+            # (fastworkflow/_framework_commands, e.g. review_plan) are not trained, so a phrasing
+            # of theirs in a benchmark is not a leak of the training seeds.
+            framework_meta = cmd_dir.map_command_2_metadata.get(command_key)
+            if framework_meta is not None and getattr(framework_meta, "framework", None):
+                continue
             metadata = cmd_dir.get_utterance_metadata(command_key)
             if metadata and metadata.plain_utterances:
                 leaked = metadata.plain_utterances[0]

@@ -17,7 +17,18 @@ from fastworkflow.command_directory import CommandDirectory
 from fastworkflow.entry_declarations import declared_occupiable
 from fastworkflow.utils import python_utils
 
+
+def _approval_marker(subject_workflow_path: str, qualified_name: str) -> str:
+    """The short listing marker of an approval-annotated command, "" for an unannotated one.
+
+    Imported here: approval_annotations reads the routing definition, which this module sits above."""
+    from fastworkflow.approval_annotations import approval_marker
+
+    return approval_marker(subject_workflow_path, qualified_name)
+
+
 logger = logging.getLogger(__name__)
+
 
 def _is_pydantic_undefined(value: Any) -> bool:
     """Return True if value appears to be Pydantic's 'undefined' sentinel.
@@ -903,7 +914,8 @@ class CommandMetadataAPI:
             return ""
         short_name = target_cmd.get("name") or leaf
         doc_string = (target_cmd.get("doc_string") or "").strip()
-        lines = [f"- {short_name}"]
+        marker = _approval_marker(subject_workflow_path, target_cmd.get("qualified_name", ""))
+        lines = [f"- {short_name}{marker}"]
         if doc_string:
             lines.append(f"  {doc_string}")
         if template := CommandMetadataAPI._planning_template(
@@ -963,7 +975,8 @@ class CommandMetadataAPI:
                     navigation_workflow, active_context_name, owning_context_name
                 )
 
-        lines = [f"- {short_name}"]
+        marker = _approval_marker(subject_workflow_path, target_cmd.get("qualified_name", ""))
+        lines = [f"- {short_name}{marker}"]
         if doc_string:
             lines.append(f"  {doc_string}")
         if template := CommandMetadataAPI._planning_template(
@@ -1081,7 +1094,8 @@ class CommandMetadataAPI:
         if "qualified_name" in target_cmd:
             new_cmd["qualified_name"] = target_cmd["qualified_name"]
         if "name" in target_cmd:
-            new_cmd["name"] = target_cmd["name"]
+            new_cmd["name"] = target_cmd["name"] + _approval_marker(
+                subject_workflow_path, target_cmd.get("qualified_name", ""))
         if doc_val := (target_cmd.get("doc_string") or "").strip():
             new_cmd["doc_string"] = doc_val
 

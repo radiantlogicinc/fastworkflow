@@ -33,6 +33,7 @@ from fastworkflow.model_pipeline_training import (
     lookup_holdout_split,
     lookup_split_command_names,
     not_here_seed_rows,
+    planning_head_labels,
     own_command_names,
     resolve_head_scope,
     scoped_head_split,
@@ -136,11 +137,13 @@ def test_flattened_labels_are_today_the_inherited_union_plus_core(tmp_path):
     workflow = _copy(tmp_path, "labels_flat")
     crd = RoutingRegistry.get_definition(workflow, load_cached=False)
     core = set(crd.command_directory.core_command_names)
+    # Phase 10 step 1 (production): the head's planning labels are added on top of today's labels.
     expected = {
         name for name in set(crd.contexts[HEAD]) | core
         if not _is_planning_name(crd.command_directory, name)
-    }
+    } | planning_head_labels(HEAD, crd)
     assert _labels(workflow, FLATTENED) == expected
+    assert planning_head_labels(HEAD, crd) == {"Book/loan_report", "Book/shelf_report"}
     assert any(name.startswith("Record/") for name in expected)  # inherited, as today
 
 
@@ -157,7 +160,7 @@ def test_scoped_labels_are_the_own_list_plus_core_and_no_inherited_command(tmp_p
         name for name in own | core
         if not _is_planning_name(crd.command_directory, name)
         and not _is_action_only(crd.command_directory, name)
-    }
+    } | planning_head_labels(HEAD, crd)
     assert core <= labels  # core commands stay in every head, including wildcard
 
 

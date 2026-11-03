@@ -229,12 +229,23 @@ def test_the_inventory_lists_planning_commands_with_their_owners(predictor):
 # Not a classifier label, and routed commands behave as before
 # ---------------------------------------------------------------------------
 
-def test_planning_commands_are_not_classifier_labels(planning_name_env):
+def test_planning_commands_are_classifier_labels_of_their_heads(planning_name_env):
+    """Phase 10 step 1 (production): a root planning command labels the global head, and a scoped one
+    labels the heads on its lookup path. The baseline arm keeps the pre-step-1 rule (no labels)."""
+    from fastworkflow.model_pipeline_training import (
+        PLANNING_HEADS_NOT_HERE,
+        experiment_planning_heads,
+        experiment_reserved_class_arm,
+    )
+
     crd = RoutingRegistry.get_definition(planning_name_env.folder, load_cached=False)
 
-    assert ROOT_PLANNING not in trained_command_labels("*", crd)
-    assert "count_books" not in {label.split("/")[-1]
-                                 for label in trained_command_labels("Library", crd)}
+    assert ROOT_PLANNING in trained_command_labels("*", crd)
+    assert "count_books" in {label.split("/")[-1] for label in trained_command_labels("Library", crd)}
+    with experiment_reserved_class_arm("sparse_1"), experiment_planning_heads(PLANNING_HEADS_NOT_HERE):
+        assert ROOT_PLANNING not in trained_command_labels("*", crd)
+        assert "count_books" not in {label.split("/")[-1]
+                                     for label in trained_command_labels("Library", crd)}
 
 
 def test_a_routed_command_still_resolves_by_name_in_its_context(predictor, classifier_consulted):

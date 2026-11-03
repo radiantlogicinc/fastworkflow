@@ -24,9 +24,11 @@ command's does. Where a command has a `ResponseGenerator`, a planning command ha
 How a matched planning command runs (`workflow_agent.match_planning_command` matches it;
 `planning_commands.typed_planning_call` fills it):
 
-1. The matcher picks the planning command for a sub-task from its description and
-   `plain_utterances`. Matching needs `JEV_API_KEY`; without it no planning command is matched (see
-   AGENTS.md).
+1. A planning command is a label of the classifiers whose scope holds it, trained from its
+   `plain_utterances`, so a request can reach it as it reaches an execution command. With
+   `JEV_API_KEY` the matcher picks the planning command for a sub-task from its description and
+   `plain_utterances` first. Without the key the planner finds the command in its list, and no typed
+   call fills its inputs.
 2. The planner fills `Input` in one typed call.
 3. The arguments are checked: `check_arguments` checks each field against its type and its options
    (`in_request` here), and the file's own rules run.
@@ -394,6 +396,25 @@ Consequences worth designing for:
   tools) writes the answer; keep a judgement step only where a judgement is needed.
 - `repeat()` and `@<skill>` include lines are gone: loop over `range()` bounded by an int field's
   `le`, and share steps through a helper module.
+
+## Approval annotation (`approval`)
+
+A planning command (and an execution command) may declare `approval = "mandatory"` or
+`approval = "delegatable"` on its `PlanGenerator` (or `ResponseGenerator`). Use `mandatory` for an
+action that cannot be undone, such as sending a critical email; `delegatable` when the user may
+hand the decision over. Leave it out for everything else: the agent decides, with no gate. Any
+other value, or a non-string value, fails the load and names the command and its file.
+
+The annotation is enforced. `mandatory` asks before every run, including a run the user typed;
+`delegatable` asks until a standing approval exists. The reply is `yes`, `no` or `always`, bound to
+the exact parameters, single-use, and it expires. The listings mark the command, and
+`planning_steps_needing_approval` lists the annotated commands a planning command's template calls.
+It is not read/write gating: an easy-to-undo write needs no annotation. Full rules are in
+`docs/planning_command_file_layout.md`.
+
+A planning command runs in agent mode. In assistant mode an exactly named planning command runs only
+when it is mechanical (code runs every step). One that needs the agent is refused, with the reasons
+that name each step.
 
 ## Checklist
 

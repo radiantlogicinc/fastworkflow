@@ -337,7 +337,17 @@ _HOOK = '''
             return False, "the library holds no Emma"
         return True, ""
 '''
-_HOOK_ANCHOR = '    plain_utterances = ["who wrote Dune", "how many copies of Dune Messiah are there"]\n'
+_HOOK_ANCHOR = '''    plain_utterances = [
+        "who wrote Dune",
+        "how many copies of Dune Messiah are there",
+        "who is the author of Persuasion, and how many copies do we have",
+        "tell me about the book Emma",
+        "what is Dune Messiah by, and how many copies",
+        "give me the author and copy count for the title Emma",
+        "does the library own Persuasion, and who wrote it",
+        "how many copies of Emma do we own and who wrote it",
+    ]
+'''
 
 #: A test copy of book_by_title whose Input rule reads the request from the validation context:
 #: a request that asks about a withdrawn book is refused.

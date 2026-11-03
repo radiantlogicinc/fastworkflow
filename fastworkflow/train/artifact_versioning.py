@@ -209,6 +209,14 @@ class StaleArtifactError(RuntimeError):
 #: trained before the record existed.
 NOT_HERE_RECORD_KEY: str = "not_here"
 
+#: Field of the not-here record that says the heads carry the planning commands as labels
+#: (Phase 10 step 1: production). Written only by a workflow WITH planning commands; a version
+#: of such a workflow without ``"planning_heads": "labelled"`` is refused at load.
+#: ``model_pipeline_training.PLANNING_HEADS_LABELLED`` is the same string (this module does not
+#: import the trainer).
+PLANNING_HEADS_RECORD_KEY: str = "planning_heads"
+PLANNING_HEADS_PRODUCTION: str = "labelled"
+
 
 class LegacyArtifactsPresentError(RuntimeError):
     """Raised when a real (unversioned) context directory blocks a publish.
@@ -661,6 +669,8 @@ def construction_record_problem(workflow_folderpath: str) -> Optional[str]:
     since "not trained" is reported by the caller's own check. Otherwise it requires the
     current version's manifest to carry a not-here construction record
     (``NOT_HERE_RECORD_KEY``). A legacy unversioned layout has no manifest and so no record.
+    A workflow WITH planning commands also needs the record to say its heads carry them as
+    labels (``PLANNING_HEADS_RECORD_KEY``); a workflow without planning commands is not asked.
     Reads only JSON, so it is cheap enough for the chatbot's workflow listing.
     """
     name = os.path.basename(os.path.normpath(workflow_folderpath))
@@ -675,14 +685,44 @@ def construction_record_problem(workflow_folderpath: str) -> Optional[str]:
             )
         return None
     record = read_manifest(workflow_folderpath, version).get(NOT_HERE_RECORD_KEY)
-    if isinstance(record, dict) and isinstance(record.get("construction"), str):
-        return None
-    return (
-        f"Workflow '{name}' ({workflow_folderpath}) has trained artifacts (version {version}) "
-        f"with no 'not here' construction record, built before the sparse 'not here' class "
-        f"(Phase 9 step 4), so they cannot be loaded: retrain with `fastworkflow train` "
-        f"{workflow_folderpath} <env_file> <passwords_file>."
-    )
+    if not (isinstance(record, dict) and isinstance(record.get("construction"), str)):
+        return (
+            f"Workflow '{name}' ({workflow_folderpath}) has trained artifacts (version {version}) "
+            f"with no 'not here' construction record, built before the sparse 'not here' class "
+            f"(Phase 9 step 4), so they cannot be loaded: retrain with `fastworkflow train` "
+            f"{workflow_folderpath} <env_file> <passwords_file>."
+        )
+    if workflow_has_planning_commands(workflow_folderpath) and (
+            record.get(PLANNING_HEADS_RECORD_KEY) != PLANNING_HEADS_PRODUCTION):
+        return (
+            f"Workflow '{name}' ({workflow_folderpath}) has planning commands, and its trained "
+            f"artifacts (version {version}) do not carry them as head labels (the 'not here' "
+            f"record has no '{PLANNING_HEADS_RECORD_KEY}': '{PLANNING_HEADS_PRODUCTION}'), built "
+            f"before planning commands became ordinary head labels (Phase 10 step 1), so they "
+            f"cannot be loaded: retrain with `fastworkflow train` "
+            f"{workflow_folderpath} <env_file> <passwords_file>."
+        )
+    return None
+
+
+def workflow_has_planning_commands(workflow_folderpath: str) -> bool:
+    """True when the workflow's command directory snapshot holds a planning command.
+
+    Read from ``___command_info/command_directory.json`` (the snapshot the routing registry
+    writes), so it needs no routing registry and no torch. A missing or unreadable snapshot
+    counts as no planning commands: the artifacts' own record is then the only check left.
+    """
+    path = os.path.join(workflow_folderpath, "___command_info", "command_directory.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    metadata = data.get("map_command_2_metadata") if isinstance(data, dict) else None
+    if not isinstance(metadata, dict):
+        return False
+    return any(isinstance(entry, dict) and entry.get("is_planning") and not entry.get("framework")
+               for entry in metadata.values())
 
 
 def require_construction_record(workflow_folderpath: str) -> None:

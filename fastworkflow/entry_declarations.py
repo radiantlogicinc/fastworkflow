@@ -1,48 +1,83 @@
-"""The entry-command declaration contract.
+"""Navigation facts a workflow declares on its classes, and the retired entry-command declaration.
 
-One canonical source for "which command enters this context": the context's own
-callback class, read through :func:`declared_entry_commands`. Nothing in the
-routing definition or the context model records the fact, and inferring it from
-a command's NAME would bake one workflow's spelling conventions into the
-framework.
+How a command enters a context is declared once, on the command: ``descends_to = "<Context>"``
+and ``descend_parameter = "<param>"`` on its ``ResponseGenerator`` class, read by
+``context_navigation.collect_descend_edges`` (design 3.15). The context class used to declare it
+too, as ``enter_command`` / ``enter_commands``. Those shipped, so a context class that still
+declares either is a load error (:func:`check_retired_entry_declarations`), not a second source
+for the same fact.
 
-The live callers read the declaration to name the entry command: the
-foreign-context refusal guard in
-``fastworkflow/_workflows/command_metadata_extraction/intent_detection.py``,
-and the unavailable-command path in ``fastworkflow/context_navigation.py``.
-
-Two more facts follow the same pattern. ``occupiable = False`` on a context's
-callback class (read by :func:`declared_occupiable`) marks a mixin context a user
-cannot enter. ``descends_to = "<Context>"`` and ``descend_parameter = "<param>"``
-on a command's ``ResponseGenerator`` class (read by ``context_navigation``) say
-a command enters a context, and only when that parameter is passed if one is
-named. Absent attributes mean the
-workflow declares nothing: the context is listed and the command has no
-navigation effect.
+``occupiable = False`` on a context's callback class (read by :func:`declared_occupiable`) marks a
+mixin context a user cannot enter. Absent attributes mean the workflow declares nothing: the
+context is listed and the command has no navigation effect.
 """
 from __future__ import annotations
 
+import inspect
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
 
-#: Class attributes a workflow's context callback class may declare to say which
-#: command enters that context. THE canonical source for the fact: nothing in the
-#: routing definition records which command sets the current context, and
-#: inferring it from a command's NAME would bake one workflow's spelling
-#: conventions into the framework. Recording the same fact a second time in the
-#: context model file was considered and rejected: two sources for one fact is
-#: one source plus a drift.
-#:
-#: Syntax: ``enter_command = "<command_name>"`` or
-#: ``enter_command = "<command_name> <param>value-shaped hint</param>"``. Only the
-#: leading command name is load-bearing; the rest is hint text shown to the agent.
-#: ``enter_commands`` takes a list when a context has more than one entry command,
-#: in which case dispatch declines and the hint names them all.
+#: The retired class attributes a context callback class may still carry. Declaring one is a load
+#: error (design 3.15); nothing reads them.
 CONTEXT_ENTER_COMMAND_ATTRS = ("enter_command", "enter_commands")
+
+
 # ---------------------------------------------------------------------------
-# The declaration
+# The retired declaration
+# ---------------------------------------------------------------------------
+
+def check_retired_entry_declarations(workflow_folderpath: str, context_model) -> None:
+    """Raise ValueError when a context class declares ``enter_command`` or ``enter_commands``.
+
+    One line per declaration, naming the file, the context, and the command the declaration's
+    leading token names, with the declaration to write instead: ``descends_to`` on that command's
+    ``ResponseGenerator``. Reads the context classes through *context_model* (the routing
+    definition is still being built when this runs, so the routing registry is not consulted).
+    """
+    problems: list[str] = []
+    for context_name in list(getattr(context_model, "_command_contexts", {})):
+        context_class = context_model.get_context_class(context_name, _context_class_type())
+        if context_class is None:
+            continue
+        for attribute in CONTEXT_ENTER_COMMAND_ATTRS:
+            value = getattr(context_class, attribute, None)
+            if value is None:
+                continue
+            declarations = list(value) if isinstance(value, (list, tuple)) else [value]
+            for declaration in declarations:
+                words = str(declaration).split()
+                command = words[0] if words else "<command>"
+                problems.append(
+                    f"{_source_label(context_class, workflow_folderpath)}: "
+                    f"Context.{attribute} is no longer read; declare descends_to = "
+                    f"\"{context_name}\" on {command}'s ResponseGenerator"
+                )
+    if problems:
+        raise ValueError("\n".join(problems))
+
+
+def _context_class_type():
+    import fastworkflow
+
+    return fastworkflow.ModuleType.CONTEXT_CLASS
+
+
+def _source_label(context_class, workflow_folderpath: str) -> str:
+    """The context class's file, relative to the workflow folder, or its qualified name."""
+    try:
+        path = inspect.getsourcefile(context_class) or inspect.getfile(context_class)
+    except (TypeError, OSError):
+        return context_class.__qualname__
+    if not path:
+        return context_class.__qualname__
+    return os.path.relpath(os.path.abspath(path), os.path.abspath(workflow_folderpath))
+
+
+# ---------------------------------------------------------------------------
+# The occupiable fact
 # ---------------------------------------------------------------------------
 
 def _declared_context_class(workflow_folderpath: str, context_name: str):
@@ -55,36 +90,11 @@ def _declared_context_class(workflow_folderpath: str, context_name: str):
     )
 
 
-def declared_entry_commands(workflow_folderpath: str, context_name: str) -> list[str]:
-    """The ``enter_command`` declarations *context_name* carries, verbatim.
-
-    Read off the context's own callback class, the one canonical source. Empty
-    when the workflow declares nothing, when the context has no callback class,
-    or when loading it fails -- a hint that names the context alone is worth more
-    than a failed turn, so nothing here is allowed to raise.
-    """
-    try:
-        context_class = _declared_context_class(workflow_folderpath, context_name)
-        for attribute in CONTEXT_ENTER_COMMAND_ATTRS:
-            value = getattr(context_class, attribute, None)
-            if isinstance(value, str) and value.strip():
-                return [value.strip()]
-            if isinstance(value, (list, tuple)) and value:
-                return [str(v).strip() for v in value if str(v).strip()]
-    except Exception as exc:  # noqa: BLE001 - a hint must not fail a turn
-        logger.debug(
-            "no enter_command declaration readable for context %r: %r",
-            context_name, exc,
-        )
-    return []
-
-
 def declared_occupiable(workflow_folderpath: str, context_name: str) -> bool | None:
     """The ``occupiable`` declaration of *context_name*, or None when undeclared.
 
-    ``occupiable = False`` on the context's callback class marks a mixin context a
-    user cannot enter. None means the class does not say, and the context is
-    listed. Never raises.
+    ``occupiable = False`` on the context's callback class marks a mixin context a user cannot
+    enter. None means the class does not say, and the context is listed. Never raises.
     """
     try:
         value = getattr(_declared_context_class(workflow_folderpath, context_name),

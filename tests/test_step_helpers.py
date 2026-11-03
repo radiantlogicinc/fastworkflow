@@ -792,21 +792,8 @@ def script_command_extraction(monkeypatch, wf, extracted: dict[str, dict] | None
 
     monkeypatch.setattr(CommandExecutor, "perform_action", classmethod(extract))
 
-    # The library's ResponseGenerators return their Signature.Output, which the executor
-    # does not take (it wants a CommandOutput). LibraryRunner wraps it the same way; here
-    # the wrap sits at the executor's call site, so the rest of the dispatch is unchanged.
-    def as_command_output(response_generator, *args):
-        raw = call_response_generator(response_generator, *args)
-        if isinstance(raw, fastworkflow.CommandOutput):
-            return raw
-        if isinstance(raw, BaseModel):
-            return fastworkflow.CommandOutput(
-                command_response=fastworkflow.CommandResponse(
-                    response=raw.model_dump_json(), output=raw))
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response=str(raw)))
-
-    monkeypatch.setattr(command_executor_module, "call_response_generator", as_command_output)
+    # fix-3rsq.12.early: the executor frames a returned Signature.Output itself (design 3.14), so this
+    # test seam no longer wraps the call; the library's commands run through the real executor.
 
 
 @pytest.fixture

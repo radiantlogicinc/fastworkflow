@@ -1,0 +1,68 @@
+{
+  "cases": [
+    {
+      "utterance": "go up one level",
+      "expected": "go_up"
+    },
+    {
+      "utterance": "reset the context",
+      "expected": "reset_context"
+    },
+    {
+      "utterance": "what can I do here",
+      "expected": "what_can_i_do"
+    },
+    {
+      "utterance": "what context am I in",
+      "expected": "what_is_current_context"
+    },
+    {
+      "utterance": "create a new todo list called groceries",
+      "expected": "TodoListManager/create_todo_list"
+    },
+    {
+      "utterance": "show all my todo lists",
+      "expected": "TodoListManager/list_todo_lists"
+    },
+    {
+      "utterance": "delete the todo list named chores",
+      "expected": "TodoListManager/delete_todo_list"
+    },
+    {
+      "utterance": "save the lists",
+      "expected": "TodoListManager/save_lists"
+    },
+    {
+      "utterance": "rename the todo list to errands",
+      "expected": "TodoListManager/update_todo_list"
+    },
+    {
+      "utterance": "get the todo list with id 3",
+      "expected": "TodoListManager/get_todo_list"
+    },
+    {
+      "utterance": "mark this list as completed",
+      "expected": "TodoList/mark_completed"
+    },
+    {
+      "utterance": "add an item to this list",
+      "expected": "TodoList/add_child_todoitem"
+    },
+    {
+      "utterance": "give me all the children of this list",
+      "expected": "TodoList/get_all_children"
+    },
+    {
+      "utterance": "remove the child with id 2",
+      "expected": "TodoList/remove_child_by_id"
+    },
+    {
+      "utterance": "what is the status of this item",
+      "expected": "TodoItem/status"
+    },
+    {
+      "utterance": "assign this item to Jane",
+      "expected": "TodoItem/assign_to"
+    }
+  ]
+}

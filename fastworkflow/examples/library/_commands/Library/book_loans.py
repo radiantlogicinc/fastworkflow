@@ -15,7 +15,16 @@ from .book_by_title import Signature as BookByTitle
 class Signature:
     """Say who has a book on loan, given its title."""
 
-    plain_utterances = ["who has borrowed Dune", "is anyone reading Emma right now"]
+    plain_utterances = [
+        "who has borrowed Dune",
+        "is anyone reading Emma right now",
+        "who is reading Persuasion at the moment",
+        "which patrons have Dune Messiah out",
+        "is anyone holding a copy of Emma",
+        "names of everyone who borrowed Persuasion",
+        "has anybody got Dune out, and until when",
+        "who currently holds the title Dune Messiah",
+    ]
 
     class Input(BaseModel):
         title: str = Field(description="the book's title",
