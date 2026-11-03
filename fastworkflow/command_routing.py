@@ -170,9 +170,16 @@ class RoutingDefinition(BaseModel):
             cls_obj = module
             for part in parts:
                 cls_obj = getattr(cls_obj, part, None)
-            return cls_obj
-        
-        return getattr(module, module_class_name, None)
+        else:
+            cls_obj = getattr(module, module_class_name, None)
+
+        if module_type == ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS:
+            # a load error for a check option on a field of a type it does not apply to (design 2.46)
+            from fastworkflow.planning_commands import option_params
+            input_model = getattr(cls_obj, "Input", None)
+            if isinstance(input_model, type) and issubclass(input_model, BaseModel):
+                option_params(input_model, f"{module_file_path}: {command_name}")
+        return cls_obj
 
     # ------------------------------------------------------------------
     # Utterance Definition functionality

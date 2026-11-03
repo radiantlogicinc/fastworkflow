@@ -14,7 +14,8 @@ class Signature:
     plain_utterances = ["who wrote Dune", "how many copies of Dune Messiah are there"]
 
     class Input(BaseModel):
-        title: str = Field(description="the book's title")
+        title: str = Field(description="the book's title",
+                           json_schema_extra={"in_request": True})
 
 
 class PlanGenerator(BookPhases):

@@ -2,7 +2,7 @@
 
 Real components throughout: the tutorial workflow's skills (copied to a temporary folder, so the
 repo's own ``___command_info`` is never read for writing or touched), one skill added to that copy
-with two free-text inputs and a declared choice, the real ``check_arguments`` and ``validate_call``,
+with two free-text inputs and a declared choice, the real ``check_arguments`` and ``_validate_arguments``,
 and the real ``refusal_question``. No planner model is called.
 """
 import shutil
@@ -177,7 +177,7 @@ def test_the_same_value_for_two_inputs_is_refused_for_the_role_the_request_does_
                                  "Move the loan of member Ann Lee to branch Ann Lee")
 
     with pytest.raises(sc.PlanningCommandInputError) as refused:
-        sc.validate_call(command, args, "Move the loan of member Ann Lee to branch Ann Lee", None)
+        sc._validate_arguments(command, args, "Move the loan of member Ann Lee to branch Ann Lee", None)
 
     assert str(refused.value) == "branch='Ann Lee' is also the value of member"
     assert sc.refusal_question(command, refused.value) == (
@@ -191,6 +191,6 @@ def test_the_same_value_for_two_inputs_refuses_the_first_when_neither_role_is_wr
     args, _ = sc.check_arguments(command, _raw(command, member="Ann Lee", branch="Ann Lee"), request)
 
     with pytest.raises(sc.PlanningCommandInputError) as refused:
-        sc.validate_call(command, args, request, None)
+        sc._validate_arguments(command, args, request, None)
 
     assert str(refused.value) == "member='Ann Lee' is also the value of branch"

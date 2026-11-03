@@ -158,7 +158,7 @@ def refusal(planning_command: str, args: dict) -> str:
     """The message a call of *skill* with *args* is refused with (empty: not refused)."""
     command = workflow_agent.load_planning_command_map(WORKFLOW)[planning_command]
     try:
-        planning_commands.validate_call(command, args, "")
+        planning_commands._validate_arguments(command, args, "")
     except planning_commands.PlanningCommandInputError as error:
         return str(error)
     return ""

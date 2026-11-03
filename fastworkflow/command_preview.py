@@ -575,7 +575,14 @@ def _allowed(value: int, bounds: tuple[Optional[int], Optional[int]]) -> bool:
 
 
 def sample_value(command, p) -> Any:
-    """The value parameter *p* of planning command *command* is previewed with (see the module doc)."""
+    """The value parameter *p* of planning command *command* is previewed with (see the module doc).
+
+    A type with no small fixed set of values (design 11.5) gets one sample value, in this order: its
+    first ``examples`` value (a float that reads as a number; a list[str] as a list, or one text as a
+    one-element list); else the default of an optional parameter that has a non-empty one (as a str
+    and an int take); else the type's placeholder: 1.0 for a float (its ``ge``/``le`` bounds are not
+    read), ``["<name>"]`` for a list[str].
+    """
     examples = _examples(command, p.name)
     if p.type == "str":
         if not p.required and p.default:
@@ -593,6 +600,17 @@ def sample_value(command, p) -> Any:
             low, high = bounds
             value = low if low is not None and value < low else high
         return value
+    if p.type == "float":
+        try:
+            return float(examples[0])
+        except (IndexError, TypeError, ValueError):
+            pass
+        return p.default if not p.required and p.default is not None else 1.0
+    if p.type == "list[str]":
+        if examples:
+            first = examples[0]
+            return [str(item) for item in first] if isinstance(first, (list, tuple)) else [str(first)]
+        return list(p.default) if not p.required and p.default else [f"<{p.name}>"]
     if p.default is not None:
         return p.default
     return str(examples[0]) if examples and examples[0] in p.values else p.values[0]
@@ -1139,11 +1157,13 @@ def _inputs_section(command) -> list[str]:
         if p.required:
             default = "required"
         elif p.type == "bool":
-            default = "false"
+            default = "true" if p.default else "false"
         else:
-            default = _code(json.dumps(p.default) if p.type == "str" else p.default)
+            default = _code(json.dumps(list(p.default)) if p.type == "list[str]" else
+                            json.dumps(p.default) if p.type == "str" else p.default)
         sample = sample_value(command, p)
         sample_text = ("false" if sample is False else
+                       _code(json.dumps(sample)) if isinstance(sample, list) else
                        _code(sample) if sample != "" else '`""`')
         lines.append(f"| `{p.name}` | {_text(type_text, True)} | {default} | {sample_text.replace('|', chr(92) + '|')} "
                      f"| {'yes' if p.verify else ''} | {'yes' if p.subject else ''} | {_text(p.desc, True)} |")

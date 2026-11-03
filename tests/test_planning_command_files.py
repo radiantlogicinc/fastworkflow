@@ -355,15 +355,15 @@ class PlanGenerator:
 
 
 @pytest.mark.parametrize("field, message", [
-    ("ratio: float = 0.5", "has type"),
+    ("ratios: list[int] = []", "has type"),
     ("count: Optional[int] = None", "Optional is for an argument the request may leave out"),
     ("name: Optional[str] = 'x'", "Optional is for"),
     ("name: str = None", "default must be a value of its type"),
-    ("flag: bool = True", "must default to false"),
+    ("flag: bool = 1", "bool parameter .* default must be true or false"),
     ("kind: Literal['a', 'b'] = 'c'", "not one of its values"),
     ("kind: Literal[1, 2]", "a Literal of text values only"),
     ("name: str = Field(json_schema_extra={'colour': 'red'})", "unknown key"),
-    ("name: str = Field(json_schema_extra={'verify': True})", "only a bool, enum or subject parameter takes verify"),
+    ("name: str = Field(json_schema_extra={'verify': True})", "option verify does not apply to field 'name' of type str"),
     ("name: str = Field(json_schema_extra={'strip': 'group'})", "strip must be a list of words"),
     ("name: str = Field(json_schema_extra={'subject': 'yes'})", "subject must be true or false"),
     ("count: int = Field(default=1, json_schema_extra={'requires': 'name'})",
@@ -417,10 +417,10 @@ def test_an_optional_str_field_is_none_when_the_request_leaves_it_out(tmp_path):
     assert args["owner"] == ""
     seen = sys.modules[command.validate.__module__].SEEN
     seen.clear()
-    assert sc.validate_call(command, args, "Show Payroll.") == args
+    assert sc._validate_arguments(command, args, "Show Payroll.") == args
     assert seen == [None]   # the hook, the validator and steps() read None
     assert sc.expand(command, args) == ["open Payroll", "say who owns it"]
-    args = sc.validate_call(command, {"name": "Payroll", "owner": "Ann Lee"}, "Show Payroll and Ann Lee.")
+    args = sc._validate_arguments(command, {"name": "Payroll", "owner": "Ann Lee"}, "Show Payroll and Ann Lee.")
     assert sc.expand(command, args) == ["open Payroll", "check owner Ann Lee"]
 
 
@@ -491,8 +491,8 @@ def test_a_unicode_dash_in_the_request_matches_a_plain_one(tmp_path):
 def test_the_validation_hook_can_refuse_or_correct_a_call(tmp_path):
     command = _example(tmp_path)
     with pytest.raises(PlanningCommandCallError, match="the risk is assessed for the whole record"):
-        sc.validate_call(command, _args(person="Ann Lee", include_risk=True), "x")
-    assert sc.validate_call(command, _args(), "x") == _args()
+        sc._validate_arguments(command, _args(person="Ann Lee", include_risk=True), "x")
+    assert sc._validate_arguments(command, _args(), "x") == _args()
 
     seen = []
 
@@ -503,14 +503,14 @@ def test_the_validation_hook_can_refuse_or_correct_a_call(tmp_path):
 
     from dataclasses import replace
     notes: list[str] = []
-    args = sc.validate_call(replace(command, validate=correcting), _args(), "who is in Payroll", "WF", notes)
+    args = sc._validate_arguments(replace(command, validate=correcting), _args(), "who is in Payroll", "WF", notes)
     assert args["name"] == "PAYROLL" and seen == [("WF", "show_record", "who is in Payroll")]
     assert notes == ["name='Payroll' -> 'PAYROLL' (validate_extracted_parameters)"]
 
     def raising(workflow, name, params):
         raise RuntimeError("backend down")
     with pytest.raises(PlanningCommandCallError, match="raised RuntimeError: backend down"):
-        sc.validate_call(replace(command, validate=raising), _args(), "x")
+        sc._validate_arguments(replace(command, validate=raising), _args(), "x")
 
 
 def _typed(**fields):

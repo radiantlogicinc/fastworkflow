@@ -14,7 +14,8 @@ class Signature:
     plain_utterances = ["how many books by Jane Austen do you have"]
 
     class Input(BaseModel):
-        query: str = Field(description="the title or author words")
+        query: str = Field(description="the title or author words",
+                        json_schema_extra={"in_request": True})
 
 
 class PlanGenerator:

@@ -991,7 +991,7 @@ class PlanGenerator:
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(bad)
     mod = python_utils.get_module(path, folder)
-    with pytest.raises(PlanningCommandFormatError, match="only a str or int parameter takes in_request"):
+    with pytest.raises(PlanningCommandFormatError, match=r"option in_request does not apply to field '\w+' of type \w+"):
         planning_commands.command_from_module("Library/bad_in_request", mod, path)
 
 

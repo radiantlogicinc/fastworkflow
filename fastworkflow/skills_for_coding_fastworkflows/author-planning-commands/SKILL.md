@@ -165,7 +165,7 @@ class PlanGenerator:
 | Names `user_query`, `available_commands`, `steps_before`, `steps_after`, `reasoning` are reserved | `planning_commands.py` `RESERVED_NAMES` |
 | `in_request` (in `json_schema_extra`) is allowed on a `str` or `int` field only; see below | `planning_commands.py` `_spec_from_field`, `check_arguments` |
 | A rule across fields is a pydantic validator on `Input` raising `ValueError` with what to fix; the request is `(info.context or {}).get("request", "")`, `""` when the template is rendered | `planning_commands.py` `check_input` |
-| `validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None)` returns `(False, message)` to refuse a call; a refusal gets the planner one more typed call, a second falls back to the text planner | `planning_commands.py` `validate_call`, `typed_planning_call` |
+| `validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None)` returns `(False, message)` to refuse a call; a refusal gets the planner one more typed call, a second falls back to the text planner | `planning_commands.py` `_validate_arguments`, `typed_planning_call` |
 
 ### Field options (`json_schema_extra`)
 

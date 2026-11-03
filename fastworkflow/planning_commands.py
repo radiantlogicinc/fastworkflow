@@ -120,11 +120,15 @@ A planning command file::
     For a subject it chooses among the request's subjects (at most ``MAX_SUBJECT_OPTIONS``)
     or ``NO_SUBJECT`` ("none": the default, or a failed call for a required parameter); a
     request naming no subject is not checked.
-  - ``in_request: True`` (a ``str`` or an ``int``): a ``str`` must appear in the request
+  - ``in_request: True`` (a ``str``, an ``int`` or a ``list[str]``): a ``str`` must appear in the request
     exactly as the request writes it (a verbatim substring); an ``int`` must be a number
     the request writes (digits or the words zero to twenty outside the text of the other
     arguments); otherwise it takes the only one written, or its default when that is
-    written, and with several others the call fails ("the first two" never runs as 3).
+    written, and with several others the call fails ("the first two" never runs as 3); a
+    ``list[str]`` keeps each item the request writes and drops the others.
+  - No check is implied by a field's type (design 2.46): a field without an option is not
+    checked against the request, on either kind of command. A check option on a field of a
+    type it does not apply to fails the load, naming the option and the type.
 
 - ``PlanGenerator`` (required): its public methods are the planning command's phases, in order, each
   returning its steps as a list of str, one per step (empty ones are dropped); see
@@ -164,7 +168,7 @@ A planning command file::
   ``fastworkflow command preview --check`` fails); a ``"from"`` naming a command or field the
   workflow lacks is a logged warning (``check_phase_sources``), not a load failure.
 - ``validate_extracted_parameters`` (optional, the signature of a command's): called with
-  the checked arguments as an ``Input`` (``validate_call``); ``(False, message)`` refuses the
+  the checked arguments as an ``Input`` (``_validate_arguments``); ``(False, message)`` refuses the
   call (the planner gets the message and one more try, see the rules below), an exception
   fails it (the planner falls back), and a field it corrects in place is used. An argument that only means something when other arguments take some value is
   normalised here: the hook writes its default back (``if not cmd_parameters.include_risk:
@@ -210,6 +214,7 @@ from __future__ import annotations
 import functools
 import inspect
 import json
+import math
 import os
 import re
 import sys
@@ -431,8 +436,9 @@ def refusal_question(command: PlanningCommandCommand, refusal: PlanningCommandIn
 @dataclass(frozen=True)
 class Param:
     name: str
-    type: str  # "str" | "bool" | "int" | "enum"
+    type: str  # "str" | "bool" | "int" | "float" | "list[str]" | "enum"
     values: tuple[str, ...] = ()
+    #: A list[str] default is a tuple (a Param is hashable); the others are the value.
     default: object = None
     required: bool = False
     desc: str = ""
@@ -490,7 +496,7 @@ class PlanningCommandCommand:
         for p in self.params:
             s = f"{p.name}: {p.type_text()}"
             if not p.required:
-                s += f" = {json.dumps(p.default)}"
+                s += f" = {json.dumps(_json_value(p))}"
             parts.append(s)
         lines = [f"{self.name}({', '.join(parts)})", f"  {self.description}"]
         lines += [f"  - {p.name}: {p.desc}" for p in self.params]
@@ -525,11 +531,11 @@ def _parse_param(name: str, spec, where: str) -> Param:
         if not values or any(not re.fullmatch(r"[\w-]+", v) for v in values) or len(set(values)) != len(values):
             raise PlanningCommandFormatError(f"{where}: parameter {name!r} has a bad enum {type_text!r}")
         kind = "enum"
-    elif type_text.strip() in ("str", "bool", "int"):
+    elif type_text.strip() in ("str", "bool", "int", "float", "list[str]"):
         kind = type_text.strip()
     else:
         raise PlanningCommandFormatError(f"{where}: parameter {name!r} has unknown type {type_text!r} "
-                               "(str, bool, int or enum[...])")
+                               "(str, bool, int, float, list[str] or enum[...])")
     desc = spec.get("desc", "")
     if not isinstance(desc, str):
         raise PlanningCommandFormatError(f"{where}: parameter {name!r} desc must be text")
@@ -539,15 +545,22 @@ def _parse_param(name: str, spec, where: str) -> Param:
     required = raw_default is None and kind != "bool"
     default: object = None
     if kind == "bool":
-        if raw_default not in (None, "false"):
-            raise PlanningCommandFormatError(f"{where}: bool parameter {name!r} must default to false "
-                                   "(the model sets it true only when the request asks)")
-        default = False
+        if raw_default not in (None, "true", "false"):
+            raise PlanningCommandFormatError(f"{where}: bool parameter {name!r} default must be true or false")
+        default = raw_default == "true"
     elif raw_default is not None:
         if kind == "int":
             if not re.fullmatch(r"-?\d+", raw_default):
                 raise PlanningCommandFormatError(f"{where}: parameter {name!r} default {raw_default!r} is not an int")
             default = int(raw_default)
+        elif kind == "float":
+            default = _float_text(raw_default)
+            if default is None:
+                raise PlanningCommandFormatError(f"{where}: parameter {name!r} default {raw_default!r} is not a number")
+        elif kind == "list[str]":
+            default = _list_text(raw_default)
+            if default is None:
+                raise PlanningCommandFormatError(f"{where}: parameter {name!r} default {raw_default!r} is not a list of text")
         elif kind == "enum":
             if raw_default not in values:
                 raise PlanningCommandFormatError(f"{where}: parameter {name!r} default {raw_default!r} is not one of its values")
@@ -556,30 +569,64 @@ def _parse_param(name: str, spec, where: str) -> Param:
             default = raw_default
     strip: tuple[str, ...] = ()
     if "strip" in spec:
-        if kind != "str" or not isinstance(spec["strip"], str):
-            raise PlanningCommandFormatError(f"{where}: only a str parameter takes strip words ({name!r})")
+        if kind != "str":
+            raise option_error(where, "strip", name, kind, "a str")
+        if not isinstance(spec["strip"], str):
+            raise PlanningCommandFormatError(f"{where}: strip of {name!r} must be a list of words")
         strip = tuple(w.strip() for w in spec["strip"].split(",") if w.strip())
     subject = _flag(spec, "subject", name, where)
     if subject and kind != "str":
-        raise PlanningCommandFormatError(f"{where}: only a str parameter takes subject ({name!r})")
+        raise option_error(where, "subject", name, kind, "a str")
     verify = _flag(spec, "verify", name, where)
     if verify and kind not in ("bool", "enum") and not subject:
-        raise PlanningCommandFormatError(f"{where}: only a bool, enum or subject parameter takes verify ({name!r})")
+        raise option_error(where, "verify", name, kind, "a bool, an enum or a subject str")
     means: tuple[tuple[str, str], ...] = ()
     if "means" in spec:
         block = spec["means"]
-        if kind != "enum" or not isinstance(block, dict) or not block:
+        if kind != "enum":
+            raise option_error(where, "means", name, kind, "an enum")
+        if not isinstance(block, dict) or not block:
             raise PlanningCommandFormatError(f"{where}: means of {name!r} must be a block of its enum values")
         for key, text in block.items():
             if key not in values or not isinstance(text, str):
                 raise PlanningCommandFormatError(f"{where}: means of {name!r}: {key!r} is not a value of it, or not text")
         means = tuple((v, block[v]) for v in values if v in block)
+        if not verify:
+            raise PlanningCommandFormatError(f"{where}: option means on field {name!r} needs verify (means gives the "
+                                             "verify check each value's meaning)")
     in_request = _flag(spec, "in_request", name, where)
-    if in_request and kind not in ("str", "int"):
-        raise PlanningCommandFormatError(f"{where}: only a str or int parameter takes in_request ({name!r})")
+    if in_request and kind not in ("str", "int", "list[str]"):
+        raise option_error(where, "in_request", name, kind, "a str, an int or a list[str]")
     return Param(name=name, type=kind, values=values, default=default, required=required,
                  desc=desc, strip=strip, verify=verify, means=means, in_request=in_request,
                  subject=subject)
+
+
+def option_error(where: str, option: str, name: str, kind: str, takes: str) -> PlanningCommandFormatError:
+    """The load error of a check option on a field of a type it does not apply to (design 2.46)."""
+    return PlanningCommandFormatError(f"{where}: option {option} does not apply to field {name!r} of type "
+                                      f"{kind} (it takes {takes})")
+
+
+def _float_text(text) -> float | None:
+    """*text* as a finite float, or None."""
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _list_text(value) -> tuple[str, ...] | None:
+    """A list[str] default: a list, or the list written as JSON text; a tuple of its text, or None."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    if not isinstance(value, (list, tuple)) or not all(isinstance(v, str) for v in value):
+        return None
+    return tuple(value)
 
 
 def _flag(spec: dict, key: str, name: str, where: str) -> bool:
@@ -612,8 +659,10 @@ def _spec_from_field(name: str, info, where: str) -> dict:
             raise PlanningCommandFormatError(f"{where}: field {name!r}: Optional is for an argument the request may "
                                    "leave out, Optional[str] = None; give another type a default")
         annotation = str
-    if annotation is str or annotation is bool or annotation is int:
+    if annotation in (str, bool, int, float):
         type_text = annotation.__name__
+    elif annotation == list[str]:
+        type_text = "list[str]"
     elif get_origin(annotation) is Literal:
         values = get_args(annotation)
         if not values or not all(isinstance(v, str) for v in values):
@@ -621,20 +670,29 @@ def _spec_from_field(name: str, info, where: str) -> dict:
         type_text = f"enum[{', '.join(values)}]"
     else:
         raise PlanningCommandFormatError(f"{where}: field {name!r} has type {annotation!r}; a planning command field is "
-                               "str, bool, int or Literal[...] of text values")
+                               "str, bool, int, float, list[str] or Literal[...] of text values")
     spec: dict = {"type": type_text}
     if info.description:
         spec["desc"] = info.description
+    default: object = PydanticUndefined
     if info.default_factory is not None:
-        raise PlanningCommandFormatError(f"{where}: field {name!r}: give a plain default, not a default_factory")
-    if optional:
-        spec["default"] = ""
+        if type_text != "list[str]" or info.default_factory is not list:
+            raise PlanningCommandFormatError(f"{where}: field {name!r}: give a plain default, not a default_factory")
+        default = []
     elif info.default is not PydanticUndefined:
         default = info.default
-        if default is None or isinstance(default, (dict, list, tuple)):
+    if optional:
+        spec["default"] = ""
+    elif default is not PydanticUndefined:
+        if default is None or isinstance(default, dict) or (isinstance(default, (list, tuple)) and type_text != "list[str]"):
             raise PlanningCommandFormatError(f"{where}: field {name!r} default must be a value of its type "
                                    "(leave the default out for a required parameter)")
-        spec["default"] = ("true" if default else "false") if isinstance(default, bool) else str(default)
+        if type_text == "list[str]":
+            if _list_text(default) is None:
+                raise PlanningCommandFormatError(f"{where}: field {name!r} default must be a list of text")
+            spec["default"] = json.dumps(list(default))
+        else:
+            spec["default"] = ("true" if default else "false") if isinstance(default, bool) else str(default)
     extra = info.json_schema_extra
     if extra is None:
         return spec
@@ -749,7 +807,9 @@ def _template_values(p: Param) -> tuple:
     """The inputs ``placeholder_template`` gives one parameter; the first is its base input.
 
     A str reads ``<name>`` (and "" too when that is its default), a bool is true and false, an
-    int takes its default (or 1 and 0 when that is 0), an enum each value (its default first).
+    int takes its default (or 1 and 0 when that is 0), a float its default (or 1.0 and 0.0 when
+    that is 0), a list[str] its default (or ``["<name>"]``: one value, never varied), an enum each
+    value (its default first).
     """
     if p.type == "str":
         return (f"<{p.name}>",) if p.required or p.default != "" else (f"<{p.name}>", "")
@@ -757,16 +817,25 @@ def _template_values(p: Param) -> tuple:
         return (True, False)
     if p.type == "int":
         return (p.default,) if p.default else (1, 0)
+    if p.type == "float":
+        return (p.default,) if p.default else (1.0, 0.0)
+    if p.type == "list[str]":
+        return (_json_value(p) if p.default else [f"<{p.name}>"],)
     if p.default is None:
         return tuple(p.values)
     return (p.default,) + tuple(v for v in p.values if v != p.default)
+
+
+def _env_key(env: dict) -> tuple:
+    """*env* as a hashable key (a list[str] argument is a list)."""
+    return tuple((k, tuple(v) if isinstance(v, list) else v) for k, v in env.items())
 
 
 def _template_grid(command: PlanningCommandCommand) -> list[dict]:
     """The argument sets ``placeholder_template`` renders: the base first, then the other
     combinations ``input_grid`` tries (past ``MAX_GRID``, a bounded set, logged once per
     planning command file), leaving out a set the planning command's ``validate_extracted_parameters`` changes or
-    refuses (``validate_call`` never passes one on to ``steps()``; the set it changes to is
+    refuses (``_validate_arguments`` never passes one on to ``steps()``; the set it changes to is
     another of the grid, or none)."""
     values = [_template_values(p) for p in command.params]
     sizes = [len(v) for v in values]
@@ -787,7 +856,7 @@ def _template_grid(command: PlanningCommandCommand) -> list[dict]:
     grid = [{p.name: v[i] for p, v, i in zip(command.params, values, combo)} for combo in input_grid(sizes, first)]
     out, seen = [], set()
     for env in grid:
-        key = tuple(env.items())
+        key = _env_key(env)
         if key in seen:
             continue
         try:
@@ -828,7 +897,7 @@ def _literal_words(p: Param, allowed: frozenset) -> str:
         return p.name if True in allowed else f"not {p.name}"
     if p.type == "str":
         return f"{p.name} is empty" if "" in allowed else f"{p.name} is given"
-    if p.type == "int":
+    if p.type in ("int", "float"):
         return f"not {p.name}" if 0 in allowed else p.name
     shown = [v for v in p.values if v in allowed]
     if len(p.values) > 2 and len(shown) == len(p.values) - 1:
@@ -863,11 +932,11 @@ class _Conditions:
         self.size = len(grid)
         self.full = (1 << self.size) - 1
         self.cache: dict[int, str | None] = {}
-        index = {tuple(env.items()): i for i, env in enumerate(grid)}
+        index = {_env_key(env): i for i, env in enumerate(grid)}
         # per parameter: (i, j) for each grid point i and each point j that is i with only
         # that parameter's value changed
         self.pairs = [(p, [(i, j) for i, env in enumerate(grid) for v in _template_values(p)
-                           if v != env[p.name] for j in [index.get(tuple({**env, p.name: v}.items()))]
+                           if v != env[p.name] for j in [index.get(_env_key({**env, p.name: v}))]
                            if j is not None])
                       for p in command.params]
         # per parameter: (value, mask of the points with that value), in _template_values order
@@ -1137,7 +1206,8 @@ def placeholder_template(command: PlanningCommandCommand) -> list[str]:
 
     ``steps()`` runs on every combination of the inputs ``_template_values`` gives (a str
     reads ``<name>``, and "" when that is its default; a bool true and false; an int its
-    default, or 1 and 0; an enum each value; past ``MAX_GRID`` combinations, those
+    default, or 1 and 0; a float its default, or 1.0 and 0.0; a list[str] one value, its default
+    or ``["<name>"]``; an enum each value; past ``MAX_GRID`` combinations, those
     ``input_grid`` covers), and the runs are merged in order. A line not
     every run writes ends with ``(only when ...)``, the condition on the arguments under which
     it is written (``kind is group``, ``person is given``, ``not flag``); lines that differ only
@@ -2590,6 +2660,23 @@ def _run_validate(command: PlanningCommandCommand, args: dict, request: str, wor
     return {n: "" if v is None and fields[n].default is None else v for n, v in out.items()}
 
 
+def _validate_arguments(command: PlanningCommandCommand, args: dict, request: str, workflow=None,
+                        notes: list[str] | None = None) -> dict:
+    """The validation steps after the options' checks, in their order (3.4, The argument path), for a
+    typed planning call, which has no ``Signature`` to run ``validate_parameters`` on: the planning
+    command file's ``validate_extracted_parameters`` hook (it may correct fields), then the ``Input``'s
+    own rules with the request and workflow as context (``check_input``), then the roles of two
+    inputs given one value (``_check_roles``). Raises PlanningCommandInputError when the hook or a rule
+    refuses the call, PlanningCommandCallError when the hook raises."""
+    checked = args if command.validate is None else _run_validate(command, args, request, workflow)
+    for p in command.params:
+        if checked[p.name] != args.get(p.name) and notes is not None:
+            notes.append(f"{p.name}={args.get(p.name)!r} -> {checked[p.name]!r} (validate_extracted_parameters)")
+    check_input(command, checked, request, workflow)
+    _check_roles(command, checked, request)
+    return checked
+
+
 def _validation_text(error) -> str:
     """A pydantic ValidationError as one line: ``field: message; ...`` (a validator's own
     ValueError text without pydantic's "Value error, " prefix)."""
@@ -2629,22 +2716,6 @@ def _check_roles(command: PlanningCommandCommand, args: dict, request: str) -> N
             raise PlanningCommandInputError(f"{loser.name}={args[loser.name]!r} is also the value of {other.name}")
 
 
-def validate_call(command: PlanningCommandCommand, args: dict, request: str, workflow=None,
-                  notes: list[str] | None = None) -> dict:
-    """``args`` after the planning command's ``validate_extracted_parameters`` hook (a planning command file's), as for
-    a command: ``hook(workflow, planning_command_name, input, command_text=request)`` returns ``(ok,
-    message)`` and may correct fields of ``input`` in place; then the ``Input``'s own rules
-    (``check_input``). Raises PlanningCommandInputError when the hook or a rule refuses the call,
-    PlanningCommandCallError when the hook raises; without either ``args`` come back unchanged."""
-    checked = args if command.validate is None else _run_validate(command, args, request, workflow)
-    for p in command.params:
-        if checked[p.name] != args.get(p.name) and notes is not None:
-            notes.append(f"{p.name}={args.get(p.name)!r} -> {checked[p.name]!r} (validate_extracted_parameters)")
-    check_input(command, checked, request, workflow)
-    _check_roles(command, checked, request)
-    return checked
-
-
 # ---------------------------------------------------------------- arguments and guards
 
 def _clean_str(value) -> str:
@@ -2682,6 +2753,24 @@ def _single(value):
     if isinstance(value, (list, tuple)) and len(value) == 1 and not isinstance(value[0], (list, tuple, dict)):
         return value[0]
     return value
+
+
+def _list_items(value) -> list[str]:
+    """The elements a list[str] argument holds: a list or tuple, the list written as JSON text, or
+    comma-separated text. None elements are left out here; empty ones are left to the caller."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value if v is not None]
+    text = str(value).strip()
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, list):
+            return [str(v) for v in parsed if v is not None]
+    return text.split(",") if text else []
 
 
 def _empty(value) -> bool:
@@ -2870,6 +2959,12 @@ def _fold(text: str) -> str:
     return text.translate(_DASHES)
 
 
+def _written(text: str, folded: str, request: str) -> str | None:
+    """*text* as the request writes it (its own spelling, dashes and case ignored), or None."""
+    at = folded.find(_fold(text).lower()) if text else -1
+    return request[at:at + len(text)] if at >= 0 else None
+
+
 def _screen(command: PlanningCommandCommand, raw: dict, request: str) -> tuple[dict, dict[str, str]]:
     """``(values, refused)``: the ``str`` and ``int`` arguments through the command parameter
     screen (``utils.signatures.screen_parameter_values``): quotes and angle brackets around a
@@ -2893,8 +2988,10 @@ def _screen(command: PlanningCommandCommand, raw: dict, request: str) -> tuple[d
 # appends them through ``extraction_sentences_for``).
 IN_REQUEST_STR_SENTENCE = "Copy it exactly as the request writes it."   # in_request on a str
 IN_REQUEST_INT_SENTENCE = "A number the request writes."                # in_request on an int
+IN_REQUEST_LIST_SENTENCE = "Copy each item exactly as the request writes it."  # in_request on a list[str]
 SUBJECT_SENTENCE = "Copy it exactly as the request writes it. It must name a record the request names."  # subject
 VERIFY_BOOL_SENTENCE = "True only when the request asks for it."       # verify on a bool
+VERIFY_BOOL_TRUE_SENTENCE = "False only when the request asks against it."  # verify on a bool that defaults true
 
 
 def extraction_sentences(p: Param) -> tuple[str, ...]:
@@ -2905,16 +3002,60 @@ def extraction_sentences(p: Param) -> tuple[str, ...]:
     if p.subject:
         sentences.append(SUBJECT_SENTENCE)
     elif p.in_request:
-        sentences.append(IN_REQUEST_STR_SENTENCE if p.type == "str" else IN_REQUEST_INT_SENTENCE)
+        sentences.append({"str": IN_REQUEST_STR_SENTENCE, "int": IN_REQUEST_INT_SENTENCE}.get(
+            p.type, IN_REQUEST_LIST_SENTENCE))
     if p.verify and p.type == "bool":
-        sentences.append(VERIFY_BOOL_SENTENCE)
+        sentences.append(VERIFY_BOOL_SENTENCE if p.default is not True else VERIFY_BOOL_TRUE_SENTENCE)
     return tuple(sentences)
+
+
+#: The check options (2.46), read from a field's ``json_schema_extra`` for a command of either kind.
+CHECK_OPTIONS = ("in_request", "subject", "strip", "verify", "means")
+
+
+def option_params(input_model, where: str) -> tuple[Param, ...]:
+    """A ``Param`` for each field of *input_model* (an ``Input``, of either kind of command) that carries
+    a check option (2.46). Other fields are not checked. A load error (PlanningCommandFormatError) when
+    an option is on a field of a type it does not apply to, or a field's type is not one the
+    extractor supports."""
+    from types import SimpleNamespace
+
+    out = []
+    for name, info in input_model.model_fields.items():
+        extra = info.json_schema_extra
+        if not isinstance(extra, dict):
+            continue
+        options = {k: v for k, v in extra.items() if k in CHECK_OPTIONS}
+        if not options:
+            continue
+        shadow = SimpleNamespace(annotation=info.annotation, description=info.description, default=info.default,
+                                 default_factory=info.default_factory, json_schema_extra=options)
+        out.append(_parse_param(name, _spec_from_field(name, shadow, where), where))
+    return tuple(out)
+
+
+@functools.lru_cache(maxsize=None)
+def option_command(input_model, name: str, identifiers: tuple = ()) -> PlanningCommandCommand:
+    """The checks of an execution command's ``Input`` as a ``PlanningCommandCommand`` holding only the fields
+    that carry an option, so ``check_arguments`` and ``check_verdicts`` run on them unchanged (2.46)."""
+    return PlanningCommandCommand(name=name, description="", params=option_params(input_model, name),
+                                  identifiers=identifiers, input_model=input_model)
+
+
+def option_sentences(input_model) -> dict[str, tuple[str, ...]]:
+    """``{field: sentences}`` the CME parameter extractor appends to the descriptions of an ``Input``'s fields
+    (3.4, Descriptions), for each field whose options have a sentence. Empty for a field without options,
+    whichever kind of command the ``Input`` belongs to."""
+    if input_model is None:
+        return {}
+    return {p.name: sentences for p in option_params(input_model, getattr(input_model, "__name__", "Input"))
+            if (sentences := extraction_sentences(p))}
 
 
 def extraction_sentences_for(workflow_folderpath: str | None, qualified_name: str | None) -> dict[str, tuple[str, ...]]:
     """``{field: sentences}`` the CME parameter extractor appends to the descriptions of planning
-    command *qualified_name*'s fields, for the fields whose options have a sentence. Empty for an
-    execution command, or without a workflow (3.4, Descriptions)."""
+    command *qualified_name*'s fields, for the fields whose options have a sentence. Empty without a
+    workflow (3.4, Descriptions)."""
     if not workflow_folderpath or not qualified_name:
         return {}
     command = planning_command(workflow_folderpath, qualified_name)
@@ -2927,8 +3068,26 @@ def verify_field_names(workflow_folderpath: str) -> tuple[str, ...]:
     """``<command>.<field>`` for each planning command's field that carries ``verify``: the checks
     that need ``JEV_API_KEY`` (the INFO line at load, design 3.9)."""
     commands = resolve_field_sources(workflow_folderpath).planning_commands
-    return tuple(f"{qname}.{p.name}" for qname, command in sorted(commands.items())
-                 for p in command.params if p.verify)
+    planning = tuple(f"{qname}.{p.name}" for qname, command in sorted(commands.items())
+                     for p in command.params if p.verify)
+    return planning + tuple(f"{qname}.{p.name}" for qname, command in sorted(_execution_option_commands(
+        workflow_folderpath).items()) for p in command.params if p.verify)
+
+
+def _execution_option_commands(workflow_folderpath: str) -> dict[str, PlanningCommandCommand]:
+    """``{command: option_command}`` for each execution command of the workflow whose ``Input`` carries an option."""
+    from fastworkflow.observation_offloading.facts import workflow_signatures
+
+    planning = resolve_field_sources(workflow_folderpath).planning_commands
+    out = {}
+    for name, signature in workflow_signatures(workflow_folderpath).items():
+        model = getattr(signature, "Input", None)
+        if not isinstance(model, type) or name in planning:
+            continue
+        command = option_command(model, name)
+        if command.params:
+            out[name] = command
+    return out
 
 
 def check_arguments(command: PlanningCommandCommand, raw: dict, request: str,
@@ -2946,7 +3105,10 @@ def check_arguments(command: PlanningCommandCommand, raw: dict, request: str,
       default, a required one fails the call), and the extractor's "not given" number or a
       made-up extreme counts as missing;
     - a missing or empty argument takes its default; a required one fails the call;
-    - an enum must be one of its values, an int an integer, a bool true/false;
+    - an enum must be one of its values, an int an integer, a float a number (the extractor's
+      "not given" marker counts as missing), a bool true/false; a list[str] is its elements
+      (cleaned; no check that the request writes them: design 2.22), a list written as JSON text
+      or comma-separated text;
     - a str argument loses surrounding quotes and its strip words, and must then be a
       verbatim (case-insensitive; any Unicode dash matches "-") substring of ``request``;
       it takes the request's own spelling. One that is not: an optional argument takes its default, a required one
@@ -2963,7 +3125,7 @@ def check_arguments(command: PlanningCommandCommand, raw: dict, request: str,
     - an optional str argument equal to another str argument takes its default.
 
     An argument that only applies when others take some value is reset afterwards, by the
-    planning command's ``validate_extracted_parameters`` (``validate_call``).
+    planning command's ``validate_extracted_parameters`` (``_validate_arguments``).
 
     ``notes`` says what a guard changed. A required argument the guards refuse raises
     PlanningCommandInputError (the planner fills the call once more, ``typed_planning_call``); a sure check
@@ -2979,7 +3141,8 @@ def check_arguments(command: PlanningCommandCommand, raw: dict, request: str,
     if vocabulary is None:
         vocabulary = _vocabulary_for(command)
     kinds = frozenset(v.lower() for p in command.params if p.type == "enum" for v in p.values)
-    single = {**raw, **{p.name: _single(raw.get(p.name)) for p in command.params}}
+    single = {**raw, **{p.name: raw.get(p.name) if p.type == "list[str]" else _single(raw.get(p.name))
+                        for p in command.params}}
     screened, refused = _screen(command, single, request)
 
     def refuse(p: Param, value, why: str) -> None:
@@ -3011,6 +3174,26 @@ def check_arguments(command: PlanningCommandCommand, raw: dict, request: str,
         elif p.name in refused:
             refuse(p, shown, refused[p.name])
             continue
+        if p.type == "list[str]":
+            # no check by type (design 2.46): the elements are cleaned; with in_request, each one the
+            # request does not write is dropped, and the request's own spelling of the rest is kept
+            items = [text for text in (_clean_str(item) for item in _list_items(value))
+                     if text and text != "None"]
+            if p.in_request:
+                kept = []
+                for item in items:
+                    exact = _written(item, folded, request)
+                    if exact is None:
+                        notes.append(f"{p.name}={item!r} is not written in the request: dropped")
+                    else:
+                        kept.append(exact)
+                if items and not kept and p.required:
+                    raise PlanningCommandInputError(f"{p.name}={shown!r} is not written in the request")
+                items = kept
+            if not items and p.required:
+                raise PlanningCommandInputError(f"missing required argument {p.name}")
+            args[p.name] = items if items else list(p.default)
+            continue
         if _empty(value):
             if p.required:
                 raise PlanningCommandInputError(f"missing required argument {p.name}")
@@ -3028,6 +3211,16 @@ def check_arguments(command: PlanningCommandCommand, raw: dict, request: str,
             except ValueError:
                 raise PlanningCommandInputError(f"{p.name}={shown!r} is not an integer") from None
             if is_sentinel_number(number):   # the extractor's "not given" marker or a made-up extreme
+                if p.required:
+                    raise PlanningCommandInputError(f"missing required argument {p.name}")
+                number = p.default
+            args[p.name] = number
+        elif p.type == "float":
+            try:
+                number = float(str(value).strip())
+            except ValueError:
+                raise PlanningCommandInputError(f"{p.name}={shown!r} is not a number") from None
+            if not math.isfinite(number) or is_sentinel_number(number):   # the extractor's "not given" marker
                 if p.required:
                     raise PlanningCommandInputError(f"missing required argument {p.name}")
                 number = p.default
@@ -3061,6 +3254,12 @@ def check_arguments(command: PlanningCommandCommand, raw: dict, request: str,
                 elif is_kind_word(text, p.name, vocabulary, _kind_selector_options(p, vocabulary)):
                     refuse(p, shown, KIND_WORD_WHY)
                     continue
+            if not (p.in_request or p.subject):
+                # no request check without the option (design 2.46): the value as the model wrote it,
+                # after the free-text screens above, which refuse a placeholder, a pronoun or a word
+                # of the workflow's vocabulary whatever the field's options
+                args[p.name] = text
+                continue
             at = folded.find(_fold(text).lower()) if text else -1
             if at < 0:
                 if p.required:
@@ -3338,10 +3537,17 @@ def filter_extra_steps(extra, expanded: list[str], names: frozenset[str], planni
 def _field_desc(p: Param) -> str:
     desc = p.desc or p.name
     if p.type == "bool":
+        if p.default is True:
+            return f"{desc}. false only when the request explicitly asks against this; otherwise true"
         return f"{desc}. true only when the request explicitly asks for this; otherwise false"
     if p.type == "str":
         desc += ". Copied verbatim from the request"
-    return desc + (" (required)" if p.required else f" (default {json.dumps(p.default)})")
+    return desc + (" (required)" if p.required else f" (default {json.dumps(_json_value(p))})")
+
+
+def _json_value(p: Param):
+    """``p.default`` as JSON reads it (a list[str] default is a tuple)."""
+    return list(p.default) if p.type == "list[str]" else p.default
 
 
 def typed_signature(command: PlanningCommandCommand):
@@ -3351,7 +3557,7 @@ def typed_signature(command: PlanningCommandCommand):
 
     fields: dict = {"user_query": (str, dspy.InputField())}
     for p in command.params:
-        kind = {"str": str, "bool": bool, "int": int}.get(p.type)
+        kind = {"str": str, "bool": bool, "int": int, "float": float, "list[str]": list[str]}.get(p.type)
         if p.type == "enum":
             kind = Literal[p.values]
         fields[p.name] = (kind, dspy.OutputField(desc=_field_desc(p)))
@@ -3380,6 +3586,9 @@ def _check_options(p: Param, subjects: list[str] = ()) -> tuple[tuple[str, str],
         return tuple((s, f"the request names {s} as the {p.name}") for s in named) + (
             (NO_SUBJECT, f"the request names no {p.name}; each name it writes is something else"),)
     if p.type == "bool":
+        if p.default is True:
+            return (("true", f"no: the request does not ask against {p.name}"),
+                    ("false", f"yes: the request asks against {p.name} ({p.desc or p.name})"))
         return (("true", f"yes: {p.desc or p.name}"),
                 ("false", "no: the request does not ask for this, or says not to"))
     means = dict(p.means)
@@ -3391,7 +3600,8 @@ def _check_one(lm, command: PlanningCommandCommand, p: Param, request: str) -> t
     from dspy.experimental import Choice
 
     if p.type == "bool":
-        question = f"Does the request ask for this: {p.desc or p.name}?"
+        question = (f"Does the request ask against this: {p.desc or p.name}?" if p.default is True
+                    else f"Does the request ask for this: {p.desc or p.name}?")
     elif p.type == "str":
         question = f"Which record named in the request is the {p.name}? {p.desc}".strip()
     else:
@@ -3469,7 +3679,7 @@ def typed_planning_call(command: PlanningCommandCommand, request: str, available
     reaches the adapter as extra input, as for the text planner. With ``check_lm`` (a
     classifier LM) the planning command's ``verify`` parameters are decided again from the request,
     alongside the typed call (``check_verdicts``). A planning command file's
-    ``validate_extracted_parameters`` then sees the checked arguments (``validate_call``;
+    ``validate_extracted_parameters`` then sees the checked arguments (``_validate_arguments``;
     ``workflow`` is passed to it), and the ``Input``'s rules (``check_input``). When the planning command's
     rules or the argument guards refuse the arguments (PlanningCommandInputError: a made-up name, a
     missing or invalid value), the planner fills the call once more, with the
@@ -3488,7 +3698,7 @@ def typed_planning_call(command: PlanningCommandCommand, request: str, available
     def checked(prediction) -> tuple[dict, list[str]]:
         raw = {p.name: getattr(prediction, p.name, None) for p in command.params}
         args, notes = check_arguments(command, raw, request, verdicts)
-        return validate_call(command, args, request, workflow, notes), notes
+        return _validate_arguments(command, args, request, workflow, notes), notes
 
     with ThreadPoolExecutor(1) as pool:
         checks = pool.submit(check_verdicts, check_lm, command, request)

@@ -539,9 +539,9 @@ def test_m_the_input_rule_refuses_the_same_call_at_the_turn_frame(
         command = planning_commands.planning_command(state.wf.folderpath, BOOK_BY_TITLE)
         assert command is not None
         with pytest.raises(PlanningCommandInputError, match="the library does not look up withdrawn books"):
-            planning_commands.validate_call(command, {"title": "Dune"},
+            planning_commands._validate_arguments(command, {"title": "Dune"},
                                          "book_by_title title=Dune withdrawn", state.wf)
-        assert planning_commands.validate_call(
+        assert planning_commands._validate_arguments(
             command, {"title": "Dune"}, "book_by_title title=Dune", state.wf) == {"title": "Dune"}
     finally:
         state.ctx.pop_active_workflow()

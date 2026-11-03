@@ -773,7 +773,8 @@ def _unfilled_required(planning, cmd_parameters: BaseModel) -> List[str]:
     for param in planning.params:
         value = getattr(cmd_parameters, param.name, None)
         if param.required and (value is None or value == NOT_FOUND
-                               or (isinstance(value, str) and not value.strip())):
+                               or (isinstance(value, str) and not value.strip())
+                               or (isinstance(value, list) and not value)):
             unfilled.append(param.name)
     return unfilled
 
@@ -937,7 +938,7 @@ Today's date is {today}.
         
         params_signature = self.create_signature_from_pydantic_model(
             model_class,
-            planning_commands.extraction_sentences_for(workflow_folderpath, subject_command_name))
+            planning_commands.option_sentences(model_class))
         
         class ParamExtractor(dspy.Module):
             def __init__(self, signature):
@@ -992,9 +993,19 @@ Today's date is {today}.
         # object in-place without any validation.
         return model_class.model_construct(**param_dict)  # type: ignore[arg-type]
     
-    def _check_planning_arguments(self, planning, cmd_parameters: BaseModel,
-                                  diagnostics: Optional[Dict[str, Any]]) -> Optional[str]:
-        """The arguments of planning command *planning*, checked against the request (self.command).
+    def _option_command(self, app_workflow, subject_command_name: str, cmd_parameters: BaseModel):
+        """The checks of the command's ``Input`` options as a ``PlanningCommandCommand`` (2.46): its fields
+        that carry an option, for an execution command; a planning command's own description otherwise."""
+        from fastworkflow.workflow_agent import identifier_patterns
+
+        folderpath = getattr(app_workflow, "folderpath", None)
+        identifiers = identifier_patterns(folderpath) if folderpath else ()
+        return planning_commands.option_command(type(cmd_parameters), subject_command_name, identifiers)
+
+    def _check_option_arguments(self, command, cmd_parameters: BaseModel,
+                                diagnostics: Optional[Dict[str, Any]]) -> Optional[str]:
+        """The arguments of the command *command*'s check options, checked against the request (self.command),
+        for a command of either kind (2.46, 3.4).
 
         ``check_verdicts`` (one classifier call per ``verify`` field, when a Jev LM is set) and then
         ``check_arguments``' guards; the guarded values are written back onto *cmd_parameters*.
@@ -1003,10 +1014,10 @@ Today's date is {today}.
         # workflow_agent imports this module (through command_executor), so it is read at call time.
         from fastworkflow.workflow_agent import _jev_lm
 
-        raw = {param.name: getattr(cmd_parameters, param.name, None) for param in planning.params}
+        raw = {param.name: getattr(cmd_parameters, param.name, None) for param in command.params}
         try:
-            verdicts = planning_commands.check_verdicts(_jev_lm(), planning, self.command)
-            args, notes = planning_commands.check_arguments(planning, raw, self.command, verdicts)
+            verdicts = planning_commands.check_verdicts(_jev_lm(), command, self.command)
+            args, notes = planning_commands.check_arguments(command, raw, self.command, verdicts)
         except planning_commands.PlanningCommandCallError as refusal:
             if diagnostics is not None:
                 diagnostics["argument_refusal"] = str(refusal)
@@ -1017,15 +1028,15 @@ Today's date is {today}.
             setattr(cmd_parameters, name, value)
         return None
 
-    def _check_planning_input(self, planning, cmd_parameters: BaseModel, app_workflow) -> Optional[str]:
-        """The refusal text of planning command *planning*'s ``Input`` rules, or None.
+    def _check_input_rules(self, command, cmd_parameters: BaseModel, app_workflow) -> Optional[str]:
+        """The refusal text of the ``Input``'s own validators, for a command of either kind, or None.
 
-        The rules read the request (self.command) and the workflow from the validation context,
-        as the turn frame's call does (``planning_commands.check_input``).
+        The validators read the request (self.command) and the workflow from the validation context
+        (``planning_commands.check_input``, design 3.4).
         """
-        args = {param.name: getattr(cmd_parameters, param.name, None) for param in planning.params}
+        args = {name: getattr(cmd_parameters, name, None) for name in type(cmd_parameters).model_fields}
         try:
-            planning_commands.check_input(planning, args, self.command, app_workflow)
+            planning_commands.check_input(command, args, self.command, app_workflow)
         except planning_commands.PlanningCommandCallError as refusal:
             return str(refusal)
         return None
@@ -1480,8 +1491,12 @@ Today's date is {today}.
             if unfilled:
                 missing_fields.extend(unfilled)
                 is_valid = False
-        if is_valid and planning is not None:
-            guard_refusal = self._check_planning_arguments(planning, cmd_parameters, diagnostics)
+        # One validation step for every command (3.4, The argument path): the options' checks, then the
+        # hook, then the Input's validators. A command's checks are its option fields (2.46).
+        command = planning if planning is not None else self._option_command(
+            app_workflow, subject_command_name, cmd_parameters)
+        if is_valid and command.params:
+            guard_refusal = self._check_option_arguments(command, cmd_parameters, diagnostics)
             if guard_refusal is not None:
                 return (False, guard_refusal, {}, [])
 
@@ -1523,8 +1538,8 @@ Today's date is {today}.
             if not is_valid:
                 return (False, message, {}, [])
 
-        if is_valid and planning is not None:
-            input_refusal = self._check_planning_input(planning, cmd_parameters, app_workflow)
+        if is_valid:
+            input_refusal = self._check_input_rules(command, cmd_parameters, app_workflow)
             if input_refusal is not None:
                 return (False, input_refusal, {}, [])
         if is_valid:

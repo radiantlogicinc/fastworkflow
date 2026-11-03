@@ -14,7 +14,8 @@ class Signature:
     plain_utterances = ["what do you have by Frank Herbert, and how many copies of each"]
 
     class Input(BaseModel):
-        author: str = Field(description="the author's name")
+        author: str = Field(description="the author's name",
+                            json_schema_extra={"in_request": True})
 
 
 class PlanGenerator:

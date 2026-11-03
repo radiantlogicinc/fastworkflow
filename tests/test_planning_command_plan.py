@@ -366,8 +366,8 @@ def test_refused_from_a_planning_command_hook_is_its_refusal():
     module.Signature, module.PlanGenerator = Refusing, PlanGenerator
     command = planning_commands.command_from_module("walk", module, "_commands/walk.py").command
     with pytest.raises(planning_commands.PlanningCommandInputError, match="name the item"):
-        planning_commands.validate_call(command, {"name": "Nope", "more": False, "stop_late": False}, "")
-    assert planning_commands.validate_call(command, {"name": "Dune", "more": False, "stop_late": False}, "")
+        planning_commands._validate_arguments(command, {"name": "Nope", "more": False, "stop_late": False}, "")
+    assert planning_commands._validate_arguments(command, {"name": "Dune", "more": False, "stop_late": False}, "")
 
 
 def test_the_default_generate_utterances_is_the_standard_body(monkeypatch):

@@ -83,7 +83,7 @@ def test_a_refused_call_of_a_tutorial_planning_command_is_put_as_a_question_nami
 def test_a_refusal_from_a_planning_commands_own_rule_is_put_in_its_own_words():
     command = _planning_command("member_loans")
     with pytest.raises(sc.PlanningCommandInputError) as refused:
-        sc.validate_call(command, {"member": "everyone"}, "Which books does everyone have on loan?", None)
+        sc._validate_arguments(command, {"member": "everyone"}, "Which books does everyone have on loan?", None)
 
     assert sc.refusal_question(command, refused.value) == (
         "I can't run member loans yet: member is 'everyone', which names no one member; this skill "

@@ -17,7 +17,8 @@ class Signature:
     plain_utterances = ["do you have a book called Emma", "is there a member named Lee"]
 
     class Input(BaseModel):
-        name: str = Field(description="the name to look for")
+        name: str = Field(description="the name to look for",
+                          json_schema_extra={"in_request": True})
         kind: Literal["book", "member"] = Field(
             default="book", description="whether the request is about a book or a member")
 

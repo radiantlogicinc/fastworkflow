@@ -1536,6 +1536,11 @@ def warm_planning_commands(workflow_folderpath: str) -> None:
     A workflow without planning commands has nothing to warm. Never raises: a failure is
     logged and the turn path meets it again."""
     if not _planning_command_files(os.path.join(workflow_folderpath, "_commands")):
+        if _jev_lm() is None:   # the verify checks of execution commands' fields need the key too (2.46)
+            try:
+                _warn_missing_jev_key(workflow_folderpath)
+            except Exception as error:  # noqa: BLE001 - warm-up must not stop startup
+                logger.debug(f"planning command warm-up: no verify check listing for {workflow_folderpath}: {error}")
         return
     loaded = ()
     for step in (load_planning_commands, planning_commands.command_utterances):
@@ -1899,6 +1904,11 @@ def _warn_missing_jev_key(workflow_folderpath: str) -> None:
     candidates are off, and so are the ``verify`` checks of the fields that name planning commands.
     """
     fields = planning_commands.verify_field_names(workflow_folderpath)
+    if not _planning_command_files(os.path.join(workflow_folderpath, "_commands")):
+        if fields:
+            logger.info(f"{workflow_folderpath}: JEV_API_KEY is not set: the verify checks of "
+                        f"{', '.join(fields)} are inactive.")
+        return
     checks_clause = f" and the verify checks of {', '.join(fields)}" if fields else ""
     logger.info(
         f"{workflow_folderpath}: planning commands are matched by intent detection; without "

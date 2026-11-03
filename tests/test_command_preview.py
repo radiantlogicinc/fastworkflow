@@ -91,7 +91,7 @@ class Signature:
         name: str = Field(description="the record's name | as written",
                           json_schema_extra={"strip": ["item", "kit"]})
         kind: Literal["item", "kit"] = Field(default="item", description="what the request is about",
-                                             json_schema_extra={"means": {"item": "one item",
+                                             json_schema_extra={"verify": True, "means": {"item": "one item",
                                                                           "kit": "a set of items"}})
         supplier: str = Field(default="", description="one supplier to keep; empty for all")
         detail: bool = Field(default=False, description="never changes the steps")

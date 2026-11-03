@@ -31,9 +31,10 @@ class Signature:
 
     class Input(BaseModel):
         name: str = Field(description="the record's name",
-                          json_schema_extra={"strip": ["group", "feed"]})
+                          json_schema_extra={"strip": ["group", "feed"], "in_request": True})
         kind: Literal["group", "feed"] = Field(description="group, or feed (a source of logins)")
-        person: str = Field(default="", description="one named person to check for; empty lists everyone")
+        person: str = Field(default="", description="one named person to check for; empty lists everyone",
+                            json_schema_extra={"in_request": True})
         include_risk: bool = Field(default=False, description="the request asks how risky it is")
         count: int = Field(default=2, description="how many members to open")
         owner: str = Field(default="", description="the owner to compare the risk with")
@@ -290,11 +291,11 @@ def test_a_dependent_argument_is_reset_by_the_validation_hook(tmp_path):
     request = "Who is in Payroll, compared with the customer?"
     args, notes = sc.check_arguments(command, {"name": "Payroll", "kind": "group", "owner": "the customer"}, request)
     assert args["owner"] == "the customer"   # the argument check leaves it
-    args = sc.validate_call(command, args, request, None, notes)
+    args = sc._validate_arguments(command, args, request, None, notes)
     assert args["owner"] == "" and notes[-1] == "owner='the customer' -> '' (validate_extracted_parameters)"
     args, _ = sc.check_arguments(command, {"name": "Payroll", "kind": "group", "owner": "the customer",
                                            "include_risk": True}, request)
-    assert sc.validate_call(command, args, request)["owner"] == "the customer"
+    assert sc._validate_arguments(command, args, request)["owner"] == "the customer"
 
 
 def test_booleans_default_false_and_bad_values_fail_the_call(tmp_path):
@@ -547,8 +548,10 @@ def test_verify_means_and_in_request_are_read_from_the_input_fields(tmp_path):
     assert (kind.verify, kind.means) == (True, (("group", "a group of people"), ("feed", "a feed that logins arrive on")))
     assert (risk.verify, risk.means, risk.in_request) == (True, (), False)
     assert (count.verify, count.in_request) == (False, True)
-    # without the keys, nothing changes
-    assert not any(p.verify or p.means or p.in_request for p in _command(tmp_path / "plain").params)
+    # the fixture's name and person carry in_request (a str with no option is not checked against the
+    # request, design 2.46); its other fields carry none
+    assert [p.name for p in _command(tmp_path / "plain").params if p.verify or p.means or p.in_request] == [
+        "name", "person"]
     assert sc._check_options(kind) == (("group", "a group of people"), ("feed", "a feed that logins arrive on"))
     assert [v for v, _ in sc._check_options(risk)] == ["true", "false"]
 
@@ -571,14 +574,14 @@ class PlanGenerator:
 
 
 @pytest.mark.parametrize("field, message", [
-    ("name: str = Field(json_schema_extra={'verify': True})", "only a bool, enum or subject parameter takes verify"),
-    ("flag: bool = Field(default=False, json_schema_extra={'subject': True})", "only a str parameter takes subject"),
+    ("name: str = Field(json_schema_extra={'verify': True})", "option verify does not apply to field 'name' of type str"),
+    ("flag: bool = Field(default=False, json_schema_extra={'subject': True})", "option subject does not apply to field 'flag' of type bool"),
     ("flag: bool = Field(default=False, json_schema_extra={'verify': 'yes'})", "verify must be true or false"),
     ("flag: bool = Field(default=False, json_schema_extra={'means': {'true': 'asked'}})",
-     "means of 'flag' must be a block of its enum values"),
+     "option means does not apply to field 'flag' of type bool"),
     ("kind: Literal['a', 'b'] = Field(json_schema_extra={'means': {'c': 'x'}})", "'c' is not a value of it"),
     ("kind: Literal['a', 'b'] = Field(json_schema_extra={'in_request': True})",
-     "only a str or int parameter takes in_request"),
+     "option in_request does not apply to field 'kind' of type enum"),
 ])
 def test_a_malformed_check_fails_the_load(tmp_path, field, message):
     assert re.search(message, _load_error(_write(tmp_path, {"bad": CHECK_FIELD.replace("{field}", field)})))
@@ -606,7 +609,7 @@ def test_a_dependent_argument_follows_the_checked_value(tmp_path):
     raw = {"name": "Payroll", "kind": "group", "include_risk": True, "owner": "the customer"}
     request = "Who is in Payroll, next to the customer?"
     args, notes = sc.check_arguments(command, raw, request, {"include_risk": (False, 0.9)})
-    args = sc.validate_call(command, args, request, None, notes)
+    args = sc._validate_arguments(command, args, request, None, notes)
     assert (args["include_risk"], args["owner"]) == (False, "")
     assert notes[-1] == "owner='the customer' -> '' (validate_extracted_parameters)"
 
@@ -1039,7 +1042,7 @@ class Signature:
 
     class Input(BaseModel):
         first: str = Field(description="the first record's name")
-        second: str = Field(description="the second record's name")
+        second: str = Field(description="the second record's name", json_schema_extra={"in_request": True})
         kind: Literal["group", "feed"] = Field(description="group, or feed (a source of logins)")
 
         @model_validator(mode="after")
@@ -1073,15 +1076,15 @@ def test_input_validators_refuse_a_call_with_a_message_that_says_what_to_fix(tmp
     args, notes = sc.check_arguments(command, {"first": "Payroll", "second": "payroll", "kind": "group"},
                                      PAIR_REQUEST)
     with pytest.raises(sc.PlanningCommandInputError, match="rule of pair: first and second are both 'Payroll'; second is the other record") as refused:
-        sc.validate_call(command, args, PAIR_REQUEST, None, notes)
+        sc._validate_arguments(command, args, PAIR_REQUEST, None, notes)
     assert "Value error" not in str(refused.value)
     assert isinstance(refused.value, PlanningCommandCallError)
     # the request reaches the validators through the validation context
     request = "Which of the Payroll and Billing feeds is riskier?"
     args, _ = sc.check_arguments(command, {"first": "Payroll", "second": "Billing", "kind": "group"}, request)
     with pytest.raises(sc.PlanningCommandInputError, match="kind is feed"):
-        sc.validate_call(command, args, request)
-    assert sc.validate_call(command, {**args, "kind": "feed"}, request)["kind"] == "feed"
+        sc._validate_arguments(command, args, request)
+    assert sc._validate_arguments(command, {**args, "kind": "feed"}, request)["kind"] == "feed"
     # the template is rendered as before: the placeholders differ and the request is empty
     assert command.template[:2] == ("open <group or feed, by kind> <first>",
                                     "open <group or feed, by kind> <second>")
@@ -1095,9 +1098,9 @@ def test_a_hook_refusal_is_an_input_error_and_a_hook_exception_is_not(tmp_path):
                             '        return True, ""')
     command = _command(tmp_path, hooked)
     with pytest.raises(sc.PlanningCommandInputError, match="count is at most 5"):
-        sc.validate_call(command, _args(count=9), "Who is in Payroll?")
+        sc._validate_arguments(command, _args(count=9), "Who is in Payroll?")
     with pytest.raises(PlanningCommandCallError) as raised:
-        sc.validate_call(command, _args(count=-1), "Who is in Payroll?")
+        sc._validate_arguments(command, _args(count=-1), "Who is in Payroll?")
     assert not isinstance(raised.value, sc.PlanningCommandInputError)
 
 
