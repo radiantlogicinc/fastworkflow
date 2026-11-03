@@ -94,7 +94,16 @@ from .list_loans import Signature as ListLoans
 class Signature:
     """Say who has this book on loan and when each loan is due back."""
 
-    plain_utterances = ["who has this book", "when is it due back"]
+    plain_utterances = [
+        "who has this book",
+        "when is it due back",
+        "is this book out, and until when",
+        "who is holding this one right now and what's the return date",
+        "tell me who borrowed this book and when it comes back",
+        "is this one on loan to anyone",
+        "when will this copy be returned, and to whom",
+        "who's got this book at the moment",
+    ]
 
 
 class PlanGenerator:
@@ -138,14 +147,15 @@ between, "not here", or a bare value (a reply such as "Dune" that names no comma
   seed of every other command of the workflow, planning commands included. So write
   `plain_utterances` for a planning command as you would for an execution command: its seed also
   teaches every other context that the request is not theirs.
-- **Planning commands** are chosen by the agent as it plans, from its list of commands, where
-  it sees each one with its `Signature` and its template (page 1), and uses it as the next
-  section shows. With `JEV_API_KEY` in `fastworkflow.passwords.env`, the Jev decision model
-  first picks the planning command that fits the request, by its description and
-  `plain_utterances`, scope by scope along the same path, and the agent is shown that one
-  first. Jev is TypeSafe's service, so this sends the request and the planning commands'
-  descriptions to TypeSafe. The key is optional: without it the agent finds the planning
-  command itself, and the `verify` option checks nothing (page 9).
+- **Planning commands** are labels too. Each classifier whose scope holds a planning command has
+  that command as one of its labels, so a request can reach it the way it reaches an execution
+  command, and its seed teaches the classifier what it is for. The classifier proposes; the
+  planner then writes the plan, and the agent runs it (below). With `JEV_API_KEY` in
+  `fastworkflow.passwords.env`, the Jev decision model first picks the planning command that fits
+  the part, by its description and `plain_utterances`, scope by scope along the same path, and the
+  agent is shown that one first. Jev is TypeSafe's service, so this sends the request and the
+  planning commands' descriptions to TypeSafe. The key is optional: without it the planner finds
+  the planning command in its list, and the `verify` option checks nothing (page 9).
 - **An answer that is unsure between commands** stops the walk: the user is asked which one
   is meant. **A "not here" answer** moves the walk on to the next scope.
 
@@ -156,6 +166,11 @@ So editing one command's seeds retrains only the classifiers that hold that comm
 that recorded its seed), while adding or removing a command retrains every classifier.
 `fastworkflow train --regenerate-utterances` chooses the seeds again. A workflow trained by an
 earlier release does not load, and says to retrain with `fastworkflow train`.
+
+The first train after an upgrade to this release **generates** training utterances for each
+planning command from its `plain_utterances`, because planning commands are now labels of the
+classifiers. That costs LLM calls, which earlier releases did not make. Later trains reuse them.
+The library example gives each command eight seeds, which is the count to follow.
 
 ## How a request is planned
 
@@ -226,30 +241,31 @@ say which books Mia Chen has on loan, and that the note was added
 
 `member_report` leaves the workflow on Mia Chen (page 5), so `add_note` runs on her record.
 
-**A larger workflow gets a shortlist.** Past a fixed size, listing every command in full makes
-the planner's prompt long and its choices worse, so the planner is shown a shortlist for the
-request instead. For the same request it would hold:
+**A larger workflow is still listed in full in this release.** The planner is shown every command
+of the workflow, each planning command with its template, whatever the workflow's size. A shortlist
+for a large workflow is built and measured, and it is off: the planner keeps the full list until the
+plan review round that shows the proposed commands to the user is in place, so that a command the
+shortlist leaves out can be corrected. When the shortlist is switched on, it works like this. For a
+request it would hold:
 
-1. **The commands that match**, in every scope on the path and in every context the library
-   can navigate into through a declared `descends_to` (`Book`, `Member`, and their base
-   `Record`): `find_member`, `list_member_loans`, `add_note`, and `member_report`, the
-   planning command that covers part of it, with its template.
-2. **What those need**, added until nothing new comes in: the producers of their inputs,
-   read from producer `from_` edges (`open_member`'s `member_uid` comes from
-   `find_member`); the commands that navigate to their contexts (`open_member` enters
-   `Member`); the callees of each planning command on the list; and the core commands.
+1. **The commands that match**, in every scope on the path and in every context the library can
+   navigate into through a declared `descends_to` (`Book`, `Member`, and their base `Record`):
+   `find_member`, `list_member_loans`, `add_note`, and `member_report`, the planning command that
+   covers part of it, with its template.
+2. **What those need**, added until nothing new comes in: the producers of their inputs, read from
+   producer `from_` edges (`open_member`'s `member_uid` comes from `find_member`); the commands that
+   navigate to their contexts (`open_member` enters `Member`); the callees of each planning command
+   on the list; and the core commands.
 
-The planner sees the shortlist in full, each planning command on it with its template, and
-every other context as one line. The templates count toward the size at which the shortlist
-starts. The list follows the workflow: when a step moves it into another context, the list
-is shown again from there, and a later plan gathers the shortlist again.
+In that case the planner sees the shortlist in full, each planning command on it with its template,
+and every other context as one line. The list follows the workflow: when a step moves it into
+another context, the list is shown again from there.
 
-So in a large workflow, **the edges you declare decide what the plan can reach**: a
-producer `from_` on an input brings its producer onto the shortlist, and a `descends_to` on
-a navigation command brings in the way to its context. A navigation command that moves the
-workflow without declaring `descends_to` is reported the first time it does it (page 5). A
-command neither edge reaches is still listed, as one line under its context, and the agent
-sees it in full once its run enters that context.
+So in a large workflow, **the edges you declare decide what the plan can reach**: a producer `from_`
+on an input brings its producer onto the shortlist, and a `descends_to` on a navigation command brings
+in the way to its context. A navigation command that moves the workflow without declaring
+`descends_to` is reported the first time it does it (page 5). A command neither edge reaches is
+still listed in the full list, and it is the shortlist that would leave it out.
 
 When a plan has a planning command as a step, that command's arguments are checked against
 the request and what the turn's earlier steps found, not against the step as written: a value
@@ -262,10 +278,12 @@ spans in the turn's trace, so they are there to read.
 
 ## Assistant mode
 
-`fastworkflow run --assistant` runs one execution command per message, with no agent, so
-nothing is planned. A request there that needs a planning command is refused with a pointer
-to agent mode, never handed to the agent silently, and naming one gets
-`member_report is a planning command; it runs in agent mode.`
+`fastworkflow run --assistant` runs one execution command per message, with no agent. A planning
+command named exactly, as `count_books` or `/count_books`, runs there when it is mechanical: code runs
+every step and nothing needs the agent. A planning command that needs the agent, such as
+`member_report`, is refused, with the reasons and what to change, and the message points to agent
+mode. A request that is not an exact name is not matched to a planning command in this mode. Direct
+API and MCP calls refuse a planning command.
 
 ## What you learned
 
@@ -278,6 +296,6 @@ the planner fills its inputs, code checks them and writes its steps, and the pla
 steps the request asks for beyond it; a value the request leaves out is asked for in an
 attended turn. When the call fails, the planner adapts the command's template. Without the key,
 or for a part no planning command covers, the planner plans from the list of commands, which
-shows each planning command with its template. The list holds every command while the workflow
-is small, and a shortlist that your producer `from_` and `descends_to` declarations complete
-once it is large.
+shows each planning command with its template. The planner is shown the full list of commands in this release. A shortlist, which your producer
+`from_` and `descends_to` declarations complete, is built for a large workflow and is off until the
+review rounds are in place.

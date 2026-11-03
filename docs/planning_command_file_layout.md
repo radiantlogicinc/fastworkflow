@@ -109,8 +109,11 @@ agent and assistant mode and through direct API and MCP calls. A **planning comm
 does the rest. Write an execution command when code can decide every step. Write a planning
 command when the agent should run, judge or recover part of the job: a value to find, a judgement
 to make, a step to recover when it goes wrong, or a question for the user. A planning command runs
-in agent mode only; in assistant mode (`fastworkflow run --assistant`, or a message with a leading
-`/`) it is refused as "... is a planning command; it runs in agent mode."
+in agent mode. In assistant mode (`fastworkflow run --assistant`, or a message with a leading `/`)
+an exactly named planning command runs when it is mechanical: code runs every step and nothing needs
+the agent. One that needs the agent is refused with the reasons, which name the step and what to
+change. Direct API and MCP calls still refuse a planning command, with "... is a planning command;
+it runs in agent mode."
 
 ## The order
 
@@ -174,6 +177,69 @@ on planning commands today; `fastworkflow.planning_commands` has the full rules.
   writes is taken, or the default when that is written; with several candidates the call is
   refused.
 
+## Approval annotation (`approval`)
+
+A command may declare `approval` on its class: `ResponseGenerator` for an execution command,
+`PlanGenerator` for a planning command. It takes one of two values, and nothing else:
+
+```python
+class ResponseGenerator:           # or PlanGenerator
+    approval = "mandatory"         # the action cannot be undone, e.g. sending a critical email
+```
+
+- `approval = "mandatory"`: the framework asks before every run, and the run waits for the reply.
+- `approval = "delegatable"`: the framework asks until a standing approval for the user exists.
+- Absent: the agent decides, with no gate. Most commands are like this.
+
+The annotation is not read/write gating. An easy-to-undo write needs no annotation, and only the two
+values exist. The attribute is validated when the routing definition loads.
+An unknown value, or a value that is not a string, fails the load and names the command, its file
+and the two allowed values. The listings show a marker after the name: `(needs your approval before
+it runs)` for `mandatory`, `(may need your approval)` for `delegatable`. A workflow with no
+annotation gets no marker.
+
+**What the user sees.** The prompt names the command and its parameters, and asks for a reply.
+`yes` runs the command once. `no` declines it, and it does not run. `always` runs it once and records
+a standing approval for that user, that workflow and that command. Only an exact reply counts. A reply
+that is not one of these words is not read as an approval.
+
+**What the framework checks.**
+
+- A reply is bound to the exact parameters the prompt showed. Any change to a parameter invalidates
+  the approval, so the command does not run.
+- A reply works once. An approval expires after 2 turns or 15 minutes, whichever comes first.
+- Without a human channel (an unattended turn), the request waits in a queue and expires. It never
+  resolves by itself.
+- A `mandatory` command the user types directly also asks. A `delegatable` command the user types
+  runs without a prompt.
+- A recorded standing approval runs its command without a prompt, on any channel, including an
+  unattended turn. A standing approval is kept per user, per workflow and per command.
+
+**Managing standing approvals.** These messages are read by the framework, never by the agent:
+`/approvals` lists the standing approvals, `/revoke_approval <command>` revokes one, and
+`/cancel_pending` cancels the approval that is waiting, if any. A host (the FastAPI server) receives
+the approval token in the live response only. It is never stored, logged or sent again.
+
+**Switch.** `FW_APPROVAL_BINDING` is `enforce` (the default), `shadow` or `off`. `shadow` records and
+audits each decision but runs the command as before. `off` restores the earlier path.
+
+Intent confirmations and plan review are not approvals. Neither one lets an annotated command run.
+
+## Return values of an execution command
+
+A `ResponseGenerator.__call__` may return one of four forms. The framework wraps each one, so the
+command does not build the envelope itself:
+
+- its own `Signature.Output`: the output is the value, and its JSON is the response;
+- a `str`: the response, with no typed output;
+- a `CommandResponse(response=..., output=...)`;
+- a `CommandOutput`, as before.
+
+Any other type fails the call with a `TypeError` that names the command and the type. To decline a
+call, raise `fastworkflow.Refused(message)`: the call returns `success=False` with that message. A
+command with no `Input` receives `None` as its parameters when its `__call__` declares a third
+argument. Otherwise the two-argument form still works.
+
 ## Previews
 
 `fastworkflow command preview <workflow_folder> [--out <dir>] [--check]` writes one markdown
@@ -181,6 +247,10 @@ file per planning command, `<dir>/<name>.md`, generated from the planning comman
 loader (`fastworkflow.command_preview`). The default `<dir>` is `docs/planning_command_previews` next to the
 workflow folder (`<workflow_folder>/../docs/planning_command_previews`), which for a workflow package
 inside its project is the project's `docs/planning_command_previews`.
+
+Known issue: `--check` looks for the bundled examples' previews in
+`fastworkflow/examples/docs/planning_command_previews`, a folder that is not committed, so it exits 1
+for the library example. That exit is not a sign that the previews are stale.
 
 A preview follows the order above:
 

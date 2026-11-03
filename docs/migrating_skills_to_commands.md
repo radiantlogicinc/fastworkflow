@@ -349,9 +349,21 @@ class ResponseGenerator:
     descends_to = "Book"
 ```
 
-`enter_command` on the context's own class still works in this release, so an app can keep it
-for now. Move the declaration to `descends_to` on the commands that enter the context. A later
-release turns `enter_command` into a load error.
+A context class that still declares `enter_command` or `enter_commands` is a load error in this
+release. The error names the file, the command and the fix. Delete the attribute from the context
+class, and declare `descends_to` on each command that enters that context. A command that moves the
+workflow into a context it does not declare logs one warning per command and target. Commands in the
+app that do not enter a context need no change.
+
+## 11. Retrain, and review approvals and return values
+
+- **Retrain** each workflow that has planning commands with `fastworkflow train`. The first train
+  after the upgrade generates training utterances for each planning command, which costs LLM calls.
+  Until you retrain, the workflow's artifacts refuse to load and say to retrain.
+- **Approvals.** A command with `approval = "mandatory"` now asks before it runs, and the user
+  replies `yes`, `no` or `always`. See `docs/planning_command_file_layout.md`, "Approval annotation".
+- **Return values.** A command returns its own `Signature.Output`, a `str`, a `CommandResponse` or a
+  `CommandOutput`. Any other type fails that call with a `TypeError` that names the command.
 
 ## Coming in later releases
 

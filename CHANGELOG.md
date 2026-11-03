@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+### Upgrading to Phase 10 (matching contract, approvals, return forms)
+
+1. **Retrain every workflow that has planning commands**, with `fastworkflow train`. Their
+   earlier artifacts refuse to load and say to retrain. The first train after the upgrade is a
+   full retrain, and it **generates** training utterances for each planning command, because
+   planning commands are now ordinary classifier labels. That is an LLM cost earlier releases did
+   not incur. Later trains reuse the generated utterances. A workflow without planning commands
+   needs no retrain for this change.
+2. **Declare navigation on the command, not the context.** Delete `enter_command` and
+   `enter_commands` from each context class, and set `descends_to = "<Context>"` on each
+   `ResponseGenerator` or `PlanGenerator` that enters that context. A context class that still
+   declares either one is a load error. It names the file, the command and the fix. A command that
+   moves the workflow into a context it does not declare logs one warning per command and target.
+3. **Review `approval` annotations.** Before this release the attribute was declared and shown but
+   not enforced. Now `approval = "mandatory"` asks before every run, including a run you typed
+   yourself, and `approval = "delegatable"` asks unless a standing approval is recorded. Tell users
+   that the prompt takes `yes`, `no` or `always`. `FW_APPROVAL_BINDING` takes `off`, `shadow` or
+   `enforce` (the default). `off` restores the earlier path, and `shadow` records each decision
+   without asking.
+4. **Check command return values.** A command may return its own `Signature.Output`, a `str`, a
+   `CommandResponse` or a `CommandOutput`. Any other type fails that call with a `TypeError` that
+   names the command. A command with no `Input` receives `None` as its parameters when its
+   `__call__` declares a third argument.
+5. **Assistant mode** runs a planning command only when you name it exactly and it is mechanical.
+   Any other planning command is refused, with the reasons. Direct API and MCP calls still refuse
+   planning commands.
+6. **Known issue:** `fastworkflow command preview --check` looks for the bundled examples' previews
+   in `fastworkflow/examples/docs/planning_command_previews`, a folder that is not committed. It
+   exits 1 for the library example. That exit does not mean the output is stale.
+
 ### Upgrading to Phase 9 scoped lookup
 
 1. Retrain every workflow with `fastworkflow train`. Old artifacts refuse to load until you do,
@@ -11,6 +41,38 @@
    matches a command of an enclosing context now reaches that command.
 
 ### Added
+
+- **Planning commands are ordinary classifier labels** (fix-3rsq.10.12). A planning command is a
+  label of every classifier whose scope holds it, so a request reaches it the way it reaches an
+  execution command. The experiment switch `PLANNING_HEADS_LABELLED` remains for
+  re-measurement. Old artifacts of such a workflow refuse to load (see the upgrade checklist).
+
+- **Approval annotation, enforced** (fix-3rsq.10.13, fix-3rsq.10.14). A command class may declare
+  `approval = "mandatory"` or `approval = "delegatable"`. Absent means the agent decides, with no
+  gate. The annotation is not a read/write gate. Each approval is bound to the exact parameters it
+  was asked for. A reply is single-use and expires after 2 turns or 15 minutes, and a changed
+  parameter invalidates it. A reply of `always` records a standing approval for that user, that
+  workflow and that command. `/approvals` lists standing approvals, `/revoke_approval <command>`
+  revokes one, and `/cancel_pending` cancels the pending approval. A host receives the approval token
+  in the live response only, and it is never stored or logged. Intent confirmations and plan review
+  are not approvals. The listings mark annotated commands: "(needs your approval before it runs)" for
+  `mandatory` and "(may need your approval)" for `delegatable`.
+
+- **Command return forms** (fix-3rsq.12.early). A command returns its own `Signature.Output`, a
+  `str`, a `CommandResponse` or a `CommandOutput`. The framework wraps the first three, so the
+  command does not fill the envelope. `fastworkflow.Refused(message)` gives `success=False` with that
+  message. A command with no `Input` receives `None` as its parameters when its `__call__` declares a
+  third argument.
+
+- **Full run listing by default** (fix-3rsq.10.15). A sub-task's run is shown the full listing of
+  commands. A size-based command shortlist exists for a larger workflow, above
+  `FULL_LISTING_MAX_CHARS` (7000 characters). It is off in this release, so the full listing is used
+  at every size. It is expected to be switched on together with the plan review round that shows the
+  proposed commands to the user.
+
+- **The library example has eight seeds per command** (fix-3rsq.10.17). Its
+  `plain_utterances` are the worked example for the seed count. Follow it, and keep each command's
+  seeds distinct from its neighbours' and from its callees'.
 
 - **Scoped lookup: a request finds its command along the live chain** (fix-3rsq.9).
   A command is found on the path a request walks: the current context and its bases, then
@@ -512,6 +574,10 @@
 
 ### Removed
 
+- **`enter_command` and `enter_commands` on a context class** (fix-3rsq.10.4). A context class that
+  declares either one is a load error, which names `descends_to` and the command. Declare the move
+  with `descends_to` on the command that makes it.
+
 - **`context_hierarchy_model.json`** (fix-3rsq.9). The file is no longer read. A workflow
   that still has one loads, logs one warning that the file is ignored and can be deleted,
   and routes the same way. Parents come from each context's `get_parent`, read from the live
@@ -580,6 +646,15 @@
   A folder under `_skills` is not a skill (see the skill-context note above).
 
 ### Changed
+
+- **Navigation warns once when a command moves the workflow into a context it does not declare.** A
+  warning names the command and the target, and says to declare `descends_to`. It is logged once per
+  command and target in each process (fix-3rsq.10.4).
+- **Assistant mode uses the same rule for planning commands** (fix-3rsq.10.8). An exactly named
+  planning command that is mechanical runs. One that needs the agent is refused with the reasons,
+  such as a step the agent carries out in prose, a branch decided at run time, or a `verify` check.
+- **Planning commands in the listings** name their approval marker, and a planning command's
+  template shows the annotated commands it calls.
 
 - **Every trained workflow must be retrained** (fix-3rsq.9). A workflow trained by an
   earlier release refuses to load and says "retrain with `fastworkflow train`". The first
@@ -800,6 +875,10 @@
   `fw.nlu.param_extraction` v7.
 
 ### Fixed
+
+- **Held-out planning requests no longer repeat training rows** (fix-3rsq.10.17). The test-set
+  builder for planning-command matching dropped held-out requests that matched rows the trained
+  version was built from. Its measurements were optimistic before this fix.
 
 - **A clarification reply fills the field it was asked for** (fix-mbkw).
   When parameter extraction asks for a missing or invalid field, the reply is

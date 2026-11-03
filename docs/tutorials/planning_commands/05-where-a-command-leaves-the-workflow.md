@@ -29,7 +29,16 @@ class Signature:
         author: str = Field(description="the book's author")
         copies: int = Field(description="how many copies the library owns")
 
-    plain_utterances = ["open book b1", "go to the book Dune"]
+    plain_utterances = [
+        "open book b1",
+        "go to the book Dune",
+        "open the book with uid b3",
+        "make b2 the current book",
+        "select b2 so I can act on it",
+        "I want to act on b3 now",
+        "make the Dune Messiah book the open one",
+        "load uid b4 as the current book",
+    ]
 
 
 class ResponseGenerator:
@@ -117,7 +126,16 @@ class Signature:
         due_dates: list[str] = Field(description="each loan's due date, in row order")
         total: int = Field(description="how many loans the book has, on every page")
 
-    plain_utterances = ["list this book's loans"]
+    plain_utterances = [
+        "list this book's loans",
+        "give me page two of this title's loans",
+        "how many loans does this book have",
+        "give me the full loan list for this title",
+        "read out the borrowers and due dates of this book, row by row",
+        "list the loans on this one, starting from row 11",
+        "every loan this title has, please",
+        "what loans are open on this book",
+    ]
 
 
 class ResponseGenerator:

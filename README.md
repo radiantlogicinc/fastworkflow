@@ -306,7 +306,7 @@ This is what lets small models stay accurate as your app grows — and what keep
 
 ## Planning commands: multi-command jobs in code
 
-When a family of requests is answered by the same few commands in a known order (find a record, open it, read it, answer), write that job once as a **planning command**: a Python file in `_commands/` (or `_commands/<Context>/`), beside the execution commands. Its `Signature` describes the job and declares typed inputs, and its `PlanGenerator` class holds the phases. Each phase is a method, run in the order `__phases__` gives, and the phases pass facts to each other in code. With `JEV_API_KEY`, Jev matches a request to a planning command, one typed call fills its inputs, and the fields marked `verify` are checked. Without it, planning commands are not matched, and the text planner plans the request (it may name planning commands as steps). Code runs the mechanical steps itself.
+When a family of requests is answered by the same few commands in a known order (find a record, open it, read it, answer), write that job once as a **planning command**: a Python file in `_commands/` (or `_commands/<Context>/`), beside the execution commands. Its `Signature` describes the job and declares typed inputs, and its `PlanGenerator` class holds the phases. Each phase is a method, run in the order `__phases__` gives, and the phases pass facts to each other in code. A planning command is a label of the classifiers whose scope holds it, so a request reaches it the way it reaches an execution command. With `JEV_API_KEY`, Jev picks the planning command for the request, one typed call fills its inputs, and the fields marked `verify` are checked. Without it, the text planner plans the request with the planning commands in its list, and the `verify` checks do not run. Code runs the mechanical steps itself. A command may declare `approval = "mandatory"` or `approval = "delegatable"`; the framework then asks the user before it runs, and the user replies `yes`, `no` or `always`. A planning command runs in agent mode; in assistant mode an exactly named one runs only when it is mechanical.
 
 ```sh
 fastworkflow command preview <workflow_dir>           # one markdown preview per planning command
@@ -736,6 +736,8 @@ When a model uses the `litellm_proxy/` prefix, the per-role keys are ignored and
 > **`CRASH RUNNING FASTWORKFLOW`** — the persistent-state folder is corrupted. Delete `FASTWORKFLOW_STATE_ROOT/workflows/<workflow-id>/` (default `~/.local/state/fastworkflow/...`) and re-run.
 
 > **Slow first training run** — the first run downloads BERT/DistilBERT from HuggingFace and makes LLM calls for synthetic-utterance generation. Set `HF_HOME=/path/to/cache` to control model storage; later runs skip the download. A small workflow trains in ~5–8 minutes on CPU.
+
+> **"Retrain with `fastworkflow train`" when a workflow loads** — it was trained by an earlier release. The first retrain after an upgrade generates training utterances for each planning command, which calls the LLM.
 
 > **Commands not recognized** — a command module with an import/syntax error won't load and won't appear as an intent. Check your `_commands/*.py` files.
 

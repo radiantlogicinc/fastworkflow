@@ -27,7 +27,16 @@ class Signature:
     class Output(BaseModel):
         total: int = Field(description="how many loans are overdue")
 
-    plain_utterances = ["how many loans are overdue", "count the overdue loans at Central"]
+    plain_utterances = [
+        "how many loans are overdue",
+        "count the overdue loans at Central",
+        "how many books are past their due date",
+        "number of overdue loans at Riverside",
+        "tally the late loans across all branches",
+        "how many of our loans are late",
+        "give me the late-loan count for Riverside",
+        "are there overdue books at Central",
+    ]
 
 
 class ResponseGenerator:
@@ -69,7 +78,16 @@ from fastworkflow.planning import run
 class Signature:
     """List the library's branches, then say how many loans are overdue across the library."""
 
-    plain_utterances = ["give me the library overview", "how is the library doing"]
+    plain_utterances = [
+        "give me the library overview",
+        "how is the library doing",
+        "a status report on the library: branches and overdue loans",
+        "summarize the branches and how many loans are late",
+        "overall picture of the library, please",
+        "run the library summary",
+        "branches and overdue count for the whole library",
+        "how is everything at the library, including late loans",
+    ]
 
 
 class PlanGenerator:
@@ -237,8 +255,9 @@ the answer. Most of the planning commands on the next pages need no agent at all
 arguments are known: code runs every step, and `__result__` writes the answer. They are
 planning commands here so that each page can show one idea of the kind. In your own
 workflow, a job like that is shorter as an execution command that calls your app (page 3
-shows one); it runs in assistant mode and through direct API and MCP calls as well, where a
-planning command is refused (page 14), and it returns its `Output` the same way.
+shows one); it runs in assistant mode and through direct API and MCP calls as well. A planning command runs in
+assistant mode only when it is named exactly and is mechanical, and direct API and MCP calls refuse
+it (page 14).
 
 A planning command earns its place when the agent has work in it: a value to find, a
 judgement to make, a step to recover when it goes wrong, or a question for the user. On

@@ -358,11 +358,11 @@ command returns it from `__call__` (page 1), and a planning command from `__resu
 its command's `Output` or a `CommandResponse`, keeps the call: a model writes the answer from
 the phases' runs, `output` is `None`, and the warning names the command and the exception.
 
-**`verify` checks nothing.** `library: planning commands are not matched without JEV_API_KEY;
-the text planner plans and may name them as steps; the verify checks of <fields> are off.`,
-logged once at load, means the workflow has no `JEV_API_KEY`: without it planning commands are
-not matched and the text planner plans the request, and the fields the line names carry a
-`verify` option that checks nothing without the key (page 9).
+**`verify` checks nothing.** `library: planning commands are matched by intent detection; without
+JEV_API_KEY, Jev's planning-match candidates and the verify checks of <fields> are off.`, logged
+once at load, means the workflow has no `JEV_API_KEY`. Planning commands are ordinary intent labels,
+so intent detection still matches them. Without the key, the Jev matcher does not run, and the
+fields the line names carry a `verify` option that checks nothing (page 9).
 
 **A navigation command without `descends_to`.** `open_shelf moved the workflow into Shelf but
 declares no descends_to; declare descends_to = "Shelf" so plans can reach Shelf's commands`
@@ -370,12 +370,21 @@ means a command set `workflow.current_command_context` to a record of a context 
 name. Declare it on the command (page 5).
 
 **A planning command is refused.** `member_report is a planning command; it runs in agent
-mode.` means it was named in assistant mode, in a `/`-prefixed message, or by a direct
-action or MCP call; run it in agent mode.
+mode.` means it was called by a direct API or MCP call, or it was named in assistant mode and
+needs the agent. A refusal in assistant mode lists the reasons, each naming the step and what to
+change. Run the request in agent mode, or change the step the reason names.
+
+**An approval prompt does not run the command.** A command with `approval = "mandatory"` asks
+before it runs. Reply `yes` to run it, `no` to decline, or `always` to approve it from now on for
+that user, workflow and command. An approval expires after 2 turns or 15 minutes, and any change to
+its parameters cancels it. `/approvals` lists the standing approvals, `/revoke_approval <command>`
+revokes one, and `/cancel_pending` cancels the approval that is waiting (see
+`docs/planning_command_file_layout.md`, "Approval annotation").
 
 **The workflow will not load after an upgrade.** "Retrain with `fastworkflow train`" means its
-classifiers were trained by an earlier release. Retrain it; the first train after the upgrade
-is a full retrain. A warning that `context_hierarchy_model.json` is ignored means the file is no
+classifiers were trained by an earlier release. Retrain it. The first train after the upgrade is a
+full retrain, and for a workflow with planning commands it generates their training utterances,
+which costs LLM calls. A warning that `context_hierarchy_model.json` is ignored means the file is no
 longer read and can be deleted (page 14 says where parents come from).
 
 ## A fact named like a `str` method

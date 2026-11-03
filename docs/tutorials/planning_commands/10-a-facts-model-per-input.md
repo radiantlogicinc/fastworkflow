@@ -33,7 +33,16 @@ from .find_member import Signature as FindMember
 class Signature:
     """Say whether a book or a member goes by a name, and name each match."""
 
-    plain_utterances = ["do you have a book called Emma", "is there a member named Lee"]
+    plain_utterances = [
+        "do you have a book called Emma",
+        "is there a member named Lee",
+        "do we have any member called Patel",
+        "is there a book called Dune Messiah",
+        "does anyone go by the name Mia",
+        "is a title called Persuasion in the catalogue",
+        "is there a patron named Raj",
+        "check whether we have a book titled Dune and name the matches",
+    ]
 
     class Input(BaseModel):
         name: str = Field(description="the name to look for",
@@ -110,7 +119,16 @@ from .show_book import Signature as ShowBook
 class Signature:
     """Say where this book is held, how many copies there are, and who has it on loan."""
 
-    plain_utterances = ["where is this book kept, and who has it", "is this book in"]
+    plain_utterances = [
+        "where is this book kept, and who has it",
+        "is this book in",
+        "which branch keeps this book, how many copies, and who is borrowing it",
+        "where do we keep this title and is any copy out",
+        "shelf location and loan status for this one",
+        "is there a copy in the building right now",
+        "tell me where this book sits and who holds the copies",
+        "give me the shelf status of this title",
+    ]
 
 
 class Shelf(BaseModel):
