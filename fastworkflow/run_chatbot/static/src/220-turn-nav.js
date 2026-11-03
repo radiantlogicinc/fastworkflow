@@ -125,11 +125,19 @@ function renderFeedbackPair(item, row) {
   item.appendChild(pair);
 }
 
-function renderFeedbackHistoryRow(row) {
+/* `nodeTitle` is the title of the node whose panel lists the row. A row whose
+   label says something that title does not \u2014 the distillation agent labels
+   its notes "Execution" or "Planning", so that phase's notes can be told apart
+   on the same turn \u2014 shows the label in its header. A label equal to the title
+   (what the composer writes) would only repeat the page, so it is left out;
+   callers that pass no title show no label, as before. */
+function renderFeedbackHistoryRow(row, nodeTitle) {
   var item = el("div", "feedbackHistoryItem");
+  var label = (nodeTitle !== undefined && row.target_label && row.target_label !== nodeTitle)
+    ? " \u00b7 " + row.target_label : "";
   item.appendChild(el("div", "sub",
     row.created_at + " \u00b7 " + feedbackProvenanceLabel(row.provenance)
-    + " \u00b7 " + feedbackClassification(row)));
+    + label + " \u00b7 " + feedbackClassification(row)));
   /* Verbatim. The stored comment is the author's text and is never re-split,
      re-headed or summarised on the way to the screen. */
   item.appendChild(el("pre", "json", row.comment || ""));
@@ -242,7 +250,7 @@ function renderFeedback(parent, node) {
     (data.feedback || []).filter(function (row) {
       return row.target_kind === node.kind && JSON.stringify(row.span_ids) === JSON.stringify(ids);
     }).forEach(function (row) {
-      history.appendChild(renderFeedbackHistoryRow(row));
+      history.appendChild(renderFeedbackHistoryRow(row, node.title || ""));
     });
     save.disabled = false;
     note.textContent = "Each save adds a timestamped comment.";

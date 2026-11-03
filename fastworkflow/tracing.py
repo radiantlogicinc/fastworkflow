@@ -284,7 +284,12 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 #
 # v23: fw.planner.plan / fw.planner.replan v5 (fix-hia1.34) -- `skill_notes`: what
 # the argument guards and verify verdicts changed in a skill call's arguments.
-SPAN_CONTRACT_VERSION = 23
+#
+# v24: fw.agent.step v8 -- the policy verifier's decision on a step it rewrote
+# (fastworkflow.policy_runtime): `policy_mode`, `policy_outcome`, `policy_source`,
+# `policy_table_version`, `policy_intent`, `policy_requests`, `policy_judgement`,
+# and `answer` (the answer a finish policy sent back).
+SPAN_CONTRACT_VERSION = 24
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -573,8 +578,14 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # `tool_args` is still what the model sent.
     # v7 (fix-6llp): `by_code` (true) on a step code ran (skill_phases.CodeSteps),
     # not the model; `thought` then says "run by code".
+    # v8: written on a step the policy verifier rewrote (fastworkflow.policy_runtime):
+    # `policy_source` names the row that fired, `policy_outcome` / `policy_mode` /
+    # `policy_table_version` what it decided under which table, `policy_intent` /
+    # `policy_requests` the intent reader's state, `policy_judgement` the question
+    # judge's reason (ask_user only), and `answer` the answer a finish policy sent
+    # back; the step's `observation` is the rewrite the agent read.
     SPAN_AGENT_STEP: SpanContract(
-        version=7,
+        version=8,
         attributes=frozenset(
             {
                 "step_index",
@@ -589,6 +600,14 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "repaired_tool_name",
                 "folded_command",
                 "by_code",
+                "policy_mode",
+                "policy_outcome",
+                "policy_source",
+                "policy_table_version",
+                "policy_intent",
+                "policy_requests",
+                "policy_judgement",
+                "answer",
             }
         ),
     ),

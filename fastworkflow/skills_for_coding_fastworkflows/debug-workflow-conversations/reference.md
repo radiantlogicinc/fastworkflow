@@ -103,6 +103,19 @@ and `recovered`; on suspension `clarification` (status `awaiting_user`);
 `command` and the tool folded them into the command text (`tool_args` keeps
 what was sent; the observation ends with a "(Ran as: ...)" note);
 `finish_check_note` (historical whitelist key; no longer set on new spans).
+On a step a policy verifier rule rewrote (`FW_POLICY_MODE=enforce`; see the
+`distill-policy-verifiers` skill), these are added:
+- `policy_source`: the rule's id.
+- `policy_outcome` and `policy_mode`.
+- `policy_table_version`.
+- `policy_intent` and `policy_requests`: what the intent reader had recorded.
+- `policy_judgement`: on an `ask_user` step, the question judge's reason.
+- `answer`: on a `finish` step, the answer the rule sent back.
+
+The `observation` is the rule's text, and the tool did not run. A command the
+rule blocked still has its `fw.command.execute` span (the dispatch happened),
+with `success` false and the rule's text as `response_text`. Nothing executed,
+and distillation leaves it out of the agent's actions.
 
 ### `fw.agent.tool_call` (kind `tool`)
 One per agent → workflow invocation; `raw_command` is the exact command text

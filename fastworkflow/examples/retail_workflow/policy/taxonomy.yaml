@@ -1,0 +1,973 @@
+# Failure-mode taxonomy for the retail workflow - worked example.
+#
+# The taxonomy behind table.py (retail-demo/0.4.1), the table used in the
+# 15-task retail evaluation runs. Built with the insights-to-failure-modes
+# coding skill (fastworkflow/skills_for_coding_fastworkflows/).
+#
+# Source corpus: corpus/ (cumulative over four rounds)
+#   execution_agent_anti_patterns.md  (69 items, DE1..DE69)
+#   planning_agent_insights.md        (48 items, DP1..DP48)
+#   provenance.json                   (pair -> insights, reference source)
+# Student: gpt-oss-20b, no policy. Distilled tasks: 16, 35, 41, 76, 87, 110.
+# Round 0 (seeded): DE1-13 / DP1-11, self-distillation of task 16 (each
+#   failing trial against a passing trial of the same model, distill --self).
+# Round 1: distill --pool-students <task 41 student run> --pool-teachers
+#   <teacher run> --task 41 -> DE14-35 / DP12-24 (teacher gpt-5.2; judge
+#   gpt-5.2).
+# Round 2: the student under table 0.2.0 on task 41, failing attempts against
+#   the same teacher attempt -> DE36-45 / DP25-27.
+# Round 3: distill --pool-students <student run under 0.3.1> --pool-teachers
+#   <teacher run> --task 35 41 76 87 110 -> DE46-69 / DP28-48. References:
+#   a passing student trial (self) for 35 and 41; teacher Mistral Large 4 for
+#   76, 87 and 110. Judge: Mistral Large 4.
+# Run names and task ids below are evidence (which trial showed the defect),
+# never rule content. The domain policy quoted as "policy.md" is the
+# tau2-bench retail policy (data/tau2/domains/retail/policy.md there).
+#
+# `signal`: trajectory | +intent | +user_text | +question-judge | none.
+# `source`: reference kind behind the insights (self / teacher).
+# `compiled` names the row in table.py. `overlap` names the same defect in
+#   earlier taxonomies of this research (S* self, C* pool, R* teacher-student),
+#   which are not shipped; their rules that this table carries are in table.py.
+# Planning-side "do this next" hints (nudges) were trialled alongside this
+#   table; they are not part of fastworkflow, and their references are removed.
+
+corpus:
+  execution_items: 69
+  planning_items: 48
+  tasks:
+  - 16
+  - 41
+  - 35
+  - 76
+  - 87
+  - 110
+  rounds:
+  - round: 0
+    seeded_from: Insights_corpora/self_t16_r2
+    items: DE1-13, DP1-11
+  - round: 1
+    student: d_t41_student
+    teacher: d_t41_teacher2
+    failed:
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    pairs:
+    - - 1
+      - 1
+    - - 2
+      - 1
+    - - 3
+      - 1
+    - - 4
+      - 1
+    - - 5
+      - 1
+    items: DE14-35, DP12-24
+  - round: 2
+    student: d_t41_D2
+    teacher: d_t41_teacher2
+    failed:
+    - 1
+    - 2
+    - 4
+    pairs:
+    - - 1
+      - 1
+    - - 2
+      - 1
+    - - 4
+      - 1
+    items: DE36-45, DP25-27
+  - round: 3
+    student: d_train6_P031
+    self_reference: d_train6_P031 attempt 2 (tasks 35, 41)
+    teacher: d_train6_teacherM_pol (attempt 2 for 76 and 87, attempt 1 for 110)
+    failed: {'35': [1, 3, 4, 5], '41': [1, 5], '76': [1, 2, 3, 4, 5], '87': [1, 2, 3, 4, 5], '110': [1, 2, 3, 4, 5]}
+    skipped_no_turns: {'35': [1, 5], '87': [2, 3], '110': [5]}
+    items: DE46-69, DP28-48
+
+modes:
+
+  # --- round 0: seeded task-16 modes (taxonomy_self.yaml) --------------
+  - id: unreported-requested-total
+    name: Closed without the figure the customer asked for
+    insights:
+      execution:
+      - DE2
+      - DE3
+      planning:
+      - DP1
+      - DP3
+    what: Seeded from taxonomy_self.yaml (task 16, self-distilled); see the mode there.
+    source:
+    - self
+    signal: +intent
+    check: 'If the customer asked for the refund total and the refunding writes are done, the
+      answer must state the total computed from tool output: each cancelled order''s paid amount
+      (payment_history) plus each returned item''s price (order items).'
+    hook: before-finish
+    compiled: S1
+    overlap: unreported-requested-total (S1, taxonomy_self.yaml)
+  - id: refund-to-an-unrelated-method
+    name: Refund destination picked arbitrarily
+    insights:
+      execution:
+      - DE4
+      planning: []
+    what: Seeded from taxonomy_self.yaml (task 16, self-distilled); see the mode there.
+    source:
+    - self
+    signal: trajectory
+    check: 'A return''s payment_method_id must be one the order was paid with (its payment_history)
+      or a gift card - the domain policy''s own rule (policy.md: "The refund must either go
+      to the original payment method, or an existing gift card").'
+    hook: before-side-effect
+    compiled: S2
+    overlap: refund-to-an-unrelated-method (S2, taxonomy_self.yaml)
+  - id: invalid-cancel-reason
+    name: Cancellation reason outside the accepted values
+    insights:
+      execution:
+      - DE1
+      planning: []
+    what: Seeded from taxonomy_self.yaml (task 16, self-distilled); see the mode there.
+    source:
+    - self
+    signal: trajectory
+    check: A cancel's reason, when given, must be one of the accepted values.
+    hook: before-side-effect
+    compiled: S3
+    overlap: invalid-cancel-reason (S3, taxonomy_self.yaml)
+  - id: duplicate-cancel
+    name: Re-cancelling an order already cancelled
+    insights:
+      execution: []
+      planning:
+      - DP2
+    what: Seeded from taxonomy_self.yaml (task 16, self-distilled); see the mode there.
+    source:
+    - self
+    signal: trajectory
+    check: Block cancel_pending_order for an order a cancel already succeeded on.
+    hook: before-side-effect
+    compiled: S4
+    overlap: duplicate-cancel (S4, taxonomy_self.yaml)
+  - id: fabricated-facts
+    name: Stating facts no tool or policy supports
+    insights:
+      execution:
+      - DE5
+      planning:
+      - DP4
+      - DP5
+    what: Seeded from taxonomy_self.yaml (task 16, self-distilled); see the mode there.
+    source:
+    - self
+    signal: none
+    compiled: false
+    overlap: fabricated-facts (taxonomy_self.yaml)
+    notes: contradicts-policy / lexical-only. Not compiled. Detecting these claims means matching
+      the answer's wording - brittle - and part of the insight contradicts the domain policy,
+      which says that after a return "the user will receive an email regarding how to return
+      items" and quotes refund timelines of 5 to 7 business days. A rule written from this insight
+      would block true statements. It also did not cause trial 2's failure (the missing total
+      did).
+  - id: redundant-lookups
+    name: Re-fetching data already in hand
+    insights:
+      execution:
+      - DE6
+      - DE68
+      planning:
+      - DP34
+    what: Seeded from taxonomy_self.yaml (task 16, self-distilled); see the mode there.
+    source:
+    - self
+    signal: trajectory
+    compiled: false
+    overlap: redundant-lookups (taxonomy_self.yaml)
+    notes: not-outcome-relevant. Costs calls, not outcomes - no failing trial was lost to it.
+      Left as a prompt-level efficiency note. Round 3 adds DE68 and DP34 (repeated
+      get_user_details in d_train6_P031 110/3 and 41/1); still no reward lost to it.
+  - id: pending-order-left-uncancelled
+    name: Asked to cancel all pending orders; one was skipped
+    insights:
+      execution:
+      - DE7
+      - DE8
+      planning:
+      - DP6
+    what: Seeded from taxonomy_self.yaml (task 16, self-distilled); see the mode there.
+    source:
+    - self
+    signal: +intent
+    check: If the customer asked to cancel ALL pending orders, then at finish every order listed
+      by get_user_details must have been read, and every order read as pending must have a successful
+      cancel_pending_order.
+    hook: before-finish
+    compiled: S5
+    overlap: pending-order-left-uncancelled (S5, taxonomy_self.yaml)
+  - id: return-from-undelivered-order
+    name: Return aimed at an order that is not delivered
+    insights:
+      execution:
+      - DE11
+      planning:
+      - DP9
+    what: Seeded from taxonomy_self.yaml (task 16, self-distilled); see the mode there.
+    source:
+    - self
+    signal: trajectory
+    check: return_delivered_order_items must target an order whose get_order_details status
+      is "delivered".
+    hook: before-side-effect
+    compiled: S6
+    overlap: return-from-undelivered-order (S6, taxonomy_self.yaml)
+  - id: claimed-cancellation-never-ran
+    name: Answer reports a cancellation that did not happen
+    insights:
+      execution:
+      - DE10
+      planning: []
+    what: Seeded from taxonomy_self.yaml (task 16, self-distilled); see the mode there.
+    source:
+    - self
+    signal: trajectory
+    check: Any order id the answer reports as cancelled must have a successful cancel_pending_order
+      in the conversation.
+    hook: before-finish
+    compiled: S7
+    overlap: claimed-cancellation-never-ran (S7, taxonomy_self.yaml)
+  - id: asks-for-what-it-can-look-up
+    name: Asked the customer which order holds an item
+    insights:
+      execution:
+      - DE9
+      planning:
+      - DP7
+    what: Seeded from taxonomy_self.yaml (task 16, self-distilled); see the mode there.
+    source:
+    - self
+    signal: +question-judge
+    compiled: false
+    overlap: asks-for-what-it-can-look-up (taxonomy_self.yaml)
+    notes: needs-judge. Needs the question judge (an LLM call per question). It did not cause
+      either failure - the customer said "not sure" and the agent looked the order up - so it
+      is left uncompiled to keep this table judge-free.
+  - id: literal-item-matching
+    name: Matched the item by exact name instead of meaning
+    insights:
+      execution:
+      - DE12
+      planning:
+      - DP10
+    what: Seeded from taxonomy_self.yaml (task 16, self-distilled); see the mode there.
+    source:
+    - self
+    signal: none
+    compiled: false
+    overlap: literal-item-matching (taxonomy_self.yaml)
+    notes: no-deterministic-signal. Semantic matching is not deterministically checkable; prompt-only.
+  - id: re-confirming-requested-actions
+    name: Asking for a yes the customer already gave in their request
+    insights:
+      execution:
+      - DE13
+      planning:
+      - DP8
+    what: Seeded from taxonomy_self.yaml (task 16, self-distilled); see the mode there.
+    source:
+    - self
+    signal: none
+    compiled: false
+    overlap: re-confirming-requested-actions (taxonomy_self.yaml)
+    notes: 'contradicts-policy. NOT compiled because it contradicts the domain policy: policy.md
+      requires "explicit user confirmation (yes)" before any database update, however the request
+      was phrased. A rule from this insight would push the agent to break the policy. An insight
+      the judge drew from turn counts.'
+  - id: deferred-cancellation
+    name: A planned cancel pushed behind other steps and lost
+    insights:
+      execution: []
+      planning:
+      - DP11
+    what: Seeded from taxonomy_self.yaml (task 16, self-distilled); see the mode there.
+    source:
+    - self
+    signal: none
+    compiled: false
+    overlap: deferred-cancellation (taxonomy_self.yaml)
+    notes: no-deterministic-signal. Ordering advice for the planner. Its consequence - a pending
+      order never cancelled - is what S5 checks at finish.
+
+  # --- round 1: task 41, teacher reference ------------------------------
+  # pairs d_t41_student/1-5 vs d_t41_teacher2/1 (provenance.json). The seeded
+  # task-16 items were in the files, so the judge was told to add only new
+  # insights; the five pairs still repeat each other, hence the large modes.
+
+  - id: requested-work-left-undone
+    name: Finished with part of the request never executed
+    insights: {execution: [DE16, DE20, DE23, DE25, DE27, DE29, DE31, DE33, DE42, DE43, DE49], planning: [DP12, DP15, DP19, DP20, DP22, DP23, DP25]}
+    what: >
+      The customer asked to check and correct the address on their account and
+      ALL their orders. Every student trial changed the profile and one order's
+      address and never the other pending order's; some finished first and
+      claimed the work done (DE23, DE27, DE31, DP23 - the claim is the symptom
+      of the same defect).
+    source: [teacher]
+    signal: +intent
+    check: >
+      As C6 (taxonomy_combined.yaml): at finish, unless the answer waits on the
+      customer, every firm request whose command exists and whose condition
+      holds on the observed data has a successful execution for each record it
+      covers; "all" covers every record of that kind eligible for the command,
+      known once every candidate record has been read.
+    hook: before-finish
+    compiled: C6
+    overlap: requested-work-left-undone (C6, taxonomy_combined.yaml), missing-subtask (R10), pending-order-left-uncancelled (S5)
+    notes: >
+      Round 3 adds DE49 (d_train6_P031/41/5: the answer said an order already
+      had the corrected address when its details showed the old one - the
+      symptom of the order never being updated).
+      Existing row - no new one. C6 is already in table_demo.py. In d_t41_D1
+      it did not fire on the skipped order because that run's pinned opening
+      asked about "the order's" address; the opening now pinned asks about
+      "all my orders", which C6's scope=all reading covers.
+
+  - id: irreversible-write-before-other-requested-changes
+    name: A write that locks the record ran before the other changes requested on it
+    insights: {execution: [DE14, DE19, DE28, DE32, DE37], planning: []}
+    what: >
+      Four of five student trials swapped the item first and only then turned
+      to the address. The item modification is the irreversible one: after it
+      the order is "pending (items modified)" and, per policy, cannot be
+      modified again - so the address change the customer also asked for on
+      that order can no longer be made. The insights: do not run the
+      irreversible swap until the address correction (and the variant and
+      payment) are settled.
+    source: [teacher]
+    signal: +intent
+    check: >
+      Before a write whose success leaves the target record ineligible for
+      further writes (the workflow's item modification on a pending order), no
+      other firm request covering that same record and still unfinished (C6's
+      notion: its condition holds, its command exists, no successful execution
+      on this record) may need a command that requires the record's current
+      status. If one does, it must run first.
+    hook: before-side-effect
+    compiled: D1
+    overlap: write-against-order-status (C2) blocks the doomed later call but cannot recover the request; destructive-ordering (R12/R13, taxonomy.yaml) is the same "irreversible step last" principle for cancel vs return
+    notes: >
+      Policy, retail policy.md "modify items": "This action can only be called
+      once, and will change the order status to 'pending (items modifed)'. The
+      agent will not be able to modify or cancel the order anymore." So the
+      rule enforces an order the policy implies; it never blocks the
+      modification itself once the other requested writes on that record are
+      done, conditions unmet, or the requests not firm.
+
+  - id: price-difference-method-not-confirmed
+    name: Payment method for a price difference picked without the customer
+    insights: {execution: [DE15, DE44], planning: [DP13, DP26]}
+    what: >
+      One trial put the item swap's price difference on a credit card the
+      customer never named; the task expects the order's own payment method.
+    source: [teacher]
+    signal: +intent
+    compiled: false
+    overlap: refund-to-an-unrelated-method (S2, returns only)
+    notes: >
+      covered-by C4. Policy (modify items): "The user must provide a payment
+      method to pay or receive refund of the price difference." C4 requires an
+      explicit yes to a proposal that names, for an item modification, the
+      price difference and the payment method - the principle behind these
+      insights. A rule fixing "the original method" would contradict the
+      policy's "user must provide".
+      Round 2 (d_t41_D2/4): C4 did not cover it in practice - the agent
+      proposed a method the order was not paid with and the customer said yes
+      to the proposal. Still not compiled: "the customer named it first" is
+      decidable only from wording (the customer did name it, after the
+      agent), and "the original method only" contradicts the policy above.
+      Prompt material; a gap left open.
+
+  - id: malformed-command-arguments
+    name: Argument names or markup not in the command's schema
+    insights: {execution: [DE17, DE22, DE26, DE30, DE34, DE38, DE39, DE45], planning: []}
+    what: >
+      The student wrote old_item_ids, first_line, list-in-string values.
+    source: [teacher]
+    signal: trajectory
+    compiled: false
+    overlap: malformed-retry (taxonomy_combined.yaml)
+    notes: >
+      not-outcome-relevant. fastworkflow's parameter extraction maps the
+      student's tags onto the command's parameters; in every failing trial the
+      recorded tau2 calls carry the correct item_ids/new_item_ids and address
+      fields. An absence-of-name rule would misfire on correct calls.
+
+  - id: unconfirmed-refund-claims
+    name: Refund destination or amount stated beyond what a tool returned
+    insights: {execution: [DE18, DE35, DE40], planning: []}
+    what: >
+      Answers said the difference was refunded to a named method when the tool
+      output did not state it.
+    source: [teacher]
+    signal: none
+    compiled: false
+    overlap: unverified-assertions (taxonomy_combined.yaml)
+    notes: >
+      lexical-only. Deciding that a sentence claims a refund destination the
+      observations do not support means matching the answer's wording; task 41
+      has no communicate check, so no reward was lost to it either.
+
+  - id: repeated-successful-write
+    name: A write re-issued after it already succeeded
+    insights: {execution: [DE21], planning: [DP16]}
+    what: >
+      One trial ran modify_user_address twice with the same address.
+    source: [teacher]
+    signal: trajectory
+    compiled: false
+    overlap: write-that-changes-nothing (C5), duplicate-cancel (S4), duplicate-write (R6)
+    notes: >
+      not-outcome-relevant. The repeat wrote the same values; the final state
+      was unaffected (that trial failed on the skipped order). C5 enforces the
+      principle if wanted; it is not in table_demo.
+
+  - id: stray-text-in-user-values
+    name: Customer-typed value carried a stray token into a write
+    insights: {execution: [DE24], planning: [DP18]}
+    what: >
+      The customer's message read "R 445 Maple Drive"; the student wrote it.
+    source: [teacher]
+    signal: none
+    compiled: false
+    overlap: none
+    notes: >
+      no-deterministic-signal. The token came from the simulated customer's
+      own message, so the student copied what it was given (the judge blames
+      it); deciding a typed token is "stray" is a semantic judgement on user
+      text.
+
+  - id: recheck-request-not-verified
+    name: Asked to re-check, answered without reading the records again
+    insights: {execution: [], planning: [DP14, DP17, DP21, DP24]}
+    what: >
+      When the customer asked to re-check the updated orders, the student
+      answered without get_order_details.
+    source: [teacher]
+    signal: +intent
+    compiled: false
+    overlap: none
+    notes: >
+      not-outcome-relevant. No trial lost reward to it (the writes were already
+      wrong or right); planning advice, and planning is not distilled yet.
+
+  # --- round 2: task 41 under retail-demo/0.2.0, teacher reference ----------
+
+  - id: write-that-changes-nothing
+    name: A write whose new values equal what is already stored
+    insights: {execution: [DE36], planning: [DP27]}
+    what: >
+      The agent told the customer the address "is already correct" without
+      showing it, then wrote the unchanged address onto one order and moved
+      on. The no-op write also made C6 treat every order holding that address
+      as already done, so the other order and the profile were never fixed.
+    source: [teacher]
+    signal: trajectory
+    check: >
+      As C5 (taxonomy_combined.yaml): a modify_pending_order_address /
+      modify_user_address whose address equals the target's current stored
+      address, or a modify_pending_order_items whose new item ids equal the old
+      ones, changes nothing and is not run.
+    hook: before-side-effect
+    compiled: C5
+    overlap: write-that-changes-nothing (C5, taxonomy_combined.yaml), repeated-successful-write (round 1)
+    notes: >
+      Existing row - imported, not rewritten. Outcome-relevant: d_t41_D2/1 lost
+      reward to it. With C5 the no-op write never runs, so nothing counts as
+      written and C6 still sees the address request open at finish.
+
+  - id: blocked-call-repeated
+    name: A call a rule blocked was re-issued unchanged
+    insights: {execution: [DE41], planning: []}
+    what: >
+      d_t41_D2/2: D1 blocked the item swap twice; the agent re-issued it a
+      third time and the guard's valve (a call blocked twice by the same rule
+      is let through, to prevent deadlock) released it. The order locked and
+      the address changes C2 then blocked could never be made.
+    source: [teacher]
+    signal: trajectory
+    compiled: false
+    overlap: none
+    notes: >
+      covered-by D1. The rule fired as intended; the call went through by the
+      guard's valve, a mechanism setting, not a missing rule. Whether a rule
+      whose blocked call is irreversible should be exempt from the valve is a
+      mechanism decision, recorded here and not compiled.
+
+  # --- round 3: train-6 tasks under retail-demo/0.3.1, self + teacher ------
+  # pairs from provenance.json (demo_r3). 35/41 vs a passing student trial;
+  # 76/87/110 vs Mistral Large 4, whose prompts carried policy.md (the
+  # student's did not) - some teacher-side insights restate the policy.
+
+  - id: write-against-order-status
+    name: A command aimed at an order whose status it does not apply to
+    insights: {execution: [DE65], planning: [DP46, DP48]}
+    what: >
+      d_train6_P031 110: the tablet order is pending, and the student's plan
+      and first attempt used the delivered-order exchange for it.
+      DP48 adds "never use the return command for a swap, never fabricate
+      payment tokens"; its status half is this mode.
+    source: [teacher]
+    signal: trajectory
+    check: >
+      As C2 (taxonomy_combined.yaml): a write whose command requires an order
+      status (cancel / modify on 'pending', return / exchange on 'delivered')
+      is not run against an order whose last observed status differs.
+    hook: before-side-effect
+    compiled: C2
+    overlap: write-against-order-status (C2, taxonomy_combined.yaml), return-from-undelivered-order (S6)
+    notes: >
+      Existing row - no new one. C2 is already in table_demo.py; in the failing
+      110 trials the recorded writes are modify_pending_order_items, so the
+      exchange never ran.
+
+  - id: write-before-every-order-read
+    name: A write to one order before every order on the account was read
+    insights: {execution: [DE54], planning: []}
+    what: >
+      d_train6_P031 76/2: the student issued cancel_pending_order before
+      reading the account's other orders; the insight states the principle
+      ("do not cancel until every order on the account has been retrieved").
+    source: [teacher]
+    signal: trajectory
+    check: >
+      As S8: before a write that targets an order, every order listed by
+      get_user_details has been read with get_order_details.
+    hook: before-side-effect
+    compiled: S8
+    overlap: S8 (table_self.py), C1 (taxonomy_combined.yaml)
+    notes: >
+      Existing row - no new one. S8 was added by hand (user-approved
+      exception); DE54 is the first distilled insight stating its principle.
+      The insight's reason ("the system blocks write operations until all
+      orders have been read") describes S8 itself, as seen by the student.
+
+  - id: transfer-instead-of-doing
+    name: Handed off, or redirected elsewhere, a request the tools can complete
+    insights: {execution: [DE47], planning: [DP30, DP43]}
+    what: >
+      d_train6_P031 35/3: one email lookup failed and the student transferred
+      without asking for another identifier. 87/1 (DP43): the student never
+      looked the account up and sent the customer to an account portal
+      instead. 87/3 and 87/5 transferred the same way (no insights: 87/3 has
+      no recorded turn, 87/5's pair returned none).
+    source: [self, teacher]
+    signal: +intent
+    check: >
+      As C8 (taxonomy_combined.yaml), with its status condition made explicit:
+      block transfer_to_human_agents while the customer is identifiable (a
+      user id is known, or an email they typed has not been looked up) and
+      some firm request is still open whose command can still apply - some
+      order it would act on is unread, or was last read in a status that
+      command requires.
+    hook: before-side-effect
+    compiled: C8
+    overlap: transfer-instead-of-doing (C8, taxonomy_combined.yaml)
+    notes: >
+      Import of C8, which is not in table_demo.py yet. The status condition is
+      part of C8's own check ("a workflow command can carry out") but its code
+      counts any open request: in the d_train6_D3 review it would have blocked
+      transfers whose only open request was a cancel or swap on an order
+      already modified or cancelled. The import must check status as stated
+      above. Policy: "transfer the user to a human agent if and only if the
+      request cannot be handled within the scope of your actions." It would
+      block 87/3 and 87/5 (email typed, never looked up). It would NOT block
+      35/3: the only email the customer typed failed its lookup, so per C8 the
+      customer is not identifiable - asking for another identifier first is
+      the uncompiled mode identification-not-exhausted.
+
+  - id: identification-not-exhausted
+    name: Gave up on identifying the customer while another lookup path existed
+    insights: {execution: [DE46], planning: [DP28, DP29]}
+    what: >
+      d_train6_P031 35/3: after find_user_id_by_email failed, the student did
+      not ask for another email or for name and ZIP. DP29: it asked for
+      identifiers no lookup command takes (order or phone numbers).
+    source: [self]
+    signal: +question-judge
+    compiled: false
+    overlap: transfer-instead-of-doing (C8) covers the case where an untried identifier is already in the conversation
+    notes: >
+      needs-judge. Whether the customer was asked for (or refused) another
+      identifier is in the wording of the agent's question and the reply;
+      blocking a transfer until a name+ZIP lookup ran would fire on customers
+      who cannot give a ZIP, where DP28 itself says transferring is right.
+      Prompt material.
+
+  - id: request-abandoned-instead-of-looking-up
+    name: Asked for, or gave up on, data the account already holds
+    insights: {execution: [DE58, DE59, DE60, DE63, DE69], planning: [DP42, DP44]}
+    what: >
+      d_train6_P031 87/1: the customer would not type the new address and
+      asked for "a secure method"; the student never looked the account up
+      (the address is on one of the orders), walked the customer through an
+      invented account portal and closed. C6 blocked three closings; the turn
+      ended after the per-turn bound. 110/3 (DE69): asked again for an address
+      the customer said was on an order.
+    source: [teacher]
+    signal: +question-judge
+    compiled: false
+    overlap: asks-for-what-it-can-look-up (round 0), requested-work-left-undone (C6), transfer-instead-of-doing (C8), fabricated-facts (the portal)
+    notes: >
+      covered-by C6 and C8 for the consequences: closing with the change undone
+      is C6 (it fired three times in 87/1), handing off is C8. The defect
+      itself - asking the customer for data the records hold, or offering a
+      channel the workflow lacks - is in the agent's question text: needs the
+      question judge (asks-for-what-it-can-look-up) or wording matching.
+      DE60 ("never finish without authenticating when an email was given") is
+      the C6 consequence. Prompt material for the rest.
+
+  - id: address-from-wrong-record
+    name: Wrote an address taken from the wrong record
+    insights: {execution: [DE61, DE62, DE64, DE66], planning: [DP45]}
+    what: >
+      87/4 wrote the profile's current address onto the other pending orders
+      instead of the address on another order the customer meant. 110/1 and
+      110/4 wrote the old address (from the order to be corrected) onto the
+      order and profile that already held the new one - the direction
+      reversed.
+    source: [teacher]
+    signal: none
+    compiled: false
+    overlap: write-that-changes-nothing (C5) catches only the case where the written address equals the target's own
+    notes: >
+      no-deterministic-signal. Which stored address is "new" and which "old"
+      is the customer's meaning, not a field: in task 110 the new address is
+      the profile's, in task 87 it is on an order and the profile holds the
+      old one. DP45's heuristic ("the order whose address differs from the
+      default holds the old address") is right for 110 and wrong for 87 - see
+      collisions. A rule requiring the written address to appear in what the
+      customer agreed to was tried as C4 0.1.2 and withdrawn (user decision:
+      an explicit yes suffices). Outcome-relevant (87/4, 110/1, 110/4); left
+      as prompt material and an open gap.
+
+  - id: wrong-order-targeted
+    name: Acted on an order that does not hold the items the customer named
+    insights: {execution: [DE50, DE51, DE53, DE55, DE56], planning: [DP35, DP40]}
+    what: >
+      d_train6_P031 76/1 and 76/3: the customer named a jacket and a
+      skateboard; the student asked to cancel "the pending order" it opened
+      first (a smart-watch order), without saying what it held, got a yes and
+      cancelled it. S8 then made it read every order; it cancelled the same
+      wrong order anyway.
+    source: [teacher]
+    signal: none
+    compiled: false
+    overlap: write-before-every-order-read (S8) ensures every order is read, not that the right one is chosen
+    notes: >
+      lexical-only. Deciding that an order "holds the items the customer
+      named" means matching the customer's words ("fleece jacket", "the
+      board") to item names - the reader records requests, not the items they
+      name, and records are never parsed from its free text. Outcome-relevant
+      (76/1, 76/3). Closing it would need the intent reader to return the
+      items each request names (a reader change, not a table row) - left open.
+
+  - id: conditional-fallback-left-undone
+    name: A request's fallback held but was never carried out
+    insights: {execution: [DE57], planning: [DP41]}
+    what: >
+      The customer's two requests each carried a fallback ("if removing the
+      jacket is not possible, cancel that order"; "if the board cannot be
+      changed, cancel"). 76/3 carried out one fallback and not the other;
+      76/2 issued the jacket order's cancel, S8 blocked it to read the other
+      orders, and it was never re-issued.
+    source: [teacher]
+    signal: +intent
+    compiled: false
+    overlap: requested-work-left-undone (C6) skips conditional requests by design
+    notes: >
+      no-deterministic-signal. C6 checks firm requests only, because whether a
+      fallback's condition holds ("removing one item is not possible", "that
+      variant does not exist") is not in the reader's output. Outcome-relevant
+      (76/2, 76/3). Would need the reader to resolve conditions - left open.
+
+  - id: fallback-before-checking-the-primary
+    name: Took the fallback without checking whether the primary was possible
+    insights: {execution: [DE52], planning: [DP36]}
+    what: >
+      The students did not look up whether the requested skateboard variant
+      exists before treating the change as impossible.
+    source: [teacher]
+    signal: none
+    compiled: false
+    overlap: none
+    notes: >
+      not-outcome-relevant. In task 76 the variant does not exist, so the
+      fallback (cancel) was the right outcome; the trials lost reward to
+      wrong targets and missing cancels, not to this. Matching a described
+      variant to catalog options is also semantic.
+
+  - id: extra-items-in-a-write
+    name: Wrote more items than the customer described
+    insights: {execution: [DE48], planning: [DP31]}
+    what: >
+      d_train6_P031 35/4: the customer asked to return "the speaker that is
+      more expensive and not water-resistant"; the order held two speakers
+      and the student returned both.
+    source: [self]
+    signal: none
+    compiled: false
+    overlap: literal-item-matching (round 0)
+    notes: >
+      no-deterministic-signal. Which item matches a description ("the pricier,
+      non-waterproof one") is a semantic judgement over item options.
+      Outcome-relevant (35/4). Prompt material.
+
+  - id: payment-id-not-from-the-account
+    name: Payment method id asked of the customer or made up
+    insights: {execution: [DE67], planning: [DP32]}
+    what: >
+      35/4 pair: the student asked the customer for a payment method id they
+      could not know. 110/3: the student wrote a masked token ("PMT-****-...")
+      as the payment method in its messages.
+    source: [self, teacher]
+    signal: none
+    compiled: false
+    overlap: price-difference-method-not-confirmed (round 1), refund-to-an-unrelated-method (S2)
+    notes: >
+      not-outcome-relevant. No write carried a made-up id (110/3 made no
+      write; the tools reject unknown ids anyway); asking for an id is
+      question wording. Prompt material.
+
+  - id: replan-ignores-executed-steps
+    name: Replans that lose track of what already ran
+    insights: {execution: [], planning: [DP33, DP37, DP38]}
+    what: >
+      Replans that inferred a write ran from the customer's thanks (DP33),
+      spread confirmed cancels over several replans (DP37) or re-planned a
+      cancel that had already succeeded (DP38).
+    source: [self, teacher]
+    signal: trajectory
+    compiled: false
+    overlap: duplicate-cancel (S4), repeated-successful-write (round 1)
+    notes: >
+      covered-by S4 for the one checkable consequence (re-cancelling an order
+      a cancel already succeeded on). DP33 and DP37 are planning style; no
+      failing trial lost reward to them.
+
+  - id: one-reason-for-different-orders
+    name: One cancel reason applied to orders the customer gave different reasons for
+    insights: {execution: [], planning: [DP39]}
+    what: >
+      The teacher's customer gave a reason per order; the insight says to map
+      each order to its own reason. d_train6_P031 76/4: the customer gave
+      "ordered by mistake" for the jacket order; for the skateboard order the
+      student asked only for a yes ("yes ###STOP###") and reused that reason,
+      though the opening said the board is no longer needed. (76/2 differs:
+      asked for the board order's reason, the customer itself said "ordered by
+      mistake" - simulator-decided, see gaps.)
+    source: [teacher]
+    signal: +user_text
+    compiled: false
+    overlap: invalid-cancel-reason (S3) checks the value set only
+    notes: >
+      lexical-only. Outcome-relevant (76/4 fails the DB check on the board
+      order's reason). Which allowed value a customer meant for an order is in
+      their words ("since I don't need it anymore", "I made a mistake"), and
+      mapping those to 'no longer needed' / 'ordered by mistake' per order is
+      wording matching. S3 already tells the agent to use the reason the
+      customer gave and to ask when none was given; prompt material beyond that.
+
+  - id: stalled-on-one-detail
+    name: Independent changes held back while one detail was missing
+    insights: {execution: [], planning: [DP47]}
+    what: >
+      110/3: the student kept asking about a payment method for the tablet
+      and never made the address changes, which needed no payment method.
+    source: [teacher]
+    signal: none
+    compiled: false
+    overlap: requested-work-left-undone (C6)
+    notes: >
+      covered-by C6, which blocks closing with the address changes undone.
+      The ordering advice itself has no deterministic signal.
+
+collisions:
+  - between: [DP45, DE61]
+    tension: >
+      DP45 (task 110) takes the address that differs from the profile's as the
+      old one; DE61 (task 87) uses the address found on an order, which
+      differs from the profile's, as the new one.
+    resolution: >
+      Not decidable from the records: the customer's words say which address
+      is the new one. Neither is compiled.
+
+gaps:
+  - trial: d_t41_student/5
+    cause: >
+      the simulated customer answered as the agent ("I've updated both your
+      account profile and the shipping address on all of your orders") and the
+      conversation ended - a simulator failure, after the student had already
+      swapped before the address.
+    why_not_compiled: simulator-side; no insight names it
+  - trial: d_train6_P031/76/2
+    cause: >
+      asked for the skateboard order's reason, the simulated customer gave
+      "ordered by mistake"; its script says it is no longer needed. (76/4 is
+      the agent's: it reused the other order's reason - see
+      one-reason-for-different-orders.)
+    why_not_compiled: simulator-side
+  - trial: d_train6_P031/35/1, d_train6_P031/35/5
+    cause: the simulated customer ended the conversation (###STOP###) before any write.
+    why_not_compiled: simulator-side; no recorded turn, so not distilled
+  - trial: d_train6_P031/76/2
+    cause: >
+      the final answer said the jacket order was cancelled; no cancel ran on
+      it. S7 (claimed-cancellation-never-ran) did not fire; why was not
+      examined here.
+    why_not_compiled: no round-3 insight names the claim; a rule-coverage question for S7
+  - trial: d_train6_P031/41/1
+    cause: >
+      D1 blocked the item swap twice and the guard's valve let the third
+      attempt through (blocked-call-repeated, round 2) - no new insight.
+    why_not_compiled: mechanism setting, not a missing rule
+  - trial: d_train6_P031/41/5
+    cause: >
+      the item swap's price difference went to a credit card instead of the
+      order's PayPal (price-difference-method-not-confirmed, round 1).
+    why_not_compiled: covered-by C4 in principle; open gap recorded in round 1
+
+coverage:
+  insights: 117
+  in_compiled_modes: 45
+  compiled_rules:
+  - C5
+  - C6
+  - D1
+  - S1
+  - S2
+  - S3
+  - S4
+  - S5
+  - S6
+  - S7
+  - S8
+  - C2
+  - C8
+  new_rows_round_1:
+  - D1
+  imported_rows_round_2:
+  - C5
+  imported_rows_round_3:
+  - C8 (with its status condition made explicit)
+  existing_rows_cited_round_3:
+  - C2
+  - S8
+  - C6
+  not_compiled:
+    contradicts-policy:
+    - DE5
+    - DP4
+    - DP5
+    - DE13
+    - DP8
+    not-outcome-relevant:
+    - DE6
+    - DE17
+    - DE22
+    - DE26
+    - DE30
+    - DE34
+    - DE38
+    - DE39
+    - DE45
+    - DE21
+    - DP16
+    - DP14
+    - DP17
+    - DP21
+    - DP24
+    - DE68
+    - DP34
+    - DE52
+    - DP36
+    - DE67
+    - DP32
+    needs-judge:
+    - DE9
+    - DP7
+    - DE46
+    - DP28
+    - DP29
+    no-deterministic-signal:
+    - DE12
+    - DP10
+    - DP11
+    - DE24
+    - DP18
+    - DE61
+    - DE62
+    - DE64
+    - DE66
+    - DP45
+    - DE57
+    - DP41
+    - DE48
+    - DP31
+    covered-by:
+    - DE15
+    - DE44
+    - DP13
+    - DP26
+    - DE41
+    - DE58
+    - DE59
+    - DE60
+    - DE63
+    - DE69
+    - DP42
+    - DP44
+    - DP33
+    - DP37
+    - DP38
+    - DP47
+    lexical-only:
+    - DE18
+    - DE35
+    - DE40
+    - DE50
+    - DE51
+    - DE53
+    - DE55
+    - DE56
+    - DP35
+    - DP40
+    - DP39
+  new_modes_round_3:
+  - write-against-order-status
+  - write-before-every-order-read
+  - transfer-instead-of-doing
+  - identification-not-exhausted
+  - request-abandoned-instead-of-looking-up
+  - address-from-wrong-record
+  - wrong-order-targeted
+  - conditional-fallback-left-undone
+  - fallback-before-checking-the-primary
+  - extra-items-in-a-write
+  - payment-id-not-from-the-account
+  - replan-ignores-executed-steps
+  - one-reason-for-different-orders
+  - stalled-on-one-detail
+  shared_with_taxonomy_combined:
+  - requested-work-left-undone
+  - write-that-changes-nothing
+  - malformed-command-arguments
+  - unconfirmed-refund-claims
+  - repeated-successful-write
+  - write-against-order-status
+  - transfer-instead-of-doing
