@@ -42,8 +42,9 @@ When it holds, the step is not taken and the agent reads the rule's text instead
   - a `failure_pattern` for tools that report errors as successful text.
 
   The engine knows no workflow.
-- **Modes.** `off` (the default) is byte-for-byte the unmodified agent. `enforce` acts. What a
-  table *would* do is answered offline by `fastworkflow policy replay`, on recorded runs.
+- **No switch.** A workflow that has `_policy/table.py` has its rules enforced; one without
+  it is byte-for-byte the unmodified agent. What a table *would* do is answered offline by
+  `fastworkflow policy replay`, on recorded runs.
 
 ## Phases and where each is checked
 
@@ -129,14 +130,18 @@ steps.
 
 ## Configuration
 
+The table is found, not configured: `<workflow>/_policy/table.py`, exposing `TABLE` (a
+`DecisionTable`) and optionally `FACTS` (`ContractFacts`). `_policy`, like `_commands`, is a
+framework folder.
+
+A table file that exists but is malformed fails at agent construction: rules the developer
+wrote must not be skipped without a word.
+
+The only optional setting is the model for the readings:
+
 | setting | meaning |
 |---|---|
-| `FW_POLICY_MODE` | `off` (default) or `enforce`; any other value is an error |
-| `FW_POLICY_TABLE` | `path.py[:ATTR]` (a relative path is tried against the current directory, then the workflow folder) or `module[:ATTR]`; `ATTR` defaults to `TABLE`; `FACTS` is read from the same module |
 | `LLM_POLICY_INTENT` / `LITELLM_API_KEY_POLICY_INTENT` | model for the readings; `LLM_AGENT` when unset |
-
-`enforce` with a missing or malformed table fails at agent construction. A run configured
-to enforce that quietly enforced nothing would be measured as if it had.
 
 ## Producing a table
 
@@ -147,10 +152,10 @@ Run the loop described in the `distill-policy-verifiers` coding skill:
    `--pool-students/--pool-teachers`; `--provenance` records which pair produced which
    insight.
 3. Cluster the insights into failure modes (`insights-to-failure-modes`).
-4. Compile `policy/table.py`.
+4. Compile `_policy/table.py`.
 5. Audit it with `fastworkflow policy replay`.
-6. Enable it.
-7. Compare against an `off` arm.
+6. Ship it: the table is on as soon as `_policy/table.py` exists.
+7. Compare against the same workflow without the table (a control arm).
 
 The replay drives the same `AgentPolicy` over recorded spans:
 
@@ -158,7 +163,7 @@ The replay drives the same `AgentPolicy` over recorded spans:
 - canonical commands from `fw.command.execute` under each step's tool call;
 - the recorded intent, or with `--live` a fresh reading.
 
-So its verdicts follow the live rules. `fastworkflow/examples/retail_workflow/policy/` is a
+So its verdicts follow the live rules. `fastworkflow/examples/retail_workflow/_policy/` is a
 complete worked example: corpus, provenance, taxonomy, table and tests.
 
 ## Files

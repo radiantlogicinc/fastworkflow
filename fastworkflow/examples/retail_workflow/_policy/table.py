@@ -3,10 +3,8 @@
 The rules here are RETAIL CONTENT - an example of what a table compiled from
 distillation looks like, not part of the framework. The engine
 (``fastworkflow.policy_decision``) knows no workflow; this file is what a
-workflow supplies. Enable it with::
-
-    FW_POLICY_MODE=enforce
-    FW_POLICY_TABLE=policy/table.py        # resolved against the workflow folder
+workflow supplies. It is on because it is here, at ``_policy/table.py`` in the
+workflow folder; there is no setting.
 
 How it was made: failing trials of a small model (gpt-oss-20b) on six retail
 tasks were distilled, over four rounds, against passing trials - of the same

@@ -34,12 +34,12 @@ agent as an ordinary observation. A bare refusal costs a loop iteration and the
 agent usually re-proposes the same call; a replacement tells it what to do
 instead and it keeps going.
 
-**Two modes.** ``OFF`` is the default and is byte-for-byte the unmodified
-behaviour. ``ENFORCE`` acts. What a table *would* have done on recorded runs is
+**Two modes.** ``OFF`` (a workflow without a table) is byte-for-byte the
+unmodified behaviour. ``ENFORCE`` (a workflow with one) acts. What a table *would* have done on recorded runs is
 answered offline by ``fastworkflow.policy_replay``.
 
 The rules themselves are workflow content: a workflow ships a table module
-(``FW_POLICY_TABLE``) exposing ``TABLE`` (a ``DecisionTable``) and optionally
+(``_policy/table.py``) exposing ``TABLE`` (a ``DecisionTable``) and optionally
 ``FACTS`` (``ContractFacts``). Nothing in this module knows any workflow.
 """
 

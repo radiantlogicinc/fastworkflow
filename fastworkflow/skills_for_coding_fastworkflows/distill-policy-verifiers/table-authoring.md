@@ -1,7 +1,7 @@
 # Writing a policy table
 
 A table module exposes `TABLE` (a `DecisionTable`) and optionally `FACTS` (`ContractFacts`).
-Load it with `FW_POLICY_TABLE=path/to/table.py[:ATTR]` (`ATTR` defaults to `TABLE`).
+Put it at `<workflow>/_policy/table.py`; the workflow enforces it from then on.
 
 ## Facts: what the workflow declares
 

@@ -1,4 +1,4 @@
-"""The retail worked example's policy table (examples/retail_workflow/policy/table.py).
+"""The retail worked example's policy table (examples/retail_workflow/_policy/table.py).
 
 Each row is checked on the conversations that motivated it - where it must fire
 and where a passing trial shows it must stay silent. Order reads are written as
@@ -25,7 +25,7 @@ from fastworkflow.policy_decision import (
 
 _PATH = (
     Path(__file__).resolve().parents[1]
-    / "fastworkflow" / "examples" / "retail_workflow" / "policy" / "table.py"
+    / "fastworkflow" / "examples" / "retail_workflow" / "_policy" / "table.py"
 )
 _spec = importlib.util.spec_from_file_location("retail_example_table", _PATH)
 example = importlib.util.module_from_spec(_spec)
@@ -34,11 +34,10 @@ TABLE, FACTS = example.TABLE, example.FACTS
 
 
 def test_the_example_loads_through_the_policy_loader():
-    from fastworkflow.policy_decision import PolicyMode
     from fastworkflow.policy_loader import load_policy
 
-    point, facts = load_policy(
-        str(_PATH.parents[1]), mode=PolicyMode.ENFORCE, reference="policy/table.py")
+    point, facts = load_policy(str(_PATH.parents[1]))
+    assert point.enabled
     assert point.table.version == example.TABLE_VERSION == "retail-demo/0.4.1"
     assert [r.row_id.split("-")[0] for r in point.table.rows] == [
         "S3", "S2", "S6", "S4", "S8", "S7", "S5", "S1",

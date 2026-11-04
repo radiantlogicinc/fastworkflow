@@ -20,22 +20,20 @@ The rules come from two kinds of distillation:
 
 ## Turn it on
 
-```bash
-# in the workflow's env file, or exported
-FW_POLICY_MODE=enforce
-FW_POLICY_TABLE=policy/table.py     # resolved against the workflow folder
-```
-
-With the mode `off` (the default) nothing changes. Some rules read what the user asked
+There is nothing to set: the table is on because it is at `_policy/table.py` in the
+workflow folder. To run the workflow without it, use a copy of the workflow without
+`_policy/`. Some rules read what the user asked
 for (`FACTS.intent_operations`). That takes one model call per user message, on
 `LLM_POLICY_INTENT`, or on `LLM_AGENT` when that is unset.
 
-## Audit it on recorded runs before turning it on
+## Audit it on recorded runs
 
 ```bash
 fastworkflow policy replay fastworkflow/examples/retail_workflow \
-    --experiment <experiment id> --table policy/table.py
+    --experiment <experiment id>
 ```
+
+`--table PATH` audits another table (a candidate) instead of `_policy/table.py`.
 
 A rule should stay silent on passing trials. On failing trials it should fire
 where the trial went wrong, and nowhere else.

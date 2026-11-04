@@ -1,19 +1,14 @@
-"""Load a workflow's policy table from the settings.
+"""Load a workflow's policy table.
 
-Two settings (env file or process environment), both defaulting to a no-op,
-because a policy that turns itself on is not a feature flag:
+A workflow's rules live in ``<workflow>/_policy/table.py``. A workflow that has
+that file has its rules enforced; one without it runs unchanged. There is no
+setting: a table is workflow content, like ``_commands``.
 
-  FW_POLICY_MODE   off | enforce                       (default: off)
-  FW_POLICY_TABLE  path/to/table.py[:ATTR]  or  package.module[:ATTR]
-                   (ATTR defaults to TABLE; a relative path is tried against the
-                   current directory, then against the workflow folder)
+The module exposes ``TABLE`` (a ``DecisionTable``) and optionally ``FACTS``
+(``ContractFacts``).
 
-The table module exposes ``TABLE`` (a ``DecisionTable``) and optionally ``FACTS``
-(``ContractFacts``). ``off`` is byte-for-byte the unmodified behaviour.
-
-A table that cannot be loaded while the mode is not ``off`` is a HARD ERROR,
-deliberately: a run configured to enforce that quietly enforced nothing would be
-recorded, and measured, as if it had.
+A table file that exists but cannot be loaded is a HARD ERROR at startup,
+deliberately: rules the developer wrote must not be skipped without a word.
 """
 
 from __future__ import annotations
@@ -24,7 +19,6 @@ import importlib.util
 from pathlib import Path
 from typing import Optional
 
-import fastworkflow
 from fastworkflow.policy_decision import (
     NO_OP_TABLE,
     ContractFacts,
@@ -34,23 +28,25 @@ from fastworkflow.policy_decision import (
 )
 from fastworkflow.utils.logging import logger
 
-MODE_SETTING = "FW_POLICY_MODE"
-TABLE_SETTING = "FW_POLICY_TABLE"
+POLICY_FOLDER = "_policy"
+TABLE_FILE = "table.py"
 
 
-def policy_mode() -> PolicyMode:
-    """The configured mode; raises ValueError for a value that is not one."""
-    raw = (fastworkflow.get_env_var(MODE_SETTING, default="") or "off").strip().lower()
-    try:
-        return PolicyMode(raw)
-    except ValueError:
-        raise ValueError(
-            f"{MODE_SETTING}={raw!r} is not one of {[m.value for m in PolicyMode]}"
-        ) from None
+def workflow_table_path(workflow_folderpath: Optional[str]) -> Optional[Path]:
+    """``<workflow>/_policy/table.py`` when the workflow has one, else None."""
+    if not workflow_folderpath:
+        return None
+    path = Path(workflow_folderpath) / POLICY_FOLDER / TABLE_FILE
+    return path if path.is_file() else None
 
 
 def load_table_module(reference: str, workflow_folderpath: Optional[str] = None):
-    """(module, attribute name) for a ``path.py[:ATTR]`` or ``module[:ATTR]``."""
+    """(module, attribute name) for a ``path.py[:ATTR]`` or ``module[:ATTR]``.
+
+    A relative path is tried against the current directory, then the workflow
+    folder. Used for the workflow's own table and for a table given explicitly
+    (``fastworkflow policy replay --table``).
+    """
     module_ref, _, attribute = reference.strip().partition(":")
     attribute = attribute or "TABLE"
     if module_ref.endswith(".py"):
@@ -59,7 +55,7 @@ def load_table_module(reference: str, workflow_folderpath: Optional[str] = None)
             path = Path(workflow_folderpath) / module_ref
         if not path.is_file():
             raise ValueError(
-                f"{TABLE_SETTING} points at {module_ref}, which does not exist"
+                f"Policy table {module_ref} does not exist"
                 + (f" (also tried under {workflow_folderpath})" if workflow_folderpath else "")
             )
         spec = importlib.util.spec_from_file_location(f"fw_policy_{path.stem}", path)
@@ -73,43 +69,34 @@ def load_table_module(reference: str, workflow_folderpath: Optional[str] = None)
 def load_policy(
     workflow_folderpath: Optional[str] = None,
     *,
-    mode: Optional[PolicyMode] = None,
     reference: Optional[str] = None,
 ) -> tuple[PolicyDecisionPoint, ContractFacts]:
-    """The decision point and the workflow's facts, from the settings.
+    """The decision point and the workflow's facts.
 
-    ``mode`` / ``reference`` override the settings (tests, the replay audit).
+    Without ``reference``, the workflow's own ``_policy/table.py``; a workflow
+    without one gets the no-op decision point. ``reference`` names another table
+    (the replay audit, tests) and must exist.
     """
-    mode = policy_mode() if mode is None else mode
-    if mode is PolicyMode.OFF:
-        return PolicyDecisionPoint(NO_OP_TABLE, PolicyMode.OFF), ContractFacts()
-    reference = (
-        reference
-        if reference is not None
-        else (fastworkflow.get_env_var(TABLE_SETTING, default="") or "")
-    ).strip()
-    if not reference:
-        raise ValueError(
-            f"{MODE_SETTING}={mode.value} with no {TABLE_SETTING}. The mechanism is "
-            "framework-side but the rules are workflow content, so there is "
-            "nothing to enforce."
-        )
+    if reference is None:
+        path = workflow_table_path(workflow_folderpath)
+        if path is None:
+            return PolicyDecisionPoint(NO_OP_TABLE, PolicyMode.OFF), ContractFacts()
+        reference = str(path)
     module, attribute = load_table_module(reference, workflow_folderpath)
     table = getattr(module, attribute, None)
     if not isinstance(table, DecisionTable):
         raise ValueError(
-            f"{TABLE_SETTING}={reference}: {attribute} is "
+            f"Policy table {reference}: {attribute} is "
             f"{type(table).__name__}, not a DecisionTable"
         )
     facts = getattr(module, "FACTS", None) or ContractFacts()
     if not isinstance(facts, ContractFacts):
-        raise ValueError(f"{TABLE_SETTING}={reference}: FACTS is not ContractFacts")
+        raise ValueError(f"Policy table {reference}: FACTS is not ContractFacts")
     facts = with_workflow_identifiers(facts, workflow_folderpath)
     logger.info(
-        f"Policy {mode.value}: table {table.version} ({len(table.rows)} rows) "
-        f"from {reference}"
+        f"Policy: table {table.version} ({len(table.rows)} rows) from {reference}"
     )
-    return PolicyDecisionPoint(table, mode), facts
+    return PolicyDecisionPoint(table, PolicyMode.ENFORCE), facts
 
 
 def with_workflow_identifiers(
@@ -133,7 +120,7 @@ def with_workflow_identifiers(
 
 
 def attach_policy(agent, host) -> None:
-    """Give a ReAct agent the configured policy. A no-op when the mode is off.
+    """Give a ReAct agent its workflow's policy. A no-op without ``_policy/table.py``.
 
     ``host`` is the WorkflowExecutionContext the agent serves; the table is
     resolved against its app workflow's folder.

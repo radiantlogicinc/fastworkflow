@@ -57,7 +57,7 @@ class fastWorkflowReAct(Module):
     # forward() only: set by the caller per run, taken (and cleared) by forward().
     code_steps: Any = None
     # The conversation's policy (``fastworkflow.policy_runtime.AgentPolicy``), set by
-    # ``policy_loader.attach_policy`` when FW_POLICY_MODE enables a table; None
+    # ``policy_loader.attach_policy`` when the workflow has _policy/table.py; None
     # otherwise, and then nothing below changes behaviour.
     policy: Any = None
     # False while this run is not the last of its user turn (a sub-task or skill

@@ -641,7 +641,7 @@ def add_policy_parser(subparsers):
     """Add the 'policy' command group: 'policy replay' audits a table on recorded runs."""
     parser_policy = subparsers.add_parser(
         "policy",
-        help="Work with a workflow's policy verifier table (FW_POLICY_TABLE).",
+        help="Work with a workflow's policy verifier table (_policy/table.py).",
     )
     policy_subparsers = parser_policy.add_subparsers(dest="action", required=True)
     parser_replay = policy_subparsers.add_parser(
@@ -656,8 +656,9 @@ def add_policy_parser(subparsers):
         help="Experiment id of the recorded run to replay",
     )
     parser_replay.add_argument(
-        "--table", required=True, metavar="PATH[:ATTR]",
-        help="The table module (path.py or package.module), as FW_POLICY_TABLE takes it",
+        "--table", default=None, metavar="PATH[:ATTR]",
+        help="Another table to audit (path.py or package.module; ATTR defaults to "
+             "TABLE). Default: the workflow's own _policy/table.py",
     )
     parser_replay.add_argument(
         "--task", action="append", dest="task_ids", metavar="TASK_ID",
@@ -687,20 +688,24 @@ def add_policy_parser(subparsers):
 
 def _policy_replay_main(args) -> int:
     """Replay a recorded experiment through a policy table."""
-    from fastworkflow.policy_decision import PolicyMode
-    from fastworkflow.policy_loader import load_policy
+    from fastworkflow.policy_loader import POLICY_FOLDER, TABLE_FILE, load_policy
     from fastworkflow.policy_replay import format_report, replay_experiment
 
     store = _open_workflow_store(
         args,
         f"fastworkflow policy replay {args.workflow_folderpath} <env_file> "
-        "<passwords_file> --experiment ... --table ...",
+        "<passwords_file> --experiment ... [--table ...]",
     )
     if store is None:
         return 1
-    point, facts = load_policy(
-        args.workflow_folderpath, mode=PolicyMode.ENFORCE, reference=args.table
-    )
+    point, facts = load_policy(args.workflow_folderpath, reference=args.table)
+    if not point.enabled:
+        print(
+            f"{args.workflow_folderpath} has no {POLICY_FOLDER}/{TABLE_FILE}; "
+            "pass --table to audit another table.",
+            file=sys.stderr,
+        )
+        return 1
     report = replay_experiment(
         store, args.experiment, point.table, facts,
         task_ids=args.task_ids, live=args.live,

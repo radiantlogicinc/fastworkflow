@@ -1009,7 +1009,7 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         on_step_complete=on_step_complete,
     )
     agent.on_step_end = lambda: _end_repeat_step(chat_session_obj)
-    # The policy verifier (FW_POLICY_MODE / FW_POLICY_TABLE); nothing when off.
+    # The policy verifier (the workflow's _policy/table.py); nothing without one.
     from fastworkflow.policy_loader import attach_policy
 
     attach_policy(agent, chat_session_obj)

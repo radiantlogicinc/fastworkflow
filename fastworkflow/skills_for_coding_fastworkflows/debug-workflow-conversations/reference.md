@@ -103,7 +103,7 @@ and `recovered`; on suspension `clarification` (status `awaiting_user`);
 `command` and the tool folded them into the command text (`tool_args` keeps
 what was sent; the observation ends with a "(Ran as: ...)" note);
 `finish_check_note` (historical whitelist key; no longer set on new spans).
-On a step a policy verifier rule rewrote (`FW_POLICY_MODE=enforce`; see the
+On a step a policy verifier rule rewrote (the workflow's `_policy/table.py`; see the
 `distill-policy-verifiers` skill), these are added:
 - `policy_source`: the rule's id.
 - `policy_outcome` and `policy_mode`.

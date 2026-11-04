@@ -30,7 +30,7 @@ what you mark compilable, and explicit about why you left things out.
 ## Inputs to gather first
 
 1. **The corpus**: the two insight files `distill` wrote (`<workflow>/Insights/<workflow>/`).
-   Snapshot them before a later round appends to them, e.g. into `<workflow>/policy/corpus/`.
+   Snapshot them before a later round appends to them, e.g. into `<workflow>/_policy/corpus/`.
    - Number the items by position: execution items `E1..En`, planning items `P1..Pn`.
    - Use a different prefix per distillation source (e.g. `SE`/`SP` for self-distilled,
      `CE`/`CP` for pool), so ids never clash across taxonomies.
@@ -47,7 +47,7 @@ what you mark compilable, and explicit about why you left things out.
 4. **The domain policy**: whatever document states the rules the agent must follow (the
    workflow's policy text, its description, the business rules it was built from). Check
    every insight against it.
-5. **Existing taxonomies** for this workflow (`<workflow>/policy/*.yaml`). Reuse their mode
+5. **Existing taxonomies** for this workflow (`<workflow>/_policy/*.yaml`). Reuse their mode
    ids and record overlap instead of inventing near-duplicates.
 6. **What actually failed**, when available: the failing trials' grading (missed actions,
    failed assertions). This separates a causal insight from a side remark.
@@ -164,7 +164,7 @@ Good advice that cannot be checked is prompt material, not verifier material: sa
 
 ### 6. Write the taxonomy and validate it
 
-Write `<workflow>/policy/taxonomy[_<corpus>].yaml` following
+Write `<workflow>/_policy/taxonomy[_<corpus>].yaml` following
 [taxonomy-schema.md](taxonomy-schema.md) (read it now if you have not). For an incremental
 round:
 
@@ -203,7 +203,7 @@ gaps. The summary is what gets reviewed; the YAML is what gets compiled.
 
 ## Example
 
-`fastworkflow/examples/retail_workflow/policy/` holds a complete round:
+`fastworkflow/examples/retail_workflow/_policy/` holds a complete round:
 
 - the corpus with its provenance (four cumulative rounds, self and pool distillation);
 - `taxonomy.yaml` (37 modes over 117 insights, 13 compiled, the rest with their reasons);

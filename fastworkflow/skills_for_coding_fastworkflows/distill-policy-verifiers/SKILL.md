@@ -3,9 +3,9 @@ name: distill-policy-verifiers
 description: >-
   Turn a workflow agent's recorded failures into deterministic policy verifiers: record trials,
   distil failing trials against passing ones (fastworkflow distill: teacher/student, --self or
-  --pool-students), cluster the insights, compile a policy table (FW_POLICY_TABLE), audit it
-  with fastworkflow policy replay, turn it on with FW_POLICY_MODE=enforce, and compare it with
-  a control arm. Use when asked to make distilled insights enforceable, to build or extend a
+  --pool-students), cluster the insights, compile a policy table, audit it with fastworkflow
+  policy replay, ship it as <workflow>/_policy/table.py (which turns it on), and compare it
+  with a control arm. Use when asked to make distilled insights enforceable, to build or extend a
   workflow's policy table, to add or debug a verifier rule, or to run the
   distill-verify-evaluate loop for any workflow.
 ---
@@ -27,7 +27,7 @@ workflow's own operation names. The rule still decides.
 
 The engine is generic (`fastworkflow.policy_decision`, `policy_runtime`, `policy_intent`).
 The rules are workflow content. A complete worked example is in
-`fastworkflow/examples/retail_workflow/policy/`; read it first.
+`fastworkflow/examples/retail_workflow/_policy/`; read it first.
 
 ## The loop
 
@@ -41,7 +41,7 @@ The rules are workflow content. A complete worked example is in
 - Start every run under a new experiment id. A resumed id mixes trials from different code.
 
 **Set hold-out tasks aside now.** Before the first distillation, draw a random share of the
-tasks (say a fifth, with a recorded seed) and write the list to `<workflow>/policy/holdout.txt`.
+tasks (say a fifth, with a recorded seed) and write the list to `<workflow>/_policy/holdout.txt`.
 Hold-out tasks are recorded and graded like the rest, but:
 
 - they never appear in a distillation pair;
@@ -93,18 +93,19 @@ Where the output goes:
 - Insights are appended to `<workflow>/Insights/<workflow>/`.
 - The judge's notes are written as annotations on the failing trials. They are visible in
   the debug UI (`fastworkflow run_chatbot`).
-- Snapshot the insight files into `<workflow>/policy/corpus/` (one folder per round) before
+- Snapshot the insight files into `<workflow>/_policy/corpus/` (one folder per round) before
   the next round appends to them.
 
 ### 3. Cluster
 
 Use [insights-to-failure-modes](../insights-to-failure-modes/SKILL.md). Output:
-`<workflow>/policy/taxonomy.yaml`, where every insight is in exactly one mode and every mode
+`<workflow>/_policy/taxonomy.yaml`, where every insight is in exactly one mode and every mode
 is compiled or carries a reason it was not.
 
 ### 4. Compile the table
 
-Write `<workflow>/policy/table.py` exposing `TABLE` and `FACTS`.
+Write the candidate as `<workflow>/_policy/table_next.py`, exposing `TABLE` and `FACTS`.
+Not `table.py` yet: that name is the live table, enforced as soon as it exists (step 7).
 [table-authoring.md](table-authoring.md) has the API and a skeleton. Rules that have held up:
 
 - **One principle per row, never a list of situations.** "Every request is carried out for
@@ -139,7 +140,7 @@ are plain Python over `CommandRecord` lists; see the example's
 ### 6. Audit it on whole recorded runs
 
 ```bash
-fastworkflow policy replay <workflow> --experiment <id> --table policy/table.py [--live]
+fastworkflow policy replay <workflow> --experiment <id> --table _policy/table_next.py [--live]
 ```
 
 The replay drives the same policy object as a live run, with the same valve and finish
@@ -156,14 +157,12 @@ bounds, over every recorded step.
 
 ### 7. Turn it on
 
-```bash
-FW_POLICY_MODE=enforce
-FW_POLICY_TABLE=policy/table.py        # relative to the workflow folder
-LLM_POLICY_INTENT=...                  # optional; LLM_AGENT otherwise
-```
+Rename the audited candidate to `<workflow>/_policy/table.py`. There is no setting: a
+workflow with that file enforces it, and one without it is the unchanged agent. A table
+file that is malformed fails at startup, so rules are never skipped silently.
 
-`off` (the default) is the unchanged agent. A misconfigured table under `enforce` fails at
-startup, so a run can never silently measure nothing.
+The only optional setting is the model for the readings: `LLM_POLICY_INTENT` (with
+`LITELLM_API_KEY_POLICY_INTENT`), else `LLM_AGENT`.
 
 The guard checks only steps the model chose:
 
@@ -172,8 +171,9 @@ The guard checks only steps the model chose:
 
 ### 8. Evaluate against a control
 
-- Run the same held-out tasks, same models and same trial count in two arms: `off` and
-  `enforce`. Compare pass rates.
+- Run the same held-out tasks, same models and same trial count in two arms: the workflow
+  without `_policy/table.py` (control) and with it. Use two copies of the workflow folder
+  rather than adding and removing the file between runs. Compare pass rates.
 - Read every fire in the debug UI: a step a rule rewrote shows a **Policy** section with the
   rule, table version and what the intent reader saw. Count right fires and wrong fires.
 - Report the table version and the arms. A verifier is a disclosed change to the agent, not

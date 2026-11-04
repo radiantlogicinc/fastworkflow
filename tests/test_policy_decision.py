@@ -28,7 +28,7 @@ from fastworkflow.policy_decision import (
     PolicyState,
     RequestedOperation,
 )
-from fastworkflow.policy_loader import load_policy, policy_mode
+from fastworkflow.policy_loader import load_policy
 
 SIDE = frozenset({DecisionPhase.BEFORE_SIDE_EFFECT})
 FINISH = frozenset({DecisionPhase.BEFORE_FINISH})
@@ -182,38 +182,45 @@ FACTS = ContractFacts(write_commands=frozenset({"close_ticket"}))
 """
 
 
-def test_off_is_the_default_and_loads_nothing(monkeypatch):
-    monkeypatch.delenv("FW_POLICY_MODE", raising=False)
-    point, facts = load_policy(None)
+def _workflow_with_table(tmp_path, source=TABLE_MODULE):
+    (tmp_path / "_policy").mkdir()
+    (tmp_path / "_policy" / "table.py").write_text(textwrap.dedent(source))
+    return str(tmp_path)
+
+
+def test_a_workflow_without_a_table_loads_nothing(tmp_path):
+    point, facts = load_policy(str(tmp_path))
     assert not point.enabled and facts == ContractFacts()
+    point, _ = load_policy(None)
+    assert not point.enabled
 
 
-def test_a_mode_that_is_not_one_is_an_error(monkeypatch):
-    monkeypatch.setenv("FW_POLICY_MODE", "shadow")
-    with pytest.raises(ValueError, match="FW_POLICY_MODE"):
-        policy_mode()
-
-
-def test_enforce_without_a_table_is_a_hard_error():
-    with pytest.raises(ValueError, match="FW_POLICY_TABLE"):
-        load_policy(None, mode=PolicyMode.ENFORCE, reference="")
-
-
-def test_a_relative_table_path_resolves_against_the_workflow(tmp_path):
-    (tmp_path / "policy").mkdir()
-    (tmp_path / "policy" / "table.py").write_text(textwrap.dedent(TABLE_MODULE))
-    point, facts = load_policy(
-        str(tmp_path), mode=PolicyMode.ENFORCE, reference="policy/table.py:OTHER")
-    assert point.enabled and point.table.version == "tmp/1"
+def test_a_workflow_with_a_table_is_enforced(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path.parent)  # not the workflow folder
+    point, facts = load_policy(_workflow_with_table(tmp_path))
+    assert point.enabled and point.mode is PolicyMode.ENFORCE
+    assert point.table.version == "tmp/1"
     assert facts.is_write("close_ticket")
 
 
-def test_a_missing_table_or_wrong_attribute_is_an_error(tmp_path):
+def test_a_broken_workflow_table_is_an_error(tmp_path):
+    folder = _workflow_with_table(tmp_path, "TABLE = None\n")
+    with pytest.raises(ValueError, match="not a DecisionTable"):
+        load_policy(folder)
+
+
+def test_another_table_can_be_named_relative_to_the_workflow(tmp_path):
+    point, _ = load_policy(
+        _workflow_with_table(tmp_path), reference="_policy/table.py:OTHER")
+    assert point.enabled and point.table.version == "tmp/1"
+
+
+def test_a_named_table_that_is_missing_or_wrong_is_an_error(tmp_path):
     with pytest.raises(ValueError, match="does not exist"):
-        load_policy(str(tmp_path), mode=PolicyMode.ENFORCE, reference="nope.py")
+        load_policy(str(tmp_path), reference="nope.py")
     (tmp_path / "table.py").write_text(textwrap.dedent(TABLE_MODULE))
     with pytest.raises(ValueError, match="not a DecisionTable"):
-        load_policy(str(tmp_path), mode=PolicyMode.ENFORCE, reference="table.py:FACTS")
+        load_policy(str(tmp_path), reference="table.py:FACTS")
 
 
 def test_identifier_patterns_come_from_the_workflow_when_the_table_has_none(tmp_path):
@@ -221,6 +228,6 @@ def test_identifier_patterns_come_from_the_workflow_when_the_table_has_none(tmp_
     (tmp_path / "_skills").mkdir()
     (tmp_path / "_skills" / "_split.py").write_text(
         "import re\nidentifier_patterns = [re.compile(r'T-\\d+')]\n")
-    _, facts = load_policy(str(tmp_path), mode=PolicyMode.ENFORCE, reference="table.py")
+    _, facts = load_policy(str(tmp_path), reference="table.py")
     assert facts.id_patterns == (r"T-\d+",)
     assert facts.looks_like_id("T-12") and not facts.looks_like_id("x T-12")

@@ -1,6 +1,6 @@
 """The policy, as one agent runs it over one conversation.
 
-``AgentPolicy`` is what a ReAct agent holds when ``FW_POLICY_MODE`` enables a
+``AgentPolicy`` is what a ReAct agent holds when its workflow has a policy
 table (``fastworkflow.policy_loader.attach_policy``). It owns the conversation's
 ``PolicyState`` and is consulted at four points, each where the fact it needs
 first exists:

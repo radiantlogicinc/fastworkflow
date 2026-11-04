@@ -5,8 +5,8 @@
 ### Added
 
 - **Policy verifiers** (`docs/policy_verifiers_design.md`). A workflow can ship a
-  versioned table of deterministic rules (`FW_POLICY_MODE=enforce`,
-  `FW_POLICY_TABLE=policy/table.py`). The rules are checked:
+  versioned table of deterministic rules in `_policy/table.py`; a workflow that
+  has one has its rules enforced, with nothing to configure. The rules are checked:
   - before a command the model chose runs, on its real name and validated
     parameters;
   - before a question goes to the user;
@@ -14,10 +14,10 @@
 
   A rule that fires replaces the step's result with its own text, and the agent
   carries on. Rules that need to know what the user asked for read it from one
-  model call per user message (`LLM_POLICY_INTENT`, else `LLM_AGENT`). Off by
-  default; off changes nothing. `fw.agent.step` v8 records which rule fired; the
+  model call per user message (`LLM_POLICY_INTENT`, else `LLM_AGENT`). A workflow
+  without a table runs unchanged. `fw.agent.step` v8 records which rule fired; the
   debug UI shows it on the step. Worked example:
-  `fastworkflow/examples/retail_workflow/policy/`.
+  `fastworkflow/examples/retail_workflow/_policy/`.
 - **`fastworkflow policy replay`**: replays a recorded experiment through a policy
   table and reports every step it would block, with the totals on passing and on
   failing attempts. This is the audit a table must pass before it is turned on.
