@@ -322,6 +322,11 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # only a pronoun or only a kind word or field name of the workflow, and was treated as not given. A
 # span recorded before this carries no such key.
 #
+# v33: fw.nlu.intent v4 (fix-jd9o.1) -- `jev_tiebreak`: Jev's choice among an ambiguous intent's
+# candidates, with `matcher_layer` "jev_tiebreak" when it routed. fw.nlu.param_extraction v9
+# (fix-jd9o.3) -- `fields_reset_not_given`: fields an LLM extraction filled that Jev judged not given,
+# reset to their not-given value. A span recorded before this carries neither key.
+#
 # v32: fw.nlu.param_extraction v8 (fix-3rsq.one-hook) -- the validation hook replaces db_lookup as the one
 # place a parameter is corrected or refused. `db_lookup` is no longer written; `validation_hook` records
 # `changed_fields` (a value the hook rewrote in place binds the slot, signal "validation_hook") and
@@ -334,7 +339,7 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # by owner decision 2026-10-30. `experiment_arm`, `fast_path` and `recipe_choice` (the v25 keys of the
 # planner span) and `fast_path_refusal_asked` (the v28 key of the executor span) are no longer declared
 # or written. A span recorded before this carries them as it wrote them; nothing reads them as a live path.
-SPAN_CONTRACT_VERSION = 32
+SPAN_CONTRACT_VERSION = 33
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -739,8 +744,11 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # `known_name_*` keys before they were declared here.
     # v3: `auto_navigation_enabled` is absent. Auto-navigation was removed, so
     # there is no flag and no composed step for a measured run to carry.
+    # v4 (fix-jd9o.1): `jev_tiebreak` records Jev's choice among an ambiguous
+    # intent's candidates ({choice, probability, threshold, candidates when it
+    # routed}); `matcher_layer` is then "jev_tiebreak". Absent on earlier versions.
     SPAN_NLU_INTENT: SpanContract(
-        version=3,
+        version=4,
         attributes=frozenset(
             {
                 "context",
@@ -761,6 +769,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "classifier_signal_version",
                 "candidates",
                 "escalation_labels_discarded",
+                "jev_tiebreak",
                 "reducible",
                 "decision_uncertainty",
                 "command_name",
@@ -805,7 +814,10 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         # now also carries `changed_fields` (fields the hook rewrote in place) and `refused_fields`
         # (the fields a fastworkflow.Refused named). A span carrying v7 has `db_lookup` and no
         # `validation_hook` change list, and a reader must not read one as the other.
-        version=8,
+        # v9 (fix-jd9o.3): `fields_reset_not_given` ({field: probability}) records the fields an LLM
+        # extraction filled that Jev judged the request does not give, reset to their not-given
+        # value. Absent on earlier versions.
+        version=9,
         attributes=frozenset(
             {
                 "command_name",
@@ -826,6 +838,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "parameters_valid",
                 "command_name_values",
                 "word_screen_values",
+                "fields_reset_not_given",
             }
         ),
     ),
