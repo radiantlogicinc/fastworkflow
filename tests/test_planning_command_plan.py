@@ -44,7 +44,7 @@ def _late(item):
 class PlanGenerator:
     def __phases__(self, input):
         notes = [self.notes] if input.more else []
-        return [self.find, self.item, *notes, self.answer]
+        return [self.find, self.item, *notes]
 
     def find(self, input) -> Found:
         return ["open_catalog", f"find_item query={input.name}"]
@@ -61,10 +61,10 @@ class PlanGenerator:
     def notes(self, find):
         return [f"list_notes (on {find.labels[0]})"]
 
-    def answer(self, input, item=None):
+    def __result__(self, input, item=None):
         if not item:
-            return [f"say that no item named {input.name} was found", "apply no change"]
-        return [f"say that {self._items_read(item)}", "apply no change"]
+            return f"No item named {input.name} was found."
+        return f"{self._items_read(item)}."
 
     def _items_read(self, item):
         return f"{len(item)} items: {', '.join(i.uid for i in item)}"
@@ -137,11 +137,10 @@ def test_a_fact_named_like_a_str_method_still_reads_as_the_fact():
 
 def test_each_method_is_a_phase_in_order_and_call_gives_the_shape():
     phases = planned(PlanGenerator)(_input())
-    assert [p.name for p in phases] == ["find", "item", "answer"]          # __call__: no notes
+    assert [p.name for p in phases] == ["find", "item"]                    # __call__: no notes
     assert phases[0].output is Found and phases[1].output is PlanGenerator.Item
-    assert phases[1].item == "uid" and phases[1].until is None and phases[2].output is None
-    assert [p.name for p in planned(PlanGenerator)(_input(more=True))] == ["find", "item", "notes",
-                                                                  "answer"]
+    assert phases[1].item == "uid" and phases[1].until is None
+    assert [p.name for p in planned(PlanGenerator)(_input(more=True))] == ["find", "item", "notes"]
     assert planned(PlanGenerator)(_input(stop_late=True))[1].until.__name__ == "_late"
     check_bindings(phases)
 
@@ -192,14 +191,13 @@ def test_the_template_shows_facts_and_helpers_by_name():
     steps, _ = planning_command_parts(PlanGenerator)
     assert steps(_input(more=True)) == [
         "open_catalog", "find_item query=Dune", "open_item_by_uid item_uid=<uid>",
-        "list_parts (full list)", "list_notes (on <find.labels[0]>)",
-        "say that <items read> (only when item)", "apply no change (only when item)"]
+        "list_parts (full list)", "list_notes (on <find.labels[0]>)"]
 
 
 def test_a_parameter_naming_a_phase_the_call_does_not_have_keeps_its_default():
     class Maybe:
         def __phases__(self, input):
-            return [self.find, self.extra, self.answer] if input.more else [self.find, self.answer]
+            return [self.find, self.extra] if input.more else [self.find]
 
         def find(self, input) -> Found:
             return [f"find_item query={input.name}"]
@@ -210,15 +208,13 @@ def test_a_parameter_naming_a_phase_the_call_does_not_have_keeps_its_default():
         def extra(self) -> Extra:
             return ["count_checks"]
 
-        def answer(self, find, extra=None):
-            more = [f"say that it has {extra.total} checks"] if extra is not None else []
-            return [f"say that {find.labels[0]} was found", *more]
+        def __result__(self, find, extra=None):
+            if extra is None:
+                return f"{find.labels[0]} was found."
+            return f"{find.labels[0]} was found. It has {extra.total} checks."
 
     loaded = planning_commands.command_from_module("maybe", _module(plan=Maybe), "_commands/maybe.py")
-    assert list(loaded.steps) == [
-        "find_item query=<name>", "count_checks (only when more)",
-        "say that <find.labels[0]> was found",
-        "say that it has <extra.total> checks (only when more)"]
+    assert list(loaded.steps) == ["find_item query=<name>", "count_checks (only when more)"]
 
 
 def test_a_method_failing_on_unknown_facts_or_writing_none_is_a_load_error():
@@ -226,19 +222,25 @@ def test_a_method_failing_on_unknown_facts_or_writing_none_is_a_load_error():
         def find(self, input) -> Found:
             return [f"find_item query={input.name}"]
 
-        def answer(self, find):
-            return [f"say that {find.labels[0].upper()[:2] + 1}"]
+        def detail(self, find):
+            return [f"open_item_by_uid item_uid={find.labels[0].upper()[:2] + 1}"]
 
-    with pytest.raises(planning_commands.PlanningCommandFormatError, match="phase 'answer' fails while its "
+        def __result__(self, find):
+            return "Done."
+
+    with pytest.raises(planning_commands.PlanningCommandFormatError, match="phase 'detail' fails while its "
                                                                 "template is built"):
         planning_commands.command_from_module("fails", _module(plan=Fails), "_commands/fails.py")
 
     class WritesNone:
         def find(self, input) -> Found:
-            return [f"find_item query={input.name} owner={None}"]
+            return [f"find_item query={input.name}"]
 
-        def answer(self, find):
-            return ["say that done"]
+        def detail(self, find):
+            return [f"list_parts owner={None}"]
+
+        def __result__(self, find):
+            return "Done."
 
     with pytest.raises(planning_commands.PlanningCommandFormatError, match="writes None into a step"):
         planning_commands.command_from_module("none", _module(plan=WritesNone), "_commands/none.py")
@@ -290,7 +292,7 @@ def test_call_picks_the_phases_and_a_flat_call_runs_from_its_one_phase():
         def __phases__(self, input):
             if not input.more:
                 return [self.quick]
-            return [self.find, self.answer]
+            return [self.find]
 
         def quick(self, input):
             return [f"find_item query={input.name} (the first row only)"]
@@ -298,8 +300,8 @@ def test_call_picks_the_phases_and_a_flat_call_runs_from_its_one_phase():
         def find(self, input) -> Found:
             return [f"find_item query={input.name}"]
 
-        def answer(self, find):
-            return [f"say that {find.labels[0]} was found"]
+        def __result__(self, find):
+            return f"{find.labels[0]} was found."
 
     command = planning_commands.command_from_module("either", _module(plan=Either),
                                                  "_commands/either.py").command
@@ -307,7 +309,7 @@ def test_call_picks_the_phases_and_a_flat_call_runs_from_its_one_phase():
     assert planning_commands.phases_for(command, args) is None
     assert planning_commands.expand(command, args) == ["find_item query=Dune (the first row only)"]
     assert [p.name for p in planning_commands.phases_for(command, {**args, "more": True})] == [
-        "find", "answer"]
+        "find"]
 
 
 def test_the_loader_refuses_the_old_forms_and_a_method_without_self():
@@ -428,7 +430,7 @@ def test_the_step_check_names_unknown_commands_and_parameters():
 # ------------------------------------------------- a PlanGenerator subclassing another skill's
 
 class Lookup:
-    """A base skill's plan: find, then open the match, then answer."""
+    """A base skill's plan: find, then open the match; its __result__ writes the answer."""
 
     def find(self, input) -> Found:
         return [f"find_item query={input.name}"]
@@ -441,8 +443,8 @@ class Lookup:
             return []
         return [pick("open_item_by_uid", item_uid=find.uids[0], named=input.name)]
 
-    def answer(self, input, item=None):
-        return [f"say that {input.name} is {self._uid(item)}"]
+    def __result__(self, input, item=None):
+        return f"{input.name} is {self._uid(item)}."
 
     def _uid(self, item):
         return item.uid if item is not None else "not found"
@@ -462,22 +464,22 @@ def test_a_subclass_that_adds_phases_writes_call_with_the_order():
 
     with pytest.raises(PhaseError, match=r"Parts adds the phase\(s\) parts to those of "
                        r"test_planning_command_plan.Lookup: write __phases__\(self, input\) returning the phases a call "
-                       r"runs, in order \(from: self.find, self.item, self.answer, self.parts\)"):
+                       r"runs, in order \(from: self.find, self.item, self.parts\)"):
         planned(Parts)
     with pytest.raises(planning_commands.PlanningCommandFormatError, match="write __phases__"):
         planning_commands.command_from_module("parts", _module(plan=Parts), "_commands/parts.py")
 
     class Ordered(Parts):                                   # base phases placed anywhere
         def __phases__(self, input):
-            return [self.find, self.parts, self.item, self.answer]
+            return [self.find, self.parts, self.item]
 
-    assert [p.name for p in planned(Ordered)(_input())] == ["find", "parts", "item", "answer"]
+    assert [p.name for p in planned(Ordered)(_input())] == ["find", "parts", "item"]
 
 
 def test_call_places_base_phases_and_an_override_reads_by_its_own_signature():
     class Parts(Lookup):
         def __phases__(self, input):
-            return [self.find, self.item, self.parts, self.answer]
+            return [self.find, self.item, self.parts]
 
         class PartFacts(BaseModel):
             labels: list[str] = fact_from("list_parts.labels")
@@ -487,27 +489,29 @@ def test_call_places_base_phases_and_an_override_reads_by_its_own_signature():
                 return []
             return ["list_parts (full list)"]
 
-        def answer(self, input, item=None, parts=None):           # overrides Lookup.answer
+        def __result__(self, input, item=None, parts=None):       # overrides Lookup.__result__
             if parts is None:
-                return [f"say that no item named {input.name} was found"]
-            return [f"say that {input.name} has parts {', '.join(parts.labels)}"]
+                return f"No item named {input.name} was found."
+            return f"{input.name} has parts {', '.join(parts.labels)}."
 
     phases = planned(Parts)(_input())
-    assert [p.name for p in phases] == ["find", "item", "parts", "answer"]
-    assert list(inspect.signature(phases[3].steps_fn).parameters) == ["item", "parts"]
+    assert [p.name for p in phases] == ["find", "item", "parts"]
+    assert list(inspect.signature(phases[2].steps_fn).parameters) == ["item"]
     facts = {"find": Found(uids=["u1"], labels=["Dune"])}
     assert phase_steps(phases[1], facts) == ["open_item_by_uid item_uid=u1"]
     facts["item"] = Lookup.Item(uid="u1")
     facts["parts"] = Parts.PartFacts(labels=["gear", "axle"])
-    assert phase_steps(phases[3], facts) == ["say that Dune has parts gear, axle"]
+    assert phase_steps(phases[2], facts) == ["list_parts (full list)"]
+    assert Parts().__result__(_input(), item=facts["item"], parts=facts["parts"]) == \
+        "Dune has parts gear, axle."
     assert not runs_now(phases[1], {"find": Found(uids=[], labels=[])})
 
 
 class Parts(Lookup):
-    """Extends Lookup.answer's steps with super(), in run and in template mode."""
+    """Extends Lookup.__result__ with super(), and adds phases, in run and in template mode."""
 
     def __phases__(self, input):
-        return [self.find, self.item, self.parts, self.answer]
+        return [self.find, self.item, self.parts]
 
     class PartFacts(BaseModel):
         labels: list[str] = fact_from("list_parts.labels")
@@ -518,11 +522,11 @@ class Parts(Lookup):
             return []
         return ["list_parts (full list)"]
 
-    def answer(self, input, item=None, parts=None):
-        steps = super().answer(input, item)
+    def __result__(self, input, item=None, parts=None):
+        text = super().__result__(input, item)
         if parts is None:
-            return steps
-        return [*steps, f"say that it has {self._parts(parts)}"]
+            return text
+        return f"{text}\nIt has {self._parts(parts)}."
 
     def _parts(self, parts):
         return f"{parts.total} parts: {', '.join(parts.labels)}"
@@ -532,49 +536,50 @@ def test_an_override_extends_the_base_steps_with_super_at_run_time_and_in_the_te
     phases = planned(Parts)(_input())
     facts = {"find": Found(uids=["u1"], labels=["Dune"]), "item": Lookup.Item(uid="u1"),
              "parts": Parts.PartFacts(labels=["gear", "axle"], total=2)}
-    assert phase_steps(phases[3], facts) == ["say that Dune is u1",
-                                             "say that it has 2 parts: gear, axle"]
-    assert phase_steps(phases[3], {"find": facts["find"]}) == ["say that Dune is not found"]
+    answer = Parts().__result__
+    assert answer(_input(), item=facts["item"], parts=facts["parts"]) == \
+        "Dune is u1.\nIt has 2 parts: gear, axle."
+    assert answer(_input(), item=None, parts=None) == "Dune is not found."
     loaded = planning_commands.command_from_module("parts", _module(plan=Parts), "_commands/parts.py")
-    # template mode: super() reaches Lookup.answer, whose helper reads as its name
+    # template mode: the phases' steps, with the helper of the base's item reading as its name
     assert list(loaded.steps) == [
         "find_item query=<name>",
         "open_item_by_uid with the uid of the <name> match (only when find.uids)",
-        "list_parts (full list)",
-        "say that <name> is <uid>", "say that it has <parts>"]
+        "list_parts (full list)"]
 
 
 def test_call_cannot_return_a_base_method_the_class_overrides():
     class Wrong(Parts):
         def __phases__(self, input):
-            return [self.find, super().answer]
+            return [self.find, super().item]
 
-        def answer(self, input, item=None):
-            return ["say that it is done"]
+        def item(self, input, find):
+            return []
 
     from fastworkflow.planning_phases import PhaseError
 
-    with pytest.raises(PhaseError, match=r"returns a base's answer that the class overrides: "
-                                         r"return self.answer"):
+    with pytest.raises(PhaseError, match=r"returns a base's item that the class overrides: "
+                                         r"return self.item"):
         planned(Wrong)(_input())
 
 
 def test_a_subclass_that_only_overrides_keeps_the_base_plan_and_inherits_call():
     class Same(Lookup):
-        def answer(self, input, item=None):
-            return [*super().answer(input, item), "apply no change"]
+        def __result__(self, input, item=None):
+            return f"{super().__result__(input, item)}\nNo change applied."
 
     class Chosen(Lookup):
         def __phases__(self, input):
-            return [self.find, self.answer]
+            return [self.find]
 
     class Inherits(Chosen):
         pass
 
-    assert [p.name for p in planned(Same)(_input())] == ["find", "item", "answer"]
-    assert [p.name for p in planned(Inherits)(_input())] == ["find", "answer"]
+    assert [p.name for p in planned(Same)(_input())] == ["find", "item"]
+    assert [p.name for p in planned(Inherits)(_input())] == ["find"]
     loaded = planning_commands.command_from_module("same", _module(plan=Same), "_commands/same.py")
-    assert loaded.steps[-2:] == ("say that <name> is <uid>", "apply no change")
+    assert loaded.steps[-1] == "open_item_by_uid with the uid of the <name> match (only when find.uids)"
+    assert Same().__result__(_input(), item=Lookup.Item(uid="u1")) == "Dune is u1.\nNo change applied."
 
 
 def test_phases_from_several_bases_need_call():
@@ -592,10 +597,10 @@ def test_phases_from_several_bases_need_call():
 
 
 def test_a_name_a_subclass_sets_to_a_non_function_is_not_a_phase():
-    class NoAnswer(Lookup):
-        answer = None
+    class NoItem(Lookup):
+        item = None
 
-    assert [p.name for p in planned(NoAnswer)(_input())] == ["find", "item"]
+    assert [p.name for p in planned(NoItem)(_input())] == ["find"]
 
 
 # ------------------------------------------------- phases with no Input (fix-bh1e.11)

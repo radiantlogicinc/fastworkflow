@@ -1,7 +1,7 @@
 """book_details: the first book matching the request's words, or that none matches.
 
 find lists the matches; book opens the first one, and is skipped when nothing matched;
-answer says what book found, or that no book matches.
+__result__ says what book found, or that no book matches.
 """
 from pydantic import BaseModel, Field
 
@@ -34,8 +34,8 @@ class PlanGenerator:
             return []
         return [run("show_book", book_uid=find.book_uids[0])]
 
-    def answer(self, input, book=None):
+    def __result__(self, input, book=None):
         if book is None:
-            return [f"say that no book matches {input.title}"]
-        return [f"say that {book.name} is by {book.author}; the library owns "
-                f"{book.copies} copies"]
+            return f"No book matches {input.title}."
+        return (f"{book.name} is by {book.author}; the library owns "
+                f"{book.copies} copies.")

@@ -58,6 +58,12 @@ def paging_line(output, command_parameters) -> str:
     return f"Rows {start + 1}-{after} of {total}; next page: {name}={after}."
 
 
+def _declared_output_message(command_name: str, returned: str) -> str:
+    """The call error for a command that declares Signature.Output and returned something else."""
+    return (f"{command_name} declares an Output but returned {returned}; return the Output, "
+            "or CommandResponse(response=..., output=<Output>)")
+
+
 def frame_command_result(result, *, command_name: str, output_model: type | None,
                          command_parameters=None) -> CommandOutput:
     """Wrap what a ``ResponseGenerator.__call__`` returned in a CommandOutput (design 3.14).
@@ -71,6 +77,10 @@ def frame_command_result(result, *, command_name: str, output_model: type | None
       ``success`` left to the framework. A ``CommandResponse`` with ``success=False`` is a call error:
       a refusal is ``raise fastworkflow.Refused(message)``.
 
+    A command that declares ``Signature.Output`` must return it, directly or as
+    ``CommandResponse(response=..., output=<Output>)``. A str, or a CommandResponse without that
+    output, is a call error (fix-3rsq.declared-output-required).
+
     A hand-built ``CommandOutput``, or any other value, fails the call, naming the command and the
     type it returned.
     """
@@ -80,8 +90,14 @@ def frame_command_result(result, *, command_name: str, output_model: type | None
                 f"{command_name} returned a CommandResponse with success=False: success is the framework's "
                 "to set. Refuse with raise fastworkflow.Refused(message)"
             )
+        if output_model is not None and not isinstance(result.output, output_model):
+            returned = "CommandResponse without output" if result.output is None else (
+                f"CommandResponse(output={type(result.output).__qualname__})")
+            raise TypeError(_declared_output_message(command_name, returned))
         return CommandOutput(command_response=result)
     if isinstance(result, str):
+        if output_model is not None:
+            raise TypeError(_declared_output_message(command_name, "str"))
         return CommandOutput(command_response=fastworkflow.CommandResponse(response=result))
     if output_model is not None and type(result) is output_model:
         text = result.model_dump_json()
@@ -92,6 +108,8 @@ def frame_command_result(result, *, command_name: str, output_model: type | None
             )
         )
     returned = f"{type(result).__module__}.{type(result).__qualname__}"
+    if output_model is not None and type(result) is not output_model:
+        raise TypeError(_declared_output_message(command_name, type(result).__qualname__))
     if output_model is None:
         declared = "its ResponseGenerator declares no Signature.Output"
     else:
@@ -646,9 +664,6 @@ class CommandExecutor(CommandExecutorInterface):
         if "is_assistant_mode_command" in chat_session.cme_workflow._context:
             del chat_session.cme_workflow._context["is_assistant_mode_command"]
 
-        fastworkflow.turn.warn_on_missing_declared_output(
-            command_output, workflow.folderpath
-        )
         return command_output
 
     @classmethod
@@ -744,9 +759,6 @@ class CommandExecutor(CommandExecutorInterface):
             command_output.context = context
             command_output.command_name = action.command_name
             command_output.command_call_id = call_id
-            fastworkflow.turn.warn_on_missing_declared_output(
-                command_output, workflow.folderpath
-            )
             return command_output
 
         # Always resolve the command's Signature class via create() so
@@ -815,9 +827,6 @@ class CommandExecutor(CommandExecutorInterface):
         command_output.command_parameters = input_obj or None
         command_output.command_call_id = call_id
 
-        fastworkflow.turn.warn_on_missing_declared_output(
-            command_output, workflow.folderpath
-        )
         return command_output
 
     # MCP-compliant methods

@@ -1,7 +1,7 @@
 """author_books: each book by the author the request names, opened one by one.
 
 find lists the author's books; book runs once per book found (at most five), each its own
-sub-plan; answer names every book with its copies.
+sub-plan; __result__ names every book with its copies.
 """
 from pydantic import BaseModel, Field
 
@@ -33,11 +33,11 @@ class PlanGenerator:
     def book(self, uid) -> Book:
         return [run("show_book", book_uid=uid)]
 
-    def answer(self, input, book=None):
-        return [f"say that {self._books_by(input.author, book)}"]
+    def __result__(self, input, book=None):
+        return self._books_by(input.author, book)
 
     def _books_by(self, author, book):
         if not book:
-            return f"no book by {author} was found"
+            return f"No book by {author} was found."
         copies = "; ".join(f"{b.name} ({count(b.copies, 'copy', 'copies')})" for b in book)
-        return f"the books by {author}: {copies}"
+        return f"The books by {author}: {copies}."

@@ -55,7 +55,7 @@ class PlanGenerator:
 
     def __phases__(self, input):
         checks = [self.checks] if input.checks else []
-        return [self.find, self.item, *checks, self.report]
+        return [self.find, self.item, *checks]
 
     def find(self, input) -> ItemMatch:
         return ["open_catalog", f"find_item query={input.name}"]
@@ -66,10 +66,10 @@ class PlanGenerator:
     def checks(self, item) -> CheckFacts:
         return [f"count_checks on {item.uid}"]
 
-    def report(self, item, checks=None):
+    def __result__(self, input, item, checks=None):
         counted = f"; open checks: {checks.total}" if checks is not None else ""
-        return [f"say that {item.uid} has the parts {self._parts(item)}{counted}, "
-                f"weight {item.weight:.1f}"]
+        return (f"{item.uid} has the parts {self._parts(item)}{counted}, "
+                f"weight {item.weight:.1f}.")
 
     def _parts(self, item):
         return ", ".join(item.part_labels)
@@ -225,7 +225,7 @@ def test_phased_preview_shows_each_phase_its_facts_and_the_condition_both_ways(w
     # the phases, and when each runs
     assert "| `find` | `ItemMatch` | always |" in text
     assert "| `checks` | `CheckFacts` | only when checks = true |" in text
-    assert "| `report` | none | always |" in text
+    assert "| `find` | `ItemMatch` | always |" in text and "`__result__`" in text
     # facts and their sources
     assert "| `item_uids` | `list[str]` | `find_item.item_uids` |" in text
     assert "| `weight` | `float` | `list_parts.weight` |" in text
@@ -239,10 +239,13 @@ def test_phased_preview_shows_each_phase_its_facts_and_the_condition_both_ways(w
     assert "count_checks" not in text[off:on]
     # the item's uid is the uid the find listed (one placeholder for one value)
     assert "1. `count_checks on <find.item_uids[0]>`" in text[on:]
-    assert ("`say that <find.item_uids[0]> has the parts <item.part_labels[0]>; open checks: "
-            "<checks.total>, weight <item.weight>`") in text[on:]
-    assert ("`say that <find.item_uids[0]> has the parts <item.part_labels[0]>, weight "
-            "<item.weight>`") in text[off:on]
+    # the answer __result__ writes, per plan, with the placeholders escaped for Markdown
+    answer_off = text[text.index("### Answer when checks = false"):text.index("### Answer when checks = true")]
+    answer_on = text[text.index("### Answer when checks = true"):]
+    assert ("Written by `__result__`: \\<find.item_uids[0]> has the parts \\<item.part_labels[0]>; "
+            "open checks: \\<checks.total>, weight \\<item.weight>.") in answer_on
+    assert ("Written by `__result__`: \\<find.item_uids[0]> has the parts \\<item.part_labels[0]>, "
+            "weight \\<item.weight>.") in answer_off
     # a phase that reads the same as in the first plan is one line
     assert "As in the plan when checks = false." in text[on:]
 
@@ -381,12 +384,13 @@ class Check(BaseModel):
 
 class PlanGenerator:
     """Without the deep check: one plan (flat). With it: find, checks (once per match, until
-    two passed), extra (more than one match), report (when an item was checked)."""
+    two passed), extra (more than one match); __result__ writes the answer (when an item was
+    checked)."""
 
     def __phases__(self, input):
         if not input.deep:
             return [self.quick]
-        return [self.find, self.checks, self.extra, self.report]
+        return [self.find, self.checks, self.extra]
 
     def quick(self, input):
         return [f"find_item query={input.names}", "run_check on each match", "say which passed"]
@@ -404,10 +408,8 @@ class PlanGenerator:
             return []
         return [f"count_checks for {len(find.item_uids)} items"]
 
-    def report(self, checks):
-        if not checks:
-            return []
-        return [f"say that {self._passed(checks)}"]
+    def __result__(self, checks):
+        return f"{self._passed(checks) if checks else '0 items passed: none'}."
 
     def _passed(self, checks):
         passed = [c.uid for c in checks if c.passed]
@@ -436,7 +438,7 @@ def test_conditions_fan_out_settings_and_a_flat_plan_are_rendered(checks_workflo
     # A phase's condition is the tests its method made on placeholder facts (len() reads
     # one item: a test that the list is not empty).
     assert "| `extra` | none | only when `find.item_uids` | no |" in text
-    assert "| `report` | none | only when `checks` | no |" in text
+    assert "| `extra` | none | only when `find.item_uids` | no |" in text
     assert "Settings: `when=find.item_uids`." in text
     assert ("Settings: `over='find.item_uids'`, `item='uid'`, `max_items=5`, "
             "`until=lambda checks: sum(c.passed for c in checks) >= 2`, `noun='matches'`.") in text
@@ -454,9 +456,9 @@ def test_a_phase_computing_on_facts_is_marked_as_rendered_with_placeholders(chec
     phases = text.split("#### Phase ")[1:]
     marked = {part.split("`")[1]: note in part for part in phases}
     # `find` and `checks` read no earlier facts (an item is not a fact); the rest do.
-    assert marked == {"find": False, "checks": False, "extra": True, "report": True}
-    # The report computes "0 items passed" from placeholder facts: marked, not trusted.
-    assert "1. `say that 0 items passed: none`" in text
+    assert marked == {"find": False, "checks": False, "extra": True}
+    # The answer computes "0 items passed" from placeholder facts: not trusted, but shown.
+    assert "Written by `__result__`: 0 items passed: none." in text
     shown = command_preview.render_previews(workflow)["show_item.md"]
     assert shown.count(note) >= 2   # item and report read earlier facts
 
@@ -537,16 +539,15 @@ class PlanGenerator:
             return [f"open_box label={uid}", "weigh_box"]
         return box_steps(uid, shelf)
 
-    def report(self, shelf, box=None):
-        if box is None:
-            return ["say that no box was opened"]
+    def __result__(self, shelf, box=None):
+        if not box:
+            return "No box was opened."
         lines = []
         for one in box:
             kind = one.label.split("_", 1)[0]
             where = "on the shelf" if one.uid in shelf.box_uids else "not on the shelf"
-            lines.append(f"say that {one.label} (kind {kind}) is {where} and weighs "
-                         f"{int(one.weight)}")
-        return lines or ["say that no box was opened"]
+            lines.append(f"{one.label} (kind {kind}) is {where} and weighs {int(one.weight)}.")
+        return "\\n".join(lines)
 
 
 def box_steps(uid, shelf):
@@ -648,7 +649,7 @@ def test_a_fan_out_over_a_literal_list_renders_each_item(shelf_workflow):
     # a fan-out over an empty list runs nothing, and says so
     none = _plan(text, "when scope = named, first = empty")
     assert command_preview.NO_ITEMS_NOTE in none
-    assert "1. `say that no box was opened`" in none
+    assert "Written by `__result__`: No box was opened." in text[text.index("### Answer when scope = named, first = empty"):]
 
 
 def test_the_runs_column_names_the_deciding_input_only(shelf_workflow):
@@ -684,8 +685,8 @@ def test_placeholders_survive_splitting_and_number_conversion(shelf_workflow):
     """Fixes 4 and 5: a split on "_" keeps the whole placeholder; int() gives 999999, said so."""
     text = command_preview.render_previews(shelf_workflow)["walk_boxes.md"]
     every = _plan(text, "when scope = every, boxes = 0")
-    assert ("1. `say that <shelf.box_labels[0]> (kind <shelf.box_labels[0]>) is on the shelf "
-            "and weighs 999999`") in every
+    assert ("Written by `__result__`: \\<shelf.box_labels[0]> (kind \\<shelf.box_labels[0]>) is on "
+            "the shelf and weighs 999999.") in text[text.index("### Answer when scope = every, boxes = 0"):]
     assert "(kind <shelf)" not in text and "weighs 0" not in text
     assert "999999" in command_preview.PLACEHOLDER_NOTE
 
@@ -807,33 +808,79 @@ def test_answer_mode_is_by_code_only_for_say_that_and_guards_need_a_negation():
         "Answer: written by code, word for word (step 1 verbatim; step 2 dropped as a guard).")
 
 
+# A call with no __result__: its verbatim answer phase is written by code (answer_by_code), and
+# its last phase is a judgement step the model writes. The answer modes exist for these calls
+# only: a call with __result__ writes its answer there, and its answer-only phases do not run.
+ANSWER_MODE = '''
+"""answer_mode: a verbatim answer phase, then a judgement last phase, and no __result__."""
+from pydantic import BaseModel, Field
+from fastworkflow.planning import fact_from
+
+
+class Signature:
+    """Say how one named item is listed."""
+
+    class Input(BaseModel):
+        name: str = Field(description="the item's name")
+
+
+class PlanGenerator:
+    class Match(BaseModel):
+        uids: list[str] = fact_from("find_item.item_uids")
+
+    def find(self, input) -> Match:
+        return ["open_catalog", f"find_item query={input.name}"]
+
+    def summary(self, find):
+        return [f"say that {find.uids[0]} is listed"]
+
+    def report(self, find):
+        return ["say which item is heavier"]
+'''
+
+
+def _add_answer_mode(folder) -> None:
+    (folder / "_commands" / "answer_mode.py").write_text(textwrap.dedent(ANSWER_MODE))
+
+
 def test_an_answer_only_phase_shows_its_answer_mode_and_a_command_phase_none(workflow):
-    text = command_preview.render_previews(workflow)["show_item.md"]
-    plan = text[text.index("## Plan"):]
-    # Each report phase (one per plan) is answer-only; find, item and checks run commands.
-    assert plan.count("Answer: written by code, word for word (step 1 verbatim).") == 2
-    blocks = plan.split("#### Phase ")[1:]
-    assert [block.split("`")[1] for block in blocks if "Answer: " in block] == ["report", "report"]
-    # A flat skill and a fixed one have no phases, so no answer mode.
+    from pathlib import Path
+
+    _add_answer_mode(Path(workflow))
     previews = command_preview.render_previews(workflow)
+    plan = previews["answer_mode.md"][previews["answer_mode.md"].index("## Plan"):]
+    blocks = plan.split("### Phase ")[1:]
+    # the find phase runs commands, so it has no answer mode; the two answer-only phases do
+    assert "Answer: " not in blocks[0]
+    assert [block.split("`")[1] for block in blocks if "Answer: " in block] == ["summary", "report"]
+    # summary is before the last phase: its say-that line writes no answer (3.16 (a))
+    assert ("Answer: none (a phase before the last writes no answer from 'say that' lines; "
+            "its text reaches the answer only through __result__).") in blocks[1]
+    assert "Answer: written by the model (step 1 needs judgement)." in blocks[2]
+    # A flat skill and a fixed one have no phases, so no answer mode.
     assert "Answer: " not in previews["list_parts_of.md"]
     assert "Answer: " not in previews["close_out.md"]
 
 
 def test_without_command_names_no_answer_mode_is_shown(workflow):
+    from pathlib import Path
+
     from fastworkflow import workflow_agent
 
+    _add_answer_mode(Path(workflow))
     commands = workflow_agent.load_planning_command_map(workflow)
     (name, description, steps), = [s for s in workflow_agent.load_planning_commands(workflow)
-                                   if s[0] == "show_item"]
+                                   if s[0] == "answer_mode"]
     bare = command_preview.render_preview(name, description, steps, commands[name], (),
-                                        "_commands/show_item.py")
+                                        "_commands/answer_mode.py")
     named = command_preview.render_preview(name, description, steps, commands[name], (),
-                                         "_commands/show_item.py",
+                                         "_commands/answer_mode.py",
                                          command_preview.phase_command_names(workflow))
     assert "Answer: " not in bare
     assert [line for line in named.splitlines() if line not in bare.splitlines()] == [
-        "Answer: written by code, word for word (step 1 verbatim)."] * 2
+        "Answer: none (a phase before the last writes no answer from 'say that' lines; "
+        "its text reaches the answer only through __result__).",
+        "Answer: written by the model (step 1 needs judgement)."]
 
 
 # ------------------------------------------------- which steps read every page (fix-ajir.14)
@@ -1132,17 +1179,17 @@ class Signature:
 
 class PlanGenerator:
     def __phases__(self, input):
-        return [self.find, self.each, self.answer]
+        return [self.find, self.each]
 
     def find(self, input) -> OUTPUT:
         return [f"find_{input.kind} query={input.name}"]
 
     @phase(over="OVER")
     def each(self, title):
-        return [f"say that {title} matches"]
+        return [f"find_book query={title}"]
 
-    def answer(self, input, find):
-        return [f"say that {input.name} matches {find.total}"]
+    def __result__(self, input, find):
+        return f"{input.name} matches {find.total}."
 '''
 
 BOOK_FIELDS = ("titles: list[str] = Field(default_factory=list, description=\"a stub output\")\n"
@@ -1189,12 +1236,12 @@ def test_a_from_edge_to_a_field_of_one_member_resolves_and_says_which_member_has
     # kind = book runs find_book, whose Output has titles: the fan-out renders its items
     assert "| `each` | none | always | per item of `find.titles` as `title` |" in text
     book = _plan(text, "when kind = book")
-    assert "For the first item, `title` = `<find.titles[0]>`:\n\n1. `say that <find.titles[0]> matches`" in book
+    assert "For the first item, `title` = `<find.titles[0]>`:\n\n1. `find_book query=<find.titles[0]>`" in book
     # kind = member runs find_member, which has no titles: the preview says so, and says who has it
     member = _plan(text, "when kind = member")
     assert "_Items not rendered: phase 'each': over='find.titles': Output has no field 'titles'. " \
            "`titles` is a field of `Lib/find_book`'s `Output` only._" in member
-    assert "say that <find.titles[0]> matches" not in member
+    assert "find_book query=<find.titles[0]>" not in member
 
 
 def test_a_field_in_neither_member_is_reported_as_unresolved(tmp_path):

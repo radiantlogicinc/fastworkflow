@@ -280,9 +280,8 @@ def test_a_hand_built_commandoutput_return_is_a_call_error_naming_the_short_form
             workflow, fastworkflow.Action(command_name="envelope", command="hand built", parameters={"word": "x"}))
 
     message = str(exc_info.value)
-    assert "CommandOutput" in message
-    assert "a str or a CommandResponse" in message
-    assert "raise fastworkflow.Refused(message)" in message
+    assert message == ("envelope declares an Output but returned CommandOutput; return the Output, "
+                       "or CommandResponse(response=..., output=<Output>)")
 
 
 def test_a_commandresponse_with_success_false_is_a_call_error(initialized, workflow_path):

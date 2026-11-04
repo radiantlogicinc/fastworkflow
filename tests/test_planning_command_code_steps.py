@@ -1157,18 +1157,16 @@ def test_the_model_step_after_code_runs_a_command_the_plan_lacked(todo):
     assert todo.agent.iteration_counter == 1
 
 
-def test_an_answer_only_last_phase_is_still_written_with_no_model_step(todo):
-    todo.plan = _plan(
-        Phase("open", lambda: ["get_todo_list id=8"], output=Opened),
-        Phase("report", lambda open=None: [
-            f"say that the list is {open.description if open else 'named'}"]))
-    result = todo.turn()
+def test_a_last_phase_of_say_that_lines_is_a_load_error():
+    # Was: the answer-only last phase was written by code with no model step. A last phase
+    # of 'say that' lines no longer loads (3.16): the answer is returned from __result__.
+    from fastworkflow.planning_commands import PlanningCommandFormatError
 
-    assert result.status == TurnStatus.COMPLETED
-    assert todo.model.asked == [] and todo.model.closings == []
-    spans = _phases(todo.sink)
-    assert [s.attributes["answer_only"] for s in spans] == [False, True]
-    assert spans[0].attributes["steps_used"] == spans[0].attributes["steps_by_code"] == 1
+    with pytest.raises(PlanningCommandFormatError, match="writes the answer as 'say that' lines"):
+        _planning_command(_plan(
+            Phase("open", lambda: ["get_todo_list id=8"], output=Opened),
+            Phase("report", lambda open=None: [
+                f"say that the list is {open.description if open else 'named'}"])))
 
 
 def test_a_flat_call_leaves_planner_steps_after_to_the_agent(todo):

@@ -31,6 +31,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel
 
 import fastworkflow
 from fastworkflow import Action, CommandOutput, CommandResponse
@@ -183,23 +184,24 @@ class TestOutputReturn:
 
 
 class TestOtherForms:
-    def test_a_str_return_is_the_response_text(self, todo_copy, tmp_path):
+    def test_a_str_return_from_a_command_that_declares_an_output_is_a_call_error(self, todo_copy, tmp_path):
+        # list_todo_lists declares Signature.Output, so its text is not a short form (fix-3rsq.declared-output-required).
         _rewrite_call(todo_copy, "TodoListManager/list_todo_lists.py", """
             return "two todo lists"
             """)
-        out = _run(todo_copy, _todo_root(tmp_path), LIST_TODO_LISTS)
-        assert out.command_response.response == "two todo lists"
-        assert out.command_response.output is None
-        assert out.success is True
-        assert out.command_name == LIST_TODO_LISTS
+        with pytest.raises(TypeError) as raised:
+            _run(todo_copy, _todo_root(tmp_path), LIST_TODO_LISTS)
+        assert str(raised.value).startswith(f"{LIST_TODO_LISTS} declares an Output but returned str;")
 
     def test_a_command_response_return_keeps_its_artifacts(self, todo_copy, tmp_path):
         _rewrite_call(todo_copy, "TodoListManager/list_todo_lists.py", """
-            return fastworkflow.CommandResponse(response="listed", artifacts={"count": 0})
+            return fastworkflow.CommandResponse(response="listed", artifacts={"count": 0},
+                                                output=Signature.Output(todolist_ids=[]))
             """)
         out = _run(todo_copy, _todo_root(tmp_path), LIST_TODO_LISTS)
         assert out.command_response.response == "listed"
         assert out.command_response.artifacts == {"count": 0}
+        assert out.command_response.output.todolist_ids == []
         assert out.success is True
         assert out.command_name == LIST_TODO_LISTS
 
@@ -211,8 +213,7 @@ class TestOtherForms:
         with pytest.raises(TypeError) as raised:
             _run(todo_copy, _todo_root(tmp_path), LIST_TODO_LISTS)
         assert LIST_TODO_LISTS in str(raised.value)
-        assert "CommandOutput" in str(raised.value)
-        assert "not a short form" in str(raised.value)
+        assert str(raised.value) == _declared_output_error(LIST_TODO_LISTS, "CommandOutput")
 
     def test_frame_command_result_refuses_a_command_output_it_is_handed(self):
         built = CommandOutput(command_response=CommandResponse(response="as built"))
@@ -245,7 +246,8 @@ class TestOtherForms:
 class TestCallSignature:
     def test_a_three_argument_call_gets_none_for_a_command_with_no_input(self, todo_copy, tmp_path):
         _rewrite_call(todo_copy, "TodoListManager/list_todo_lists.py", """
-            return fastworkflow.CommandResponse(response=f"got {command_parameters!r}")
+            return fastworkflow.CommandResponse(response=f"got {command_parameters!r}",
+                                                output=Signature.Output(todolist_ids=[]))
             """)
         out = _run(todo_copy, _todo_root(tmp_path), LIST_TODO_LISTS)
         assert out.command_response.response == "got None"
@@ -253,7 +255,8 @@ class TestCallSignature:
 
     def test_a_three_argument_call_gets_the_filled_input_for_a_command_with_one(self, example_copy, tmp_path):
         _rewrite_call(example_copy, "TodoListManager/get_todo_list.py", """
-            return fastworkflow.CommandResponse(response=f"got {type(command_parameters).__name__} id={command_parameters.id}")
+            return fastworkflow.CommandResponse(response=f"got {type(command_parameters).__name__} id={command_parameters.id}",
+                                                output=Signature.Output(result=None))
             """)
         out = _run(example_copy, _example_root(tmp_path), GET_TODO_LIST, parameters={"id": 7})
         assert out.command_response.response == "got Input id=7"
@@ -318,3 +321,62 @@ class TestLibraryCommandsRunThroughExecutor:
         assert out.command_response.output.total == len(book.notes)
         assert out.command_parameters is None
         assert not [r for r in caplog.records if "declares an Output" in r.getMessage()]
+
+
+# ----------------------------------------------------------------------
+# A command that declares Signature.Output must return it (fix-3rsq.declared-output-required)
+# ----------------------------------------------------------------------
+
+
+def _declared_output_error(command_name: str, returned: str) -> str:
+    return (f"{command_name} declares an Output but returned {returned}; return the Output, "
+            "or CommandResponse(response=..., output=<Output>)")
+
+
+class TestDeclaredOutputMustBeReturned:
+    def test_a_str_return_from_a_command_that_declares_an_output_is_a_call_error(self, example_copy, tmp_path):
+        _rewrite_call(example_copy, "TodoListManager/list_todo_lists.py", """
+            return "two todo lists"
+            """)
+        with pytest.raises(TypeError) as raised:
+            _run(example_copy, _example_root(tmp_path), LIST_TODO_LISTS)
+        assert str(raised.value) == _declared_output_error(LIST_TODO_LISTS, "str")
+
+    def test_a_command_response_without_output_is_a_call_error(self, example_copy, tmp_path):
+        _rewrite_call(example_copy, "TodoListManager/list_todo_lists.py", """
+            return fastworkflow.CommandResponse(response="listed", artifacts={"count": 0})
+            """)
+        with pytest.raises(TypeError) as raised:
+            _run(example_copy, _example_root(tmp_path), LIST_TODO_LISTS)
+        assert str(raised.value) == _declared_output_error(LIST_TODO_LISTS, "CommandResponse without output")
+
+    def test_a_none_return_from_a_command_that_declares_an_output_is_a_call_error(self, example_copy, tmp_path):
+        _rewrite_call(example_copy, "TodoListManager/list_todo_lists.py", """
+            return None
+            """)
+        with pytest.raises(TypeError) as raised:
+            _run(example_copy, _example_root(tmp_path), LIST_TODO_LISTS)
+        assert str(raised.value) == _declared_output_error(LIST_TODO_LISTS, "NoneType")
+
+    def test_a_command_response_carrying_the_output_is_the_structured_form(self, example_copy, tmp_path):
+        _rewrite_call(example_copy, "TodoListManager/list_todo_lists.py", """
+            app = workflow.command_context_for_response_generation
+            output = Signature.Output(result=app.list_todo_lists())
+            return fastworkflow.CommandResponse(response="two lists", output=output)
+            """)
+        out = _run(example_copy, _example_root(tmp_path), LIST_TODO_LISTS)
+        assert out.success is True
+        assert out.command_response.response == "two lists"
+        assert type(out.command_response.output).__name__ == "Output"
+
+    def test_frame_command_result_refuses_a_str_when_an_output_is_declared(self):
+        class Out(BaseModel):
+            value: int = 0
+
+        with pytest.raises(TypeError) as raised:
+            frame_command_result("text", command_name="x", output_model=Out)
+        assert str(raised.value) == _declared_output_error("x", "str")
+
+    def test_frame_command_result_accepts_a_str_when_no_output_is_declared(self):
+        built = frame_command_result("text", command_name="x", output_model=None)
+        assert built.command_response.response == "text"

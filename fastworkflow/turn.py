@@ -17,7 +17,6 @@ the bottom of ``fastworkflow/__init__.py`` via ``TurnResult.model_rebuild``.
 from __future__ import annotations
 
 import inspect
-import os
 import uuid
 import warnings
 from datetime import datetime, timezone
@@ -27,11 +26,6 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from fastworkflow import CommandOutput, CommandResponse
-from fastworkflow.command_directory import (
-    _INTERNAL_CME_WORKFLOW_PATH,
-    get_cached_command_directory,
-)
-from fastworkflow.utils import python_utils
 from fastworkflow.utils.logging import logger
 
 # Key marking an artifacts-dict envelope whose value was offloaded to a store
@@ -168,79 +162,32 @@ def warn_on_unserializable_artifacts(command_output: "CommandOutput") -> None:
 
 
 _MISSING_DECLARED_OUTPUT_WARNED: set[str] = set()
-_DECLARED_OUTPUT_CACHE: dict[tuple[str, str], bool] = {}
-_SKIP_MISSING_OUTPUT_COMMANDS = frozenset({"", "ask_user", "wildcard"})
 
 
 def reset_missing_declared_output_warnings() -> None:
     """Clear the once-per-process missing-output warning state (for tests)."""
     _MISSING_DECLARED_OUTPUT_WARNED.clear()
-    _DECLARED_OUTPUT_CACHE.clear()
-
-
-def _command_declares_output(workflow_folderpath: str, command_name: str) -> bool:
-    """Whether *command_name* in *workflow_folderpath* defines ``Signature.Output``."""
-    wf_abs = os.path.abspath(workflow_folderpath)
-    cache_key = (wf_abs, command_name)
-    cached = _DECLARED_OUTPUT_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-
-    if wf_abs == _INTERNAL_CME_WORKFLOW_PATH:
-        _DECLARED_OUTPUT_CACHE[cache_key] = False
-        return False
-    directory = get_cached_command_directory(wf_abs)
-    if command_name in directory.core_command_names:
-        _DECLARED_OUTPUT_CACHE[cache_key] = False
-        return False
-    metadata = directory.map_command_2_metadata.get(command_name)
-    declares = False
-    if metadata is not None:
-        try:
-            directory.ensure_command_hydrated(command_name)
-        except KeyError:
-            pass
-        else:
-            module = python_utils.get_module(
-                metadata.response_generation_module_path,
-                metadata.workflow_folderpath or wf_abs,
-            )
-            signature = getattr(module, "Signature", None) if module else None
-            output_cls = getattr(signature, "Output", None) if signature else None
-            declares = (
-                inspect.isclass(output_cls)
-                and issubclass(output_cls, BaseModel)
-            )
-    _DECLARED_OUTPUT_CACHE[cache_key] = declares
-    return declares
 
 
 def warn_on_missing_declared_output(
     command_output: "CommandOutput",
-    workflow_folderpath: str | None,
     *,
-    output_model: type | None = None,
+    output_model: type,
 ) -> None:
-    """Log once per command per process when ``Signature.Output`` was declared but not returned (3.14)."""
-    if not command_output.success:
-        return
-    if command_output.is_ask_user:
+    """Log once per planning command per process when its ``Signature.Output`` was declared but not returned.
+
+    Execution commands never reach this: ``frame_command_result`` makes a declared Output that is not
+    returned a call error. A planning command's ``__result__`` may fail, and its framework fallback
+    then writes text with no output; this logs that case.
+    """
+    if not command_output.success or command_output.is_ask_user:
         return
     command_name = command_output.command_name or ""
-    if command_name in _SKIP_MISSING_OUTPUT_COMMANDS:
-        return
-    response = command_output.command_response
-    if response.output is not None:
+    if not command_name or command_output.command_response.output is not None:
         return
     if command_name in _MISSING_DECLARED_OUTPUT_WARNED:
         return
-    if output_model is not None:
-        declares = inspect.isclass(output_model) and issubclass(output_model, BaseModel)
-    elif workflow_folderpath:
-        declares = _command_declares_output(workflow_folderpath, command_name)
-    else:
-        return
-    if not declares:
+    if not (inspect.isclass(output_model) and issubclass(output_model, BaseModel)):
         return
 
     _MISSING_DECLARED_OUTPUT_WARNED.add(command_name)
@@ -365,12 +312,13 @@ class TurnOutput(BaseModel):
 # runs needs that much to know an absent field means "this engine could not emit
 # it" rather than "it did not occur". Bump it when either model gains a field or
 # either vocabulary gains a member.
-TURN_CAPTURE_CONTRACT_VERSION = 1
+TURN_CAPTURE_CONTRACT_VERSION = 2
 
 # Which matching layer decided, named for what ``intent_detection.py`` actually
 # writes to ``nlu_trace["matcher_layer"]`` — ``exact_prefix``,
 # ``fuzzy_prematch``, ``embedding_cache``, ``classifier``,
-# ``clarification_default`` — plus ``direct_action`` for
+# ``clarification_default``, ``jev_tiebreak`` (Jev picked among an ambiguous
+# intent's candidates) — plus ``direct_action`` for
 # ``process_action_turn``, which resolves an ``Action``'s command name with no
 # NLU at all and therefore emits no ``fw.nlu.intent`` span to read a layer off.
 #
@@ -387,6 +335,7 @@ RoutingTier = Literal[
     "embedding_cache",
     "classifier",
     "clarification_default",
+    "jev_tiebreak",
     # An emitter that did not say which layer decided. A real member rather
     # than a default, so "not recorded" never reads as a tier that ran.
     "unknown",

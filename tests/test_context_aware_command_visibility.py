@@ -205,7 +205,11 @@ def test_deferred_context_sections_omit_parameters_and_name_navigation(
     current, _, deferred = text.partition(
         "Commands available after entering the TodoListManager context"
     )
-    assert "type:" in current
+    # The global commands declare no Output any more (CME what_can_i_do's dead Output was removed
+    # with fix-3rsq.declared-output-required), so the global section renders no type line.
+    assert "- what_can_i_do" in current
+    assert "outputs:" not in current
+    assert "type:" not in current
     assert "type:" not in deferred
     assert "outputs:" not in deferred.lower()
     assert "- create_todo_list" in deferred or "- get_todo_list" in deferred
@@ -323,7 +327,7 @@ def test_agent_system_prompt_refreshes_with_parameters_on_context_change(
         return system.get("content", "")
 
     at_root = system_text()
-    assert "type:" in at_root
+    assert "type:" not in at_root  # no global command declares an Output or a typed input now
 
     class TodoListManager:
         pass

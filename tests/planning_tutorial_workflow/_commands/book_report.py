@@ -1,8 +1,8 @@
 """book_report: the book the request names, and who has it on loan when asked.
 
-With brief, one plan: find the book and say whether the library has it. Otherwise find,
-book (skipped when nothing matched), loans (only when the request asks who has it, and
-skipped when no book was opened) and answer.
+With brief, one phase: find the book, and __result__ says whether the library has it. Otherwise
+find, book (skipped when nothing matched), loans (only when the request asks who has it, and
+skipped when no book was opened) and __result__ writes the answer.
 """
 from pydantic import BaseModel, Field
 
@@ -26,13 +26,9 @@ class Signature:
 class PlanGenerator:
     def __phases__(self, input):
         if input.brief:
-            return [self.check]
+            return [self.find]
         loans = [self.loans] if input.loans else []
-        return [self.find, self.book, *loans, self.answer]
-
-    def check(self, input):
-        return [run("find_book", query=input.title),
-                "say whether the library has the book"]
+        return [self.find, self.book, *loans]
 
     class Found(BaseModel):
         book_uids: list[str] = fact_from("find_book.book_uids")
@@ -61,12 +57,14 @@ class PlanGenerator:
             return []
         return [full_list("list_loans", book_uid=book.uid)]
 
-    def answer(self, input, book=None, loans=None):
+    def __result__(self, input, find=None, book=None, loans=None):
+        if input.brief:
+            if find.book_uids:
+                return f"Yes, the library has {input.title}."
+            return f"No, the library does not have {input.title}."
         if book is None:
-            return [f"say that no book matches {input.title}"]
-        lines = [f"say that {book.name} is by {book.author}; the library owns "
-                 f"{book.copies} copies"]
+            return f"No book matches {input.title}."
+        lines = [f"{book.name} is by {book.author}; the library owns {book.copies} copies."]
         if loans is not None:
-            lines.append(f"say that it is on loan to "
-                         f"{listed(loans.borrowers, loans.total, 'borrower')}")
-        return lines
+            lines.append(f"It is on loan to {listed(loans.borrowers, loans.total, 'borrower')}.")
+        return "\n".join(lines)

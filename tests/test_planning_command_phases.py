@@ -16,6 +16,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 from fastworkflow import planning_phases, tracing
+from fastworkflow.planning import phase, planned
 from fastworkflow.observation_offloading.archive import command_run_record
 from fastworkflow.planning_commands import (
     PlanningCommandCallPlan,
@@ -99,12 +100,24 @@ def note_steps(book: Optional[BookFacts] = None):
     return [f"count_notes on {book.uid if book else 'the book'}"]
 
 
-def report_steps(book: Optional[BookFacts] = None, notes: Optional[NoteFacts] = None):
+def report_answer(book: Optional[BookFacts] = None, notes: Optional[NoteFacts] = None) -> str:
+    """What ``__result__`` answers: the book's loans (and its notes), the first letter capital and
+    a full stop. The facts it was given are recorded in SEEN["report"]."""
     SEEN["report"] = {"book": book, "notes": notes}
     if book is None:
-        return ["say who has the book on loan"]
-    line = f"say that {book.uid} has loans {', '.join(book.loan_uids) or 'none'}"
-    return [line + (f" and {notes.total} notes" if notes else "")]
+        return "Who has the book on loan."
+    text = f"{book.uid} has loans {', '.join(book.loan_uids) or 'none'}"
+    if notes:
+        text += f" and {notes.total} notes"
+    return text[:1].upper() + text[1:] + "."
+
+
+def books_answer(books: Optional[list] = None) -> str:
+    """What ``__result__`` answers for a fan-out over books; the books given are recorded in SEEN."""
+    SEEN["report_books"] = {"books": books}
+    if books is None:
+        return "Who has each book on loan."
+    return "; ".join(f"{b.uid}: {', '.join(b.loan_uids) or 'none'}" for b in books) + "."
 
 
 class LibrarySignature:
@@ -115,12 +128,57 @@ class LibrarySignature:
         notes: bool = Field(default=False, description="the request asks about its notes")
 
 
+class PlanGenerator:
+    """The library skill as a PlanGenerator: find, book and notes are phases (notes only when
+    asked for), and __result__ writes the answer, so no phase is a 'say that' answer."""
+
+    def __phases__(self, input):
+        return [self.find, self.book, self.notes] if input.notes else [self.find, self.book]
+
+    def find(self, input) -> Found:
+        return find_steps(input.name)
+
+    def book(self, find) -> BookFacts:
+        return book_steps(find)
+
+    def notes(self, book) -> NoteFacts:
+        return note_steps(book)
+
+    def __result__(self, input, book=None, notes=None):
+        return report_answer(book, notes)
+
+
+class HasLoans:
+    """PlanGenerator, but notes is a phase only when the book has loans (``return []`` skips it)."""
+
+    def find(self, input) -> Found:
+        return find_steps(input.name)
+
+    def book(self, find) -> BookFacts:
+        return book_steps(find)
+
+    def notes(self, book) -> NoteFacts:
+        if not book.loan_uids:
+            return []
+        return note_steps(book)
+
+    def __result__(self, input, book=None, notes=None):
+        return report_answer(book, notes)
+
+
 def plan(input):
+    """The phases the library PlanGenerator runs for *input*."""
+    return planned(PlanGenerator)(input)
+
+
+def answer_by_model_plan(input):
+    """The library phases, then a last phase the model writes (not __result__): one verbatim
+    step and one judgement step, so code leaves the answer to the model."""
     return [
         Phase("find", lambda: find_steps(input.name), output=Found),
         Phase("book", lambda find: book_steps(find), output=BookFacts),
-        Phase("notes", lambda book: note_steps(book), output=NoteFacts, when=input.notes),
-        Phase("report", report_steps),
+        Phase("report", lambda book=None: ["say that b1 has loans l1, l2",
+                                           "say which loan is due first"]),
     ]
 
 
@@ -133,8 +191,14 @@ def _module(**attrs):
 
 
 def _phased_command(**attrs):
-    attrs.setdefault("plan", plan)
-    return command_from_module("show_book", _module(**attrs), "_commands/show_book.py").command
+    """The library skill: its PlanGenerator class, or a function plan given as ``plan=`` (which
+    has no __result__: its last phase answers as an executor or the model does)."""
+    from fastworkflow import planning_commands
+    path = "_commands/show_book.py"
+    if "plan" in attrs:
+        return command_from_module("show_book", _module(**attrs), path).command
+    attrs.setdefault("PlanGenerator", PlanGenerator)
+    return planning_commands.command_from_module("show_book", _module(**attrs), path).command
 
 
 def _flat_command():
@@ -152,11 +216,12 @@ def test_a_planning_command_with_plan_and_no_steps_gets_the_concatenation_as_its
     command = _phased_command()
     instance = LibrarySignature.Input(name="Dune", notes=True)
     # The template is built with placeholder facts (planning_phases.Placeholder), never None.
+    # The class-form template notes each step's facts: a step that reads a fact is "only when" it.
     assert command.steps_fn(instance) == [
         "open_library", "find_book query=Dune",
-        "open_book_by_uid book_uid=<find.book_uids[0]>", "list_loans (full list)",
-        "count_notes on <book.uid>",
-        "say that <book.uid> has loans <book.loan_uids[*]> and <notes.total> notes",
+        "open_book_by_uid book_uid=<find.book_uids[0]> (only when find)",
+        "list_loans (full list) (only when find)",
+        "count_notes on <book.uid> (only when book)",
     ]
     assert command.steps_fn(instance) == concatenated_steps(plan(instance))
     assert command.phase_outputs == (Found, BookFacts, NoteFacts)
@@ -170,9 +235,9 @@ def test_a_planning_command_without_plan_loads_as_before():
 def test_when_false_leaves_the_phase_out():
     command = _phased_command()
     names = [p.name for p in phases_for(command, {"name": "Dune", "notes": False})]
-    assert names == ["find", "book", "report"]
+    assert names == ["find", "book"]
     names = [p.name for p in phases_for(command, {"name": "Dune", "notes": True})]
-    assert names == ["find", "book", "notes", "report"]
+    assert names == ["find", "book", "notes"]
 
 
 def test_a_malformed_from_fails_the_load():
@@ -255,7 +320,7 @@ def test_a_plain_name_several_contexts_define_passes_when_one_context_resolves_i
 
 def test_parameters_bind_by_name_and_keep_their_defaults():
     found = Found(book_uids=["b1"])
-    phase = Phase("report", report_steps)
+    phase = Phase("report", lambda book=None, notes=None: [])
     assert bound_arguments(phase, {"find": found}) == {}
     assert bound_arguments(Phase("book", lambda find: []), {"find": found}) == {"find": found}
     with pytest.raises(PhaseError, match="needs 'find'"):
@@ -804,9 +869,6 @@ def phased(initialized_fastworkflow, todo_workflow_path, monkeypatch):
         return state.script[name]["answer"]
 
     monkeypatch.setattr("fastworkflow.planning_phases.write_answer", fake_answer)
-    # These tests script the model's answer; the answer written by code is tested on its own
-    # (test_code_writes_an_answer_only_phase_and_its_span_says_so and around it).
-    monkeypatch.setattr("fastworkflow.planning_phases.answer_by_code", lambda plan_text: False)
     state.ctx, state.sink, state.reviews, state.start = ctx, sink, reviews, start
     state.answered = answered
     return state
@@ -818,19 +880,16 @@ def test_three_phases_run_as_three_sub_plans_in_order(phased):
 
     assert result.status == TurnStatus.COMPLETED
     queries = [call["user_query"] for call in executor.calls]
-    # Two executor runs; the report phase names no command, so it is answer-only.
+    # Two executor runs: the answer is __result__'s, from the facts, in code.
     assert len(queries) == 2
-    assert "part 1 of 3 (find)" in queries[0] and "find_book query=Dune" in queries[0]
-    assert "part 2 of 3 (book)" in queries[1] and "open_book_by_uid book_uid=b1" in queries[1]
-    assert len(phased.answered) == 1
-    assert "part 3 of 3 (report)" in phased.answered[0]
-    assert "say that b1 has loans l1, l2" in phased.answered[0]
+    assert "part 1 of 2 (find)" in queries[0] and "find_book query=Dune" in queries[0]
+    assert "part 2 of 2 (book)" in queries[1] and "open_book_by_uid book_uid=b1" in queries[1]
+    assert phased.answered == []                 # __result__ wrote the answer: no model call
     # Each phase's steps come from its steps_fn, not the planner: one plan call for the sub-task.
     assert len(phased.planned) == 1
     # Step numbers continue across the phases: find took 2 steps.
     assert [call["first_step"] for call in executor.calls] == [0, 2]
-    # The last phase writes the answer.
-    assert result.answer == "Dune (b1) is on loan: l1, l2."
+    assert result.answer == "B1 has loans l1, l2."
 
 
 def test_each_phase_gets_the_earlier_phases_outputs_as_typed_objects(phased):
@@ -868,7 +927,8 @@ def test_a_missing_fact_fails_the_phase_cleanly_and_stops_the_call(phased):
     assert "found b1" not in result.answer and "b1 has two loans" not in result.answer
     assert "stopped at its part 'book'" in result.answer
     assert "BookFacts.loan_uids" in result.answer and "list_loans" in result.answer
-    assert "Not run: report." in result.answer
+    assert "Not run" not in result.answer        # book is the last phase here
+    assert "report" not in SEEN                  # __result__ never ran
     span = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[-1]
     assert span.status == tracing.STATUS_ERROR
     assert "BookFacts.loan_uids" in span.attributes["facts_error"]
@@ -968,16 +1028,15 @@ def test_the_trace_shows_each_phase(phased):
     phased.ctx.process_turn("show the book Dune")
 
     spans = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
-    assert [s.attributes["phase"] for s in spans] == ["find", "book", "report"]
-    assert [s.attributes["phase_index"] for s in spans] == [0, 1, 2]
-    assert {s.attributes["phase_count"] for s in spans} == {3}
+    assert [s.attributes["phase"] for s in spans] == ["find", "book"]
+    assert [s.attributes["phase_index"] for s in spans] == [0, 1]
+    assert {s.attributes["phase_count"] for s in spans} == {2}
     assert {s.attributes["step_budget"] for s in spans} == {15}
-    assert [s.attributes["steps_used"] for s in spans] == [2, 2, 0]
-    assert [s.attributes["answer_only"] for s in spans] == [False, False, True]
+    assert [s.attributes["steps_used"] for s in spans] == [2, 2]
+    assert [s.attributes["answer_only"] for s in spans] == [False, False]
     assert spans[0].attributes["facts"] == {"book_uids": ["b1"]}
     assert spans[1].attributes["facts"] == {"uid": "b1", "loan_uids": ["l1", "l2"]}
     assert spans[1].attributes["record"] == BOOK
-    assert spans[2].attributes["facts"] is None
     assert all(s.status == tracing.STATUS_OK for s in spans)
     contract = tracing.SPAN_CONTRACTS[tracing.SPAN_PLANNING_COMMAND_PHASE].attributes
     for span in spans:
@@ -1000,11 +1059,11 @@ def test_a_phase_suspended_on_ask_user_resumes_and_the_rest_run(phased):
 
     second = phased.ctx.process_turn("the first edition")
     assert second.status == TurnStatus.COMPLETED
-    assert second.answer == "Dune (b1) is on loan: l1, l2."
-    assert "(report)" in phased.answered[-1]
+    assert second.answer == "B1 has loans l1, l2."
+    assert phased.answered == []
     spans = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
     assert [(s.attributes["phase"], s.attributes["resumed"]) for s in spans] == [
-        ("find", False), ("book", False), ("book", True), ("report", False)]
+        ("find", False), ("book", False), ("book", True)]
     assert spans[1].attributes["suspended"] is True
 
 
@@ -1013,19 +1072,19 @@ def test_a_phase_executor_is_held_to_its_phase(phased):
     phased.ctx.process_turn("show the book Dune")
 
     queries = [call["user_query"] for call in executor.calls]
-    for query in queries:
-        # Only the phase's steps, framed as a part; the request is not in the input.
-        assert "show the book Dune" not in query
-        assert "Do only these steps, then finish. Later parts will do the rest." in query
+    # A part other than the last: only its steps, framed as a part; the request is not in its input.
+    assert "show the book Dune" not in queries[0]
+    assert "Do only these steps, then finish. Later parts will do the rest." in queries[0]
     assert queries[0].endswith("1. open_library\n2. find_book query=Dune")
+    # The last part is framed to run its steps only (3.16): __result__ writes the answer, and a
+    # None from it hands the answer to one deferred model call. No model call writes it here.
+    assert "This is part 2 of 2 (book) of a larger job. Do only these steps, then finish." in queries[1]
+    assert "answer the request" not in queries[1]
     assert queries[1].endswith("1. open_book_by_uid book_uid=b1\n2. list_loans (full list)")
-    # The last phase answers the request, so it sees it.
-    last = phased.answered[-1]
-    assert last.startswith("show the book Dune\n\n")
-    assert "Answer the request" in last
+    assert phased.answered == []
     # The executor span records the same input.
     executes = phased.sink.named(tracing.SPAN_AGENT_EXECUTE)
-    assert [e.attributes["agent_input"] for e in executes] == queries + [last]
+    assert [e.attributes["agent_input"] for e in executes] == queries
 
 
 def test_a_search_phase_that_ended_on_a_record_fills_from_its_own_search(phased):
@@ -1036,7 +1095,7 @@ def test_a_search_phase_that_ended_on_a_record_fills_from_its_own_search(phased)
     phased.start()
     result = phased.ctx.process_turn("show the book Dune")
 
-    assert result.answer == "Dune (b1) is on loan: l1, l2."
+    assert result.answer == "B1 has loans l1, l2."
     find = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[0]
     assert find.status == tracing.STATUS_OK
     assert find.attributes["facts"] == {"book_uids": ["b1"]}
@@ -1050,7 +1109,7 @@ def test_an_off_plan_search_in_a_phase_does_not_replace_its_fact(phased):
     phased.start()
     result = phased.ctx.process_turn("show the book Dune")
 
-    assert result.answer == "Dune (b1) is on loan: l1, l2."
+    assert result.answer == "B1 has loans l1, l2."
     find = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[0]
     assert find.attributes["facts"] == {"book_uids": ["b1"]}
 
@@ -1078,7 +1137,7 @@ def test_a_search_of_an_earlier_phase_never_counts(phased):
         return [
             Phase("find", lambda: find_steps(input.name), output=Found),
             Phase("again", lambda find: ["say the uid again"], output=Found),
-            Phase("report", lambda: report_steps()),
+            Phase("report", lambda: ["say who has the book on loan"]),
         ]
 
     phased.command = _phased_command(plan=plan_reading_the_search_again)
@@ -1100,7 +1159,7 @@ def test_a_phase_whose_opening_step_finds_the_record_already_open_fills_its_fact
     phased.start()
     result = phased.ctx.process_turn("show the book Dune")
 
-    assert result.answer == "Dune (b1) is on loan: l1, l2."
+    assert result.answer == "B1 has loans l1, l2."
     book = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[1]
     assert book.status == tracing.STATUS_OK
     assert book.attributes["facts"] == {"uid": "b1", "loan_uids": ["l1", "l2"]}
@@ -1171,6 +1230,7 @@ def test_write_answer_is_one_model_call_with_no_tools():
 
 
 def test_an_answer_only_phase_never_runs_a_workflow_command(phased, monkeypatch):
+    phased.command = _phased_command(plan=answer_by_model_plan)
     executor = phased.start()
     tool_calls = []
     monkeypatch.setattr(phased.ctx, "_execute_workflow_query",
@@ -1188,6 +1248,7 @@ def test_an_answer_only_phase_never_runs_a_workflow_command(phased, monkeypatch)
 
 
 def test_the_trace_shows_an_answer_only_phase_and_its_model_call(phased):
+    phased.command = _phased_command(plan=answer_by_model_plan)
     phased.start()
     phased.ctx.process_turn("show the book Dune")
 
@@ -1223,12 +1284,18 @@ def report_books_steps(books: Optional[list] = None):
             + "; ".join(f"{b.uid} has {', '.join(b.loan_uids) or 'none'}" for b in books)]
 
 
-def fan_plan(input):
-    return [
-        Phase("find", lambda: find_steps(input.name), output=Found),
-        Phase("books", each_book_steps, output=BookFacts, over="find.book_uids", item="uid"),
-        Phase("report", lambda books: report_books_steps(books)),
-    ]
+class FanBooks:
+    """find, then one book phase per book found (over=find.book_uids); __result__ lists them."""
+
+    def find(self, input) -> Found:
+        return find_steps(input.name)
+
+    @phase(over="find.book_uids")
+    def books(self, uid) -> BookFacts:
+        return each_book_steps(uid)
+
+    def __result__(self, input, books=None):
+        return books_answer(books)
 
 
 def _book_item(uid, clause, loans):
@@ -1251,7 +1318,7 @@ FAN_SCRIPT = {
 
 @pytest.fixture
 def fanned(phased, monkeypatch):
-    phased.command = _phased_command(plan=fan_plan)
+    phased.command = _phased_command(PlanGenerator=FanBooks)
     phased.script = dict(FAN_SCRIPT)
     return phased
 
@@ -1263,19 +1330,20 @@ def test_n_items_run_as_n_sub_plans_and_one_final_phase(fanned):
     queries = [call["user_query"] for call in executor.calls]
     assert len(queries) == 4  # find, then one sub-plan per book
     for k, uid in enumerate(["b1", "b2", "b3"], start=1):
-        assert f"part 2 of 3 (books) for item {k} of 3 ({uid})" in queries[k]
+        assert f"part 2 of 2 (books) for item {k} of 3 ({uid})" in queries[k]
         assert f"open_book_by_uid book_uid={uid}" in queries[k]
-        assert "Do only these steps" in queries[k]
+        # The last phase is framed to run its steps only (3.16): __result__ writes the answer.
+        assert "Do only these steps, then finish. Later parts will do the rest." in queries[k]
     # The final phase gets the list of per-item outputs, in item order.
     books = SEEN["report_books"]["books"]
     assert [type(b) for b in books] == [BookFacts] * 3
     assert [(b.uid, b.loan_uids) for b in books] == [("b1", ["l1"]), ("b2", ["l2", "l3"]),
                                                      ("b3", [])]
-    assert "b2 has l2, l3" in fanned.answered[-1]
+    assert fanned.answered == []
     assert result.answer == "b1: l1; b2: l2, l3; b3: none."
     spans = fanned.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
     assert [(s.attributes["phase"], s.attributes.get("item")) for s in spans] == [
-        ("find", None), ("books", "b1"), ("books", "b2"), ("books", "b3"), ("report", None)]
+        ("find", None), ("books", "b1"), ("books", "b2"), ("books", "b3")]
     items = spans[1:4]
     assert [s.attributes["record"] for s in items] == [FIRST, SECOND, THIRD]
     assert [s.attributes["record_issues"] for s in items] == [[], [], []]
@@ -1460,7 +1528,7 @@ def test_a_plan_that_returns_none_or_nothing_means_run_flat():
     command = _phased_command(plan=notes_only_plan, steps=flat_steps)
     assert phases_for(command, {"name": "Dune", "notes": False}) is None
     assert [p.name for p in phases_for(command, {"name": "Dune", "notes": True})] == [
-        "find", "book", "notes", "report"]
+        "find", "book", "notes"]
     empty = _phased_command(plan=lambda input: [] if not input.notes else plan(input),
                             steps=flat_steps)
     assert phases_for(empty, {"name": "Dune", "notes": False}) is None
@@ -1501,19 +1569,12 @@ def test_the_same_planning_command_runs_phased_for_other_inputs(phased):
     result = phased.ctx.process_turn("show the book Dune and its notes")
 
     assert [s.attributes["phase"] for s in phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)] == [
-        "find", "book", "notes", "report"]
+        "find", "book", "notes"]
     assert {call["max_iters"] for call in executor.calls} == {15}
-    assert result.answer == "Dune (b1) is on loan: l1, l2."
+    # A function plan has no __result__: the last phase's own answer is the turn's.
+    assert result.answer == "3 notes"
 
 
-def has_loans_plan(input):
-    return [
-        Phase("find", lambda: find_steps(input.name), output=Found),
-        Phase("book", lambda find: book_steps(find), output=BookFacts),
-        Phase("notes", lambda book: note_steps(book), output=NoteFacts,
-              when=lambda book: bool(book.loan_uids)),
-        Phase("report", report_steps),
-    ]
 
 
 def test_a_callable_when_binds_earlier_outputs_by_name():
@@ -1526,10 +1587,11 @@ def test_a_callable_when_binds_earlier_outputs_by_name():
         runs_now(Phase("x", lambda: [], when=lambda: 1 / 0), {})
     assert runs_now(Phase("x", lambda: [], when=True), {}) is True
     # A callable when is kept by plan() and in the flat steps; it is decided at run time.
-    command = _phased_command(plan=has_loans_plan)
+    command = _phased_command(PlanGenerator=HasLoans)
     assert [p.name for p in phases_for(command, {"name": "Dune"})] == [
-        "find", "book", "notes", "report"]
-    assert "count_notes on <book.uid>" in command.steps_fn(LibrarySignature.Input(name="Dune"))
+        "find", "book", "notes"]
+    assert any(step.startswith("count_notes on <book.uid>")
+               for step in command.steps_fn(LibrarySignature.Input(name="Dune")))
 
 
 def test_a_callable_when_whose_parameter_nothing_provides_fails_the_load():
@@ -1540,7 +1602,7 @@ def test_a_callable_when_whose_parameter_nothing_provides_fails_the_load():
 
 
 def test_a_phase_whose_condition_holds_runs(phased):
-    phased.command = _phased_command(plan=has_loans_plan)
+    phased.command = _phased_command(PlanGenerator=HasLoans)
     phased.start()
     phased.ctx.process_turn("show the book Dune")
 
@@ -1551,22 +1613,22 @@ def test_a_phase_whose_condition_holds_runs(phased):
 
 
 def test_a_phase_whose_condition_fails_is_skipped_and_counts_as_not_run(phased):
-    phased.command = _phased_command(plan=has_loans_plan)
+    phased.command = _phased_command(PlanGenerator=HasLoans)
     phased.script["book"] = dict(SCRIPT["book"], runs=[
         SCRIPT["book"]["runs"][0], _run("list_loans", {"loan_uids": []}, context=BOOK)])
     executor = phased.start()
-    phased.ctx.process_turn("show the book Dune")
+    result = phased.ctx.process_turn("show the book Dune")
 
     assert not any("(notes)" in call["user_query"] for call in executor.calls)
     assert "notes" not in SEEN
     assert SEEN["report"]["notes"] is None          # skipped phase: None (step 1a), not a default
     spans = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
-    assert [s.attributes["phase"] for s in spans] == ["find", "book", "notes", "report"]
+    assert [s.attributes["phase"] for s in spans] == ["find", "book", "notes"]
     assert spans[2].attributes["skipped"] is True and spans[2].status == tracing.STATUS_OK
     assert not [s for s in phased.sink.named(tracing.SPAN_AGENT_EXECUTE)
                 if s.parent_span_id == spans[2].span_id]
-    # The report keeps its place in the job: part 4 of 4.
-    assert "part 4 of 4 (report)" in phased.answered[-1]
+    assert phased.answered == []                 # __result__ wrote the answer, from the book
+    assert result.answer == "B1 has loans none."
 
 
 def test_a_condition_that_raises_fails_the_phase(phased):
@@ -1583,29 +1645,73 @@ def test_a_condition_that_raises_fails_the_phase(phased):
 
 
 def test_a_skipped_last_phase_leaves_the_answer_of_the_phase_before(phased):
+    # A skipped last phase leaves the answer of the phase before it. (A last phase written as
+    # 'say that' lines is a load error, skipped or not: test_a_last_phase_written_as_say_that_lines_fails_the_load.)
     phased.command = _phased_command(plan=lambda input: [
         Phase("find", lambda: find_steps(input.name), output=Found),
         Phase("book", lambda find: book_steps(find), output=BookFacts),
-        Phase("report", lambda book=None: report_steps(book), when=lambda book: not book.loan_uids)])
+        Phase("report", lambda book=None: ["say which loan is due first"],
+              when=lambda book: not book.loan_uids)])
     phased.start()
     result = phased.ctx.process_turn("show the book Dune")
     assert result.answer == "b1 has two loans"
+
+
+def test_a_last_phase_written_as_say_that_lines_fails_the_load():
+    # The say-that refusal, for a function plan and for a PlanGenerator class alike. This test
+    # does not use the phased fixture: that fixture stubs answer_by_code, which the check reads.
+    with pytest.raises(PlanningCommandFormatError, match="writes the answer as 'say that' lines"):
+        _phased_command(plan=lambda input: [
+            Phase("find", lambda: find_steps(input.name), output=Found),
+            Phase("report", lambda find: ["say that b1 has loans l1, l2"])])
+    # Skipped at run time (its when), it is still refused: the check reads the steps.
+    with pytest.raises(PlanningCommandFormatError, match="writes the answer as 'say that' lines"):
+        _phased_command(plan=lambda input: [
+            Phase("find", lambda: find_steps(input.name), output=Found),
+            Phase("book", lambda find: book_steps(find), output=BookFacts),
+            Phase("report", lambda book=None: ["say that b1 has loans l1, l2"],
+                  when=lambda book: not book.loan_uids)])
+
+    class SayThatLast:
+        def find(self, input) -> Found:
+            return find_steps(input.name)
+
+        def report(self, find):
+            return ["say that b1 has loans l1, l2"]
+
+    with pytest.raises(PlanningCommandFormatError, match="writes the answer as 'say that' lines"):
+        _phased_command(PlanGenerator=SayThatLast)
+    # A last phase with a judgement step too is the model's to write: it loads.
+    assert _phased_command(plan=lambda input: [
+        Phase("find", lambda: find_steps(input.name), output=Found),
+        Phase("report", lambda find: ["say that b1 has loans l1, l2", "say which loan is due first"])
+    ]).plan_fn
 
 
 FIVE = ["b1", "b2", "b3", "b4", "b5"]
 FIVE_LOANS = {"b1": ["l1"], "b2": [], "b3": ["l3"], "b4": ["l4"], "b5": []}
 
 
+def _two_with_loans(books):
+    return sum(1 for b in books if b.loan_uids) >= 2
+
+
 def two_with_loans_plan(max_items=None, noun=None):
-    def plan_(input):
-        return [
-            Phase("find", lambda: find_steps(input.name), output=Found),
-            Phase("books", each_book_steps, output=BookFacts, over="find.book_uids", item="uid",
-                  max_items=max_items, noun=noun,
-                  until=lambda books: sum(1 for b in books if b.loan_uids) >= 2),
-            Phase("report", lambda books: report_books_steps(books)),
-        ]
-    return plan_
+    """find, then books until two of them have loans (a stop condition); the cap and noun as given."""
+
+    class TwoWithLoans:
+        def find(self, input) -> Found:
+            return find_steps(input.name)
+
+        @phase(over="find.book_uids", max_items=max_items, noun=noun,
+               until=lambda input: _two_with_loans)
+        def books(self, uid) -> BookFacts:
+            return each_book_steps(uid)
+
+        def __result__(self, input, books=None):
+            return books_answer(books)
+
+    return TwoWithLoans
 
 
 @pytest.fixture
@@ -1632,7 +1738,7 @@ def test_until_binds_the_outputs_so_far_by_the_phase_name():
 
 
 def test_a_fan_out_stops_once_its_condition_holds(five):
-    five.command = _phased_command(plan=two_with_loans_plan())
+    five.command = _phased_command(PlanGenerator=two_with_loans_plan())
     executor = five.start()
     result = five.ctx.process_turn("show the book Dune")
 
@@ -1645,7 +1751,7 @@ def test_a_fan_out_stops_once_its_condition_holds(five):
 
 
 def test_the_cap_still_applies_to_a_fan_out_with_a_condition(five):
-    five.command = _phased_command(plan=two_with_loans_plan(max_items=2))
+    five.command = _phased_command(PlanGenerator=two_with_loans_plan(max_items=2))
     executor = five.start()
     result = five.ctx.process_turn("show the book Dune")
 
@@ -1674,7 +1780,7 @@ def test_a_noun_names_the_items_in_the_notes_without_the_phase_name():
 
 
 def test_a_noun_is_used_in_the_answer_note(five):
-    five.command = _phased_command(plan=two_with_loans_plan(noun="titles"))
+    five.command = _phased_command(PlanGenerator=two_with_loans_plan(noun="titles"))
     five.start()
     result = five.ctx.process_turn("show the book Dune")
     assert result.answer.endswith(
@@ -1683,7 +1789,7 @@ def test_a_noun_is_used_in_the_answer_note(five):
 
 
 def test_a_capped_fan_out_with_a_noun_says_the_noun(five):
-    five.command = _phased_command(plan=two_with_loans_plan(max_items=2, noun="titles"))
+    five.command = _phased_command(PlanGenerator=two_with_loans_plan(max_items=2, noun="titles"))
     five.start()
     result = five.ctx.process_turn("show the book Dune")
     assert result.answer.endswith("Note: only the first 2 of 5 titles were covered.")
@@ -1849,40 +1955,54 @@ from fastworkflow.planning_phases import (  # noqa: E402
 
 
 def optional_notes_plan(optional=True, when=True):
-    def plan_(input):
-        return [
-            Phase("find", lambda: find_steps(input.name), output=Found),
-            Phase("book", lambda find: book_steps(find), output=BookFacts),
-            Phase("notes", lambda book: note_steps(book), output=NoteFacts, when=when,
-                  optional=optional),
-            Phase("report", report_steps),
-        ]
-    return plan_
+    """notes is a phase that may fail (optional), and runs when ``when`` holds for the book."""
+
+    def holds(book):
+        return when(book) if callable(when) else when
+
+    class OptionalNotes:
+        def find(self, input) -> Found:
+            return find_steps(input.name)
+
+        def book(self, find) -> BookFacts:
+            return book_steps(find)
+
+        @phase(optional=optional)
+        def notes(self, book) -> NoteFacts:
+            if not holds(book):
+                return []
+            return note_steps(book)
+
+        def __result__(self, input, book=None, notes=None):
+            return report_answer(book, notes)
+
+    return OptionalNotes
 
 
 def test_an_optional_phase_that_fails_does_not_stop_the_call(phased):
-    phased.command = _phased_command(plan=optional_notes_plan())
+    phased.command = _phased_command(PlanGenerator=optional_notes_plan())
     phased.script["notes"] = dict(SCRIPT["notes"], runs=[], answer="it has 7 notes")  # no count_notes
     phased.start()
     result = phased.ctx.process_turn("show the book Dune")
 
     assert "stopped at its part" not in result.answer
-    assert result.answer == "Dune (b1) is on loan: l1, l2."
+    assert result.answer == "B1 has loans l1, l2."
     assert "7 notes" not in result.answer            # the failed phase's own text is dropped
     assert SEEN["report"]["notes"] is None          # counts as not run: None (step 1a)
-    assert "part 4 of 4 (report)" in phased.answered[-1]
+    assert phased.answered == []
     notes = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[2]
     assert notes.status == tracing.STATUS_ERROR and "NoteFacts.total" in notes.attributes["facts_error"]
     assert phased.ctx._phase_run is None
 
 
 def test_a_required_phase_that_fails_still_stops_the_call(phased):
-    phased.command = _phased_command(plan=optional_notes_plan(optional=False))
+    phased.command = _phased_command(PlanGenerator=optional_notes_plan(optional=False))
     phased.script["notes"] = dict(SCRIPT["notes"], runs=[], answer="it has 7 notes")
     phased.start()
     result = phased.ctx.process_turn("show the book Dune")
 
-    assert "stopped at its part 'notes'" in result.answer and "Not run: report." in result.answer
+    assert "stopped at its part 'notes'" in result.answer and "Not run" not in result.answer
+    assert "report" not in SEEN                      # __result__ never ran
     assert "7 notes" not in result.answer
     # The facts already filled, as code rendered them.
     assert "find:\n- book uids: b1" in result.answer
@@ -1890,11 +2010,11 @@ def test_a_required_phase_that_fails_still_stops_the_call(phased):
 
 
 def test_an_optional_phase_whose_condition_raises_is_left_out(phased):
-    phased.command = _phased_command(plan=optional_notes_plan(
+    phased.command = _phased_command(PlanGenerator=optional_notes_plan(
         when=lambda book: book.missing_field))
     phased.start()
     result = phased.ctx.process_turn("show the book Dune")
-    assert result.answer == "Dune (b1) is on loan: l1, l2."
+    assert result.answer == "B1 has loans l1, l2."
 
 
 def test_optional_must_be_a_bool():
@@ -1943,10 +2063,12 @@ def test_an_answer_only_answer_that_drops_a_list_item_gets_it_appended(phased):
 
 
 def test_an_answer_only_reply_that_is_empty_is_written_from_the_steps(phased, monkeypatch):
+    phased.command = _phased_command(plan=answer_by_model_plan)
     monkeypatch.setattr("fastworkflow.planning_phases.write_answer", lambda query: "```\n```")
     phased.start()
     result = phased.ctx.process_turn("show the book Dune")
-    assert result.answer == "B1 has loans l1, l2."
+    # The judgement step is written from the steps too, as a line of its own.
+    assert result.answer == "- B1 has loans l1, l2.\n- Which loan is due first."
 
 
 def test_an_answer_only_reply_that_cannot_be_parsed_is_written_from_the_steps(monkeypatch):
@@ -2146,18 +2268,23 @@ def test_answer_only_answer_bullets_a_code_written_answer_after_its_checks(monke
         "a, b, c, d"
 
 
-def test_code_writes_an_answer_only_phase_and_its_span_says_so(phased, monkeypatch):
-    # The fixture scripts the model's answers; here code writes this one.
-    monkeypatch.setattr("fastworkflow.planning_phases.answer_by_code", answer_by_code)
+def test_a_say_that_phase_before_the_last_writes_no_answer_and_its_span_says_so(phased):
+    # 3.16 (a): a phase before the last made only of 'say that' lines is skipped: no model call,
+    # and its text is not in the answer (only __result__ can use it). The last phase is a
+    # load error in 'say that' lines (test_a_last_phase_written_as_say_that_lines_fails_the_load).
+    phased.command = _phased_command(plan=lambda input: [
+        Phase("find", lambda: find_steps(input.name), output=Found),
+        Phase("report", lambda find=None: ["say that b1 has loans l1, l2"]),
+        Phase("book", lambda find: book_steps(find), output=BookFacts)])
     phased.start()
     result = phased.ctx.process_turn("show the book Dune")
-    assert result.answer == "B1 has loans l1, l2."
     assert phased.answered == []                       # no model call wrote it
+    assert "b1 has loans l1" not in result.answer
     spans = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
-    report = spans[-1]
+    report = spans[1]
+    assert report.attributes["phase"] == "report"
     assert report.attributes["answer_only"] is True
-    assert report.attributes["answer_by_code"] is True
-    assert all("answer_by_code" not in span.attributes for span in spans[:-1])
+    assert report.attributes["skipped"] is True
 
 
 # ----------------------------------------------------------------------
@@ -2244,6 +2371,7 @@ def test_extra_command_steps_move_out_of_an_answer_only_last_phase():
 
 
 def test_a_planner_command_step_runs_before_the_answer_only_last_phase(phased, monkeypatch):
+    phased.command = _phased_command(plan=answer_by_model_plan)
     # 3.06 R2/R3: the planner's extra open_portrait step landed in the answer phase, which
     # then ran as an executor with no list rules. It now runs in its own phase before it.
     phased.steps_after = ["count_notes on b1", "say how many notes it has"]
@@ -2271,6 +2399,7 @@ def test_a_planner_command_step_runs_before_the_answer_only_last_phase(phased, m
 
 
 def test_the_extra_steps_phase_is_rebuilt_after_a_restore(phased, monkeypatch):
+    phased.command = _phased_command(plan=answer_by_model_plan)
     phased.steps_after = ["count_notes on b1"]
     phased.script["extra_steps"] = dict(
         runs=[_run("count_notes", {"total": 3}, context=BOOK)], record=BOOK,
@@ -2308,6 +2437,7 @@ def test_steps_before_get_a_phase_of_their_own():
 
 
 def _with_steps_before(phased, monkeypatch):
+    phased.command = _phased_command(plan=answer_by_model_plan)
     phased.steps_before = ["count_notes on b1"]
     phased.script[STEPS_BEFORE_PHASE] = dict(
         runs=[_run("count_notes", {"total": 3}, context=BOOK)], record=BOOK,

@@ -488,7 +488,8 @@ class ResponseGenerator:
 '''
 
 
-def test_missing_output_warning_once_for_execution_command(tmp_path, caplog):
+def test_text_only_return_from_execution_command_is_a_call_error(tmp_path, caplog):
+    # fix-3rsq.declared-output-required: an execution command that declares an Output must return it.
     root = Path(__file__).resolve().parent.parent
     env_vars = dict(dotenv_values(root / "fastworkflow" / "examples" / "fastworkflow.env"))
     fastworkflow.init(env_vars=env_vars)
@@ -508,12 +509,13 @@ def test_missing_output_warning_once_for_execution_command(tmp_path, caplog):
         parameters={"query": "a"},
     )
     try:
-        with caplog.at_level(logging.WARNING):
-            CommandExecutor.perform_action(workflow, action)
-            CommandExecutor.perform_action(workflow, action)
-        msgs = [r.message for r in caplog.records if "declares an Output but returned none" in r.message]
-        assert len(msgs) == 1
-        assert "text_only_output declares an Output but returned none" in msgs[0]
+        for _ in range(2):
+            with pytest.raises(TypeError) as raised:
+                CommandExecutor.perform_action(workflow, action)
+            assert str(raised.value).startswith(
+                "text_only_output declares an Output but returned CommandResponse without output; return the Output, "
+                "or CommandResponse(response=..., output=<Output>)")
+        assert not [r for r in caplog.records if "declares an Output but returned none" in r.message]
     finally:
         fastworkflow.RoutingRegistry.clear_registry()
 

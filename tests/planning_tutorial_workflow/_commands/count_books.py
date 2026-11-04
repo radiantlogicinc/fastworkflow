@@ -1,6 +1,6 @@
 """count_books: how many books match the words the request gives.
 
-The find phase runs find_book and keeps its total as a fact; the answer phase writes the
+The find phase runs find_book and keeps its total as a fact; __result__ writes the
 answer from that fact.
 """
 from pydantic import BaseModel, Field
@@ -25,5 +25,5 @@ class PlanGenerator:
     def find(self, input) -> Found:
         return [run("find_book", query=input.query)]
 
-    def answer(self, input, find):
-        return [f"say that {find.total} books match {input.query}"]
+    def __result__(self, input, find):
+        return f"{find.total} books match {input.query}."

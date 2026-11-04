@@ -208,8 +208,8 @@ class PlanGenerator:
     def find(self, input) -> Found:
         return [f"find_book query={input.query}"]
 
-    def answer(self, input, find):
-        return [f"say that found {find.titles}"]
+    def __result__(self, input, find):
+        return f"Found {find.titles}."
 '''
     folder = _build_workflow(tmp_path, "wf_fact_from", extra_planning_commands={"Library/find_titles": phased_planning_command})
     res = planning_commands.resolve_field_sources(folder)

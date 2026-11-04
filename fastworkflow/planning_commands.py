@@ -1518,6 +1518,7 @@ def planning_command_from_parts(name: str, signature, path: str, *, steps_fn: Ca
             raise PlanningCommandFormatError(str(exc)) from None
         if not lines:
             raise PlanningCommandFormatError(f"{path}: steps() returns no steps")
+        _refuse_flat_say_that(path, name, lines)
         command = PlanningCommandCommand(name=name, description=description, params=(), path=path,
                                input_model=input_model, steps_fn=steps_fn, validate=validate,
                                plain_utterances=tuple(utterances), plan_cls=plan_cls,
@@ -1531,6 +1532,13 @@ def planning_command_from_parts(name: str, signature, path: str, *, steps_fn: Ca
                            output_model=output_model if declared_output else None)
     if plan_fn is not None:
         command = replace(command, phase_outputs=_checked_plan(command, own_steps=own_steps))
+    else:
+        for env in _template_grid(command):
+            try:
+                flat_lines = _call_steps(steps_fn, input_instance(command, env), path)
+            except Exception:  # noqa: BLE001 - steps that fail here are the template check's to report
+                continue
+            _refuse_flat_say_that(path, name, flat_lines)
     uses_result = plan_cls is not None and _check_result_method(plan_cls, path, command)
     if declared_output and not uses_result:
         raise PlanningCommandFormatError(
@@ -1558,6 +1566,15 @@ def _concatenated_steps_fn(plan_fn: Callable) -> Callable:
         return concatenated_steps(plan_fn(input))
 
     return steps
+
+
+def _refuse_flat_say_that(path: str, name: str, lines) -> None:
+    """A flat call whose answer is only 'say that' lines is refused as a last phase of them is (3.16):
+    the answer is ``__result__``'s, and the load check can see the steps the call runs flat."""
+    from fastworkflow import planning_phases
+
+    if lines and planning_phases.answer_by_code("\n".join(lines)):
+        raise PlanningCommandFormatError(planning_phases.say_that_last_message(path, name))
 
 
 def _checked_plan(command: PlanningCommandCommand, own_steps: bool = True) -> tuple[type, ...]:
@@ -1592,6 +1609,11 @@ def _checked_plan(command: PlanningCommandCommand, own_steps: bool = True) -> tu
                 raise PlanningCommandFormatError(
                     f"{command.path}: plan() returns no phases for some inputs (run flat), so "
                     "the planning command file needs its own steps(input)")
+            try:
+                flat_lines = _call_steps(command.steps_fn, input_instance(command, env), command.path)
+            except Exception:  # noqa: BLE001 - steps that fail here are the template check's to report
+                flat_lines = []
+            _refuse_flat_say_that(command.path, command.name, flat_lines)
             continue
         try:
             phases = active_phases(result, f"{command.path}: plan()")

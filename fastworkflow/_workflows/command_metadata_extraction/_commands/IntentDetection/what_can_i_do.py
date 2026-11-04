@@ -13,8 +13,6 @@ from fastworkflow.command_metadata_api import CommandMetadataAPI
 
 class Signature:
     """List all the commands available in the current context along with their metadata"""
-    class Output(BaseModel):
-        valid_command_names: list[str]
 
     # Constants from plain_utterances.json
     plain_utterances = [

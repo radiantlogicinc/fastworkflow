@@ -37,4 +37,5 @@ class ResponseGenerator:
         return fastworkflow.CommandResponse(
             response="command aborted\n",
             artifacts=output.model_dump(),
+            output=output,
         ) 

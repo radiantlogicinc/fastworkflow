@@ -25,5 +25,5 @@ class PlanGenerator:
     def find(self, input) -> Found:
         return [run("find_book", query=input.query)]
 
-    def answer(self, input, find):
-        return [f"say that {input.query} matches {listed(find.titles, find.total, 'book')}"]
+    def __result__(self, input, find):
+        return f"{input.query} matches {listed(find.titles, find.total, 'book')}."

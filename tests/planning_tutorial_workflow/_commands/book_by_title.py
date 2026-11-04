@@ -1,7 +1,7 @@
 """book_by_title: the book whose title the request names, picked by its title.
 
 find lists the matches; book opens the one whose title is the request's title (pick), and
-is skipped when nothing matched; answer says what book found, or that no book matches.
+is skipped when nothing matched; __result__ says what book found, or that no book matches.
 """
 from pydantic import BaseModel, Field
 
@@ -19,4 +19,4 @@ class Signature:
 
 
 class PlanGenerator(BookPhases):
-    """find, book and answer are BookPhases' phases; this command is their whole job."""
+    """find, book and __result__ are BookPhases' phases; this command is their whole job."""

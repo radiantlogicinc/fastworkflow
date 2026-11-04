@@ -322,6 +322,10 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # only a pronoun or only a kind word or field name of the workflow, and was treated as not given. A
 # span recorded before this carries no such key.
 #
+# v34: fw.skill.answer v1 (fix-3rsq.p14.6) -- new: the deferred model call that writes a planning
+# command call's answer when its __result__ returns None (3.16). One span per call, a child of the
+# turn's planning command work; a call whose answer is text or __result__'s makes no such span.
+#
 # v33: fw.nlu.intent v4 (fix-jd9o.1) -- `jev_tiebreak`: Jev's choice among an ambiguous intent's
 # candidates, with `matcher_layer` "jev_tiebreak" when it routed. fw.nlu.param_extraction v9
 # (fix-jd9o.3) -- `fields_reset_not_given`: fields an LLM extraction filled that Jev judged not given,
@@ -339,7 +343,7 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # by owner decision 2026-10-30. `experiment_arm`, `fast_path` and `recipe_choice` (the v25 keys of the
 # planner span) and `fast_path_refusal_asked` (the v28 key of the executor span) are no longer declared
 # or written. A span recorded before this carries them as it wrote them; nothing reads them as a live path.
-SPAN_CONTRACT_VERSION = 33
+SPAN_CONTRACT_VERSION = 34
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -379,6 +383,11 @@ AGENT_LOOP_SPAN_NAMES = frozenset({SPAN_AGENT_EXECUTE, SPAN_AGENT_STEP})
 # sub-plan run by a fresh executor. Its fw.agent.execute span is its child, so a
 # grader reads each phase's steps, budget and filled facts in one place.
 SPAN_PLANNING_COMMAND_PHASE = "fw.skill.phase"
+
+# The deferred answer of a planning command call (3.16): one model call with the phases' facts,
+# made only when the call's __result__ returned None, or when the call has no __result__ answer
+# to give. It is the answer's own step, not a phase, so it is its own span.
+SPAN_PLANNING_COMMAND_ANSWER = "fw.skill.answer"
 
 # Originally reserved-for-v2 so the schema needed no migration when the deeper
 # emitters landed. They have (D3 amendment, 2026-08-26): fw.nlu.* emit inside
@@ -612,6 +621,13 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # v6 (fix-3rsq.4.10): `uses_result`, written on an answer-only phase of a command with
     # a result method when that phase is skipped (no executor, no model call). It was
     # written from Phase 3 without being declared here.
+    # v1 (fix-3rsq.p14.6): the deferred answer of a planning command call (3.16). `skill`, `phase`
+    # and `phase_index` name the phase whose facts it writes from; `phase_count` the call's phases.
+    # `error_type` is written only when the model call raised.
+    SPAN_PLANNING_COMMAND_ANSWER: SpanContract(
+        version=1,
+        attributes=frozenset({"skill", "phase", "phase_index", "phase_count", "error_type"}),
+    ),
     SPAN_PLANNING_COMMAND_PHASE: SpanContract(
         version=6,
         attributes=frozenset(

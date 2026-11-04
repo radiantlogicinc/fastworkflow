@@ -2,7 +2,7 @@
 
 A request about every member is refused before any step runs. find lists the members by
 name; member reads the loans of the one picked by name (skipped when nothing matched);
-answer names the books.
+__result__ names the books.
 """
 import fastworkflow
 from pydantic import BaseModel, Field
@@ -44,11 +44,10 @@ class PlanGenerator:
             return []
         return [pick("list_member_loans", named=input.member)]
 
-    def answer(self, input, member=None):
+    def __result__(self, input, member=None):
         if member is None:
-            return [f"say that no member is named {input.member}"]
-        return [f"say that {input.member} has {listed(member.titles, member.total, 'book')} "
-                "on loan"]
+            return f"No member is named {input.member}."
+        return f"{input.member} has {listed(member.titles, member.total, 'book')} on loan."
 
 
 #: Words that name every member, not one.

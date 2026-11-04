@@ -494,8 +494,8 @@ def test_code_runs_quoted_values_and_example_values_while_hand_typed_and_cme_kee
         def notes(self, open):
             return [run("add_note", text=v).note("for the record") for v in special_values]
 
-        def answer(self, open):
-            return [f"say that notes were added to {open.book_uid}"]
+        def __result__(self, open):
+            return f"Notes were added to {open.book_uid}."
 
     # LibraryRunner reads wf.context["by_code"], which run_execute_workflow_query sets for
     # code-run steps and clears in its finally block.
@@ -559,8 +559,8 @@ def test_the_cme_declines_an_example_value_in_a_step_the_agent_wrote(library_env
         def book(self, input, find):
             return [pick("open_book", named=input.title)]
 
-        def answer(self):
-            return ["say that the book was opened"]
+        def __result__(self):
+            return "The book was opened."
 
     library_env.planning_command = _build_planning_command(Plan)
     before_notes = list(lib.books["b1"].notes)
@@ -1024,8 +1024,8 @@ def test_pick_in_a_later_phase_runs_by_code_on_the_one_exact_match(library_env):
         def book(self, input, find) -> OpenedBook:
             return [pick("open_book", named=input.title)]
 
-        def answer(self, book):
-            return [f"say that {book.title} ({book.book_uid}) was opened"]
+        def __result__(self, book):
+            return f"{book.title} ({book.book_uid}) was opened."
 
     library_env.planning_command = _build_planning_command(Plan)
     result = library_env.ctx.process_turn("look up Dune")
@@ -1035,7 +1035,7 @@ def test_pick_in_a_later_phase_runs_by_code_on_the_one_exact_match(library_env):
     # find_book query=Dune returned b1 ("Dune") and b2 ("Dune Messiah"); pick opened b1 in code.
     assert library_env.runner.sent == ["find_book query=Dune", "open_book book_uid=b1"]
     spans = library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
-    assert [s.attributes["phase"] for s in spans] == ["find", "book", "answer"]
+    assert [s.attributes["phase"] for s in spans] == ["find", "book"]
     assert spans[1].attributes["code_stop"] == "done"
     assert spans[1].attributes["facts"] == {"book_uid": "b1", "title": "Dune"}
 
@@ -1097,8 +1097,8 @@ def test_pick_chooses_the_listing_whose_uid_list_fits_the_command_parameter(libr
         def book(self, input, find) -> OpenedBook:
             return [pick("open_book", named=input.title)]
 
-        def answer(self, book):
-            return [f"say that {book.book_uid} was opened"]
+        def __result__(self, book):
+            return f"{book.book_uid} was opened."
 
     library_env.planning_command = _build_planning_command(Plan)
     result = library_env.ctx.process_turn("look up Dune")
@@ -1120,8 +1120,8 @@ def test_pick_uses_an_explicit_uid_as_given(library_env):
         def book(self, input, find) -> OpenedBook:
             return [pick("open_book", named=input.title, book_uid=find.book_uids[-1])]
 
-        def answer(self, book):
-            return [f"say that {book.book_uid} was opened"]
+        def __result__(self, book):
+            return f"{book.book_uid} was opened."
 
     library_env.planning_command = _build_planning_command(Plan)
     result = library_env.ctx.process_turn("look up Dune")
@@ -1151,8 +1151,8 @@ def test_pick_joins_pages_of_a_full_list_listing(library_env, monkeypatch):
         def book(self, input, find) -> OpenedBook:
             return [pick("open_book", named="Frank Herbert")]
 
-        def answer(self, book):
-            return [f"say that {book.book_uid} was opened"]
+        def __result__(self, book):
+            return f"{book.book_uid} was opened."
 
     library_env.planning_command = _build_planning_command(AuthorPlan)
 
@@ -1196,8 +1196,8 @@ def test_pick_skips_a_child_listing_inside_a_child_range(library_env, monkeypatc
         def book(self, input, find) -> OpenedBook:
             return [pick("open_book", named=input.title)]
 
-        def answer(self, book):
-            return [f"say that {book.book_uid} was opened"]
+        def __result__(self, book):
+            return f"{book.book_uid} was opened."
 
     library_env.planning_command = _build_planning_command(Plan)
     library_env.model.run("find_book query=Dune")

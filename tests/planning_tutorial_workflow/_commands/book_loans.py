@@ -1,7 +1,7 @@
 """book_loans: the book the request names and who has it on loan.
 
 Reuses the phases book_by_title shares (_book_phases.BookPhases): __phases__ places them and the
-new loans phase in order, and answer extends the shared answer with super().
+new loans phase in order, and __result__ extends the shared answer with super().
 """
 from pydantic import BaseModel, Field
 
@@ -22,7 +22,7 @@ class Signature:
 
 class PlanGenerator(BookPhases):
     def __phases__(self, input):
-        return [self.find, self.book, self.loans, self.answer]
+        return [self.find, self.book, self.loans]
 
     class Loans(BaseModel):
         borrowers: list[str] = fact_from("list_loans.borrowers")
@@ -33,9 +33,9 @@ class PlanGenerator(BookPhases):
             return []
         return [full_list("list_loans", book_uid=book.uid)]
 
-    def answer(self, input, book=None, loans=None):
-        steps = super().answer(input, book)
+    def __result__(self, input, book=None, loans=None):
+        answer = super().__result__(input, book)
         if loans is None:
-            return steps
-        return [*steps, f"say that it is on loan to "
-                        f"{listed(loans.borrowers, loans.total, 'borrower')}"]
+            return answer
+        return (f"{answer}\nIt is on loan to "
+                f"{listed(loans.borrowers, loans.total, 'borrower')}.")

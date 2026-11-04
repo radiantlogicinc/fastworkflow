@@ -905,6 +905,9 @@ def check_bindings(phases: Sequence[Phase], where: str = "plan()") -> dict[tuple
     this plan. The planning command loader fails on one that binds in no plan the inputs give (a
     misspelled phase name). A parameter with another default (``family=family``, a value
     the function keeps) is not a fact parameter and is not returned.
+
+    A last phase written as 'say that' lines also fails (``last_phase_say_that_message``): that
+    one builds its steps on placeholders to read them, the only steps this function runs.
     """
     defaults: dict[tuple[str, str, str], bool] = {}
     with_output: dict[str, tuple[type[BaseModel], ...]] = {}
@@ -960,7 +963,45 @@ def check_bindings(phases: Sequence[Phase], where: str = "plan()") -> dict[tuple
         if phase.output is not None:
             with_output[phase.name] = output_members(phase.output)
         earlier_names.add(phase.name)
+    message = last_phase_say_that_message(_plan_path(where), phases)
+    if message:
+        raise PhaseError(message)
     return defaults
+
+
+def _plan_path(where: str) -> str:
+    """The planning command's path, from the ``"<path>: plan()"`` a loader passes as *where*."""
+    return where[: -len(": plan()")] if where.endswith(": plan()") else where
+
+
+def last_phase_say_that_message(path: str, phases: Sequence[Phase]) -> Optional[str]:
+    """The load error for a call whose last phase writes its answer as 'say that' lines (3.16), or None.
+
+    The last phase's steps are built as the template builds them (placeholder facts, under
+    ``building_template``) and read by ``answer_by_code``: every step verbatim or a guard. A
+    judgement step is the model's to write, so such a phase is not refused. A phase whose steps
+    do not build here is decided at run time, and is not judged.
+    """
+    phases = list(phases)
+    if not phases:
+        return None
+    last = phases[-1]
+    earlier = {phase.name for phase in phases[:-1] if phase.output is not None}
+    try:
+        with building_template():
+            lines = _checked_steps(last.steps_fn(**_template_kwargs(last, earlier)), last)
+    except Exception:  # noqa: BLE001 - not built here: decided at run time, not refused
+        return None
+    if not answer_by_code("\n".join(lines)):
+        return None
+    return say_that_last_message(path, last.name)
+
+
+def say_that_last_message(path: str, phase_name: str) -> str:
+    """The error for a last phase written as 'say that' lines (3.16): the load check's message, and
+    the run-time refusal's (``WorkflowExecutionContext._run_planning_command_phase``)."""
+    return (f"{path}: phase '{phase_name}' writes the answer as 'say that' lines, which code no "
+            "longer copies; return the text from __result__(self, input, ...) instead")
 
 
 def _entered(runs: Sequence[Mapping[str, Any]], index: int, record: Optional[str]) -> Any:
@@ -1596,7 +1637,9 @@ def phase_query(request: str, plan_text: str, *, index: int, count: int, name: s
     A phase other than the last gets only its own steps: the request is left out, so
     the run cannot take on the rest of the job (later phases do it). The last phase
     gets the request too, since it writes the answer to it, unless *result_driven* is
-    true (``__result__`` writes the call's answer). An *answer_only* phase is told to
+    true: a command with ``__result__`` gets the answer from ``__result__``, or, when that
+    returns None, from one model call with the phases' facts (3.16), so this phase only
+    runs its steps. An *answer_only* phase is told to
     run no command and to write from the facts its steps carry (``ANSWER_ONLY_RULE``).
     *item* ``(k, n, value)`` (0-based *k*) frames one item's sub-plan of a fan-out phase.
     *code_steps*: code runs the phase's leading steps first (``CodeSteps``), and the run
@@ -3128,9 +3171,11 @@ def _result_fn_on_class(plan_cls: type) -> Callable | None:
 def run_call_result(plan_cls: type, input: Any, outputs: Mapping[str, Any], *,
                     phase_names: frozenset[str], output_model: type[BaseModel] | None,
                     command_name: str, request: str) -> tuple[Any, bool]:
-    """Run ``__result__`` once; on failure or an unexpected return, one model call writes the answer.
+    """Run ``__result__`` once. Its text (or CommandResponse) is the answer; ``None`` means no
+    code-written answer on this path, and the caller writes the answer as with no ``__result__``
+    (3.16), with no warning. On failure or any other return, one model call writes the answer.
 
-    Returns ``(command_response, fallback_used)``.
+    Returns ``(command_response, fallback_used)``, or ``(None, False)`` for a ``None`` return.
     """
     import fastworkflow
     from fastworkflow.utils.logging import logger
@@ -3142,6 +3187,8 @@ def run_call_result(plan_cls: type, input: Any, outputs: Mapping[str, Any], *,
     kwargs = bound_result_arguments(result_fn, input, outputs, phase_names=phase_names)
     try:
         raw = result_fn(instance, **kwargs)
+        if raw is None:
+            return None, False
         if isinstance(raw, str) and not raw.strip():
             raise TypeError("empty str")
         try:
@@ -3151,7 +3198,10 @@ def run_call_result(plan_cls: type, input: Any, outputs: Mapping[str, Any], *,
     except Exception as error:  # noqa: BLE001 - runtime rule 3.16
         logger.warning("planning command %r: __result__ failed (%s: %s); writing the answer "
                        "with one model call", command_name, type(error).__name__, error)
-        return fastworkflow.CommandResponse(response=write_answer(request), output=None), True
+        # The model writes from the facts the phases filled, as the call's answer does with no __result__ (3.16).
+        facts = "\n\n".join(found_facts(outputs))
+        query = f"{request}\n\n{facts}" if facts else request
+        return fastworkflow.CommandResponse(response=write_answer(query), output=None), True
 
 
 #: The author-facing API: what a planning command file writes (``Phase``, ``concatenated_steps``,

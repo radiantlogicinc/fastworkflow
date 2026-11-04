@@ -422,6 +422,7 @@ def test_the_vocabularies_are_the_layers_the_runtime_actually_has():
         "embedding_cache",
         "classifier",
         "clarification_default",
+        "jev_tiebreak",
         "unknown",
     }
     assert set(get_args(RoutingOutcome)) == {

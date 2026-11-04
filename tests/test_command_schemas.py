@@ -3,7 +3,8 @@
 - ``GET /command_schemas`` (operation_id ``get_command_schemas``) lists every listed command of the
   channel's workflow with its kind and its input and output JSON Schemas; framework commands are hidden.
 - A per-command MCP tool declares ``outputSchema`` when its command declares a ``Signature.Output``, and
-  its result carries ``structuredContent`` with the Output as JSON, beside the text content.
+  its result carries ``structuredContent`` with the Output as JSON, beside the text content. A command
+  that declares an Output and returns only text is a call error (fix-3rsq.declared-output-required).
 - A turn's ``command_response`` still carries ``next_actions`` and ``recommendations``.
 
 No mocks and no model calls: the tests copy ``tests/hello_world_workflow`` into a temp folder and edit the
@@ -91,6 +92,20 @@ _CALL_WITHOUT_OUTPUT = """    def __call__(self, workflow: Workflow, command: st
         total = self._process_command(workflow, command_parameters)
         return f"Response: {total}"
 """
+
+
+_CALL_WITH_CR_OUTPUT = """    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> fastworkflow.CommandResponse:
+        total = self._process_command(workflow, command_parameters)
+        return fastworkflow.CommandResponse(response=f"Response: {total}",
+                                            output=Signature.Output(sum_of_two_numbers=total))
+"""
+
+
+def _copy_hello_declaring_output_with_call(folder: Path, call: str) -> str:
+    """A copy of the hello workflow whose add_two_numbers declares an Output and returns ``call``'s form."""
+    shutil.copytree(HELLO, folder, ignore=_COPY_IGNORE, symlinks=True)
+    (folder / COMMAND_FILE).write_text(_HEADER + _OUTPUT_CLASS + _BODY + call)
+    return str(folder)
 
 
 def _copy_hello(folder: Path, *, declare_output: bool) -> str:
@@ -279,6 +294,26 @@ def test_mcp_tool_without_an_output_declares_no_output_schema(no_output_workflow
     })
     assert "structuredContent" not in rpc["result"]
     assert rpc["result"]["content"][0]["text"]
+
+
+def test_declared_output_returned_as_text_is_a_call_error_over_mcp(tmp_path, mcp_env):
+    server = _mcp_server(_copy_hello_declaring_output_with_call(tmp_path / "text_output", _CALL_WITHOUT_OUTPUT))
+
+    result = server.call_tool("add_two_numbers", {"first_num": 2.0, "second_num": 3.0})
+    assert result.isError is True
+    assert result.content[0].text == (
+        "Error: add_two_numbers declares an Output but returned str; return the Output, "
+        "or CommandResponse(response=..., output=<Output>)")
+    assert getattr(result, "structuredContent", None) is None
+
+
+def test_command_response_carrying_the_output_gives_structured_content_over_mcp(tmp_path, mcp_env):
+    server = _mcp_server(_copy_hello_declaring_output_with_call(tmp_path / "cr_output", _CALL_WITH_CR_OUTPUT))
+
+    result = server.call_tool("add_two_numbers", {"first_num": 2.0, "second_num": 3.0})
+    assert result.isError is False
+    assert result.structuredContent == {"sum_of_two_numbers": 5.0}
+    assert result.content[0].text == "Response: 5.0"
 
 
 # ---------------------------------------------------------------------------

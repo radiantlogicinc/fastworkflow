@@ -38,8 +38,8 @@ class PlanGenerator:
     def find(self, input):
         return [run(FIND[input.kind], query=input.name)]
 
-    def answer(self, input, find):
-        return [f"say that {input.name} matches {listed(find.labels, find.total, input.kind)}"]
+    def __result__(self, input, find):
+        return f"{input.name} matches {listed(find.labels, find.total, input.kind)}."
 
 
 FIND = {"book": "find_book", "member": "find_member"}

@@ -1,7 +1,7 @@
 """_book_phases: the phases book_by_title and book_loans share.
 
 find lists the matches; book opens the one whose title is the request's title (pick), and
-is skipped when nothing matched; answer says what book found, or that no book matches. A
+is skipped when nothing matched; __result__ says what book found, or that no book matches. A
 command that subclasses BookPhases keeps these phases and adds its own (book_loans adds loans).
 """
 from pydantic import BaseModel
@@ -28,8 +28,8 @@ class BookPhases:
             return []
         return [pick("show_book", named=input.title)]
 
-    def answer(self, input, book=None):
+    def __result__(self, input, book=None):
         if book is None:
-            return [f"say that no book matches {input.title}"]
-        return [f"say that {book.name} is by {book.author}; the library owns "
-                f"{book.copies} copies"]
+            return f"No book matches {input.title}."
+        return (f"{book.name} is by {book.author}; the library owns "
+                f"{book.copies} copies.")

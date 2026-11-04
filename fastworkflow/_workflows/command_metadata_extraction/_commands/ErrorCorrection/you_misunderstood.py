@@ -68,4 +68,5 @@ class ResponseGenerator:
         return fastworkflow.CommandResponse(
             response=response,
             artifacts=output.model_dump(),
+            output=output,
         ) 

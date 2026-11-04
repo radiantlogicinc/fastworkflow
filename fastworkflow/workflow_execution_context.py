@@ -719,8 +719,6 @@ class WorkflowExecutionContext:
         """Append one command execution to the current turn's accumulator."""
         self._turn_outputs.append(command_output)
         fastworkflow.turn.warn_on_unserializable_artifacts(command_output)
-        wf_folder = self._app_workflow.folderpath if self._app_workflow else None
-        fastworkflow.turn.warn_on_missing_declared_output(command_output, wf_folder)
 
     def append_ask_user_entry(self, question: str) -> fastworkflow.CommandOutput:
         """Append an unanswered ask_user exchange entry and return it.
@@ -2310,6 +2308,8 @@ class WorkflowExecutionContext:
             "first_step": first_step,
             "plan": "",
             "uses_result": bool(getattr(command, "uses_result", False)),
+            # A flat call: one phase named after the planning command (call_phases).
+            "flat": len(call.phases) == 1 and call.phases[0].name == command.name,
         }
         return self._run_planning_command_phases(first_step)
 
@@ -2467,18 +2467,21 @@ class WorkflowExecutionContext:
             state["index"] += 1
         uses_result = state.get("uses_result")
         command_output = None
+        response = None
         if uses_result and command.plan_cls is not None:
-            from fastworkflow.planning_commands import input_instance
+            from fastworkflow.planning_commands import _phase_names_for_command, input_instance
 
             typed = planning_phases.typed_phase_outputs(state["outputs"], phases)
             input_obj = input_instance(command, state["args"])
+            # __result__ may name any phase of the command: one this call left out is None (3.16).
             response, _fallback = planning_phases.run_call_result(
                 command.plan_cls, input_obj, typed,
-                phase_names=phase_names,
+                phase_names=phase_names | frozenset(_phase_names_for_command(command)),
                 output_model=command.output_model,
                 command_name=command.name,
                 request=state["query"],
             )
+        if response is not None:
             answer = response.response or ""
             notes = list(state.get("notes") or [])
             if notes:
@@ -2490,10 +2493,8 @@ class WorkflowExecutionContext:
             )
             if self._app_workflow:
                 command_output.workflow_name = self._app_workflow.folderpath.split("/")[-1]
-            wf_folder = self._app_workflow.folderpath if self._app_workflow else None
             fastworkflow.turn.warn_on_missing_declared_output(
                 command_output,
-                wf_folder,
                 output_model=command.output_model,
             )
             if len(self._frame_stack()) == 1:
@@ -2502,17 +2503,24 @@ class WorkflowExecutionContext:
                 # which appends it (workflow_agent._execute_workflow_query).
                 self.append_turn_output(command_output)
         else:
-            answers = state["answers"]
+            # No __result__, or it returned None (no code-written answer, 3.16): the answer is the
+            # one the phases give, as with no __result__. A deferred answer is written now.
+            settled: dict = {}
+            answers = [self._settled_phase_answer(a, phases, settled) for a in state["answers"]]
+            phase_answers = [self._settled_phase_answer(a, phases, settled)
+                             for a in state.get("phase_answers") or []]
             # The last phase writes the answer, from the facts its steps carry (a fan-out
             # last phase: its items' answers, in item order).
-            last = [a for a in state.get("phase_answers") or [] if a]
+            last = [a for a in phase_answers if a]
             answer = "\n\n".join(last) if last else "\n\n".join(a for a in answers if a)
-            if state.get("extra_answer") and last:
+            extra = self._settled_phase_answer(state.get("extra_answer"), phases, settled)
+            if extra and last:
                 # The extra command steps' own report (their phase is not the last).
-                answer = f"{answer}\n\n{state['extra_answer']}"
-            if state.get("before_answer") and last:
+                answer = f"{answer}\n\n{extra}"
+            before = self._settled_phase_answer(state.get("before_answer"), phases, settled)
+            if before and last:
                 # The report of the extra steps before the planning command's own (their phase is first).
-                answer = f"{state['before_answer']}\n\n{answer}"
+                answer = f"{before}\n\n{answer}"
             notes = list(state.get("notes") or [])
             if notes:
                 answer = "\n\n".join(part for part in (answer, " ".join(notes)) if part)
@@ -2523,6 +2531,60 @@ class WorkflowExecutionContext:
         return dspy.Prediction(final_answer=answer, exhausted=False,
                                phase_exhausted=bool(state.get("exhausted")),
                                command_output=command_output)
+
+    def _defer_phase_answer(self, index: int, query: str, plan: str) -> dict:
+        """Hold an answer-only phase's model call until the answer is settled (3.16): it runs
+        only when ``__result__`` returned None. Returns the marker the phase records."""
+        deferred = self._phase_run.setdefault("deferred", {})
+        key = str(len(deferred))
+        deferred[key] = {"index": index, "query": query, "plan": plan}
+        return {"deferred": key}
+
+    def _settled_phase_answer(self, value, phases, settled: dict) -> str:
+        """A recorded phase answer as text. A deferred one (a ``{"deferred": key}`` marker) is
+        written now, once, by the model from the facts its phase had (``answer_only_answer``)."""
+        if not (isinstance(value, dict) and "deferred" in value):
+            return value or ""
+        key = value["deferred"]
+        if key not in settled:
+            import dspy
+            from fastworkflow import planning_phases
+
+            deferred = self._phase_run["deferred"][key]
+            phase = phases[deferred["index"]]
+            # The facts of the phase itself and of the phases before it (a judgement phase's own
+            # output included), given to the model with the request.
+            outputs = self._phase_outputs(phases, deferred["index"] + 1)
+            facts = "\n\n".join(planning_phases.found_facts(outputs))
+            query = f"{deferred['query']}\n\n{facts}" if facts else deferred["query"]
+            span = tracing.start_span(self, tracing.SPAN_PLANNING_COMMAND_ANSWER, attributes={
+                "skill": self._phase_run["skill"], "phase": phase.name,
+                "phase_index": deferred["index"], "phase_count": len(phases)})
+            try:
+                result = self._call_agent_with_retry(
+                    lambda: dspy.Prediction(
+                        final_answer=planning_phases.answer_only_answer(
+                            query, deferred["plan"], outputs),
+                        suspended=False, exhausted=False),
+                    trace_input=query,
+                )
+            except BaseException as exc:
+                tracing.end_span(self, span, status=tracing.status_for_dispatch_exception(exc),
+                                 attributes={"error_type": type(exc).__name__})
+                raise
+            settled[key] = planning_phases.clean_answer(getattr(result, "final_answer", "") or "")
+            tracing.end_span(self, span)
+        return settled[key]
+
+    def _record_phase_answer(self, phase, answer) -> None:
+        """Record a phase's answer (text, or a deferred marker) for the call's answer."""
+        state = self._phase_run
+        if phase.name == state.get("extra_phase"):
+            state["extra_answer"] = answer
+        if phase.name == state.get("before_phase"):
+            state["before_answer"] = answer
+        state["answers"].append(answer)
+        state.setdefault("phase_answers", []).append(answer)
 
     def _phase_failure(self, phase, error: str):
         """Phase *phase* failed: the sub-task's result (``_planning_command_phases_failed``), or None
@@ -2932,13 +2994,17 @@ class WorkflowExecutionContext:
             state["plan"] = number(steps)
         plan_text = state["plan"]
         answer_only = not resumed and planning_phases.is_answer_only(plan_text, **names)
+        if answer_only and last and planning_phases.answer_by_code(plan_text):
+            # 3.16 (b): a last phase of 'say that' lines the load check could not read (its template
+            # did not build). Refused as the load check refuses it, as this phase's failure.
+            message = planning_phases.say_that_last_message(command.path, phase.name)
+            tracing.end_span(self, span, status=tracing.STATUS_ERROR,
+                             attributes={"steps": plan_text, "answer_only": True,
+                                         "facts_error": message})
+            return "failed", message
         planned = sorted(planning_phases.planned_steps(plan_text, **names))
         item_frame = (state["item_index"], len(state["items"]), item) if phase.fans_out else None
         try:
-            if answer_only and uses_result:
-                tracing.end_span(self, span, attributes={"skipped": True, "answer_only": True,
-                                                         "uses_result": True})
-                return "done", None
             if answer_only:
                 # Steps that name no command: one model call, with no tools, writes the
                 # answer from the facts the steps carry (none when every step is verbatim
@@ -2950,6 +3016,19 @@ class WorkflowExecutionContext:
                 user_query = planning_phases.phase_query(
                     state["query"], prompt_steps, index=index, count=len(phases),
                     name=phase.name, answer_only=True, item=item_frame)
+                if not last and planning_phases.answer_by_code(prompt_steps):
+                    # 3.16 (a): a phase before the last made only of 'say that' lines writes no
+                    # answer; its text reaches the answer only through __result__.
+                    tracing.end_span(self, span, attributes={"skipped": True, "answer_only": True})
+                    return "done", None
+                if uses_result and not planning_phases.answer_by_code(prompt_steps):
+                    # __result__ may return None, and then the model writes this answer: it is
+                    # asked then, not now (WorkflowExecutionContext._settled_phase_answer).
+                    marker = self._defer_phase_answer(index, user_query, prompt_steps)
+                    tracing.end_span(self, span, attributes={"skipped": True, "answer_only": True,
+                                                             "uses_result": True})
+                    self._record_phase_answer(phase, marker)
+                    return "done", None
                 result = self._call_agent_with_retry(
                     lambda: dspy.Prediction(
                         final_answer=planning_phases.answer_only_answer(
@@ -2976,20 +3055,24 @@ class WorkflowExecutionContext:
                         plan_text, own_steps, names,
                         answers=last or phase.name == state.get("extra_phase"))
                     # A phase other than the last sees only its own steps, never the request.
+                    # A phased command with __result__ gets its answer from __result__ (or, when that
+                    # returns None, from the deferred model call): its last phase's agent only runs steps.
+                    result_driven = bool(uses_result and last and not state.get("flat"))
                     user_query = planning_phases.phase_query(
                         state["query"], plan_text, index=index, count=len(phases),
                         name=phase.name, item=item_frame,
                         code_steps=code is not None and code.runs_any,
-                        result_driven=uses_result)
+                        result_driven=result_driven)
                     if uses_result and last and last_item:
                         notes = list(state.get("notes") or [])
                         if notes:
                             user_query = f"{user_query}\n\n{' '.join(notes)}"
-                    if code is not None and last and not uses_result:
+                    if code is not None and last:
                         # Code may run every step: the agent then answers from their outputs.
                         code.done_inputs = {"user_query": planning_phases.phase_query(
                             state["query"], plan_text, index=index, count=len(phases),
-                            name=phase.name, item=item_frame, code_ran_all=True)}
+                            name=phase.name, item=item_frame, code_ran_all=True,
+                            result_driven=result_driven)}
                     available_commands = _what_can_i_do(self)
 
                     def run_phase():
@@ -3030,14 +3113,15 @@ class WorkflowExecutionContext:
             if indices:
                 # Never backwards: a nested frame this phase ran (run_planning_command) may be past it.
                 self._next_step = max(self._next_step, max(indices) + 1)
-        answer = planning_phases.clean_answer(getattr(result, "final_answer", "") or "")
-        if not uses_result:
-            if phase.name == state.get("extra_phase"):
-                state["extra_answer"] = answer
-            if phase.name == state.get("before_phase"):
-                state["before_answer"] = answer
-            state["answers"].append(answer)
-            state.setdefault("phase_answers", []).append(answer)
+        if uses_result and last and not state.get("flat") and not answer_only:
+            # 3.16: the agent wrote no answer; the answer is __result__'s, or the deferred model call's.
+            answer_query = planning_phases.phase_query(
+                state["query"], plan_text, index=index, count=len(phases), name=phase.name,
+                answer_only=True, item=item_frame)
+            answer = self._defer_phase_answer(index, answer_query, plan_text)
+        else:
+            answer = planning_phases.clean_answer(getattr(result, "final_answer", "") or "")
+        self._record_phase_answer(phase, answer)
         exhausted = getattr(result, "exhausted", None) is True
         if exhausted:
             # The call (run_planning_command) reports it as the frame's failure.

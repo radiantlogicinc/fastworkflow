@@ -82,6 +82,7 @@ class ResponseGenerator:
         output = self._process_command(workflow, command_parameters)
 
         if output.error_msg:
-            return output.error_msg
+            return fastworkflow.CommandResponse(response=output.error_msg, output=output)
         workitem: WorkItem = workflow.command_context_for_response_generation
-        return f"Removed child work item under '{workitem.get_absolute_path()}'."
+        return fastworkflow.CommandResponse(
+            response=f"Removed child work item under '{workitem.get_absolute_path()}'.", output=output)

@@ -695,10 +695,13 @@ class _Render:
     error: str = ""
     #: ``plan()`` returned no phases for these inputs: the call runs flat, from ``steps()``.
     flat: bool = False
+    #: The answer ``__result__`` writes, as its text with placeholder facts (``result_answer``);
+    #: None when the planning command has no ``__result__`` or the call runs flat.
+    answer: Optional[str] = None
 
     def key(self) -> tuple:
         return (tuple(self.steps), self.error, tuple(self.left_out), self.flat,
-                tuple(p.key() for p in self.phases))
+                tuple(p.key() for p in self.phases), self.answer)
 
 
 _PHASE_FIELDS = ("name", "steps_fn", "output", "when", "optional")
@@ -879,7 +882,50 @@ def _render_phases(command, args: dict) -> _Render:
         pass_on_placeholders(phase, outputs, earlier, items,
                              FAN_OUT_SHOWN if phase.name in fanned else 1, read_fields.get(phase.name),
                              _ran_member(phase, lines, model_to_command))
+    if command.uses_result and command.plan_cls is not None:
+        render.answer = result_answer(command.plan_cls, planning_commands.input_instance(command, args),
+                                      outputs, frozenset(p.name for p in raw if isinstance(p, Phase)))
     return render
+
+
+#: The answer of a call whose ``__result__`` does not render with placeholder facts (3.17).
+DECIDED_AT_RUN_TIME = "decided at run time"
+
+
+def result_answer(plan_cls: type, input: Any, outputs: Mapping[str, Any], phase_names: frozenset) -> str:
+    """The text ``__result__`` returns, run once with the placeholder facts *outputs* (3.7, 3.16).
+
+    It runs as the template is built (``planning._template_self``, so its helpers read as
+    placeholders). Text, or a ``CommandResponse``'s ``response``, is the answer. A ``__result__``
+    that raises, returns nothing, or builds an ``Output`` from placeholders has no text here: the
+    answer is ``decided at run time``, with the reason (the runtime rule is ``run_call_result``).
+    """
+    import fastworkflow
+    from fastworkflow.planning import _template_self
+    from fastworkflow.planning_phases import _result_fn_on_class, bound_result_arguments
+
+    result_fn = _result_fn_on_class(plan_cls)
+    if result_fn is None:
+        return ""
+    try:
+        kwargs = bound_result_arguments(result_fn, input, outputs, phase_names=phase_names)
+        value = result_fn(_template_self(plan_cls()), **kwargs)
+    except Exception as error:  # noqa: BLE001 - shown in the preview, as a phase that does not render
+        return (f"{DECIDED_AT_RUN_TIME} ({type(error).__name__} while the template was built, "
+                "with every fact unknown).")
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, fastworkflow.CommandResponse):
+        text = value.response
+    elif isinstance(value, BaseModel):
+        return f"{DECIDED_AT_RUN_TIME} (it returns an Output, which the agent words at run time)."
+    elif value is None:
+        return f"{DECIDED_AT_RUN_TIME} (it returns None, so the agent writes the answer)."
+    else:
+        return f"{DECIDED_AT_RUN_TIME} (it returns {type(value).__name__}, not text)."
+    if not str(text or "").strip():
+        return f"{DECIDED_AT_RUN_TIME} (it returns no text, so a model writes the answer)."
+    return text
 
 
 def pass_on_placeholders(phase, outputs: dict, earlier: list, items: Optional[list] = None,
@@ -1216,13 +1262,14 @@ def _step_numbers(numbers: list[int]) -> str:
     return f"{'step' if len(numbers) == 1 else 'steps'} {text}"
 
 
-def answer_mode(steps: list[str]) -> str:
+def answer_mode(steps: list[str], last: bool = True) -> str:
     """Who writes the answer of an answer-only phase with *steps*, as one preview line.
 
     Read with the runtime's own rules (``planning_phases.answer_by_code`` and
     ``planning_phases.answer_step_kind`` on the numbered steps): code writes the answer word
     for word, dropping guard steps, or the model writes it, because a step needs
-    judgement or no step is verbatim.
+    judgement or no step is verbatim. A phase before the last made only of 'say that' lines
+    writes no answer (3.16): its text reaches the answer only through ``__result__``.
     """
     from fastworkflow.planning_commands import number
     from fastworkflow.planning_phases import answer_by_code, answer_step_kind
@@ -1231,6 +1278,9 @@ def answer_mode(steps: list[str]) -> str:
     for i, step in enumerate(steps, 1):
         kinds.setdefault(answer_step_kind(step), []).append(i)
     if answer_by_code(number(steps)):
+        if not last:
+            return ("Answer: none (a phase before the last writes no answer from 'say that' lines; "
+                    "its text reaches the answer only through __result__).")
         why = f"{_step_numbers(kinds['verbatim'])} verbatim"
         if kinds.get("guard"):
             dropped = kinds["guard"]
@@ -1304,7 +1354,7 @@ def pages_line(steps: list[str], names: Optional[dict]) -> list[str]:
     return [f"Pages: {'; '.join(parts)}.", ""] if parts else []
 
 
-def _answer_line(steps: list[str], names: Optional[dict], outputs: list) -> list[str]:
+def _answer_line(steps: list[str], names: Optional[dict], outputs: list, last: bool = True) -> list[str]:
     """``[answer_mode(steps), ""]`` when *steps* make an answer-only phase
     (``planning_phases.is_answer_only``, with *names* and the commands the facts of the plan's
     phase *outputs* come from, as a run reads them); else nothing."""
@@ -1323,7 +1373,7 @@ def _answer_line(steps: list[str], names: Optional[dict], outputs: list) -> list
                 pass
     if not is_answer_only(number(steps), commands, names.get("core_commands", ())):
         return []
-    return [answer_mode(steps), ""]
+    return [answer_mode(steps, last), ""]
 
 
 def _phase_order(found: list[_Variant]) -> list[str]:
@@ -1572,7 +1622,7 @@ def _render_lines(render: _Render, level: str, first: Optional[_Render] = None,
         if phase.items is None:
             lines += _numbered(phase.steps) + [""]
             lines += pages_line(phase.steps, names)
-            lines += _answer_line(phase.steps, names, outputs)
+            lines += _answer_line(phase.steps, names, outputs, index == len(render.phases))
         elif not phase.items:
             lines += [NO_ITEMS_NOTE, ""]
         else:
@@ -1580,7 +1630,7 @@ def _render_lines(render: _Render, level: str, first: Optional[_Render] = None,
                 lines += [head, ""]
                 lines += _numbered(steps) + [""]
                 lines += pages_line(steps, names)
-                lines += _answer_line(steps, names, outputs)
+                lines += _answer_line(steps, names, outputs, index == len(render.phases))
     if render.left_out:
         lines += [f"Left out (`when` is false): {', '.join(f'`{n}`' for n in render.left_out)}.", ""]
     return lines
@@ -1626,6 +1676,22 @@ def _steps_section(found: list[_Variant], changing: list[str], phased: bool,
     return lines
 
 
+def _answer_section(found: list[_Variant], changing: list[str]) -> list[str]:
+    """``## Answer``: the text ``__result__`` writes, with every fact a placeholder (3.7), per
+    input that changes it (shown renders only, as the steps); nothing for a command without it."""
+    rendered = [v for v in found if v.render is not None and v.render.answer is not None]
+    if not rendered:
+        return []
+    lines = ["## Answer", ""]
+    if not changing:
+        lines += [f"Written by `__result__`: {_text(rendered[0].render.answer)}", ""]
+        return lines
+    for variant in [v for v in rendered if v.shown]:
+        lines += [f"### Answer {_text(variant.title())}", "",
+                  f"Written by `__result__`: {_text(variant.render.answer)}", ""]
+    return lines
+
+
 def _calls_lines(callees: list[str], depth: int) -> list[str]:
     """The ``Calls:`` and ``Depth:`` lines of a planning command (3.7): its callees, and the
     longest chain of planning commands below it, counted from it (``planning_commands.call_depth``)."""
@@ -1658,6 +1724,7 @@ def render_preview(name: str, description: str, steps: tuple, command,
                           if wf else {})
             lines += _phases_section(found, resolution)
         lines += _steps_section(found, changing, phased, names, bool(command.params))
+        lines += _answer_section(found, changing)
     while lines and lines[-1] == "":
         lines.pop()
     return "\n".join(lines) + "\n"

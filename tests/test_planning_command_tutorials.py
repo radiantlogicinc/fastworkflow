@@ -121,7 +121,7 @@ def dry_run(planning_command: str, args: dict, folder: str = WORKFLOW) -> str:
                 lines.extend(f"    {line}" for line in sp.answer_from_steps(text).splitlines())
             else:
                 lines.append("  answer written by the model (one call, no tools)")
-        elif last and not open_step:
+        elif last and not open_step and not command.uses_result:
             lines.append("  the agent writes the answer from these runs")
         return text, runs, open_step
 
@@ -149,12 +149,28 @@ def dry_run(planning_command: str, args: dict, folder: str = WORKFLOW) -> str:
         lines.append(f"Phase {phase.name}")
         text, runs, stop = run_steps(sp.phase_steps(phase, outputs), last)
         if stop:
-            break
+            return "\n".join(lines)
         if phase.output is not None:
             outputs[phase.name] = sp.fill_output(phase.output, runs, record=None,
                                                  plan_text=text, commands=commands)
             lines.append(f"  facts: {outputs[phase.name]!r}")
+    if command.uses_result:
+        lines.append("answer written by __result__:")
+        lines.extend(f"  {line}" for line in _result_text(command, args, outputs, phases).splitlines())
     return "\n".join(lines)
+
+
+def _result_text(command, args: dict, outputs: dict, phases) -> str:
+    """The text the command's ``__result__`` returns for these phase outputs, as the runtime
+    calls it (``planning_phases.run_call_result``, without its model fallback)."""
+    from fastworkflow import planning_commands as pc
+
+    result_fn = sp._result_fn_on_class(command.plan_cls)
+    kwargs = sp.bound_result_arguments(
+        result_fn, pc.input_instance(command, args), sp.typed_phase_outputs(outputs, phases),
+        phase_names=frozenset(pc._phase_names_for_command(command)))
+    raw = result_fn(command.plan_cls(), **kwargs)
+    return raw if isinstance(raw, str) else raw.response
 
 
 def refusal(planning_command: str, args: dict) -> str:
@@ -291,7 +307,7 @@ def test_troubleshooting_errors_are_real(tmp_path):
 def test_a_skipped_phase_reads_as_none_and_the_answer_says_so():
     text = dry_run("book_details", {"title": "Ulysses"})
     assert "Phase book: skipped (its method returned [])" in text
-    assert text.endswith("answer written by code:\n    No book matches Ulysses.")
+    assert text.endswith("answer written by __result__:\n  No book matches Ulysses.")
 
 
 def test_pick_opens_the_exact_title_and_else_leaves_the_row_to_code_or_the_agent():
@@ -308,8 +324,9 @@ def test_pick_opens_the_exact_title_and_else_leaves_the_row_to_code_or_the_agent
 
 
 def test_call_shapes_the_plan_and_a_brief_call_runs_flat():
-    assert dry_run("book_report", {"title": "Dune", "brief": True}).startswith(
-        "Runs flat: one plan, one executor run.")
+    brief = dry_run("book_report", {"title": "Dune", "brief": True})
+    assert [line for line in brief.splitlines() if line.startswith("Phase")] == ["Phase find"]
+    assert brief.endswith("answer written by __result__:\n  Yes, the library has Dune.")
     without = dry_run("book_report", {"title": "Dune"})
     assert "Phase loans" not in without and "on loan" not in without
     assert "Phase loans" in dry_run("book_report", {"title": "Dune", "loans": True})
@@ -328,10 +345,10 @@ def test_refusal_and_a_plain_call():
 def test_the_composed_planning_command_places_the_base_phases_and_extends_the_base_answer():
     text = dry_run("book_loans", {"title": "Emma"})
     assert [line for line in text.splitlines() if line.startswith("Phase")] == [
-        "Phase find", "Phase book", "Phase loans", "Phase answer"]
-    assert text.endswith("answer written by code:\n"
-                         "    Emma is by Jane Austen; the library owns 2 copies.\n"
-                         "    It is on loan to 1 borrower (Raj Patel).")
+        "Phase find", "Phase book", "Phase loans"]
+    assert text.endswith("answer written by __result__:\n"
+                         "  Emma is by Jane Austen; the library owns 2 copies.\n"
+                         "  It is on loan to 1 borrower (Raj Patel).")
 
 
 def test_a_planning_command_with_no_inputs_runs_its_two_phases():
