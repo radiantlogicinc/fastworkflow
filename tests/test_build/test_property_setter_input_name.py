@@ -86,14 +86,14 @@ def test_property_setter_input_uses_property_name(temp_dir, todo_item_class):
     
     assert found_description_field, "Input field should be named 'description', not 'value'"
     
-    # Also check that the assignment in _process_command uses input.description
+    # Also check that the assignment in __call__ uses input.description
     process_command = None
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == '_process_command':
+        if isinstance(node, ast.FunctionDef) and node.name == '__call__':
             process_command = node
             break
     
-    assert process_command is not None, "Could not find _process_command method"
+    assert process_command is not None, "Could not find __call__ method"
     
     # Look for app_instance.description = input.description
     found_correct_assignment = False

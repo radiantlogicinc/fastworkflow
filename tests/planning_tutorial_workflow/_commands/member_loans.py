@@ -19,12 +19,12 @@ class Signature:
         member: str = Field(description="the member's name")
 
     @staticmethod
-    def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
-        if cmd_parameters.member.casefold() in EVERYONE:
+    def validate_extracted_parameters(workflow, command, input, command_text=None):
+        if input.member.casefold() in EVERYONE:
             raise fastworkflow.Refused(
-                f"member is {cmd_parameters.member!r}, which names no one member; this skill "
+                f"member is {input.member!r}, which names no one member; this skill "
                 "reads one member's loans: give that member's name")
-        return True, ""
+        return None
 
 
 class PlanGenerator:

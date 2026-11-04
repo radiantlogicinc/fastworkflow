@@ -1162,9 +1162,9 @@ def missing_value_example(command_name: str, field_annotations: Dict[str, Any]) 
     answers with the same "missing" markers `create_signature_from_pydantic_model`
     tells the extractor to use. None when the command has no required field.
     """
-    from fastworkflow.utils.signatures import INVALID_INT_VALUE
+    from fastworkflow.utils.signatures import INVALID_INT_VALUE, NOT_FOUND
 
-    missing_markers = {str: fastworkflow.get_env_var("NOT_FOUND"),
+    missing_markers = {str: NOT_FOUND,
                        int: INVALID_INT_VALUE,
                        float: -sys.float_info.max}
     fields = {"command": command_name.split("/")[-1]}

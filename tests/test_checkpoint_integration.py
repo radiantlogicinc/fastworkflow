@@ -223,10 +223,8 @@ import fastworkflow
 
 
 class ResponseGenerator:
-    def __call__(self, workflow, command) -> fastworkflow.CommandOutput:
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="poked")
-        )
+    def __call__(self, workflow, command, input) -> fastworkflow.CommandResponse:
+        return fastworkflow.CommandResponse(response="poked")
 '''
 
 

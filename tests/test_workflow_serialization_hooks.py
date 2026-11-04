@@ -62,11 +62,11 @@ def make_workflow(folderpath: Path) -> fastworkflow.Workflow:
 def run_command(workflow: fastworkflow.Workflow, command_name: str, command: str, **parameters):
     """Run one of the workflow's own commands, dispatching as perform_action does.
 
-    Not perform_action itself: its direct-action path constructs an
-    InputForParamExtraction without the command's Signature class, so a command
-    carrying a db_lookup field — messaging_app_4's set_current_user — raises
-    before its response generator ever runs. Parameters are supplied here
-    already valid, so parameter extraction is not what these tests exercise.
+    Not perform_action itself: parameters are supplied here already valid, so
+    parameter extraction (and the validation hook that runs in it, which
+    messaging_app_4's set_current_user uses for its fuzzy user lookup) is not
+    what these tests exercise. The response generator gets the three arguments
+    of its one signature: the filled Input, or None for a command with no Input.
     """
     routing = RoutingRegistry.get_definition(workflow.folderpath)
     generator = routing.get_command_class(
@@ -78,7 +78,7 @@ def run_command(workflow: fastworkflow.Workflow, command_name: str, command: str
 
     workflow.command_context_for_response_generation = workflow.current_command_context
     if parameters_class is None:
-        return generator(workflow, command)
+        return generator(workflow, command, None)
     return generator(workflow, command, parameters_class(**parameters))
 
 
@@ -279,6 +279,13 @@ def test_messaging_app_4_round_trip(initialized_fastworkflow):
     folderpath = EXAMPLES / "messaging_app_4"
     workflow = make_workflow(folderpath)
 
+    # set_current_user's fuzzy user lookup is its validation hook now, not a db_lookup key on the field (fix-3rsq.one-hook)
+    signature = RoutingRegistry.get_definition(workflow.folderpath).get_command_class(
+        "ChatRoom/set_current_user", fastworkflow.ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)
+    extra = signature.Input.model_fields["user_name"].json_schema_extra or {}
+    assert "db_lookup" not in extra
+    assert hasattr(signature, "validate_extracted_parameters")
+
     run_command(workflow, "set_root_context", "start the chat room")
     run_command(workflow, "ChatRoom/add_user", "add Alice",
                 user_name="Alice", is_premium_user=False)
@@ -422,10 +429,8 @@ import fastworkflow
 
 
 class ResponseGenerator:
-    def __call__(self, workflow, command) -> fastworkflow.CommandOutput:
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="poked")
-        )
+    def __call__(self, workflow, command, input) -> fastworkflow.CommandResponse:
+        return fastworkflow.CommandResponse(response="poked")
 '''
 
 

@@ -71,35 +71,14 @@ def test_no_parameters_no_input_class(temp_dir, todo_list_class):
         if isinstance(node, ast.ClassDef):
             assert node.name != 'Input', "There should be no Input class for methods without parameters"
     
-    # Check that _process_command doesn't have an input parameter
-    process_command = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == '_process_command':
-            process_command = node
-            break
-    
-    assert process_command is not None, "Could not find _process_command method"
-    
-    # Check that _process_command has only one parameter (workflow)
-    assert len(process_command.args.args) == 2, "_process_command should have only 'self' and 'workflow' parameters"
-    assert process_command.args.args[1].arg == 'workflow', "Second parameter should be 'workflow'"
-    
-    # Check that __call__ doesn't have a command_parameters parameter
+    # The one __call__ takes input, which is None for a command with no Input (the three-argument form)
     call_method = None
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == '__call__':
             call_method = node
             break
-    
+
     assert call_method is not None, "Could not find __call__ method"
-    
-    # Check that __call__ has only self, workflow, and command parameters
-    assert len(call_method.args.args) == 3, "__call__ should have only 'self', 'workflow', and 'command' parameters"
-    assert call_method.args.args[1].arg == 'workflow', "Second parameter should be 'workflow'"
-    assert call_method.args.args[2].arg == 'command', "Third parameter should be 'command'"
-    
-    # Check that the call to _process_command doesn't pass an input argument
-    for node in ast.walk(call_method):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == '_process_command':
-            assert len(node.args) == 1, "_process_command call should have only one argument (workflow)"
-            break 
+    assert [a.arg for a in call_method.args.args] == ['self', 'workflow', 'command', 'input']
+    assert ast.unparse(call_method.args.args[3].annotation) == 'None'
+    assert call_method.args.defaults == [], "__call__ takes exactly three arguments, with no default" 

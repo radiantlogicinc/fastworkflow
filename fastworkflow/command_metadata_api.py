@@ -1185,6 +1185,8 @@ class CommandMetadataAPI:
         Return a mapping of qualified command name -> {inputs: [...], outputs: [...]} where each param is a dict
         with name, type_str, description, examples.
         """
+        from fastworkflow.utils.signatures import is_required_argument  # signatures imports this module
+
         directory = CommandDirectory.load(workflow_path)
 
         params_by_command: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
@@ -1217,6 +1219,7 @@ class CommandMetadataAPI:
                         ),
                         "examples": list(getattr(field, "examples", []) or []),
                         "default": getattr(field, "default", None),
+                        "required": is_required_argument(field),
                     }
                     for name, field in InputModel.model_fields.items()
                 )

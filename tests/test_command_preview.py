@@ -30,7 +30,7 @@ class Signature:
 
     class Input(BaseModel):
         name: str = Field(description="the item's name",
-                          json_schema_extra={"subject": True})
+                          json_schema_extra={"in_request": "subject"})
         checks: bool = Field(default=False, description="the request asks about its open checks",
                              json_schema_extra={"verify": True})
 
@@ -79,6 +79,8 @@ LIST_PARTS = '''
 """list_parts_of: the parts of one named item or kit, optionally only one supplier's."""
 from typing import Literal
 
+import fastworkflow
+
 from pydantic import BaseModel, Field
 
 FIND = {"item": "find_item", "kit": "find_kit"}
@@ -88,11 +90,10 @@ class Signature:
     """List the parts of one named item or kit. One job per record."""
 
     class Input(BaseModel):
-        name: str = Field(description="the record's name | as written",
-                          json_schema_extra={"strip": ["item", "kit"]})
+        name: str = Field(description="the record's name | as written")
         kind: Literal["item", "kit"] = Field(default="item", description="what the request is about",
-                                             json_schema_extra={"verify": True, "means": {"item": "one item",
-                                                                          "kit": "a set of items"}})
+                                             json_schema_extra={"verify": {"item": "one item",
+                                                                           "kit": "a set of items"}})
         supplier: str = Field(default="", description="one supplier to keep; empty for all")
         detail: bool = Field(default=False, description="never changes the steps")
         count: int = Field(default=2, description="how many parts to open")
@@ -100,8 +101,8 @@ class Signature:
     @staticmethod
     def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
         if cmd_parameters.kind == "kit" and cmd_parameters.supplier:
-            return False, "a kit is listed for every supplier"
-        return True, ""
+            raise fastworkflow.Refused("a kit is listed for every supplier")
+        return None
 
 
 class PlanGenerator:
@@ -218,7 +219,7 @@ def test_every_planning_command_renders_one_preview(workflow):
 def test_phased_preview_shows_each_phase_its_facts_and_the_condition_both_ways(workflow):
     text = command_preview.render_previews(workflow)["show_item.md"]
     assert "Source: `_commands/show_item.py`.\n" in text and "Kind:" not in text
-    assert "| `name` | str | required | `<name>` |  | yes | the item's name |" in text
+    assert "| `name` | str | required | `<name>` |  | subject | the item's name |" in text
     assert "| `checks` | bool | false | false | yes |  | the request asks about its open checks |" in text
     assert "- what parts does the Alpha item have" in text
     # the phases, and when each runs
@@ -252,7 +253,7 @@ def test_flat_preview_renders_the_inputs_that_change_the_steps(workflow):
     assert "| `name` | str | required | `<name>` |  |  | the record's name \\| as written |" in text
     assert "| `kind` | one of item, kit | `item` | `item` |" in text
     assert "| `count` | int | `2` | `2` |" in text
-    assert "- `name` strips the words `item`, `kit` from its ends." in text
+    assert "strips the words" not in text   # the strip option is retired: the cleanup is validator code
     assert "- `kind` means: `item`: one item; `kit`: a set of items." in text
     assert "inputs that change them give: `kind`, `supplier`." in text   # not `detail`
     # each different list of steps once, titled by the inputs that decide it
@@ -509,7 +510,7 @@ class Signature:
             cmd_parameters.first = ""
         if not cmd_parameters.first:
             cmd_parameters.second = ""
-        return True, ""
+        return None
 
 
 class Shelf(BaseModel):

@@ -312,7 +312,7 @@ def test_new_full_command_in_a_pending_round_is_a_fresh_extraction(recorded):
     stale = _ListParams.model_construct(scope="other", scope_uid=NOT_FOUND)
     workflow, _ = _pending_round(stale)
     new = "list_books scope=shelf scope_uid=3c85"
-    wildcard.ResponseGenerator()(workflow, new)
+    wildcard.ResponseGenerator()(workflow, new, None)
 
     assert recorded == [{"text": f"{LIST}: {new}", "stored": None}]
     assert workflow.context["command"] == new
@@ -322,7 +322,7 @@ def test_new_full_command_in_a_pending_round_is_a_fresh_extraction(recorded):
 def test_answer_in_a_pending_round_merges_the_new_text(recorded):
     stale = _ListParams.model_construct(scope="shelf", scope_uid=NOT_FOUND)
     workflow, _ = _pending_round(stale)
-    wildcard.ResponseGenerator()(workflow, "3c85")
+    wildcard.ResponseGenerator()(workflow, "3c85", None)
 
     assert recorded == [{"text": f"{LIST}: 3c85", "stored": stale}]
     assert workflow.context["command"] == LIST  # the pending command is kept
@@ -336,11 +336,11 @@ def test_assistant_mode_retry_round_binds_the_answer(no_prediction, harness):
     stored = _ListParams.model_construct(scope="shelf", scope_uid=NOT_FOUND)
     workflow, app_workflow = _pending_round(stored)
     app_workflow.context = {}
-    output = wildcard.ResponseGenerator()(workflow, "3c85")
+    route = wildcard.ResponseGenerator()(workflow, "3c85", None)
 
-    params = output.command_response.artifacts["cmd_parameters"]
+    params = route.cmd_parameters
     assert (params.scope, params.scope_uid) == ("shelf", "3c85")
-    assert output.command_response.artifacts["command"] == f"{LIST}: {LIST}"
+    assert route.command == f"{LIST}: {LIST}"
 
 
 # ---------------------------------------------------------------------------

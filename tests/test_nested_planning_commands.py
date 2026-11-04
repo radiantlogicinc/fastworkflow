@@ -321,7 +321,7 @@ def test_h_the_budget_stops_a_call_partway_and_the_turn_goes_on(budget_env, no_t
 
 
 BOOK_BY_TITLE_FILE = "_commands/Library/book_by_title.py"
-_BOOK_BY_TITLE_SOURCE = open(os.path.join(LIBRARY, BOOK_BY_TITLE_FILE), encoding="utf-8").read()
+_BOOK_BY_TITLE_SOURCE = "import fastworkflow\n" + open(os.path.join(LIBRARY, BOOK_BY_TITLE_FILE), encoding="utf-8").read()
 HOOK_CALLS = "title_hook_calls"
 
 #: A test copy of book_by_title whose hook counts its calls (in the workflow's context), corrects
@@ -334,8 +334,8 @@ _HOOK = '''
         if cmd_parameters.title.lower() == "dune":
             cmd_parameters.title = "Dune"
         if cmd_parameters.title == "Emma":
-            return False, "the library holds no Emma"
-        return True, ""
+            raise fastworkflow.Refused("the library holds no Emma")
+        return None
 '''
 _HOOK_ANCHOR = '''    plain_utterances = [
         "who wrote Dune",
@@ -1761,3 +1761,77 @@ def test_a_global_planning_command_is_called_by_name_from_any_context(tmp_path,
     wf.current_command_context = None
     assert wf.current_command_context_name == "*"
     assert workflow_agent._explicit_agent_command("dune_total", wf) == "dune_total"
+
+
+# ---------------------------------------------------------------------------
+# A fixed plan that calls one nested command twice (fix-3rsq.repeat-nested-finish)
+# ---------------------------------------------------------------------------
+
+class TitlesSignature:
+    """Say who wrote two books, given their titles."""
+
+    class Input(BaseModel):
+        first: str = Field(description="the first title")
+        second: str = Field(description="the second title")
+
+
+def _two_book_by_title_command():
+    """A planning command whose fixed plan calls book_by_title twice, with different titles."""
+    def steps(input):
+        return [f"book_by_title title={input.first}", f"book_by_title title={input.second}"]
+
+    return planning_commands.planning_command_from_parts(
+        "Library/two_books", TitlesSignature, os.path.join(LIBRARY, "_commands/Library/two_books.py"),
+        steps_fn=steps).command
+
+
+def _record_finish_notes(monkeypatch):
+    """The finish check's real notes, recorded as the run reads them (the check itself runs)."""
+    from fastworkflow.observation_offloading import finish_check
+
+    notes: list = []
+    real = finish_check.review_finish
+
+    def recorded(**kwargs):
+        note = real(**kwargs)
+        notes.append(note)
+        return note
+
+    monkeypatch.setattr(finish_check, "review_finish", recorded)
+    return notes
+
+
+def test_a_fixed_plan_calling_one_nested_command_twice_passes_the_finish_check(nested_env, monkeypatch):
+    notes = _record_finish_notes(monkeypatch)
+    # The turn's agent numbers its steps from the context's next step, as _build_react_agent
+    # sets it in production. Without it a nested call's steps reuse the parent's next O<k> alias
+    # and archive_step refuses the parent's second row (the check then reads step 2 as not run).
+    nested_env.ctx._workflow_tool_agent.step_floor = lambda: nested_env.ctx._next_step
+    nested_env.planning_command = _two_book_by_title_command()
+    nested_env.args = {"first": "Dune", "second": "Persuasion"}
+
+    result = nested_env.ctx.process_turn("who wrote Dune and Persuasion")
+
+    assert result.status == TurnStatus.COMPLETED
+    # Both nested calls ran, each with its own title.
+    runs = [o for o in nested_env.ctx._turn_outputs if o.command_name == BOOK_BY_TITLE]
+    assert [o.command_parameters.title for o in runs] == ["Dune", "Persuasion"]
+    assert all(o.success for o in runs)
+    # The finish check read both steps as run: no note, and the model was not asked again.
+    assert notes and all(note is None for note in notes)
+    assert nested_env.model.asked == []
+    assert nested_env.nested.asked == []
+
+
+def test_a_second_call_of_the_same_nested_command_that_never_ran_is_named(nested_env):
+    """Only the first of two calls of one command ran: the check names step 2, not step 1."""
+    from fastworkflow.observation_offloading import finish_check
+
+    plan = "1. book_by_title title=Dune\n2. book_by_title title=Persuasion"
+    rows = [{"step_index": 0, "command": "book_by_title title=Dune",
+             "text": BOOK_BY_TITLE_RESPONSE}]
+    result = finish_check.check(plan, rows, [BOOK_BY_TITLE], values=True)
+
+    assert [v.step for v in result.unmet] == [2]
+    assert "Step 2 (book_by_title) was not run" in result.note
+    assert "Step 1" not in result.note

@@ -17,11 +17,8 @@ import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse
 
 class ResponseGenerator:
-    def __call__(self, workflow: fastworkflow.Workflow, command: str) -> CommandOutput:
-        return CommandOutput(
-            command_response=
-                CommandResponse(response="Startup executed")
-        )
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, input: None) -> str:
+        return "Startup executed"
 """
     with open(startup_path, "w") as f:
         f.write(startup_content)
@@ -53,19 +50,15 @@ class Signature:
         return ["valid command"]
     
     @staticmethod
-    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: None) -> tuple[bool, str]:
-        return (True, '')
+    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: None) -> None:
+        return None
 
 class ResponseGenerator:
     def _process_command(self, workflow: Workflow) -> Signature.Output:
         return Signature.Output(result="Valid command executed")
     
-    def __call__(self, workflow: Workflow, command: str) -> CommandOutput:
-        output = self._process_command(workflow)
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=output.model_dump_json())
-        )
+    def __call__(self, workflow: Workflow, command: str, input: None) -> Signature.Output:
+        return self._process_command(workflow)
 """
     with open(valid_command_path, "w") as f:
         f.write(valid_command_content)

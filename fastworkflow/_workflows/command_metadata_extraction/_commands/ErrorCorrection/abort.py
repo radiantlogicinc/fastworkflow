@@ -1,4 +1,4 @@
-from fastworkflow import CommandOutput, CommandResponse
+import fastworkflow
 from fastworkflow.workflow import Workflow
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from pydantic import BaseModel, ConfigDict
@@ -32,12 +32,9 @@ class ResponseGenerator:
         workflow.end_command_processing()
         return Signature.Output(command=command, command_name="abort")
 
-    def __call__(self, workflow: Workflow, command: str) -> CommandOutput:
+    def __call__(self, workflow: Workflow, command: str, input: None) -> fastworkflow.CommandResponse:
         output = self._process_command(workflow, command)
-        return CommandOutput(
-            command_response=
-                CommandResponse(
-                    response="command aborted\n",
-                    artifacts=output.model_dump(),
-                ),
+        return fastworkflow.CommandResponse(
+            response="command aborted\n",
+            artifacts=output.model_dump(),
         ) 

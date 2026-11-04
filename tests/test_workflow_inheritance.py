@@ -143,7 +143,7 @@ class ResponseGenerator:
             base_command = base_commands_dir / "shared_command.py"
             base_command.write_text("""
 class ResponseGenerator:
-    def __call__(self, workflow, command):
+    def __call__(self, workflow, command, input):
         return "base_version"
 """)
             
@@ -162,7 +162,7 @@ class ResponseGenerator:
             extend_command = extend_commands_dir / "shared_command.py"
             extend_command.write_text("""
 class ResponseGenerator:
-    def __call__(self, workflow, command):
+    def __call__(self, workflow, command, input):
         return "extended_version"
 """)
             

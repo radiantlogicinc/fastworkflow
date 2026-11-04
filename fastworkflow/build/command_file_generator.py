@@ -191,7 +191,6 @@ def validate_command_file_components_in_dir(directory: str) -> list:
                     has_model_config = False
                     has_plain_utterances = False
                     has_generate_utterances = False
-                    has_validate_extracted_parameters = False
                     has_response_generator = False
                     has_response_call = False
                     has_plan_generator = False
@@ -225,9 +224,6 @@ def validate_command_file_components_in_dir(directory: str) -> list:
                                         if (isinstance(base, ast.Name) and base.id == 'BaseModel') or \
                                            (isinstance(base, ast.Attribute) and base.attr == 'BaseModel'):
                                             output_inherits_basemodel = True
-                                # validate_extracted_parameters method
-                                if isinstance(subnode, ast.FunctionDef) and subnode.name == 'validate_extracted_parameters':
-                                    has_validate_extracted_parameters = True
                             # plain_utterances and template_utterances
                             for subnode in node.body:
                                 if isinstance(subnode, ast.Assign):
@@ -261,10 +257,8 @@ def validate_command_file_components_in_dir(directory: str) -> list:
                         errors.append((file_path, 'Output class does not inherit from BaseModel'))
                     if not has_plain_utterances:
                         errors.append((file_path, 'Missing plain_utterances in Signature'))
-                    # generate_utterances is optional: without it the framework's default
-                    # (command_directory.default_generate_utterances) gives the standard ones.
-                    if not has_validate_extracted_parameters:
-                        errors.append((file_path, 'Missing validate_extracted_parameters method in Signature'))
+                    # generate_utterances and validate_extracted_parameters are optional: without them the
+                    # framework's defaults apply (the hook is emitted only when a command needs one).
                     if not has_response_generator:
                         errors.append((file_path, 'Missing ResponseGenerator class'))
                     elif not has_response_call:

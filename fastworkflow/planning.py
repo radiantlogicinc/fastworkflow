@@ -1,37 +1,45 @@
-"""What a planning command file writes: ``class PlanGenerator``, ``@phase``, ``pick``, the step helpers and three filters.
+"""What a planning command file writes: ``class PlanGenerator``, its phases, and the step helpers.
 
-A planning command file (``_commands/<name>.py``) reads like a command file. ``class Signature`` declares
-the planning command exactly as a command's does (docstring, ``Input``, ``plain_utterances``,
-``validate_extracted_parameters``, ``fastworkflow.Refused``). Where a command has a
-``ResponseGenerator`` because it generates a response, a planning command has a ``PlanGenerator``
-because it generates a plan::
+A planning command file (``_commands/<name>.py``) reads like a command file. ``class Signature``
+declares the planning command exactly as a command's does (docstring, ``Input``,
+``plain_utterances``). Where a command has a ``ResponseGenerator``, a planning command has a
+``PlanGenerator``, because it generates a plan. The book example is ``tests/planning_tutorial_workflow``'s
+``book_details`` command::
 
-    from fastworkflow.planning import fact_from, full_list, pick, run
+    from pydantic import BaseModel, Field
+
+    from fastworkflow.planning import fact_from, run
+
+
+    class Signature:                                  # the book the request names: its author and copies
+        plain_utterances = ["who wrote Persuasion", "how many copies of Emma are there"]
+
+        class Input(BaseModel):
+            title: str = Field(description="the book's title")
 
 
     class PlanGenerator:
-        def find(self, input) -> Match:                  # a phase; it fills a Match
-            return [run("open_catalog"),
-                    run("find_item", query=input.name)]
+        class Found(BaseModel):                       # facts: like a command's Output
+            book_uids: list[str] = fact_from("find_book.book_uids")
 
-        class Item(BaseModel):                           # facts: like a command's Output
-            uid: str = fact_from("open_item_by_uid.item_uid")
-            parts: list[str] = fact_from("list_parts.labels")
+        def find(self, input) -> Found:               # a phase; it fills Found
+            return [run("find_book", query=input.title)]
 
-        def item(self, input, find) -> Item:             # reads the find phase's facts
-            if not find.uids:
-                return []                                # no steps: skipped when reached
-            return [pick("open_item_by_uid", item_uid=find.only_uid(input.name),
-                         named=input.name),
-                    full_list("list_parts")]
+        class Book(BaseModel):
+            name: str = fact_from("show_book.title")
+            author: str = fact_from("show_book.author")
+            copies: int = fact_from("show_book.copies")
 
-        def answer(self, input, item=None):              # None: the item phase was skipped
-            if item is None:
-                return [f"say that no item named {input.name} was found", "apply no change"]
-            return [f"say that {item.uid} has parts {self._parts(item)}", "apply no change"]
+        def book(self, find) -> Book:                 # reads find's facts
+            if not find.book_uids:
+                return []                             # no steps: skipped when reached
+            return [run("show_book", book_uid=find.book_uids[0])]
 
-        def _parts(self, item):                          # a helper, not a phase
-            return ", ".join(item.parts) or "none"
+        def answer(self, input, book=None):           # None: the book phase was skipped
+            if book is None:
+                return [f"say that no book matches {input.title}"]
+            return [f"say that {book.name} is by {book.author}; the library owns "
+                    f"{book.copies} copies"]
 
 The rules (the one-page guide: ``docs/planning_command_file_layout.md``)
 -------------------------------------------------------------
@@ -40,33 +48,30 @@ The rules (the one-page guide: ``docs/planning_command_file_layout.md``)
    written; ``_name`` methods are helpers.
 2. A phase's parameters name what it reads: ``input`` and earlier phases by name (None, its
    default, when that phase was skipped).
-3. Its return annotation is the facts model it fills (``fact_from("command.field")`` per
-   field); none: it passes nothing on.
+3. Its return annotation is the facts model it fills, each field copied from a command's
+   field with ``fact_from("command.field")``; no annotation: it fills nothing.
 4. It returns its steps as text, exactly the lines the agent reads. ``return []`` skips it:
    always decided when the phase is reached, on the real facts (the method is called once).
 
+Sharing phases: a base class in a ``_`` module (``_commands/_book_phases.py``, ``class BookPhases``)
+holds the phases two commands share; ``class PlanGenerator(BookPhases)`` keeps them and adds its
+own. A ``PlanGenerator`` may not subclass another command's (a load error): to reuse that command's
+whole job, call it in a ``run()`` step.
+
 Optional: ``PlanGenerator.__phases__(self, input)`` returns the phases a call runs, in order
-(default: every one); a call of one phase that reads and fills no facts runs flat, as one
-plan. ``@phase(over=..., max_items=..., until=..., noun=..., optional=...)`` makes a phase a
-fan-out (once per item) or optional.
+(default: every one); ``return [self.check]`` runs one. ``@phase(over=..., max_items=..., until=...,
+noun=..., optional=...)`` makes a phase a fan-out (once per item) or optional.
 
-Reuse: a ``PlanGenerator`` may subclass another planning command's (``class PlanGenerator(BookLookup)``):
-``self`` reaches the base's phases, helpers and facts models as Python resolves methods, and a
-method of the same name overrides a base phase (its own parameters are what it reads; it may
-extend the base's steps: ``return [*super().answer(input, find), "say that ..."]``). The order
-stays explicit: a subclass that only overrides keeps its base's plan; one that adds phases (or
-has phases from several bases) writes ``__phases__``, placing the base's anywhere:
-``return [self.find, self.book, self.loans, self.answer]`` (else a load error).
-
-No ``Input`` fields: a planning command may still have phases (methods without ``input``); every call
-then has the one plan, and the planner's planning command call has no arguments.
+Steps: ``run("command", k=v)`` runs a command when every value is given; ``pick("command",
+named=x)`` opens the row a find listed whose label matches ``x``; ``full_list("command")`` reads
+every page; ``when(...)`` and ``do_not_run(...)`` guard a step. ``say that ...`` is an answer line
+code copies word for word; any other line is the agent's to write.
 
 The template (what the planner sees) calls each method once per input with every fact a
-``planning_phases.Placeholder``: it reads ``<find.total>``, ``<find.uids[0]>``,
-``<find.labels[*]>``; a helper method called with one reads as its name in words
-(``<their reach>``); every test on one reads as true and is noted, so the phase's lines end
-``(only when find.uids)``. A method that fails there, or writes ``None`` into a step, is a
-load error.
+``planning_phases.Placeholder``: it reads ``<find.total>``, ``<find.book_uids[0]>``; a helper
+method called with one reads as its name in words; every test on a fact reads as true and is
+noted, so the phase's lines end ``(only when find.book_uids)``. A method that fails there, or
+writes ``None`` into a step, is a load error.
 """
 from __future__ import annotations
 

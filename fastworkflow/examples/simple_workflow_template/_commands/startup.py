@@ -1,9 +1,8 @@
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
 from ..application.workitem import WorkItem
 
 class ResponseGenerator:
-    def __call__(self, workflow: fastworkflow.Workflow, command: str) -> CommandOutput:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, input: None) -> str:
         filepath = (
             f'{workflow.folderpath}/'
             'simple_workflow_template.json'
@@ -15,7 +14,4 @@ class ResponseGenerator:
             "message": "Application initialized.",
         }
 
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=str(response))
-        )
+        return str(response)

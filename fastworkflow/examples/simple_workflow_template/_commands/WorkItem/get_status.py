@@ -1,7 +1,6 @@
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 
 from ...application.workitem import WorkItem
@@ -35,15 +34,9 @@ class ResponseGenerator:
             status_dict = workitem.get_status()
         )
 
-    def __call__(self, workflow: fastworkflow.Workflow, command: str) -> CommandOutput:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, input: None) -> Signature.Output:
         output = self._process_command(workflow)
         
         # Format the status information
-        response = (
-            f'Response: {output.model_dump_json()}'
-        )
         
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=response)
-        )
+        return output

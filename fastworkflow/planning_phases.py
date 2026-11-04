@@ -1826,11 +1826,12 @@ def _fitting_uid_column(uid_param: str, parameters_classes: Sequence[Any],
     return None
 
 
-def _lookup_values_for_step(step: Any, lookup_or_run: Any) -> list[str]:
-    """The non-paging argument values of *lookup_or_run* that *step* names."""
+def _lookup_values_for_step(step: Any, lookup_or_run: Any, paging: Iterable[str]) -> list[str]:
+    """The non-paging argument values of *lookup_or_run* that *step* names (*paging*: the step's
+    command's paging parameters, ``_command_paging``)."""
     from fastworkflow.observation_offloading import finish_check
-    from fastworkflow.observation_offloading.facts import PAGING_PARAMETERS
 
+    paging = tuple(paging)
     if isinstance(lookup_or_run, Mapping):
         args = finish_check._given_inputs(lookup_or_run.get("input"))
     else:
@@ -1839,10 +1840,10 @@ def _lookup_values_for_step(step: Any, lookup_or_run: Any) -> list[str]:
     if match is not None:
         wanted = _folded(match.group(1))
         return [finish_check.plain_value(value) for key, value in args.items()
-                if key not in PAGING_PARAMETERS and wanted and _folded(value) == wanted]
+                if key not in paging and wanted and _folded(value) == wanted]
     text = _folded(step.text)
     return [finish_check.plain_value(value) for key, value in args.items()
-            if key not in PAGING_PARAMETERS and _folded(value)
+            if key not in paging and _folded(value)
             and re.search(rf"(?<![a-z0-9_]){re.escape(_folded(value))}(?![a-z0-9_])", text)]
 
 
@@ -1855,14 +1856,14 @@ def pick_listing(
     the value *step* names and whose ``Output`` has one uid list that fits *step*'s uid
     parameter, with the pages of that listing joined (``facts._join_list``); None when
     none fits. Never after a page that shows more pages."""
-    from fastworkflow.observation_offloading.facts import (
-        PAGING_PARAMETERS, _join_list, _page_key, _scalar_of_pages)
+    from fastworkflow.observation_offloading.facts import _join_list, _page_key, _scalar_of_pages
 
     uid_param, _, _ = _uid_parameter(step, parameters_classes)
     if uid_param is None:
         return None
+    paging = _command_paging(parameters_classes)
     for run in reversed(runs):
-        if not run.get("success") or not _lookup_values_for_step(step, run):
+        if not run.get("success") or not _lookup_values_for_step(step, run, paging):
             continue
         if _fitting_uid_column(uid_param, parameters_classes,
                                str(run.get("command") or ""), run.get("output")) is None:
@@ -1870,15 +1871,15 @@ def pick_listing(
         if run.get("more_pages"):
             return None
         cmd = _plain(run.get("command"))
-        query, _, _ = _page_key(run.get("input"), PAGING_PARAMETERS, None)
+        query, _, _ = _page_key(run.get("input"), paging, None)
         pages = [r for r in runs if r.get("success") and _plain(r.get("command")) == cmd
                  and isinstance(r.get("output"), Mapping)
-                 and _page_key(r.get("input"), PAGING_PARAMETERS, None)[0] == query]
+                 and _page_key(r.get("input"), paging, None)[0] == query]
         if len(pages) <= 1:
             return run, dict(run["output"])
         joined: dict[str, Any] = {}
         for key, val in run["output"].items():
-            keyed = [(*_page_key(r.get("input"), PAGING_PARAMETERS, None),
+            keyed = [(*_page_key(r.get("input"), paging, None),
                       r["output"][key], r["output"])
                      for r in pages if key in r["output"]]
             joined[key] = (_join_list(keyed) if isinstance(val, (list, tuple))
@@ -1917,7 +1918,7 @@ def pick_step(step: Any, lookup: Any, output: Any,
     uid_param, rest, reason = _uid_parameter(step, parameters_classes)
     if uid_param is None:
         return None, reason
-    values = _lookup_values_for_step(step, lookup)
+    values = _lookup_values_for_step(step, lookup, _command_paging(parameters_classes))
     if not values:
         return None, "names no lookup value"
     run_command = str(lookup.get("command") if isinstance(lookup, Mapping)
@@ -2023,12 +2024,9 @@ def step_paging(step: Any, parameters: Callable[[str], list]) -> tuple[list[str]
     the step reads.
     ``CodeSteps`` and the planning command preview (``code_step_pages``) both read paging here.
     """
-    from fastworkflow.observation_offloading.facts import PAGING_PARAMETERS
     from fastworkflow.observation_offloading.finish_check import step_chain
 
-    fields = {name for cls in parameters(step.command) if cls is not None
-              for name in cls.model_fields}
-    paging = [name for name in PAGING_PARAMETERS if name in fields]
+    paging = list(_command_paging(parameters(step.command)))
     if not paging or any(name in step.arguments for name in paging):
         return [], False
     text = step.text.replace("`", " ").replace("*", " ")
@@ -2061,10 +2059,47 @@ def code_step_pages(plan_text: str, commands: Iterable[str], core_commands: Iter
 CODE_MAX_PAGES = 20
 
 
-def _next_page(observation: Any, paging: Iterable[str], start: int) -> Optional[tuple[str, int]]:
-    """``(name, value)``: the later page an observation names for the page at *start*: the
-    largest value of one of the command's paging parameters it writes (``Next page:
-    start=60``) that is above *start*, or None (the last page, or no paging named)."""
+def _command_paging(classes: Iterable[Any]) -> tuple[str, ...]:
+    """The paging parameters of a command across its parameter classes (``facts.paging_parameters``),
+    in ``PAGING_PARAMETERS`` order: the one every reader of a command's paging asks."""
+    from fastworkflow.observation_offloading.facts import PAGING_PARAMETERS, paging_parameters
+
+    found = {name for cls in classes if cls is not None for name in paging_parameters(cls)}
+    return tuple(name for name in PAGING_PARAMETERS if name in found)
+
+
+def _page_read(run: Any, paging: Iterable[str]) -> Optional[tuple[str, int, int, int]]:
+    """``(name, start, rows, total)`` of a run that wrote a page (3.14): the paging parameter it
+    was read by (the one its Input gives, else the first of *paging*), the position it started at,
+    the rows it listed and the total. None when the run has no Output, or the Output is no page."""
+    from fastworkflow.observation_offloading.facts import output_page
+
+    paging = tuple(paging)
+    if not paging or not isinstance(run, Mapping) or not isinstance(run.get("output"), Mapping):
+        return None
+    page = output_page(run["output"])
+    if page is None:
+        return None
+    given = run["input"] if isinstance(run.get("input"), Mapping) else {}
+    name = next((n for n in paging if n in given), paging[0])
+    start = given.get(name)
+    if not isinstance(start, int) or isinstance(start, bool):
+        start = 0
+    return name, start, page[0], page[1]
+
+
+def _next_page(observation: Any, paging: Iterable[str], start: int,
+               run: Optional[Mapping[str, Any]] = None) -> Optional[tuple[str, int]]:
+    """``(name, value)``: the later page after the page at *start*, or None (the last page, or
+    no paging). With the run that read the page and its Output, the page is the run's Input and
+    Output: the next value is the position after the rows listed, while that is below ``total``.
+    Otherwise (no run, or a run with no Output) it is the largest value of one of the command's
+    paging parameters the text writes (``Next page: start=60``) that is above *start*."""
+    read = _page_read(run, paging)
+    if read is not None:
+        name, first, rows, total = read
+        after = first + rows
+        return (name, after) if rows and after < total else None
     names = "|".join(re.escape(name) for name in paging)
     if not names:
         return None
@@ -2077,9 +2112,15 @@ def _next_page(observation: Any, paging: Iterable[str], start: int) -> Optional[
     return name, value
 
 
-def _more_pages(observation: Any, paging: Iterable[str]) -> bool:
-    """Whether a page-1 observation names a later page: one of the command's paging
+def _more_pages(observation: Any, paging: Iterable[str],
+                run: Optional[Mapping[str, Any]] = None) -> bool:
+    """Whether the run names a later page: with its Output, whether rows remain past the page it
+    read; otherwise (no run, or no Output) whether the text names one of the command's paging
     parameters with a positive value (``start=20``), as a paged command tells its reader."""
+    read = _page_read(run, paging)
+    if read is not None:
+        _, first, rows, total = read
+        return rows > 0 and first + rows < total
     names = "|".join(re.escape(name) for name in paging)
     return bool(names) and re.search(rf"(?<![A-Za-z0-9_])(?:{names})\s*=\s*0*[1-9]",
                                      str(observation or "")) is not None
@@ -2210,13 +2251,13 @@ class CodeSteps:
         elif paging and self._paged is not None:
             # Code reads the page the observation names next, up to CODE_MAX_PAGES.
             _, start, pages = self._paged
-            later = _next_page(observation, paging, start)
+            later = _next_page(observation, paging, start, run=self._run_of(step_index))
             if later is not None and pages < CODE_MAX_PAGES:
                 self._next = later
         if not move:
-            from fastworkflow.observation_offloading.facts import PAGING_PARAMETERS
-
-            more = not paging and _more_pages(observation, PAGING_PARAMETERS)
+            more = not paging and _more_pages(
+                observation, _command_paging(self._parameters(step.command)),
+                run=self._run_of(step_index))
             self._step_info[step_index] = (step.number, more)
         self._lookup = None if move else (step, step_index, observation)
 
@@ -2255,6 +2296,14 @@ class CodeSteps:
                                         if reason == "exact match"
                                         else f" (the only row{where})")
         return command
+
+    def _run_of(self, step_index: int) -> Optional[Mapping[str, Any]]:
+        """The last command run of a step (its Input and Output), or None when the runs cannot be read."""
+        try:
+            runs = self.runs(step_index)
+        except Exception:  # noqa: BLE001 - runs that cannot be read leave the text to read
+            return None
+        return runs[-1] if runs else None
 
     def _succeeded(self, step_index: int, observation: Any) -> bool:
         """No failure marker and every command run of the step succeeded; the reply for

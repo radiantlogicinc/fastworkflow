@@ -29,12 +29,12 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow: fastworkflow.Workflow, command: str,
-                 command_parameters: Signature.Input) -> Signature.Output:
-        wanted = command_parameters.branch.casefold()
+                 input: Signature.Input) -> Signature.Output:
+        wanted = input.branch.casefold()
         rows = [(name, hours) for name, hours in HOURS.items()
                 if not wanted or name.casefold() == wanted]
         if not rows:
             raise fastworkflow.Refused(
-                f"no branch is named {command_parameters.branch}; the branches are "
+                f"no branch is named {input.branch}; the branches are "
                 f"{', '.join(HOURS)}")
         return Signature.Output(branches=[n for n, _ in rows], hours=[h for _, h in rows])

@@ -330,7 +330,7 @@ class Workflow:
             wf.command_context_for_response_generation = found[0].record
             gen_cls = routing.get_command_class(
                 qualified, fastworkflow.ModuleType.RESPONSE_GENERATION_INFERENCE)
-            raw = call_response_generator(gen_cls(), wf, command, *([] if params is None else [params]))
+            raw = call_response_generator(gen_cls(), wf, command, params, command_name=qualified)
             if isinstance(raw, fastworkflow.CommandOutput):
                 out = raw
             else:

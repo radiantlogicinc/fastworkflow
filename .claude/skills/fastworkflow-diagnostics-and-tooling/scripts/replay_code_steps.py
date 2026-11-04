@@ -63,7 +63,7 @@ def stored_plans(db, experiments=()):
 def replay(folder, db, experiments=()):
     import fastworkflow
     from fastworkflow import planning_phases
-    from fastworkflow.observation_offloading.facts import PAGING_PARAMETERS
+    from fastworkflow.observation_offloading.facts import paging_parameters
 
     env = os.path.join(folder, "fastworkflow.env")
     if os.path.isfile(env):
@@ -101,10 +101,9 @@ def replay(folder, db, experiments=()):
             cut = re.search(r"[(;]", note[len(step.command):])
             if cut:
                 notes[note[len(step.command) + cut.start():].strip()] += 1
-            fields = {name for cls in parameters(step.command) if cls is not None
-                      for name in cls.model_fields}
-            if any(p in fields for p in PAGING_PARAMETERS) and not any(
-                    p in step.arguments for p in PAGING_PARAMETERS):
+            paging = {p for cls in parameters(step.command) if cls is not None
+                      for p in paging_parameters(cls)}
+            if paging and not any(p in step.arguments for p in paging):
                 page_one[step.command] += 1
         all_mechanical += not open_seen
     return {

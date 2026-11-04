@@ -38,10 +38,10 @@ def test_global_context():
     
     # Call the __call__ method which is the current implementation
     gen = ResponseGenerator()
-    response = gen(mock_workflow, "what context am I in")
+    response = gen(mock_workflow, "what context am I in", None)
     
     # Check that the response indicates the global context
-    assert "global" in response.command_response.response.lower() or "*" in response.command_response.response
+    assert "global" in response.lower() or "*" in response
 
 
 def test_context_no_properties():
@@ -73,10 +73,10 @@ def test_context_no_properties():
     )
     
     # Call the __call__ method which is the current implementation
-    response = ResponseGenerator()(mock_workflow, "what context am I in")
+    response = ResponseGenerator()(mock_workflow, "what context am I in", None)
     
     # Check that the response contains the context name
-    assert "TodoListManager" in response.command_response.response
+    assert "TodoListManager" in response
 
 
 def test_context_with_properties():
@@ -109,7 +109,7 @@ def test_context_with_properties():
     )
     
     # Call the __call__ method which is the current implementation
-    response = ResponseGenerator()(mock_workflow, "what context am I in")
+    response = ResponseGenerator()(mock_workflow, "what context am I in", None)
     
     # Check that the response contains the context name
-    assert "TodoList" in response.command_response.response 
+    assert "TodoList" in response 

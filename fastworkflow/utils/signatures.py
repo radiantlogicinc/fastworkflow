@@ -6,6 +6,7 @@ import dspy
 import os
 from contextlib import suppress
 from dataclasses import dataclass, field as dataclass_field
+from types import UnionType
 from typing import Literal, Optional, Tuple, Union, Dict, Any, Type, List, get_args, get_origin
 from enum import Enum
 from datetime import date
@@ -13,7 +14,7 @@ import re
 from difflib import get_close_matches
 import json
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 from pydantic_core import PydanticUndefined
 
 import fastworkflow
@@ -28,16 +29,79 @@ from fastworkflow import planning_commands
 from fastworkflow.utils.workflow_vocabulary import (
     KIND_WORD_WHY, WorkflowVocabulary, is_kind_word, is_pronoun_phrase, load_workflow_vocabulary)
 
-MISSING_INFORMATION_ERRMSG = None
-INVALID_INFORMATION_ERRMSG = None
-PARAMETER_EXTRACTION_ERROR_MSG = None
-NOT_FOUND = None
+# Framework sentinels, fixed in code (not env settings). ``NOT_FOUND`` is what the
+# extractor answers for a value it could not find, and what a required field holds
+# until the user supplies it. ``INVALID`` is the marker for a value that failed a check.
+NOT_FOUND = "NOT_FOUND"
+INVALID = "INVALID"
+MISSING_INFORMATION_ERRMSG = "Missing parameter values: "
+INVALID_INFORMATION_ERRMSG = "Invalid parameter values: "
+PARAMETER_EXTRACTION_ERROR_MSG = "Error in parameter extraction: {error}"
 
 LLM_PARAM_EXTRACTION = None
 LITELLM_API_KEY_PARAM_EXTRACTION = None
 
 INVALID_INT_VALUE = -sys.maxsize
 INVALID_FLOAT_VALUE = -sys.float_info.max
+
+
+def not_given_value(field_info: Any) -> Any:
+    """What a field of a parameters model holds when nothing gives it a value.
+
+    A declared default wins (a factory is called). Otherwise a required field holds the
+    framework's marker for its type, which is what the user is then asked for: ``NOT_FOUND``
+    for a str, ``INVALID_INT_VALUE`` / ``INVALID_FLOAT_VALUE`` for a number, ``[]`` for a list.
+    The developer writes none of this: a plain required field (no default) gets it here.
+    An Optional field, or any other type, holds None.
+    """
+    if field_info.default is not PydanticUndefined:
+        return field_info.default
+    if field_info.default_factory is not None:
+        return field_info.default_factory()
+    annotation = field_info.annotation
+    if get_origin(annotation) in (Union, UnionType):
+        return None
+    origin = get_origin(annotation)
+    if origin is list or annotation is list:
+        return []
+    if annotation is str:
+        return NOT_FOUND
+    if annotation is int:
+        return INVALID_INT_VALUE
+    if annotation is float:
+        return INVALID_FLOAT_VALUE
+    return None
+
+
+def is_required_argument(field_info: Any) -> bool:
+    """Whether a caller must give the field: no declared default, and not Optional."""
+    if not field_info.is_required():
+        return False
+    return get_origin(field_info.annotation) not in (Union, UnionType)
+
+
+def parameters_with_unfilled(model_class: Type[BaseModel], values: Dict[str, Any]) -> BaseModel:
+    """The parameters model for *values*, with each required field *values* leaves out set to
+    its ``not_given_value``, so validation reports it as missing (and the user is asked for it)
+    instead of pydantic raising on the construction.
+
+    With every field given, the model is built exactly as before. With a field unfilled, the
+    model is validated once with the markers in place; if a marker does not validate (a
+    pattern, a bound, a validator), it is built unvalidated, and ``validate_parameters`` is the
+    one check that runs, as on the NLU path.
+    """
+    unfilled = {
+        name: not_given_value(info)
+        for name, info in getattr(model_class, "model_fields", {}).items()
+        if name not in values and info.is_required()
+    }
+    if not unfilled:
+        return model_class(**values)
+    data = {**values, **unfilled}
+    try:
+        return model_class(**data)
+    except ValidationError:
+        return model_class.model_construct(**data)
 
 
 # --- Angle-bracketed parameter values ------------------------------------------
@@ -713,10 +777,6 @@ class DatabaseValidator:
             Raise it per command if an extra clarification turn costs more than
             a wrong substitution.
         """
-        global NOT_FOUND
-        if not NOT_FOUND:
-            NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
-
         if not value or value in [None, NOT_FOUND]:
             return False, None, []
 
@@ -777,6 +837,38 @@ def _unfilled_required(planning, cmd_parameters: BaseModel) -> List[str]:
                                or (isinstance(value, list) and not value)):
             unfilled.append(param.name)
     return unfilled
+
+
+def check_hook_accepts(result, command_name: str) -> None:
+    """The one contract of ``validate_extracted_parameters``: return None to accept (fail fast otherwise).
+
+    A hook that returns anything, a tuple included, is a call error naming the form it must use.
+    It refuses by raising ``fastworkflow.Refused``; the framework does not read a return value.
+    """
+    if result is None:
+        return
+    raise TypeError(
+        f"{command_name}'s validate_extracted_parameters must return None to accept and raise "
+        f"fastworkflow.Refused(message, field=...) to refuse; it returned {type(result).__name__}"
+    )
+
+
+_RETIRED_DB_LOOKUP = (
+    "db_lookup is retired: do the lookup in validate_extracted_parameters, write the corrected value "
+    "to input, or raise fastworkflow.Refused('... Did you mean ...?', field='<name>')"
+)
+
+
+def reject_retired_db_lookup(signature_class, input_model, where: str) -> None:
+    """A load error for the retired ``db_lookup``: the field key or the Signature method (fix-3rsq.one-hook)."""
+    if signature_class is not None and "db_lookup" in vars(signature_class):
+        raise ValueError(f"{where}: Signature.db_lookup: {_RETIRED_DB_LOOKUP}")
+    if input_model is None:
+        return
+    for name, info in input_model.model_fields.items():
+        extra = getattr(info, "json_schema_extra", None)
+        if isinstance(extra, dict) and "db_lookup" in extra:
+            raise ValueError(f"{where}: field {name!r} has json_schema_extra 'db_lookup': {_RETIRED_DB_LOOKUP}")
 
 
 class InputForParamExtraction(BaseModel):
@@ -855,7 +947,6 @@ Today's date is {today}.
                     is_optional = True
                     attribute_type = next((elem for elem in union_elements if elem is not type(None)), str)
 
-            NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
             if attribute_type is str:            
                 default_value = NOT_FOUND
             elif attribute_type is int:
@@ -921,10 +1012,7 @@ Today's date is {today}.
         Returns:
             The extracted parameters
         """
-        global PARAMETER_EXTRACTION_ERROR_MSG, LLM_PARAM_EXTRACTION, LITELLM_API_KEY_PARAM_EXTRACTION
-
-        if not PARAMETER_EXTRACTION_ERROR_MSG:
-            PARAMETER_EXTRACTION_ERROR_MSG = fastworkflow.get_env_var("PARAMETER_EXTRACTION_ERROR_MSG")
+        global LLM_PARAM_EXTRACTION, LITELLM_API_KEY_PARAM_EXTRACTION
 
         if not LLM_PARAM_EXTRACTION:
             LLM_PARAM_EXTRACTION = fastworkflow.get_env_var("LLM_PARAM_EXTRACTION")
@@ -982,7 +1070,7 @@ Today's date is {today}.
             try:
                 dspy_result = best_of_3(command=self.command)
                 for field_name in field_names:
-                    default = model_class.model_fields[field_name].default
+                    default = not_given_value(model_class.model_fields[field_name])
                     param_dict[field_name] = getattr(dspy_result, field_name, default)
             except Exception as exc:
                 logger.warning(PARAMETER_EXTRACTION_ERROR_MSG.format(error=exc))
@@ -1032,13 +1120,16 @@ Today's date is {today}.
         """The refusal text of the ``Input``'s own validators, for a command of either kind, or None.
 
         The validators read the request (self.command) and the workflow from the validation context
-        (``planning_commands.check_input``, design 3.4).
+        (``planning_commands.check_input``, design 3.4). A value a validator returns instead of its
+        input is written back onto the command's parameters.
         """
         args = {name: getattr(cmd_parameters, name, None) for name in type(cmd_parameters).model_fields}
         try:
-            planning_commands.check_input(command, args, self.command, app_workflow)
+            written = planning_commands.check_input(command, args, self.command, app_workflow)
         except planning_commands.PlanningCommandCallError as refusal:
             return str(refusal)
+        for name, value in written.items():
+            setattr(cmd_parameters, name, value)
         return None
 
     def validate_parameters(self,
@@ -1058,18 +1149,11 @@ Today's date is {today}.
         fw.nlu.param_extraction span so debugging agents read fields instead
         of parsing the prose error message. Passing None changes nothing.
         """
-        global MISSING_INFORMATION_ERRMSG, INVALID_INFORMATION_ERRMSG, NOT_FOUND
-        if not MISSING_INFORMATION_ERRMSG:
-            MISSING_INFORMATION_ERRMSG = fastworkflow.get_env_var("MISSING_INFORMATION_ERRMSG")
-        if not INVALID_INFORMATION_ERRMSG:
-            INVALID_INFORMATION_ERRMSG = fastworkflow.get_env_var("INVALID_INFORMATION_ERRMSG")
-        if not NOT_FOUND:
-            NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
-
         is_valid = True
         missing_fields = []
         invalid_fields = []
         all_suggestions = {}
+        refusal_messages: List[str] = []
 
         # Wrappers and placeholders first, before type coercion, patterns,
         # db_lookup and the workflow's hook see the value: every extraction
@@ -1354,19 +1438,6 @@ Today's date is {today}.
                                     None,
                                 )
                                 if pattern and field_value is not None and field_value != NOT_FOUND:
-                                    invalid_value = None
-                                    if hasattr(field_info, "json_schema_extra") and field_info.json_schema_extra:
-                                        invalid_value = field_info.json_schema_extra.get("invalid_value")
-
-                                    # if invalid_value and field_value == invalid_value:
-                                    #     invalid_fields.append(f"{field_name} '{field_value}'")
-                                    #     pattern_str = str(pattern)
-                                    #     examples = getattr(field_info, "examples", [])
-                                    #     example = examples[0] if examples else ""
-                                    #     all_suggestions[field_name] = [f"Please use the format matching pattern {pattern_str} (e.g., {example})"]
-                                    #     is_valid = False
-
-                                    # else:
                                     pattern_regex = re.compile(pattern)
                                     if not pattern_regex.fullmatch(str(field_value)):
                                         invalid_fields.append(f"{field_name} '{field_value}'")
@@ -1435,56 +1506,6 @@ Today's date is {today}.
                         missing_fields.append(field_name)
                         is_valid = False
 
-        for field_name, field_info in type(cmd_parameters).model_fields.items():
-            field_value = getattr(cmd_parameters, field_name, None)
-
-            if field_value in [NOT_FOUND, None] or field_name in refused_fields:
-                continue
-
-            is_db_lookup = None
-            if hasattr(field_info, "json_schema_extra") and field_info.json_schema_extra:
-                is_db_lookup = field_info.json_schema_extra.get("db_lookup")
-
-            if is_db_lookup:
-                if not self.input_for_param_extraction_class:
-                    raise ValueError("input_for_param_extraction_class is not set.")
-                matched, corrected_value, field_suggestions = (
-                    self.input_for_param_extraction_class.db_lookup(
-                        app_workflow, field_name, field_value)
-                )
-                # matched, corrected_value, field_suggestions = DatabaseValidator.fuzzy_match(field_value, key_values)
-
-                if diagnostics is not None:
-                    # The three-state contract, recorded structurally:
-                    # applied (value possibly rewritten), rejected (suggestions
-                    # offered), declined (no opinion — value left alone).
-                    diagnostics.setdefault("db_lookup", []).append({
-                        "field": field_name,
-                        "input_value": str(field_value),
-                        "outcome": (
-                            "applied" if matched
-                            else "rejected" if field_suggestions
-                            else "declined"
-                        ),
-                        "corrected_value": (
-                            str(corrected_value) if matched else None
-                        ),
-                        "corrected": bool(matched) and corrected_value != field_value,
-                        "suggestions": [str(s) for s in (field_suggestions or [])],
-                    })
-
-                if matched:
-                    if corrected_value != field_value:
-                        logger.debug(
-                            f"db_lookup substituted {subject_command_name}.{field_name}: "
-                            f"'{field_value}' -> '{corrected_value}'"
-                        )
-                    setattr(cmd_parameters, field_name, corrected_value)
-                elif field_suggestions:
-                    invalid_fields.append(f"{field_name} '{field_value}'")
-                    all_suggestions[field_name] = field_suggestions
-                    is_valid = False
-
         planning = _planning_command_of(app_workflow, subject_command_name)
         if is_valid and planning is not None:
             unfilled = _unfilled_required(planning, cmd_parameters)
@@ -1500,29 +1521,23 @@ Today's date is {today}.
             if guard_refusal is not None:
                 return (False, guard_refusal, {}, [])
 
+        hook_refusal = None
         if is_valid and self.input_for_param_extraction_class and \
                 hasattr(self.input_for_param_extraction_class, 'validate_extracted_parameters'):
+            hook = self.input_for_param_extraction_class.validate_extracted_parameters
+            # The command text goes only to a hook that declares `command_text`,
+            # so every (workflow, command, cmd_parameters) hook is called exactly as before.
+            hook_kwargs = (
+                {"command_text": self.command}
+                if "command_text" in inspect.signature(hook).parameters
+                else {}
+            )
+            before = cmd_parameters.model_dump()
+            result = None
             try:
-                hook = self.input_for_param_extraction_class.validate_extracted_parameters
-                # The command text goes only to a hook that declares `command_text`,
-                # so every existing (workflow, command, cmd_parameters) hook is
-                # called exactly as before.
-                hook_kwargs = (
-                    {"command_text": self.command}
-                    if "command_text" in inspect.signature(hook).parameters
-                    else {}
-                )
-                try:
-                    is_valid, message = hook(app_workflow, subject_command_name, cmd_parameters,
-                                             **hook_kwargs)
-                except fastworkflow.Refused as refusal:
-                    is_valid, message = False, str(refusal)
-                if diagnostics is not None:
-                    diagnostics["validation_hook"] = {
-                        "ran": True,
-                        "is_valid": bool(is_valid),
-                        "message": None if is_valid else str(message),
-                    }
+                result = hook(app_workflow, subject_command_name, cmd_parameters, **hook_kwargs)
+            except fastworkflow.Refused as refusal:
+                hook_refusal = refusal
             except Exception as e:
                 message = f"Exception in {subject_command_name}'s validate_extracted_parameters function: {str(e)}"
                 logger.critical(message)
@@ -1534,9 +1549,31 @@ Today's date is {today}.
                         "raised": type(e).__name__,
                     }
                 return (False, message, {}, [])
-
-            if not is_valid:
-                return (False, message, {}, [])
+            if hook_refusal is None:
+                check_hook_accepts(result, subject_command_name)
+            after = cmd_parameters.model_dump()
+            changed_fields = [name for name in after if after[name] != before.get(name)]
+            if diagnostics is not None:
+                # `changed_fields`: the fields the hook rewrote in place (the value is written back);
+                # the slot-binding record reads it as the `validation_hook` binding (fix-3rsq.one-hook).
+                diagnostics["validation_hook"] = {
+                    "ran": True,
+                    "is_valid": hook_refusal is None,
+                    "message": None if hook_refusal is None else str(hook_refusal),
+                    "changed_fields": changed_fields,
+                    "refused_fields": list(hook_refusal.fields) if hook_refusal is not None else [],
+                }
+            if hook_refusal is not None:
+                if not hook_refusal.fields:
+                    return (False, str(hook_refusal), {}, [])
+                is_valid = False
+                for name in hook_refusal.fields:
+                    if name not in type(cmd_parameters).model_fields:
+                        raise ValueError(
+                            f"{subject_command_name}: fastworkflow.Refused names {name!r}, which is not a field "
+                            f"of its Input (fields: {', '.join(type(cmd_parameters).model_fields)})")
+                    invalid_fields.append(f"{name} '{getattr(cmd_parameters, name, None)}'")
+                refusal_messages.append(str(hook_refusal))
 
         if is_valid:
             input_refusal = self._check_input_rules(command, cmd_parameters, app_workflow)
@@ -1580,6 +1617,9 @@ Today's date is {today}.
 
         for _, wording in word_fields.values():
             message += wording + "\n"
+
+        for refusal_message in refusal_messages:
+            message += refusal_message + "\n"
 
         for field, value in out_of_range_fields.items():
             message += out_of_range_value_message(field, value, out_of_range_problems[field]) + "\n"

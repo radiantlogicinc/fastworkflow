@@ -110,7 +110,7 @@ def test_validation_unwraps_quotes_and_records_them():
         @staticmethod
         def validate_extracted_parameters(workflow, command, cmd_parameters):
             seen["filter"] = cmd_parameters.filter
-            return True, ""
+            return None
 
     params = ShowParams.model_construct(
         group_name="Payroll", filter='"Ann Lee"', start=None, limit=20)
@@ -226,7 +226,7 @@ def test_the_not_given_marker_on_an_optional_int_becomes_none():
         @staticmethod
         def validate_extracted_parameters(workflow, command, cmd_parameters):
             seen["start"] = cmd_parameters.start
-            return True, ""
+            return None
 
     params = ShowParams.model_construct(
         group_name="Payroll", filter=None, start=INVALID_INT_VALUE, limit=20)

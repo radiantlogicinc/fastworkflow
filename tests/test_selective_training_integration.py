@@ -169,12 +169,9 @@ class Signature:
 
 
 class ResponseGenerator:
-    def __call__(self, workflow: fastworkflow.Workflow, command: str) -> fastworkflow.CommandOutput:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, input) -> fastworkflow.CommandResponse:
         session: PremiumSession = workflow.command_context_for_response_generation
-        return fastworkflow.CommandOutput(
-            command_response=
-                fastworkflow.CommandResponse(response=session.end_session())
-        )
+        return fastworkflow.CommandResponse(response=session.end_session())
 '''
 
 

@@ -5,7 +5,6 @@ from typing import List
 import fastworkflow
 from pydantic import BaseModel, Field
 
-from fastworkflow import CommandOutput, CommandResponse
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from fastworkflow.workflow import Workflow
 
@@ -39,8 +38,8 @@ class Signature:
     @staticmethod
     def validate_extracted_parameters(
         workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input"
-    ) -> tuple[bool, str]:
-        return (True, "")
+    ) -> None:
+        return None
 
 
 class ResponseGenerator:
@@ -49,10 +48,6 @@ class ResponseGenerator:
     ) -> Signature.Output:
         return Signature.Output(status=f"acknowledged {input.finding_id}")
 
-    def __call__(
-        self, workflow: Workflow, command: str, command_parameters: Signature.Input
-    ) -> CommandOutput:
-        output = self._process_command(workflow, command_parameters)
-        return CommandOutput(
-            command_response=CommandResponse(response=output.status)
-        )
+    def __call__(self, workflow: Workflow, command: str, input: Signature.Input) -> fastworkflow.CommandResponse:
+        output = self._process_command(workflow, input)
+        return fastworkflow.CommandResponse(response=output.status, output=output)

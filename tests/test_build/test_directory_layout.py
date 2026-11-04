@@ -77,7 +77,7 @@ class TestManager:
         
         # Verify imports
         assert "import fastworkflow" in content
-        assert "from fastworkflow import CommandOutput, CommandResponse" in content
+        assert "CommandOutput(" not in content  # the startup command returns its Output, a str or a CommandResponse
         
         # Verify the ResponseGenerator class exists
         assert "class ResponseGenerator:" in content

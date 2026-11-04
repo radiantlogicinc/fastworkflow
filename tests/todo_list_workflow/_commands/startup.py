@@ -1,9 +1,8 @@
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
 from ..application.todo_manager import TodoListManager
 
 class ResponseGenerator:
-    def __call__(self, workflow: fastworkflow.Workflow, command: str) -> CommandOutput:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, input: None) -> str:
         filepath = (
             f'{workflow.folderpath}/'
             'application/'
@@ -16,7 +15,4 @@ class ResponseGenerator:
             "context": workflow.current_command_context_name
         }
 
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=str(response))
-        )
+        return str(response)

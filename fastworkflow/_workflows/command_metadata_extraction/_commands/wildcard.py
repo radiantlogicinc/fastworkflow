@@ -1,5 +1,9 @@
+from typing import Any, Optional
+
+from pydantic import BaseModel, Field
+
 import fastworkflow
-from fastworkflow import Action, CommandOutput, CommandResponse, NLUPipelineStage
+from fastworkflow import Action, NLUPipelineStage
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.nlu_labels import PARAMETER_VALUE_PLACEHOLDERS
 
@@ -7,6 +11,28 @@ from ..intent_detection import CommandNamePrediction
 from ..parameter_extraction import ParameterExtraction
 
 class Signature:
+    class Output(BaseModel):
+        """The routing result of one message. The executor reads it and builds the turn's CommandOutput.
+
+        handled: a CME or core command already answered the message (or a routing hint did), so the
+            turn ends here with ``response``. A handled answer carries the artifact ``command_handled``.
+        routed: True routes the message on to an application command (run by the executor next);
+            False refuses it, and ``response`` is the answer (success=False).
+        command / command_name / cmd_parameters / ran_on_context_*: the extraction, when the message
+            is routed on to the application command ``command_name`` (run by the executor next).
+        """
+
+        handled: bool = False
+        routed: bool = True
+        response: str = ""
+        command: Optional[str] = None
+        command_name: Optional[str] = None
+        cmd_parameters: Optional[Any] = Field(default=None, exclude=True)
+        ran_on_context_name: Optional[str] = None
+        ran_on_context_clause: Optional[str] = None
+        # The nested command's Output, when a CME command answered (the handled path only).
+        output: Optional[Any] = Field(default=None, exclude=True)
+
     # These are the PARAMETER_EXTRACTION stage's bare-value literals. They belong
     # to nlu_labels.PARAMETER_VALUE_LABEL, not to this command's INTENT_DETECTION
     # escalation class; see fastworkflow/nlu_labels.py for the stage split.
@@ -55,7 +81,8 @@ class ResponseGenerator:
         self, 
         workflow: fastworkflow.Workflow, 
         command: str,
-    ) -> CommandOutput:  # sourcery skip: hoist-if-from-if
+        input: None,
+    ) -> Signature.Output:  # sourcery skip: hoist-if-from-if
         app_workflow = workflow.context["app_workflow"]   # type: fastworkflow.Workflow
         cmd_ctxt_obj_name = app_workflow.current_command_context_name
         nlu_pipeline_stage = workflow.context.get(
@@ -114,15 +141,13 @@ class ResponseGenerator:
             workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION
             workflow_context["command"] = command
             workflow.context = workflow_context
-            return CommandOutput(
-                command_response=
-                    CommandResponse(
-                        response=(
-                            f"Ambiguous intent error for command '{command}'\n"
-                            f"{cnp_output.error_msg}"
-                        ),
-                        success=False
-                    )
+            return Signature.Output(
+                handled=False,
+                routed=False,
+                response=(
+                    f"Ambiguous intent error for command '{command}'\n"
+                    f"{cnp_output.error_msg}"
+                ),
             )
         else:
             if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION and \
@@ -148,14 +173,16 @@ class ResponseGenerator:
                 command=command,
             )
             command_output = CommandExecutor.perform_action(workflow, startup_action)
-            if (
+            handled = (
                 nlu_pipeline_stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION or
                 cnp_output.command_name == 'ErrorCorrection/abort'
-            ):
-                command_output.command_response.artifacts["command_handled"] = True     
-                # Set the additional attributes
-                command_output.command_name = cnp_output.command_name
-            return command_output
+            )
+            return Signature.Output(
+                handled=handled,
+                routed=command_output.success,
+                response=command_output.command_response.response,
+                output=command_output.command_response.output,
+            )
         
         if nlu_pipeline_stage in {
                 NLUPipelineStage.INTENT_DETECTION,
@@ -205,13 +232,7 @@ class ResponseGenerator:
                         # hint names usually lives elsewhere. Ending command
                         # processing routes that next message normally.
                         workflow.end_command_processing()
-                        return CommandOutput(
-                            command_response=CommandResponse(
-                                response=routing_hint,
-                                success=False,
-                                artifacts={"command_handled": True},
-                            )
-                        )
+                        return Signature.Output(handled=True, routed=False, response=routing_hint)
 
                     if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:
                         # out of scope commands
@@ -226,16 +247,14 @@ class ResponseGenerator:
                             command=command,
                         )
                         command_output = CommandExecutor.perform_action(workflow, startup_action)
-                        command_output.command_response.artifacts["command_handled"] = True
-                        return command_output
+                        return Signature.Output(
+                            handled=True,
+                            routed=command_output.success,
+                            response=command_output.command_response.response,
+                            output=command_output.command_response.output,
+                        )
 
-                    return CommandOutput(
-                        command_response=
-                            CommandResponse(
-                                response=cnp_output.error_msg,
-                                success=False
-                            )
-                    )
+                    return Signature.Output(handled=False, routed=False, response=cnp_output.error_msg)
 
             # move to the parameter extraction stage
             workflow_context = workflow.context
@@ -271,41 +290,36 @@ class ResponseGenerator:
             workflow, app_workflow, command_name, extraction_text or preserved_command)
         pe_output = extractor.extract()
         if not pe_output.parameters_are_valid:
-            return CommandOutput(
-                command_name = command_name,
-                command_response=
-                    CommandResponse(
-                        response=(
-                            f"PARAMETER EXTRACTION ERROR FOR COMMAND '{command_name}'\n"
-                            f"{pe_output.error_msg}"
-                        ),
-                        success=False
-                    )
+            return Signature.Output(
+                handled=False,
+                routed=False,
+                response=(
+                    f"PARAMETER EXTRACTION ERROR FOR COMMAND '{command_name}'\n"
+                    f"{pe_output.error_msg}"
+                ),
             )
 
         workflow.end_command_processing()
 
-        artifacts = {
-            "command": preserved_command,
-            "command_name": command_name,
-            "cmd_parameters": pe_output.cmd_parameters,
-        }
         # The walk bound an enclosing record: the command runs on that record, so it is
         # filed under it (design 3.9, "Filing the run"). Absent when it runs here.
+        ran_on_name = ran_on_clause = None
         ran_on = app_workflow.command_context_for_response_generation
         if ran_on is not app_workflow.current_command_context:
             from fastworkflow.context_identity import identity_of
             from fastworkflow.observation_offloading.labels import context_clause
 
             ran_on_name, ran_on_label = identity_of(app_workflow, ran_on)
-            artifacts["ran_on_context_name"] = ran_on_name
-            artifacts["ran_on_context_clause"] = (
+            ran_on_clause = (
                 context_clause(ran_on_name, ran_on_label) if ran_on is not None else "")
 
-        return CommandOutput(
-            command_response=
-                CommandResponse(
-                    response="",
-                    artifacts=artifacts,
-                )
+        return Signature.Output(
+            handled=False,
+            routed=True,
+            response="",
+            command=preserved_command,
+            command_name=command_name,
+            cmd_parameters=pe_output.cmd_parameters,
+            ran_on_context_name=ran_on_name,
+            ran_on_context_clause=ran_on_clause,
         ) 

@@ -78,7 +78,7 @@ def default_generate_utterances(signature, workflow, command_name: str) -> list[
 class UtteranceMetadata(BaseModel):
     workflow_folderpath: Optional[str] = None
     plain_utterances: list[str]
-    template_utterances: list[str]
+    template_utterances: list[str] = []
     generated_utterances_module_filepath: str
     generated_utterances_func_name: str
 

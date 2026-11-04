@@ -109,7 +109,7 @@ def test_ordered_base_contexts_diamond_and_two_level_chain(tmp_path: Path):
         "class Signature:\n"
         "    \"\"\"No-op.\"\"\"\n\n"
         "class ResponseGenerator:\n"
-        "    def __call__(self, workflow, command, command_parameters=None):\n"
+        "    def __call__(self, workflow, command, command_parameters):\n"
         "        return None\n"
     )
     for ctx in ("RootBase", "MidA", "MidB", "Extra", "Leaf", "ChainTop", "ChainMid", "ChainBase"):

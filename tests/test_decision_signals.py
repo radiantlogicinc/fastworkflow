@@ -171,7 +171,7 @@ def test_enumerated_kinds_reject_numbers():
 def test_valid_signals_round_trip():
     assert classifier_confidence(0.87, signal_version="tiny/3").value == pytest.approx(0.87)
     assert ambiguity_set_size(4, signal_version="tiny/3").value == 4
-    assert slot_binding_source("db_lookup", signal_version="pe/1").value == "db_lookup"
+    assert slot_binding_source("validation_hook", signal_version="pe/1").value == "validation_hook"
 
 
 def test_signals_are_frozen_and_reject_unknown_fields():

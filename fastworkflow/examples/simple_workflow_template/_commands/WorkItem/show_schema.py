@@ -1,5 +1,4 @@
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 import json
 
@@ -32,7 +31,7 @@ class ResponseGenerator:
         # Get the schema for the current work item type
         return workitem.schema
 
-    def __call__(self, workflow: fastworkflow.Workflow, command: str) -> CommandOutput:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, input: None) -> str:
         workitem_schema = self._process_command(workflow)
         
         # Format the status information
@@ -40,7 +39,4 @@ class ResponseGenerator:
             f'Response: {json.dumps(workitem_schema)}'
         )
      
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=response)
-        )
+        return response

@@ -3,7 +3,7 @@ from typing import List
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.workflow import Workflow
-from fastworkflow import CommandOutput, CommandResponse, from_
+from fastworkflow import from_
 
 from ..retail_data import load_data
 from ..tools.return_delivered_order_items import ReturnDeliveredOrderItems
@@ -14,9 +14,8 @@ class Signature:
     class Input(BaseModel):
         order_id: str = from_(
             "get_user_details",
-            default="NOT_FOUND",
             description="The order ID of return items",
-            pattern=r"^(#?[\w\d]+|NOT_FOUND)$",
+            pattern=r"^(#?[\w\d]+)$",
             examples=["#W00000000"],
         )
         item_ids: List[str] = from_(
@@ -27,9 +26,8 @@ class Signature:
         )
         payment_method_id: str = from_(
             "get_order_details",
-            default="NOT_FOUND",
             description="Payment method ID for refund",
-            pattern=r"^((gift_card|credit_card|paypal)_\d+|NOT_FOUND)$",
+            pattern=r"^((gift_card|credit_card|paypal)_\d+)$",
             examples=["gift_card_0000000", "credit_card_0000000", "paypal_0000000"],
         )
 
@@ -60,7 +58,7 @@ class Signature:
     def validate_extracted_parameters(
         workflow: fastworkflow.Workflow, 
         command: str, cmd_parameters: "Signature.Input"
-    ) -> tuple[bool, str]:
+    ) -> None:
         if not cmd_parameters.order_id.startswith('#'):
             cmd_parameters.order_id = f'#{cmd_parameters.order_id}'
 
@@ -74,18 +72,15 @@ class Signature:
                 error_message += 'item ids must be integers\n'
                 break
 
-        return (False, error_message) if error_message else (True, '')
+        if error_message:
+            raise fastworkflow.Refused(error_message)
+        return None
 
 
 class ResponseGenerator:
-    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandOutput:
+    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> Signature.Output:
         output = self._process_command(workflow, command_parameters)
-        response = (
-            f'Response: return status is: {output.status}'
-        )
-        return CommandOutput(
-            command_response=CommandResponse(response=response),
-        )
+        return output
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()

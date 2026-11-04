@@ -59,14 +59,14 @@ def test_property_setter_uses_assignment(temp_dir, todo_item_class):
     # Parse the file to find the property assignment
     tree = ast.parse(file_content)
     
-    # Find the _process_command method
+    # Find the __call__ method (the command's one method)
     process_command_method = None
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == '_process_command':
+        if isinstance(node, ast.FunctionDef) and node.name == '__call__':
             process_command_method = node
             break
     
-    assert process_command_method is not None, "Could not find _process_command method"
+    assert process_command_method is not None, "Could not find __call__ method"
     
     # Look for attribute assignment (obj.prop = value)
     found_assignment = False
@@ -134,14 +134,14 @@ def test_set_properties_uses_assignment(temp_dir, todo_item_class):
     # Parse the file to find the property assignments
     tree = ast.parse(file_content)
     
-    # Find the _process_command method
+    # Find the __call__ method (the command's one method)
     process_command_method = None
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == '_process_command':
+        if isinstance(node, ast.FunctionDef) and node.name == '__call__':
             process_command_method = node
             break
     
-    assert process_command_method is not None, "Could not find _process_command method"
+    assert process_command_method is not None, "Could not find __call__ method"
     
     # Count attribute assignments (obj.prop = value)
     assignment_count = 0
@@ -204,14 +204,14 @@ def test_status_property_special_handling(temp_dir, todo_item_class):
     # Parse the file
     tree = ast.parse(file_content)
     
-    # Find the _process_command method
+    # Find the __call__ method (the command's one method)
     process_command_method = None
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == '_process_command':
+        if isinstance(node, ast.FunctionDef) and node.name == '__call__':
             process_command_method = node
             break
     
-    assert process_command_method is not None, "Could not find _process_command method"
+    assert process_command_method is not None, "Could not find __call__ method"
     
     # Look for any assignment to the status attribute
     found_status_assignment = False

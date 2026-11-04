@@ -286,11 +286,10 @@ def generate_startup_command(workflow_folderpath: str, app_dir: str, overwrite: 
 
     # Generate startup.py content
     startup_content = f'''import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
 {manager_import}
 
 class ResponseGenerator:
-    def __call__(self, workflow: fastworkflow.Workflow, command: str) -> CommandOutput:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, input: None) -> str:
         # Initialize your application's root context here
         # This is typically a manager class that provides access to all functionality
         filepath = (
@@ -305,9 +304,7 @@ class ResponseGenerator:
             "context": workflow.current_command_context_name
         }}
 
-        return CommandOutput(
-            command_response=CommandResponse(response=str(response))
-        )
+        return str(response)
 '''
 
     # Write the file

@@ -412,14 +412,15 @@ def test_the_scan_reaches_keys_written_far_from_the_emission_site():
     """The bags, specifically — the half a dict-literal scan cannot see.
 
     `escalation_outcome` is written into `nlu_trace` inside `_predict_impl`;
-    `db_lookup` is written into `diagnostics` from `utils/signatures.py`, a
+    `validation_hook` is written into `diagnostics` from `utils/signatures.py`, a
     different module entirely; `context_before` arrives through
     `**tracing.capture_attributes(...)`. If any of the three stopped being
     discovered, the corresponding declaration would silently become unchecked.
     """
     discovered = _emitted_attributes()
     assert "escalation_outcome" in discovered[tracing.SPAN_NLU_INTENT]
-    assert "db_lookup" in discovered[tracing.SPAN_NLU_PARAM_EXTRACTION]
+    assert "validation_hook" in discovered[tracing.SPAN_NLU_PARAM_EXTRACTION]
+    assert "db_lookup" not in discovered[tracing.SPAN_NLU_PARAM_EXTRACTION]
     assert tracing.ATTR_CONTEXT_BEFORE in discovered[tracing.SPAN_AGENT_TOOL_CALL]
 
 
@@ -642,7 +643,7 @@ def test_the_aggregate_number_moves_only_on_purpose():
     itself, so a bump -- or an accidental revert -- passes them all. Pinning the
     literal makes a change to the aggregate a deliberate edit to this test, next
     to the history comment in `tracing.py` that says what moved."""
-    assert tracing.SPAN_CONTRACT_VERSION == 31
+    assert tracing.SPAN_CONTRACT_VERSION == 32
 
 
 def test_a_provenance_record_written_before_the_map_still_validates():

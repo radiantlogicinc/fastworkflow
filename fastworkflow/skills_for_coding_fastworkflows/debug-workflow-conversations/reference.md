@@ -141,8 +141,7 @@ Wraps parameter extraction + validation for the resolved command.
 | `retry_round` | true when this turn continues a parameter-correction loop |
 | `parameters_valid` | The overall verdict (span `status` stays `ok`; only exceptions mark `error`) |
 | `missing_fields` / `invalid_fields` | Structured field lists (no prose parsing needed) |
-| `db_lookup` | List of per-field events: `{field, input_value, outcome: applied\|rejected\|declined, corrected_value, corrected, suggestions}` — the hook's three-state contract, recorded |
-| `validation_hook` | `{ran, is_valid, message, raised?}` from the command's `validate_extracted_parameters` |
+| `validation_hook` | `{ran, is_valid, message, raised?, changed_fields, refused_fields}` from the command's `validate_extracted_parameters`. `changed_fields` lists the fields the hook corrected in place; `refused_fields` lists the fields a `fastworkflow.Refused(..., field=...)` reset to missing. `raised` is set only when the hook crashed with a non-`Refused` exception. There is no `db_lookup` key on a span recorded at version 8 or later |
 
 ### `fw.ask_user` (kind `human_wait`)
 One per clarifying question (deterministic per-attempt span ids). Attributes:
@@ -244,13 +243,18 @@ WHERE name='fw.nlu.param_extraction'
   AND json_extract(attributes,'$.retry_round')
 GROUP BY trace_id HAVING rounds > 1;
 
--- db_lookup rejections with what was offered instead
-SELECT trace_id, json_extract(value,'$.field') AS field,
-       json_extract(value,'$.input_value') AS typed,
-       json_extract(value,'$.suggestions') AS offered
-FROM spans, json_each(json_extract(spans.attributes,'$.db_lookup'))
+-- validation-hook refusals with the fields it reset and the message it gave (suggestions are in the message)
+SELECT trace_id, json_extract(attributes,'$.validation_hook.refused_fields') AS refused,
+       json_extract(attributes,'$.validation_hook.message') AS message
+FROM spans
 WHERE spans.name='fw.nlu.param_extraction'
-  AND json_extract(value,'$.outcome')='rejected';
+  AND json_extract(attributes,'$.validation_hook.refused_fields') <> '[]';
+
+-- values the validation hook corrected in place
+SELECT trace_id, json_extract(attributes,'$.validation_hook.changed_fields') AS changed
+FROM spans
+WHERE spans.name='fw.nlu.param_extraction'
+  AND json_extract(attributes,'$.validation_hook.changed_fields') <> '[]';
 
 -- Turns that "completed" over a failed command (the quiet failures)
 SELECT turn_key, user_message, answer FROM turns

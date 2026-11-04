@@ -18,8 +18,6 @@ class Signature:
 
 
 class ResponseGenerator:
-    def __call__(self, workflow: fastworkflow.Workflow, command: str,
-                 command_parameters: Signature.Input) -> fastworkflow.CommandOutput:
-        output = Signature.Output(total=library.overdue_count(command_parameters.branch))
-        return fastworkflow.CommandOutput(command_response=fastworkflow.CommandResponse(
-            response=f"Overdue loans: {output.total}", output=output))
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, input: Signature.Input) -> fastworkflow.CommandResponse:
+        output = Signature.Output(total=library.overdue_count(input.branch))
+        return fastworkflow.CommandResponse(response=f"Overdue loans: {output.total}", output=output)

@@ -5,8 +5,11 @@ This demonstrates how to wrap FastWorkflow's CommandExecutor
 to provide MCP-compliant tool execution.
 """
 
+import inspect
+import logging
 import os
-from typing import Dict, Any, List, Union
+from typing import Dict, Any, List, Optional, Union
+from pydantic import BaseModel
 import fastworkflow
 from fastworkflow.active_workflow import get_active_workflow
 from fastworkflow.command_executor import CommandExecutor
@@ -15,6 +18,78 @@ from fastworkflow.command_directory import CommandDirectory
 from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry, ModuleType
 from uuid import uuid4
 from fastworkflow.command_metadata_api import CommandMetadataAPI
+from fastworkflow.utils import python_utils
+
+logger = logging.getLogger(__name__)
+
+
+def command_signature_models(
+    directory: CommandDirectory, qualified_name: str, workflow_folderpath: str
+) -> tuple[Optional[type], Optional[type]]:
+    """The ``(Input, Output)`` model classes of a command's ``Signature``, each None when absent.
+
+    Read the way ``CommandMetadataAPI.get_params_for_all_commands`` reads them, so the MCP tools and
+    ``GET /command_schemas`` agree on what a command takes and returns.
+    """
+    directory.ensure_command_hydrated(qualified_name)
+    meta = directory.get_command_metadata(qualified_name)
+    module = python_utils.get_module(
+        meta.response_generation_module_path, meta.workflow_folderpath or workflow_folderpath
+    )
+    signature = getattr(module, "Signature", None)
+
+    def model(attr: str) -> Optional[type]:
+        cls = getattr(signature, attr, None)
+        return cls if inspect.isclass(cls) and issubclass(cls, BaseModel) else None
+
+    return model("Input"), model("Output")
+
+
+def _json_schema(model: Optional[type], qualified_name: str, side: str) -> Optional[dict]:
+    """``model.model_json_schema()``, or None when there is no model or it cannot be built."""
+    if model is None:
+        return None
+    try:
+        return model.model_json_schema()
+    except Exception as e:  # a schema that cannot be built must not take the listing down
+        logger.warning("%s: no %s schema could be built (%s)", qualified_name, side, e)
+        return None
+
+
+def is_listed_command(metadata, workflow_folderpath: str) -> bool:
+    """False for the commands no client listing shows: framework commands (``fastworkflow/_framework_commands``)
+    and the internal command metadata extraction workflow's commands, unless that workflow is the subject."""
+    if metadata.framework:
+        return False
+    cme_root = os.path.realpath(fastworkflow.get_internal_workflow_path("command_metadata_extraction"))
+
+    def inside_cme(path: Optional[str]) -> bool:
+        real = os.path.realpath(path)
+        return real == cme_root or real.startswith(cme_root + os.sep)
+
+    owner = metadata.workflow_folderpath or workflow_folderpath
+    return not inside_cme(owner) or inside_cme(workflow_folderpath)
+
+
+def command_schema_listing(workflow_folderpath: str) -> Dict[str, Dict[str, Any]]:
+    """Every listed command of a workflow, by qualified name: ``{"kind": "execution" | "planning",
+    "input": <JSON Schema or None>, "output": <JSON Schema or None>}``. Served by ``GET /command_schemas``."""
+    directory = CommandDirectory.load(workflow_folderpath)
+    listing: Dict[str, Dict[str, Any]] = {}
+    for qualified_name, metadata in directory.map_command_2_metadata.items():
+        if not is_listed_command(metadata, workflow_folderpath):
+            continue
+        try:
+            input_model, output_model = command_signature_models(directory, qualified_name, workflow_folderpath)
+        except Exception as e:
+            logger.warning("%s: its signature could not be read (%s)", qualified_name, e)
+            input_model, output_model = None, None
+        listing[qualified_name] = {
+            "kind": "planning" if metadata.is_planning else "execution",
+            "input": _json_schema(input_model, qualified_name, "input"),
+            "output": _json_schema(output_model, qualified_name, "output"),
+        }
+    return listing
 
 
 class FastWorkflowMCPServer:
@@ -54,7 +129,7 @@ class FastWorkflowMCPServer:
         Returns:
             List of tool definitions in MCP format
         """
-        NOT_FOUND = fastworkflow.get_env_var('NOT_FOUND')
+        from fastworkflow.utils.signatures import NOT_FOUND
 
         # Get available commands from workflow
         workflow = self._active_workflow()
@@ -109,9 +184,8 @@ class FastWorkflowMCPServer:
                     field_descriptions.append(desc)
                 else:
                     field_descriptions.append(field_name)
-                if (default := param.get("default")) is not None:
-                    if default == NOT_FOUND:
-                        input_schema["required"].append(field_name)
+                if param.get("required") or param.get("default") == NOT_FOUND:
+                    input_schema["required"].append(field_name)
                 input_schema["properties"][field_name] = prop
 
             # Use centralized display generator for a single command for rich description
@@ -148,6 +222,15 @@ class FastWorkflowMCPServer:
                     "openWorldHint": True  # FastWorkflow can interact with external systems
                 }
             }
+            # A command that declares a Signature.Output advertises its result schema (MCP outputSchema)
+            try:
+                _, output_model = command_signature_models(cmd_directory, command_name, workflow_folderpath)
+            except Exception as e:
+                logger.warning("%s: its signature could not be read (%s)", command_name, e)
+                output_model = None
+            output_schema = _json_schema(output_model, command_name, "output")
+            if output_schema is not None:
+                tool_def["outputSchema"] = output_schema
             # Attach plain_utterances from centralized metadata if present
             if meta_for_cmd and meta_for_cmd.get("plain_utterances"):
                 tool_def["annotations"]["plain_utterances"] = meta_for_cmd["plain_utterances"]
@@ -203,6 +286,9 @@ class FastWorkflowMCPServer:
                     params.get("arguments", {})
                 )
                 result = tool_result.model_dump()
+                # structuredContent is optional in MCP: omit it rather than send null
+                if result.get("structuredContent") is None:
+                    result.pop("structuredContent", None)
             else:
                 raise ValueError(f"Unknown method: {method}")
             

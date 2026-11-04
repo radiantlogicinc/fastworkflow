@@ -59,7 +59,7 @@ GIVEN, and is left out of the key, when its value is:
 The paging parameters are the ones a facts field names in ``"page_by"`` (a name
 or a list of names: ``json_schema_extra={"from": "list_items.item_uids",
 "page_by": "cursor"}``), else the Input parameters named as a row position:
-``start``, ``offset`` or ``skip`` (``PAGING_PARAMETERS``). The other given
+``start`` (``PAGING_PARAMETERS``). The other given
 parameters form the run's QUERY; the paging ones say which PAGE of it the run read.
 
 A list value is a page of its query's rows. The pages joined are those of the
@@ -130,7 +130,47 @@ class MissingFactError(FactsError):
 
 #: Input parameters taken as a row position (a page of the same query) when a
 #: facts field does not name its own with ``"page_by"``.
-PAGING_PARAMETERS = ("start", "offset", "skip")
+PAGING_PARAMETERS = ("start",)
+
+
+def _is_int_annotation(annotation: Any) -> bool:
+    """Whether a field annotation is ``int`` or ``Optional[int]`` (not ``bool``, not ``datetime``)."""
+    if annotation is int:
+        return True
+    if typing.get_origin(annotation) in (typing.Union, types.UnionType):
+        args = [arg for arg in typing.get_args(annotation) if arg is not type(None)]
+        return len(args) == 1 and args[0] is int
+    return False
+
+
+def paging_parameters(input_model: Any) -> tuple[str, ...]:
+    """The paging parameters of a command's ``Input`` (design 2.49, 3.14): the fields named ``start``,
+    whose type is ``int`` or ``Optional[int]``, in ``PAGING_PARAMETERS`` order.
+
+    ``()`` for no ``Input`` or no such field: a ``start`` that is a ``datetime`` or a ``skip`` that is
+    a ``bool`` is an ordinary field. Every reader of ``PAGING_PARAMETERS`` for a command asks this.
+    """
+    fields = getattr(input_model, "model_fields", None)
+    if not isinstance(fields, Mapping):
+        return ()
+    return tuple(name for name in PAGING_PARAMETERS
+                 if name in fields and _is_int_annotation(fields[name].annotation))
+
+
+def output_page(output: Any) -> Optional[tuple[int, int]]:
+    """``(rows, total)`` of an ``Output`` (a model or its dict) that is a page (design 3.14): its
+    ``total`` is an int and its list fields share one length, the rows of one page. None otherwise."""
+    values = output.model_dump() if isinstance(output, BaseModel) else output
+    if not isinstance(values, Mapping):
+        return None
+    total = values.get("total")
+    if not isinstance(total, int) or isinstance(total, bool):
+        return None
+    lengths = {len(value) for name, value in values.items()
+               if name != "total" and isinstance(value, (list, tuple))}
+    if len(lengths) != 1:
+        return None
+    return lengths.pop(), total
 
 
 @dataclass(frozen=True)
@@ -302,12 +342,9 @@ def _value_in(run: Mapping[str, Any], field: str) -> tuple[bool, Any]:
 
 
 def _not_given_sentinels() -> tuple[Any, ...]:
-    import fastworkflow
-    from fastworkflow.utils.signatures import INVALID_FLOAT_VALUE, INVALID_INT_VALUE
+    from fastworkflow.utils.signatures import INVALID_FLOAT_VALUE, INVALID_INT_VALUE, NOT_FOUND
 
-    not_found = fastworkflow.get_env_var(
-        "NOT_FOUND", default=os.getenv("NOT_FOUND") or "NOT_FOUND")
-    return (not_found, INVALID_INT_VALUE, INVALID_FLOAT_VALUE)
+    return (NOT_FOUND, INVALID_INT_VALUE, INVALID_FLOAT_VALUE)
 
 
 def _input_defaults(signature: Any) -> dict[str, Any]:
@@ -589,5 +626,7 @@ __all__ = [
     "facts_from_archive",
     "facts_from_runs",
     "facts_text",
+    "output_page",
+    "paging_parameters",
     "workflow_signatures",
 ]

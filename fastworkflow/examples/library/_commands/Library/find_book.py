@@ -35,9 +35,9 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow: fastworkflow.Workflow, command: str,
-                 command_parameters: Signature.Input) -> Signature.Output:
+                 input: Signature.Input) -> Signature.Output:
         library: Library = workflow.command_context_for_response_generation
-        found = library.find_books(command_parameters.query)
-        rows = page(found, command_parameters.start)
+        found = library.find_books(input.query)
+        rows = page(found, input.start)
         return Signature.Output(book_uids=rows, titles=[library.books[u].title for u in rows],
                                 total=len(found))

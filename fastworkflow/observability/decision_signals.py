@@ -47,7 +47,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 # did not occur". Distinct from the per-signal `signal_version`, which versions
 # the *producer* of one value: retraining the intent classifier changes what a
 # confidence of 0.8 means without changing this contract at all.
-SIGNAL_CONTRACT_VERSION = 1
+SIGNAL_CONTRACT_VERSION = 2
 
 SignalKind = Literal[
     "classifier-confidence",
@@ -71,12 +71,14 @@ DecisionKind = Literal[
 ]
 
 # Exactly what `parameter_extraction.py` records as `extraction_method` today,
-# plus `db_lookup`, which substitutes a value during validation and is therefore
-# a binding source even though it is reported as a separate diagnostic. Adding a
-# member is a `SIGNAL_CONTRACT_VERSION` bump: a calibration report that silently
-# gains a category cannot be compared with the one before it.
+# plus `validation_hook`, which rewrites a value in place during validation (the hook
+# writes its corrected value back) and is therefore a binding source even though it is
+# reported as a separate diagnostic. `db_lookup` was this member until the retirement
+# of db_lookup (signal contract v2). Adding a member is a `SIGNAL_CONTRACT_VERSION`
+# bump: a calibration report that silently gains a category cannot be compared with the
+# one before it.
 SLOT_BINDING_SOURCES: frozenset[str] = frozenset(
-    {"stored_merge", "xml_regex", "llm", "db_lookup"}
+    {"stored_merge", "xml_regex", "llm", "validation_hook"}
 )
 
 # Declared, not yet emitted: goal predicates arrive with the P1 planning ontology,
@@ -330,7 +332,7 @@ def ambiguity_set_size(value: int, *, signal_version: str) -> UncertaintySignal:
 
 
 def slot_binding_source(value: str, *, signal_version: str) -> UncertaintySignal:
-    """Which mechanism bound a parameter — `extraction_method`, or `db_lookup`.
+    """Which mechanism bound a parameter — `extraction_method`, or `validation_hook`.
 
     An enumerated provenance rather than a confidence: `llm` and `stored_merge`
     are not more or less confident than each other in any ordered sense, which is

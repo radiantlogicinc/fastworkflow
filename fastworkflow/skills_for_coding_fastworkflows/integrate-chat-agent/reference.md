@@ -211,42 +211,32 @@ the response holds the user's answer; `success=false` means the question is stil
 ### Command file (single-file pattern, preferred) — `_commands/<command_name>.py`
 ```python
 import fastworkflow
-from fastworkflow.train.generate_synthetic import generate_diverse_utterances
-from pydantic import BaseModel, ConfigDict, Field
-from typing import Annotated
+from pydantic import BaseModel, Field
 from ..application.<module> import <callable_or_class>
 
 class Signature:
     plain_utterances: list[str] = ["cancel order W123", "please cancel my latest order"]
 
     class Input(BaseModel):
-        model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
-        order_id: Annotated[str, Field(default="NOT_FOUND", description="…", examples=["W123"])]
+        order_id: str = Field(description="…", examples=["W123"])   # no default: required, so a missing value is asked for
 
     class Output(BaseModel):
         status: str
 
-    @staticmethod
-    def generate_utterances(workflow: fastworkflow.Workflow, command_name: str) -> list[str]:
-        return [command_name.split('/')[-1].lower().replace('_', ' ')] + \
-               generate_diverse_utterances(Signature.plain_utterances, command_name)
-
 class ResponseGenerator:
     def __call__(self, workflow: fastworkflow.Workflow, command: str,
-                 command_parameters: "Signature.Input") -> fastworkflow.CommandOutput:
-        # call the app's real business logic here
+                 input: "Signature.Input") -> "Signature.Output":
+        # call the app's real business logic here; return the Output (a str also works)
         result = <callable_or_class>(...)
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response=str(result)),
-        )
+        return Signature.Output(status=str(result))
 ```
-- Use `default="NOT_FOUND"` for parameters so missing values are detected, not hallucinated.
+- A parameter with no default is required: a missing value is asked for, not guessed. `Optional[str] = None` makes it optional.
 - Use `Field` `description` + `examples` (and `pattern`/`min_length` where helpful) to drive accurate parameter extraction.
-- Optional hooks: `db_lookup(workflow, field_name, field_value) -> tuple[bool, str | None, list[str]]`,
-  `process_extracted_parameters(...)`. `db_lookup` runs for fields marked
-  `json_schema_extra={'db_lookup': True}` and has three return states: `(True, value, [])`
-  overwrites the field, `(False, None, [suggestions])` fails validation, and
-  `(False, None, [])` does neither — use that last one for a value your hook does not own.
+- Optional hook: `validate_extracted_parameters(workflow, command, input) -> None`, a staticmethod on
+  `Signature`. It corrects a value by assigning to `input.<field>`, refuses by raising
+  `fastworkflow.Refused(message, field=...)`, and returns `None` to accept. Value lookups
+  (`DatabaseValidator.fuzzy_match`) go in it too. `db_lookup` is retired: a
+  `json_schema_extra={'db_lookup': True}` key or a `Signature.db_lookup` method is a load error.
 - For LLM-generated responses, use `fastworkflow.utils.dspy_utils.dspySignature(Signature.Input, Signature.Output)` with `dspy.Predict`.
 
 ### Context model — `_commands/context_inheritance_model.json`

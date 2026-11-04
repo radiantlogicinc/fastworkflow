@@ -17,18 +17,14 @@ from fastworkflow.observability.decision_signals import (
     slot_binding_source,
 )
 
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.utils.signatures import (
+    InputForParamExtraction,
+    INVALID, INVALID_INFORMATION_ERRMSG, MISSING_INFORMATION_ERRMSG,
+    NOT_FOUND, PARAMETER_EXTRACTION_ERROR_MSG)
 
 
 INVALID_INT_VALUE = -sys.maxsize
 INVALID_FLOAT_VALUE = -sys.float_info.max
-
-MISSING_INFORMATION_ERRMSG = fastworkflow.get_env_var("MISSING_INFORMATION_ERRMSG")
-INVALID_INFORMATION_ERRMSG = fastworkflow.get_env_var("INVALID_INFORMATION_ERRMSG")
-
-NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
-INVALID = fastworkflow.get_env_var("INVALID")
-PARAMETER_EXTRACTION_ERROR_MSG = None
 
 # Versions of the mechanisms that bind a parameter, one per member of
 # ``SLOT_BINDING_SOURCES``. ``signal_version`` identifies the producer of a value,
@@ -41,11 +37,10 @@ PARAMETER_EXTRACTION_ERROR_MSG = None
 _STATIC_SLOT_BINDING_SIGNAL_VERSIONS = {
     "stored_merge": "param-extraction/stored-merge/1",
     "xml_regex": "param-extraction/xml-regex/1",
-    "db_lookup": "param-extraction/db-lookup/1",
+    "validation_hook": "param-extraction/validation-hook/1",
 }
 
-# Resolved lazily and once, the same way PARAMETER_EXTRACTION_ERROR_MSG above is:
-# env access on every extraction logs a warning per turn when the var is unset.
+# Resolved lazily and once: env access on every extraction logs a warning per turn when the var is unset.
 LLM_PARAM_EXTRACTION_MODEL = None
 
 
@@ -89,24 +84,20 @@ def slot_binding_uncertainty(diagnostics: dict) -> Optional[DecisionUncertainty]
         )
     ]
 
-    db_lookup_events = diagnostics.get("db_lookup") or []
-    # `applied` alone means the catalogue agreed with the extracted value; only a
-    # rewrite makes db_lookup the thing that bound the slot, which is the sense in
-    # which SLOT_BINDING_SOURCES admits it as a source.
-    if any(event.get("corrected") for event in db_lookup_events):
+    # Only a value the hook rewrote in place makes the hook the thing that bound the slot,
+    # which is the sense in which SLOT_BINDING_SOURCES admits "validation_hook" as a source.
+    # A refusal binds nothing and is recorded as an invalid field.
+    if (diagnostics.get("validation_hook") or {}).get("changed_fields"):
         signals.append(
             slot_binding_source(
-                "db_lookup",
-                signal_version=_slot_binding_signal_version("db_lookup"),
+                "validation_hook",
+                signal_version=_slot_binding_signal_version("validation_hook"),
             )
         )
 
-    # The extractor produces one binding per slot and enumerates no alternatives to
-    # it; a db_lookup that rejected a value did enumerate some, and each suggestion
-    # is a value the slot could have taken instead.
-    candidate_count = 1 + sum(
-        len(event.get("suggestions") or []) for event in db_lookup_events
-    )
+    # The extractor produces one binding per slot and enumerates no alternatives to it: a
+    # refusal's suggestions are words in its message, not structured candidates.
+    candidate_count = 1
 
     # Requirements §4.14: uncertainty is reducible when evidence gathered inside the
     # task can lower it. A missing or invalid field is re-prompted and the next
@@ -575,10 +566,6 @@ class ParameterExtraction:
 
     @staticmethod
     def _apply_missing_fields(command: str, default_params: BaseModel, missing_fields: list):
-        global PARAMETER_EXTRACTION_ERROR_MSG
-        if not PARAMETER_EXTRACTION_ERROR_MSG:
-            PARAMETER_EXTRACTION_ERROR_MSG = fastworkflow.get_env_var("PARAMETER_EXTRACTION_ERROR_MSG")
-
         # Work on plain dict to avoid validation during assignment
         params_data = {
             field_name: getattr(default_params, field_name, None)

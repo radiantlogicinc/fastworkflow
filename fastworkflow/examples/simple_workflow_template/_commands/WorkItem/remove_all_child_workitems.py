@@ -2,7 +2,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
+
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 
 from ...application.workitem import WorkItem
@@ -41,21 +41,10 @@ class ResponseGenerator:
         except ValueError as e:
             return Signature.Output(str(e))
 
-    def __call__(self, workflow: fastworkflow.Workflow, command: str) -> CommandOutput:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, input: None) -> str:
         output = self._process_command(workflow)
-        
-        # Format the status information
-        response = (
-            f'Response: {output.model_dump_json()}'
-        )
-        
+
         if output.error_msg:
-            response = output.error_msg
-        else:
-            workitem: WorkItem = workflow.command_context_for_response_generation
-            response = f"Removed all child work items from '{workitem.get_absolute_path()}'."
-        
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=response)
-        )
+            return output.error_msg
+        workitem: WorkItem = workflow.command_context_for_response_generation
+        return f"Removed all child work items from '{workitem.get_absolute_path()}'."

@@ -1,5 +1,5 @@
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
+from fastworkflow.utils.signatures import NOT_FOUND
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from pydantic import BaseModel, Field
 from typing import Optional
@@ -41,10 +41,10 @@ class Signature:
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
     @staticmethod
-    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> tuple[bool, str]:
-        if cmd_parameters.workitem_type == fastworkflow.get_env_var('NOT_FOUND'):
+    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> None:
+        if cmd_parameters.workitem_type == NOT_FOUND:
             cmd_parameters.workitem_type = None
-        return (True, '')
+        return None
 
 
 class ResponseGenerator:
@@ -74,15 +74,9 @@ class ResponseGenerator:
             new_context = new_context)
 
     def __call__(self, workflow: fastworkflow.Workflow, command: str, 
-                 command_parameters: Signature.Input) -> CommandOutput:
+                 command_parameters: Signature.Input) -> Signature.Output:
         output = self._process_command(workflow, command_parameters)
         
         # Format the status information
-        response = (
-            f'Response: {output.model_dump_json()}'
-        )
         
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=response)
-        )
+        return output

@@ -2,13 +2,13 @@
 name: validate-command-parameters
 description: >-
   Implement the `Signature.validate_extracted_parameters` hook on a fastWorkflow command so
-  whole-call rules, cross-field constraints and context preconditions are checked and corrected
-  before the command body runs, and so a bad call stays a conversation instead of becoming an
-  exception. Covers the exact contract and where it sits in the validation order, normalising values
-  in place, writing error messages an agent can act on, and what belongs here versus in the field
-  declaration. Use when a command has rules spanning more than one field, needs a precondition on
-  the current context, must normalise input before executing, or when authoring or reviewing any
-  command `Signature`.
+  whole-call rules, cross-field constraints, context preconditions and value lookups are checked and
+  corrected before the command body runs, and so a bad call stays a conversation instead of becoming
+  an exception. Covers the exact contract (return None to accept, write corrections to `input`,
+  refuse with `fastworkflow.Refused(message, field=...)`), where it sits in the validation order,
+  writing error messages an agent can act on, and what belongs here versus in the field declaration.
+  Use when a command has rules spanning more than one field, needs a precondition on the current
+  context, must normalise input before executing, or when authoring or reviewing any command `Signature`.
 ---
 
 # Validating extracted parameters
@@ -16,7 +16,8 @@ description: >-
 Pydantic answers one field at a time: right type, matches the pattern, was supplied. It cannot answer
 the questions that only exist once the whole call is on the table — is this end date before its own
 start date, is anything actually selected for this bulk command to operate on, does this decision
-value exist in the backend's vocabulary. `validate_extracted_parameters` is where those go.
+value exist in the backend's vocabulary. `validate_extracted_parameters` is where those go. It is the
+one validation hook a command has.
 
 ## The contract
 
@@ -31,14 +32,23 @@ class Signature:
     def validate_extracted_parameters(
         workflow: fastworkflow.Workflow,
         command: str,
-        cmd_parameters: "Signature.Input",
-    ) -> tuple[bool, str]:
+        input: "Signature.Input",
+    ) -> None:
         ...
-        return (True, '')
 ```
 
-Return `(True, '')` to proceed, or `(False, message)` to send `message` back to the caller. The hook
-is optional — a command without it simply skips this stage.
+- Return `None` to accept the call. Do not return a tuple: `(True, '')` or `(False, 'msg')` is a call error.
+- Correct a value by assigning to `input.<field>`. The corrected value is what the command body reads.
+- Refuse only by raising `fastworkflow.Refused(message)`. Pass `field=` to reset the named field(s) to
+  missing and ask the user for them again with the message:
+
+```python
+raise fastworkflow.Refused("decision 'approve-all' is not one of the accepted values. Use one of: approve, revoke, defer.",
+                           field="decision")
+```
+
+The hook takes an optional `command_text` parameter if it needs the raw utterance. It is optional: a
+command without the hook simply skips this stage.
 
 ## Where it runs in the order
 
@@ -47,13 +57,13 @@ The framework validates in this sequence, and **stops at the first failure**:
 ```
 1. type coercion per field   str/int/float/bool/Enum/list, plus any `pattern`
 2. missing required fields   sentinel values count as missing; empty list counts as missing
-3. db_lookup per field       fuzzy resolution against a live key set
-4. validate_extracted_parameters      <- only reached if 1-3 all passed
+3. validate_extracted_parameters      <- only reached if 1-2 all passed
 ```
 
 So this hook may assume every field is **present and of the declared type**. Do not re-check types,
 required-ness or regex here — declare those on the field and let stage 1 do it. What is left is
-exactly what the field declarations cannot express.
+exactly what the field declarations cannot express. Value lookups against a live key set also live
+here now, see the `resolve-parameter-values` skill.
 
 Before validation, in agent mode, the values are bound in code when the call's form allows it: XML
 tags, `name=value` pairs, or `command_name value` (positional). The positional form binds to the
@@ -65,25 +75,25 @@ command never runs on its defaults instead. Whatever bound the values, the seque
 
 ## It is a correction hook, not just a check
 
-The `cmd_parameters` object it receives is the one the command body will read, so writing to it is
+The `input` object it receives is the one the command body will read, so writing to it is
 the intended way to normalise:
 
 ```python
     @staticmethod
-    def validate_extracted_parameters(workflow, command, cmd_parameters):
-        if not cmd_parameters.order_id.startswith('#'):
-            cmd_parameters.order_id = f'#{cmd_parameters.order_id}'
-        return (True, '')
+    def validate_extracted_parameters(workflow, command, input):
+        if not input.order_id.startswith('#'):
+            input.order_id = f'#{input.order_id}'
 ```
 
 Prefer normalising to rejecting whenever the intent is unambiguous. Every rejection costs a round
 trip; a value that can only have meant one thing should just be fixed.
 
-## Return, never raise
+## Refuse with Refused, never with a bare exception
 
-Exceptions are caught, logged at critical, and converted into a failure whose message names the
-command and the exception. That is strictly worse than a message written for the caller: the caller
-gets a stack-trace-flavoured string instead of an instruction. Return `(False, message)`.
+Exceptions other than `fastworkflow.Refused` are caught, logged at critical, and converted into a
+call error whose message names the command and the exception. That is strictly worse than a message
+written for the caller: the caller gets a stack-trace-flavoured string instead of an instruction.
+Refusals are `raise fastworkflow.Refused(...)`, with a message written for the user or agent.
 
 ## Write the message for an agent
 
@@ -91,23 +101,25 @@ The message is the only thing the caller has to work from. Every message should 
 what is wrong with the value that arrived, and say where an acceptable one comes from.
 
 ```python
-        return (False,
-                "decision 'approve-all' is not one of the accepted values. "
-                "Use one of: approve, revoke, defer.")
+raise fastworkflow.Refused(
+    "decision 'approve-all' is not one of the accepted values. Use one of: approve, revoke, defer.",
+    field="decision")
 ```
 
 Vague messages ("invalid input") cause the agent to retry the same value.
 
 ## Accumulate errors, report once
 
-Check everything, then report together, so one round trip tells the caller all of it:
+Check everything, then raise once, so one round trip tells the caller all of it. `Refused` takes one
+message, so collect the messages and raise the joined text. Pass `field=` only when the named fields
+are the ones to re-ask:
 
 ```python
-def report(errors):
-    """The (is_valid, message) pair the framework expects, from a list of
-    error strings of which most are normally empty."""
+def refuse_if_any(errors, fields=()):
+    """Raise one Refused for every error string, or return None when there are none."""
     message = "\n".join(error for error in errors if error)
-    return (False, message) if message else (True, "")
+    if message:
+        raise fastworkflow.Refused(message, field=list(fields) or None)
 ```
 
 Three helper shapes are worth distinguishing at the call site:
@@ -120,12 +132,12 @@ Three helper shapes are worth distinguishing at the call site:
 
 ```python
     @staticmethod
-    def validate_extracted_parameters(workflow, command, cmd_parameters):
+    def validate_extracted_parameters(workflow, command, input):
         errors = []
-        cmd_parameters.decision, error = one_of(cmd_parameters.decision, DECISIONS)
+        input.decision, error = one_of(input.decision, DECISIONS)
         errors.append(error)
-        errors.append(in_order(cmd_parameters.begin_date, cmd_parameters.end_date))
-        return report(errors)
+        errors.append(in_order(input.begin_date, input.end_date))
+        refuse_if_any(errors)
 ```
 
 ## Keep it local and cheap
@@ -133,7 +145,7 @@ Three helper shapes are worth distinguishing at the call site:
 The hook runs on **every** attempt at the command, including the ones an agent is guessing at, and
 including retries after a correction. Do not call a backend from here. Check against values already
 in the workflow context, or against a constant vocabulary. If a check genuinely needs a live key set,
-that is what `db_lookup` is for — see the `resolve-parameter-values` skill.
+do the `DatabaseValidator.fuzzy_match` lookup here: see the `resolve-parameter-values` skill.
 
 ## Context preconditions belong here
 
@@ -143,7 +155,7 @@ meaningful right now" goes:
 ```python
         selection = getattr(workflow.command_context_for_response_generation, 'selection', None)
         if not selection:
-            errors.append("Nothing is selected. Use select_items first, then retry.")
+            raise fastworkflow.Refused("Nothing is selected. Use select_items first, then retry.")
 ```
 
 Note the message names the producing command, the same job the `from_` edge does for a parameter
@@ -159,10 +171,11 @@ Invariants that must hold for correctness or safety belong in the command body a
 
 ```
 - [ ] Type, pattern and required-ness are declared on the field, not re-checked here
-- [ ] Unambiguous values are normalised in place rather than rejected
-- [ ] Every failure returns (False, message); nothing raises
+- [ ] The hook returns None; it never returns a tuple
+- [ ] Unambiguous values are normalised by assigning to input.<field>, not rejected
+- [ ] Every refusal is raise fastworkflow.Refused(message, field=...); no other exceptions escape
 - [ ] Each message names the field, the bad value, and where a good one comes from
-- [ ] Errors accumulate into one message
+- [ ] Errors accumulate into one Refused
 - [ ] No backend calls
 - [ ] Safety-critical invariants are also enforced in the command body
 ```

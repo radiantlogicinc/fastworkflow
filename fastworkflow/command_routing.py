@@ -14,6 +14,7 @@ It exposes two primary classes:
 from __future__ import annotations
 
 import contextlib
+import inspect
 import json
 import os
 from enum import Enum
@@ -35,6 +36,32 @@ from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.utils import python_utils
 from fastworkflow.utils.logging import logger
 
+
+
+def check_response_call_arity(response_generation_class, where: str) -> None:
+    """A load error unless ``ResponseGenerator.__call__`` takes exactly three arguments (design 3.14):
+    ``(self, workflow, command, input)``, where ``input`` is None for a command with no ``Input``.
+    A two-argument ``__call__`` is refused, naming the form (fix-3rsq.12.3, decision C).
+    """
+    call = getattr(response_generation_class, "__call__", None)
+    if call is None or call is object.__call__:
+        return
+    try:
+        parameters = list(inspect.signature(call).parameters.values())
+    except (TypeError, ValueError):
+        return
+    if parameters and parameters[0].name in ("self", "cls"):
+        parameters = parameters[1:]
+    positional = [p for p in parameters
+                  if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+    varargs = any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in parameters)
+    if len(positional) == 3 and not varargs and all(p.default is inspect.Parameter.empty for p in positional):
+        return
+    raise ValueError(
+        f"{where}: ResponseGenerator.__call__ must take three arguments, (self, workflow, command, input), "
+        f"where input is None for a command with no Input; it takes {len(positional)} here. "
+        "Return the command's Output, a str or a CommandResponse, and refuse with raise fastworkflow.Refused(message)"
+    )
 
 class RoutingDefinition(BaseModel):
     """
@@ -179,7 +206,58 @@ class RoutingDefinition(BaseModel):
             input_model = getattr(cls_obj, "Input", None)
             if isinstance(input_model, type) and issubclass(input_model, BaseModel):
                 option_params(input_model, f"{module_file_path}: {command_name}")
+                self._check_paged_output(command_name, input_model, str(module_file_path))
+                if not command_metadata.is_planning:
+                    self._warn_default_not_found(command_name, input_model, str(module_file_path))
+            # the retired db_lookup is a load error naming the hook (fix-3rsq.one-hook)
+            from fastworkflow.utils.signatures import reject_retired_db_lookup
+            reject_retired_db_lookup(
+                cls_obj, input_model if isinstance(input_model, type) else None,
+                f"{module_file_path}: {command_name}")
+        elif module_type == ModuleType.RESPONSE_GENERATION_INFERENCE and not command_metadata.is_planning:
+            check_response_call_arity(cls_obj, f"{module_file_path}: {command_name}")
         return cls_obj
+
+
+    @staticmethod
+    def _warn_default_not_found(command_name: str, input_model: type, where: str) -> None:
+        """One WARNING per field declared ``default="NOT_FOUND"`` (fix-3rsq.plain-required).
+
+        The marker is the framework's now: a required field is written as a plain field
+        (no default) and the framework supplies NOT_FOUND. The old spelling still works.
+        Planning commands never took NOT_FOUND as a required marker, so they are not checked.
+        """
+        for field_name, info in input_model.model_fields.items():
+            if info.default == "NOT_FOUND":
+                logger.warning(
+                    f"{where}: command {command_name!r} field {field_name!r} is declared with "
+                    f"default=\"NOT_FOUND\", which is deprecated and still works. Remove the default: "
+                    f"write a plain required field (no default), e.g. "
+                    f"`{field_name}: {getattr(info.annotation, '__name__', info.annotation)} = "
+                    f"Field(description=...)`, and the framework asks the user for a missing value.")
+
+    def _check_paged_output(self, command_name: str, input_model: type, where: str) -> None:
+        """A load error for a paged command (design 2.49, 3.14) whose ``Signature.Output`` does not
+        declare ``total: int``. A paged command is one whose Input has an int ``start``, ``offset`` or
+        ``skip``; the message also says to rename the field when it is not a page."""
+        from fastworkflow.observation_offloading.facts import paging_parameters
+        from fastworkflow.planning_commands import PlanningCommandFormatError
+
+        paging = paging_parameters(input_model)
+        if not paging:
+            return
+        from fastworkflow.command_executor import _declared_output_model
+
+        output_model = _declared_output_model(
+            self.get_command_class(command_name, ModuleType.RESPONSE_GENERATION_INFERENCE))
+        total = getattr(output_model, "model_fields", {}).get("total")
+        if total is not None and total.annotation is int:
+            return
+        raise PlanningCommandFormatError(
+            f"{where}: Input.{paging[0]} makes {command_name} a paged command, but its Output declares "
+            f"no total; declare total: int, how many rows there are on every page, or rename "
+            f"{paging[0]} if it is not a page"
+        )
 
     # ------------------------------------------------------------------
     # Utterance Definition functionality

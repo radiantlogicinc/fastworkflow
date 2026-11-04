@@ -29,7 +29,7 @@ from fastworkflow.planning import fact_from
 from fastworkflow.planning import from_ as planning_from_
 from fastworkflow.planning_phases import fill_output
 from fastworkflow.planning_phases import from_ as phases_from_
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.utils.signatures import InputForParamExtraction, parameters_with_unfilled
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIBRARY = os.path.join(ROOT, "fastworkflow", "examples", "library")
@@ -137,7 +137,7 @@ def test_from_exports_and_field_construction():
         uid: str = from_(
             "find_book.book_uids",
             description="the book uid",
-            json_schema_extra={"subject": True},
+            json_schema_extra={"in_request": "subject"},
         )
         multi: str = from_(
             ["find_book.book_uids", "Library/find_member.member_uids"],
@@ -148,7 +148,7 @@ def test_from_exports_and_field_construction():
     assert uid_info.description == "the book uid"
     assert uid_info.is_required()
     assert uid_info.json_schema_extra == {
-        "subject": True,
+        "in_request": "subject",
         "from": "find_book.book_uids",
     }
 
@@ -385,9 +385,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="ok")
-        )
+        return fastworkflow.CommandResponse(response="ok")
 '''
     bad_qualified_cmd = '''import fastworkflow
 from fastworkflow import from_
@@ -404,9 +402,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="ok")
-        )
+        return fastworkflow.CommandResponse(response="ok")
 '''
     folder = _build_workflow(
         tmp_path,
@@ -456,7 +452,7 @@ class Signature:
 
 
 class ResponseGenerator:
-    def __call__(self, workflow, command, command_parameters=None):
+    def __call__(self, workflow, command, command_parameters):
         return Signature.Output(notes=[])
 '''
     bad_book_cmd = '''import fastworkflow
@@ -474,9 +470,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="ok")
-        )
+        return fastworkflow.CommandResponse(response="ok")
 '''
     folder = _build_workflow(
         tmp_path,
@@ -535,9 +529,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="ok")
-        )
+        return fastworkflow.CommandResponse(response="ok")
 '''
     folder = _build_workflow(
         tmp_path,
@@ -570,9 +562,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="ok")
-        )
+        return fastworkflow.CommandResponse(response="ok")
 '''
     folder = _build_workflow(
         tmp_path,
@@ -608,7 +598,7 @@ class Signature:
 
 
 class ResponseGenerator:
-    def __call__(self, workflow, command, command_parameters=None):
+    def __call__(self, workflow, command, command_parameters):
         return Signature.Output(author="Herbert")
 '''
     bad_output_planning_command = '''from pydantic import BaseModel
@@ -643,9 +633,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="ok")
-        )
+        return fastworkflow.CommandResponse(response="ok")
 '''
     bad_facts_planning_command = '''from pydantic import BaseModel
 from fastworkflow import from_
@@ -740,9 +728,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="ok")
-        )
+        return fastworkflow.CommandResponse(response="ok")
 ''',
         },
     )
@@ -773,7 +759,7 @@ class Signature:
 
 
 class ResponseGenerator:
-    def __call__(self, workflow, command, command_parameters=None):
+    def __call__(self, workflow, command, command_parameters):
         return Signature.Output(exact_str="a", str_list=["a"], count=1)
 '''
     valid_consumer = '''import fastworkflow
@@ -797,9 +783,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="ok")
-        )
+        return fastworkflow.CommandResponse(response="ok")
 '''
     invalid_consumer = '''import fastworkflow
 from fastworkflow import from_
@@ -815,9 +799,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="ok")
-        )
+        return fastworkflow.CommandResponse(response="ok")
 '''
     folder = _build_workflow(
         tmp_path,
@@ -855,9 +837,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="ok")
-        )
+        return fastworkflow.CommandResponse(response="ok")
 '''
     hand_planning_command = '''from pydantic import BaseModel, Field
 
@@ -1064,9 +1044,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="ok")
-        )
+        return fastworkflow.CommandResponse(response="ok")
 '''
     folder = _build_workflow(
         tmp_path,
@@ -1101,9 +1079,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="ok")
-        )
+        return fastworkflow.CommandResponse(response="ok")
 '''
     valid_cmd = '''import fastworkflow
 from fastworkflow import from_
@@ -1119,9 +1095,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="ok")
-        )
+        return fastworkflow.CommandResponse(response="ok")
 '''
     folder = _build_workflow(
         tmp_path,
@@ -1225,9 +1199,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="ok")
-        )
+        return fastworkflow.CommandResponse(response="ok")
 '''
     folder = _build_workflow(
         tmp_path,
@@ -1265,9 +1237,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="ok")
-        )
+        return fastworkflow.CommandResponse(response="ok")
 '''
     folder = _build_workflow(
         tmp_path,
@@ -1406,9 +1376,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="ok")
-        )
+        return fastworkflow.CommandResponse(response="ok")
 '''
     folder = _build_workflow(
         tmp_path,
@@ -1449,9 +1417,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="ok")
-        )
+        return fastworkflow.CommandResponse(response="ok")
 '''
     folder = _build_workflow(
         tmp_path,
@@ -1528,9 +1494,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="ok")
-        )
+        return fastworkflow.CommandResponse(response="ok")
 '''
     folder = _build_workflow(
         tmp_path,
@@ -1603,7 +1567,7 @@ import fastworkflow
 from fastworkflow import from_
 from pydantic import BaseModel, Field
 
-NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
+from fastworkflow.utils.signatures import NOT_FOUND
 
 
 class Signature:
@@ -1621,9 +1585,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="ok")
-        )
+        return fastworkflow.CommandResponse(response="ok")
 '''
     folder = _build_workflow(
         tmp_path,
@@ -1683,7 +1645,7 @@ def test_retail_missing_parameter_messages_are_byte_identical_to_baseline():
     for cmd, expected in expected_messages.items():
         param_cls = routing_def.get_command_class(cmd, ModuleType.COMMAND_PARAMETERS_CLASS)
         assert param_cls is not None, f"Missing parameter class for {cmd}"
-        params = param_cls()
+        params = parameters_with_unfilled(param_cls, {})  # the direct path builds it so (fix-3rsq.plain-required)
         extractor = InputForParamExtraction.create(workflow, cmd, cmd)
         is_valid, message, _, _ = extractor.validate_parameters(workflow, cmd, params)
         assert is_valid is False

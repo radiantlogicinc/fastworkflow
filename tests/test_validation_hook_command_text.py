@@ -1,4 +1,5 @@
 """validate_extracted_parameters receives the command text only when it asks for it."""
+import fastworkflow
 from pydantic import BaseModel, Field
 
 from fastworkflow.utils.signatures import InputForParamExtraction
@@ -22,7 +23,7 @@ def test_a_hook_that_declares_command_text_receives_it():
         @staticmethod
         def validate_extracted_parameters(workflow, command, cmd_parameters, command_text):
             seen.update(command=command, command_text=command_text)
-            return True, ""
+            return None
 
     is_valid, *_ = _validate(Hook)
 
@@ -38,7 +39,7 @@ def test_an_existing_three_argument_hook_is_called_as_before():
         @staticmethod
         def validate_extracted_parameters(workflow, command, cmd_parameters):
             seen.append(command)
-            return False, "rejected"
+            raise fastworkflow.Refused("rejected")
 
     is_valid, message, *_ = _validate(Hook)
 

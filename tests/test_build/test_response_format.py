@@ -61,21 +61,13 @@ def test_response_uses_model_dump_json(temp_dir, todo_item_class):
     
     assert call_method is not None, "Could not find __call__ method"
     
-    # Look for CommandResponse with model_dump_json()
-    found_model_dump_json = False
-    for node in ast.walk(call_method):
-        if isinstance(node, ast.Call):
-            # Check if the call is to CommandResponse
-            if isinstance(node.func, ast.Name) and node.func.id == 'CommandResponse':
-                # Check for model_dump_json() in the arguments
-                for keyword in node.keywords:
-                    if keyword.arg == 'response':
-                        if isinstance(keyword.value, ast.Call):
-                            if isinstance(keyword.value.func, ast.Attribute) and keyword.value.func.attr == 'model_dump_json':
-                                found_model_dump_json = True
-                                break
-    
-    assert found_model_dump_json, "Command response should use model_dump_json() for the response"
+    # The command returns its Signature.Output; the framework wraps it and writes the JSON response
+    returns_output = any(
+        isinstance(node, ast.Return) and isinstance(node.value, ast.Call)
+        and ast.unparse(node.value.func) == "Signature.Output"
+        for node in ast.walk(tree)
+    )
+    assert returns_output, "Command response should return its Signature.Output (the framework writes the JSON)"
 
 
 def test_get_properties_response_uses_model_dump_json(temp_dir, todo_item_class):
@@ -125,21 +117,13 @@ def test_get_properties_response_uses_model_dump_json(temp_dir, todo_item_class)
     
     assert call_method is not None, "Could not find __call__ method"
     
-    # Look for CommandResponse with model_dump_json()
-    found_model_dump_json = False
-    for node in ast.walk(call_method):
-        if isinstance(node, ast.Call):
-            # Check if the call is to CommandResponse
-            if isinstance(node.func, ast.Name) and node.func.id == 'CommandResponse':
-                # Check for model_dump_json() in the arguments
-                for keyword in node.keywords:
-                    if keyword.arg == 'response':
-                        if isinstance(keyword.value, ast.Call):
-                            if isinstance(keyword.value.func, ast.Attribute) and keyword.value.func.attr == 'model_dump_json':
-                                found_model_dump_json = True
-                                break
-    
-    assert found_model_dump_json, "get_properties response should use model_dump_json() for the response"
+    # The command returns its Signature.Output; the framework wraps it and writes the JSON response
+    returns_output = any(
+        isinstance(node, ast.Return) and isinstance(node.value, ast.Call)
+        and ast.unparse(node.value.func) == "Signature.Output"
+        for node in ast.walk(tree)
+    )
+    assert returns_output, "get_properties response should return its Signature.Output (the framework writes the JSON)"
 
 
 def test_set_properties_response_uses_model_dump_json(temp_dir, todo_item_class):
@@ -190,18 +174,10 @@ def test_set_properties_response_uses_model_dump_json(temp_dir, todo_item_class)
     
     assert call_method is not None, "Could not find __call__ method"
     
-    # Look for CommandResponse with model_dump_json()
-    found_model_dump_json = False
-    for node in ast.walk(call_method):
-        if isinstance(node, ast.Call):
-            # Check if the call is to CommandResponse
-            if isinstance(node.func, ast.Name) and node.func.id == 'CommandResponse':
-                # Check for model_dump_json() in the arguments
-                for keyword in node.keywords:
-                    if keyword.arg == 'response':
-                        if isinstance(keyword.value, ast.Call):
-                            if isinstance(keyword.value.func, ast.Attribute) and keyword.value.func.attr == 'model_dump_json':
-                                found_model_dump_json = True
-                                break
-    
-    assert found_model_dump_json, "set_properties response should use model_dump_json() for the response" 
+    # The command returns its Signature.Output; the framework wraps it and writes the JSON response
+    returns_output = any(
+        isinstance(node, ast.Return) and isinstance(node.value, ast.Call)
+        and ast.unparse(node.value.func) == "Signature.Output"
+        for node in ast.walk(tree)
+    )
+    assert returns_output, "set_properties response should return its Signature.Output (the framework writes the JSON)" 

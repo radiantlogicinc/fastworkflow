@@ -34,12 +34,12 @@ class ResponseGenerator:
     descends_to = "Member"
 
     def __call__(self, workflow: fastworkflow.Workflow, command: str,
-                 command_parameters: Signature.Input) -> Signature.Output:
+                 input: Signature.Input) -> Signature.Output:
         library: Library = workflow.command_context_for_response_generation
-        member = library.members.get(command_parameters.member_uid)
+        member = library.members.get(input.member_uid)
         if member is None:
             raise fastworkflow.Refused(
-                f"no member has the uid {command_parameters.member_uid}; find_member lists the uids")
+                f"no member has the uid {input.member_uid}; find_member lists the uids")
         workflow.current_command_context = member
         return Signature.Output(member_uid=member.uid, name=member.name,
                                 on_loan=len(library.loans_of_member(member.uid)))

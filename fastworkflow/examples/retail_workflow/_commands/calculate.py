@@ -3,7 +3,6 @@ from typing import List
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.workflow import Workflow
-from fastworkflow import CommandOutput, CommandResponse
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 
 from ..retail_data import load_data
@@ -15,12 +14,11 @@ class Signature:
 
     class Input(BaseModel):
         expression: str = Field(
-            default="NOT_FOUND",
             description=(
                 "The mathematical expression to calculate. Allowed characters: digits, "
                 "+, -, *, /, parentheses, spaces."
             ),
-            pattern=r"^(NOT_FOUND|[0-9+\-*/().\s]+)$",
+            pattern=r"^([0-9+\-*/().\s]+)$",
             examples=["(2 + 3) * 4", "10 / 2 + 3", "(8-3)/5"],
         )
 
@@ -51,12 +49,9 @@ class Signature:
 
 
 class ResponseGenerator:
-    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandOutput:
+    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> Signature.Output:
         output = self._process_command(workflow, command_parameters)
-        response = f"Result: {output.result}"
-        return CommandOutput(
-            command_response=CommandResponse(response=response),
-        )
+        return output
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()

@@ -22,14 +22,19 @@ def test_create_command_file_simple():
         assert 'class ResponseGenerator' in content
         assert 'plain_utterances =' in content
         
-        # Verify new format for generate_utterances
-        assert "command_name.split('/')[-1].lower().replace('_', ' ')" in content
+        # No generate_utterances or template_utterances: the framework default gives them
+        assert "def generate_utterances" not in content
+        assert "template_utterances" not in content
+        assert "generate_diverse_utterances" not in content
+        # The Input instance is named input (the name planning phases read)
+        assert "def __call__(self, workflow: Workflow, command: str, input: Signature.Input)" in content
         
         # Verify app_instance is retrieved from workflow.command_context_for_response_generation
-        assert "app_instance = workflow.command_context_for_response_generation" in content
+        assert "= workflow.command_context_for_response_generation" in content
         
-        # Verify response uses output.model_dump_json()
-        assert "CommandResponse(response=output.model_dump_json())" in content
+        # Verify the command returns its Output: the framework builds the envelope and the JSON response
+        assert "return Signature.Output(" in content
+        assert "CommandOutput(" not in content
 
 def test_create_command_file_with_type_annotations():
     params = [
@@ -98,12 +103,10 @@ def check_created_command_file(class_info, method_info_get_props, tmpdir):
 
     assert "# For get_properties, the primary logic is to gather attribute values" in content
     assert "return Signature.Output(product_id=app_instance.product_id, name=app_instance.name, price=app_instance.price)" in content
-    assert "app_instance = workflow.command_context_for_response_generation" in content
+    assert "= workflow.command_context_for_response_generation" in content
     
-    # Verify that _process_command doesn't expect an input parameter
-    assert "def _process_command(self, workflow: Workflow) -> Signature.Output:" in content
-    # Verify that __call__ doesn't expect command_parameters
-    assert "def __call__(self, workflow: Workflow, command: str) -> CommandOutput:" in content
+    # Verify that __call__ takes input: None for a command with no Input (the one three-argument signature)
+    assert "def __call__(self, workflow: Workflow, command: str, input: None) -> Signature.Output:" in content
 
 def test_create_command_file_set_properties():
     class_name = "InventoryItem"
@@ -163,7 +166,7 @@ def test_create_command_file_set_properties():
         assert f"app_instance.status = {class_name}.COMPLETE if input.is_complete else {class_name}.INCOMPLETE" in content
         
         assert "return Signature.Output(success=True)" in content
-        assert "app_instance = workflow.command_context_for_response_generation" in content
+        assert "= workflow.command_context_for_response_generation" in content
 
 def test_property_setter_uses_attribute_assignment():
     # sourcery skip: extract-method, use-next
@@ -190,10 +193,10 @@ def test_property_setter_uses_attribute_assignment():
         with open(file_path, 'r') as f:
             tree = ast.parse(f.read())
 
-        # Find the _process_command method
+        # Find the response generator's __call__ (the setter is written there now)
         process_command = None
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == '_process_command':
+            if isinstance(node, ast.FunctionDef) and node.name == '__call__':
                 process_command = node
                 break
 
@@ -219,7 +222,7 @@ def test_property_setter_uses_attribute_assignment():
         assert "app_instance.assign_to = input.assign_to" in content
 
 def test_response_uses_model_dump_json():
-    """Test that response uses output.model_dump_json()."""
+    """Test that the command returns its Signature.Output (the framework wraps it, design 3.14)."""
     class_info, method_info = make_class_and_method('User', 'get_details', docstring='Get user details.')
     with tempfile.TemporaryDirectory() as tmpdir:
         file_path = create_command_file(class_info, method_info, tmpdir, source_dir='.')
@@ -239,13 +242,13 @@ def test_response_uses_model_dump_json():
         )
         assert call_method is not None
 
-        found_model_dump_json = any(
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == 'model_dump_json'
+        returns_output = any(
+            isinstance(node, ast.Return)
+            and isinstance(node.value, ast.Call)
+            and ast.unparse(node.value.func) == 'Signature.Output'
             for node in ast.walk(call_method)
         )
-        assert found_model_dump_json, "Response should use output.model_dump_json()"
+        assert returns_output, "__call__ should return Signature.Output"
 
 def test_output_has_model_config_for_arbitrary_types():
     """Test that Output class has model_config for Pydantic compatibility with arbitrary types."""
@@ -267,9 +270,8 @@ def test_no_input_class_for_parameterless_methods():
         # Input class should not be included
         assert "class Input(BaseModel):" not in content
         
-        # _process_command and __call__ should not have input parameters
-        assert "def _process_command(self, workflow: Workflow) -> Signature.Output:" in content
-        assert "def __call__(self, workflow: Workflow, command: str) -> CommandOutput:" in content
+        # __call__ takes input: None, and returns the Output the framework wraps
+        assert "def __call__(self, workflow: Workflow, command: str, input: None) -> Signature.Output:" in content
 
 def test_no_unnecessary_comments():
     """Test that unnecessary comments are not included."""

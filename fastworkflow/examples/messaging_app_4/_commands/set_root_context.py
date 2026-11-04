@@ -9,8 +9,8 @@ class ResponseGenerator:
     def __call__(
         self,
         workflow: fastworkflow.Workflow,
-        command: str
-    ) -> fastworkflow.CommandOutput:
+        command: str, input: None
+    ) -> str:
         # Initialize the root command context
         workflow.root_command_context = ChatRoom()
 
@@ -18,7 +18,4 @@ class ResponseGenerator:
             f"Now you can call commands exposed in this context."
         )
 
-        return fastworkflow.CommandOutput(
-            command_response=
-                fastworkflow.CommandResponse(response=response)
-        )
+        return response

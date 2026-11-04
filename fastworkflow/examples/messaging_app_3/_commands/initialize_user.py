@@ -41,7 +41,7 @@ class ResponseGenerator:
         workflow: fastworkflow.Workflow,
         command: str,
         command_parameters: Signature.Input,
-    ) -> fastworkflow.CommandOutput:
+    ) -> str:
         # Initialize the current command context
         workflow.current_command_context = (
             PremiumUser(command_parameters.name) if command_parameters.is_premium_user else
@@ -53,7 +53,4 @@ class ResponseGenerator:
             f"Now you can call commands exposed in this context."
         )
 
-        return fastworkflow.CommandOutput(
-            command_response=
-                fastworkflow.CommandResponse(response=response)
-        )
+        return response

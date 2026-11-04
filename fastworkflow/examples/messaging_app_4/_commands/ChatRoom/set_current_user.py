@@ -13,7 +13,6 @@ class Signature:
         user_name: str = Field(
             description="Name of a person",
             examples=['John', 'Jane Doe'],
-            json_schema_extra={'db_lookup': True}
         )
 
     class Output(BaseModel):
@@ -26,16 +25,18 @@ class Signature:
     ]
 
     @staticmethod
-    def db_lookup(workflow: fastworkflow.Workflow, 
-                  field_name: str, 
-                  field_value: str
-                  ) -> tuple[bool, str | None, list[str]]:
-        if field_name == 'user_name':
-            chatroom: ChatRoom = workflow.command_context_for_response_generation
-            key_values = chatroom.list_users()
-            matched, corrected_value, field_value_suggestions = DatabaseValidator.fuzzy_match(field_value, key_values)
-            return (matched, corrected_value, field_value_suggestions)
-        return (False, '', [])
+    def validate_extracted_parameters(workflow: fastworkflow.Workflow,
+                                      command: str,
+                                      input: "Signature.Input") -> None:
+        chatroom: ChatRoom = workflow.command_context_for_response_generation
+        key_values = chatroom.list_users()
+        matched, corrected_value, suggestions = DatabaseValidator.fuzzy_match(input.user_name, key_values)
+        if matched:
+            input.user_name = corrected_value
+        elif suggestions:
+            raise fastworkflow.Refused(
+                f"No user named '{input.user_name}' in this chat room. Did you mean {', '.join(suggestions)}?",
+                field="user_name")
 
     @staticmethod
     def generate_utterances(workflow: fastworkflow.Workflow, command_name: str) -> list[str]:
@@ -68,15 +69,7 @@ class ResponseGenerator:
     def __call__(self, workflow: 
                  fastworkflow.Workflow, 
                  command: str, 
-                 command_parameters: Signature.Input) -> fastworkflow.CommandOutput:
+                 command_parameters: Signature.Input) -> Signature.Output:
         """The framework will call this function to process the command"""
         output = self._process_command(workflow, command_parameters)
-        
-        response = (
-            f'Response: {output.model_dump_json()}'
-        )
-
-        return fastworkflow.CommandOutput(
-            command_response=
-                fastworkflow.CommandResponse(response=response)
-        )
+        return output

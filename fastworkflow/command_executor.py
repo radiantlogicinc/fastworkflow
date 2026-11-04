@@ -12,36 +12,12 @@ from fastworkflow.context_navigation import declared_descends_to
 from fastworkflow import Action, CommandOutput, ChatSession
 from fastworkflow.observability.execution_recorder import record_execution, recorder_for
 from fastworkflow import ModuleType
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.utils.signatures import InputForParamExtraction, parameters_with_unfilled
 from pathlib import Path
 from fastworkflow.command_routing import RoutingDefinition
 from typing import Optional
 from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.command_directory import CommandDirectory
-
-
-def _generator_arguments(response_generator, args: tuple) -> tuple:
-    """The arguments a ``ResponseGenerator.__call__`` takes, out of ``(workflow, command, command_parameters)``.
-
-    Design 3.14: the executor always has the three, and passes ``command_parameters`` (the filled
-    ``Input``, or None for a command with no ``Input``) when ``__call__`` declares a third
-    positional parameter. A two-argument ``__call__`` is called without it, as it always was.
-    """
-    try:
-        parameters = list(inspect.signature(response_generator.__call__).parameters.values())
-    except (TypeError, ValueError):
-        return args
-    if any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in parameters):
-        return args
-    takes = sum(
-        p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-        for p in parameters
-    )
-    if len(args) == 3 and takes < 3:
-        return args[:2]
-    if len(args) == 2 and takes >= 3:
-        return (*args, None)
-    return args
 
 
 def _declared_output_model(response_generator_class) -> type | None:
@@ -59,29 +35,60 @@ def _declared_output_model(response_generator_class) -> type | None:
     return output if inspect.isclass(output) and issubclass(output, BaseModel) else None
 
 
-def frame_command_result(result, *, command_name: str, output_model: type | None) -> CommandOutput:
+def paging_line(output, command_parameters) -> str:
+    """The paging line a framework-written response ends with when rows remain (design 3.14): the
+    rows read, their total and the next page's paging value, e.g. ``Rows 1-20 of 57; next page:
+    start=20.`` Empty when the Output is not a page, the command has no paging parameter, or no rows remain.
+    """
+    from fastworkflow.observation_offloading.facts import output_page, paging_parameters
+
+    paging = paging_parameters(type(command_parameters)) if command_parameters is not None else ()
+    page = output_page(output)
+    if not paging or page is None or page[0] == 0:
+        return ""
+    rows, total = page
+    given = command_parameters.model_dump(exclude_unset=True) if command_parameters is not None else {}
+    name = next((n for n in paging if n in given), paging[0])
+    start = getattr(command_parameters, name, None) or 0
+    if not isinstance(start, int) or isinstance(start, bool):
+        start = 0
+    after = start + rows
+    if after >= total:
+        return ""
+    return f"Rows {start + 1}-{after} of {total}; next page: {name}={after}."
+
+
+def frame_command_result(result, *, command_name: str, output_model: type | None,
+                         command_parameters=None) -> CommandOutput:
     """Wrap what a ``ResponseGenerator.__call__`` returned in a CommandOutput (design 3.14).
 
-    - a ``CommandOutput`` (shipped, not taught): as returned;
-    - a ``CommandResponse``: a CommandOutput around it, as returned (its own text, output, artifacts);
-    - a ``str``: the text of the response;
-    - the command's own ``Signature.Output``: ``response`` is the Output as JSON and ``output`` the
-      instance.
+    The short forms, and only these:
 
-    ``success`` stays the framework's: True, unless the command raised ``Refused`` (handled by
-    ``call_response_generator``) or the long form said otherwise. Any other value fails the call,
-    naming the command and the type it returned.
+    - the command's own ``Signature.Output``: ``response`` is the Output as JSON and ``output`` the
+      instance;
+    - a ``str``: the text of the response;
+    - a ``CommandResponse``: a CommandOutput around it (its artifacts and next actions), with
+      ``success`` left to the framework. A ``CommandResponse`` with ``success=False`` is a call error:
+      a refusal is ``raise fastworkflow.Refused(message)``.
+
+    A hand-built ``CommandOutput``, or any other value, fails the call, naming the command and the
+    type it returned.
     """
-    if isinstance(result, CommandOutput):
-        return result
     if isinstance(result, fastworkflow.CommandResponse):
+        if result.success is False:
+            raise TypeError(
+                f"{command_name} returned a CommandResponse with success=False: success is the framework's "
+                "to set. Refuse with raise fastworkflow.Refused(message)"
+            )
         return CommandOutput(command_response=result)
     if isinstance(result, str):
         return CommandOutput(command_response=fastworkflow.CommandResponse(response=result))
     if output_model is not None and type(result) is output_model:
+        text = result.model_dump_json()
+        line = paging_line(result, command_parameters)
         return CommandOutput(
             command_response=fastworkflow.CommandResponse(
-                response=result.model_dump_json(), output=result
+                response=f"{text}\n{line}" if line else text, output=result
             )
         )
     returned = f"{type(result).__module__}.{type(result).__qualname__}"
@@ -90,27 +97,64 @@ def frame_command_result(result, *, command_name: str, output_model: type | None
     else:
         declared = f"its Signature.Output is {output_model.__qualname__}"
     raise TypeError(
-        f"{command_name} returned {returned}, which is not a value its ResponseGenerator may return "
-        f"({declared}): return that Output, a str, a CommandResponse or a CommandOutput, "
-        f"or raise fastworkflow.Refused"
+        f"{command_name} returned {returned}, which is not a short form its ResponseGenerator may return "
+        f"({declared}): return that Output, a str or a CommandResponse (artifacts or next actions), "
+        "or raise fastworkflow.Refused(message)"
     )
 
 
-def call_response_generator(response_generator, *args, command_name: str = ""):
-    """Call ``response_generator`` with ``(workflow, command[, command_parameters])`` and frame its result.
+def _wildcard_command_output(framed: CommandOutput) -> CommandOutput:
+    """The turn's CommandOutput for the CME router, built from its typed routing result (fix-3rsq.12.3).
 
-    A ``fastworkflow.Refused`` it raises is its answer: a failed CommandOutput with the refusal's
+    The router (``_workflows/command_metadata_extraction/_commands/wildcard.py``) returns its
+    ``Signature.Output``; the framework frames it here. ``success`` is ``routed``; a handled answer
+    carries the artifact ``command_handled``; a routed answer carries the extraction the turn reads
+    (``command``, ``command_name``, ``cmd_parameters`` and, when the command ran on an enclosing
+    record, ``ran_on_context_name`` / ``ran_on_context_clause``). This is what the router returned
+    before it returned its Output: the same response text, success and artifacts.
+    """
+    route = framed.command_response.output
+    if route is None or not all(hasattr(route, name) for name in ("handled", "routed", "response")):
+        raise TypeError(
+            "wildcard must return its Signature.Output (the routing result), "
+            f"not {type(route).__qualname__}"
+        )
+    artifacts: dict = {}
+    if route.handled:
+        artifacts["command_handled"] = True
+    if route.command_name is not None:
+        artifacts["command"] = route.command
+        artifacts["command_name"] = route.command_name
+        artifacts["cmd_parameters"] = route.cmd_parameters
+    if route.ran_on_context_clause is not None:
+        artifacts["ran_on_context_name"] = route.ran_on_context_name
+        artifacts["ran_on_context_clause"] = route.ran_on_context_clause
+    return CommandOutput(
+        command_response=fastworkflow.CommandResponse(
+            response=route.response,
+            success=route.routed,
+            artifacts=artifacts,
+            output=route.output,
+        )
+    )
+
+
+def call_response_generator(response_generator, workflow, command, command_parameters, *, command_name: str = ""):
+    """Call ``response_generator(workflow, command, command_parameters)`` and frame its result.
+
+    ``command_parameters`` is the filled ``Input``, or None for a command with no ``Input``. A
+    ``fastworkflow.Refused`` the call raises is its answer: a failed CommandOutput with the refusal's
     message. Any other return is framed by ``frame_command_result``.
     """
-    arguments = _generator_arguments(response_generator, args)
     try:
-        result = response_generator(*arguments)
+        result = response_generator(workflow, command, command_parameters)
     except fastworkflow.Refused as refusal:
         return refusal.as_output()
     return frame_command_result(
         result,
         command_name=command_name or type(response_generator).__qualname__,
         output_model=_declared_output_model(type(response_generator)),
+        command_parameters=command_parameters,
     )
 
 
@@ -688,6 +732,9 @@ class CommandExecutor(CommandExecutorInterface):
                 )
                 raise
             
+            if action.command_name == "wildcard":
+                command_output = _wildcard_command_output(command_output)
+
             # Validate that response_generation_object returns a CommandOutput, not a string
             if not isinstance(command_output, CommandOutput):
                 raise TypeError(f"Response generation object for command '{action.command_name}' did not return a CommandOutput. This indicates an implementation error in the response generator.")
@@ -703,13 +750,11 @@ class CommandExecutor(CommandExecutorInterface):
             return command_output
 
         # Always resolve the command's Signature class via create() so
-        # validate_extracted_parameters (and db_lookup) run on the direct-action
+        # validate_extracted_parameters runs on the direct-action
         # path the same way they do on the NLU path. Validate even when
         # action.parameters is empty/falsy — context preconditions still apply.
-        if action.parameters:
-            input_obj = command_parameters_class(**action.parameters)
-        else:
-            input_obj = command_parameters_class()
+        # A required field the caller leaves out is asked for, as on the NLU path (fix-3rsq.plain-required).
+        input_obj = parameters_with_unfilled(command_parameters_class, action.parameters or {})
 
         input_for_param_extraction = InputForParamExtraction.create(
             workflow, action.command_name, action.command
@@ -756,6 +801,9 @@ class CommandExecutor(CommandExecutorInterface):
             )
             raise
         
+        if action.command_name == "wildcard":
+            command_output = _wildcard_command_output(command_output)
+
         # Validate that response_generation_object returns a CommandOutput, not a string
         if not isinstance(command_output, CommandOutput):
             raise TypeError(f"Response generation object for command '{action.command_name}' did not return a CommandOutput. This indicates an implementation error in the response generator.")

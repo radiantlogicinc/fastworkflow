@@ -35,11 +35,9 @@ from fastworkflow import CommandOutput, CommandResponse
 
 
 class ResponseGenerator:
-    def __call__(self, workflow: fastworkflow.Workflow, command: str) -> CommandOutput:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, input) -> CommandResponse:
         bound = workflow.command_context_for_response_generation
-        return CommandOutput(
-            command_response=CommandResponse(
-                response=f"global_probe bound to {type(bound).__name__}"))
+        return CommandResponse(response=f"global_probe bound to {type(bound).__name__}")
 '''
 
 
@@ -112,7 +110,7 @@ def _run(app, cme, monkeypatch, command: str) -> Run:
     gen_cls = routing.get_command_class(
         artifacts["command_name"], fastworkflow.ModuleType.RESPONSE_GENERATION_INFERENCE)
     params = artifacts["cmd_parameters"]
-    raw = call_response_generator(gen_cls(), app, artifacts["command"], *([] if params is None else [params]))
+    raw = call_response_generator(gen_cls(), app, artifacts["command"], params)
     response = raw.command_response.response if isinstance(raw, fastworkflow.CommandOutput) else str(raw)
     return Run(artifacts, response, output=raw)
 

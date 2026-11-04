@@ -23,11 +23,9 @@ class Signature:
 
 
 class ResponseGenerator:
-    def __call__(self, workflow: fastworkflow.Workflow, command: str,
-                 command_parameters: Signature.Input) -> fastworkflow.CommandOutput:
-        loans = library.loans_of_member(command_parameters.member_uid)
-        rows = library.page(loans, command_parameters.start)
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, input: Signature.Input) -> Signature.Output:
+        loans = library.loans_of_member(input.member_uid)
+        rows = library.page(loans, input.start)
         output = Signature.Output(titles=[t for t, _ in rows], due_dates=[d for _, d in rows],
                                   total=len(loans))
-        return fastworkflow.CommandOutput(command_response=fastworkflow.CommandResponse(
-            response=output.model_dump_json(), output=output))
+        return output

@@ -16,7 +16,6 @@ class Signature:
 
 
 class ResponseGenerator:
-    def __call__(self, workflow: fastworkflow.Workflow, command: str) -> fastworkflow.CommandOutput:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, input: None) -> fastworkflow.CommandResponse:
         output = Signature.Output(names=list(library.BRANCHES), total=len(library.BRANCHES))
-        return fastworkflow.CommandOutput(command_response=fastworkflow.CommandResponse(
-            response=f"Branches: {', '.join(output.names)}", output=output))
+        return fastworkflow.CommandResponse(response=f"Branches: {', '.join(output.names)}", output=output)

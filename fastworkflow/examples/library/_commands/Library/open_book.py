@@ -34,12 +34,12 @@ class ResponseGenerator:
     descends_to = "Book"
 
     def __call__(self, workflow: fastworkflow.Workflow, command: str,
-                 command_parameters: Signature.Input) -> Signature.Output:
+                 input: Signature.Input) -> Signature.Output:
         library: Library = workflow.command_context_for_response_generation
-        book = library.books.get(command_parameters.book_uid)
+        book = library.books.get(input.book_uid)
         if book is None:
             raise fastworkflow.Refused(
-                f"no book has the uid {command_parameters.book_uid}; find_book lists the uids")
+                f"no book has the uid {input.book_uid}; find_book lists the uids")
         workflow.current_command_context = book
         return Signature.Output(book_uid=book.uid, title=book.title, author=book.author,
                                 copies=book.copies)

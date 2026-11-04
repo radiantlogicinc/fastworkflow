@@ -126,6 +126,11 @@ def test_generate_command_stub(commands_dir, basic_context_model):
     content = file_path.read_text()
     assert 'class Signature:' in content
     assert 'class ResponseGenerator:' in content
+    # No utterance boilerplate: the framework default gives the utterances (a zero-argument
+    # generate_utterances that returned [] used to be written here)
+    assert 'generate_utterances' not in content
+    assert 'template_utterances' not in content
+    assert 'def __call__(self, workflow: fastworkflow.Workflow, command: str, input: Signature.Input) -> Signature.Output:' in content
 
 
 # Skip tests that depend on container-context handlers (feature removed)

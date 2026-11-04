@@ -484,9 +484,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
-        return CommandOutput(
-            command_response=CommandResponse(response="text only"),
-        )
+        return CommandResponse(response="text only")
 '''
 
 

@@ -39,7 +39,7 @@ EXECUTION_SOURCE_WITHOUT_HEADER = '''class Signature:
 
 
 class ResponseGenerator:
-    def __call__(self, workflow, command):
+    def __call__(self, workflow, command, input):
         return None  # old generated body
 '''
 

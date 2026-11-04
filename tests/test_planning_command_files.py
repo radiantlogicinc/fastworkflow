@@ -18,7 +18,7 @@ from tests.test_text_planner_and_split import (  # noqa: F401 - workflow_env is 
 
 #: The example of the planning_commands module docstring, verbatim.
 EXAMPLE = sc.__doc__.split("A planning command file::\n\n", 1)[1].split("\n- ``Signature``", 1)[0]
-EXAMPLE = textwrap.dedent(EXAMPLE)
+EXAMPLE = "import fastworkflow\n" + textwrap.dedent(EXAMPLE)  # the docstring example refuses with fastworkflow.Refused
 
 CLOSE_OUT = '''
 class Signature:
@@ -96,8 +96,8 @@ def test_the_documented_example_loads_as_a_planning_command_with_params(tmp_path
         ("name", "str", True, None), ("kind", "enum", True, None), ("person", "str", False, ""),
         ("include_risk", "bool", False, False), ("count", "int", False, 2)]
     name, kind, person, risk, count = command.params
-    assert (name.strip, name.subject, name.desc) == (("group", "unit"), True,
-                                                      "the record's name")
+    assert (name.subject, name.in_request, name.ignore, name.desc) == (
+        True, True, ("group", "unit"), "the record's name")
     assert (kind.values, kind.verify, kind.means) == (
         ("group", "unit"), True, (("group", "a group of people"), ("unit", "an organisation unit")))
     assert person.subject and risk.verify and count.in_request
@@ -175,7 +175,7 @@ class Signature:
         def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
             if not cmd_parameters.list_all:
                 cmd_parameters.detail = False
-            return True, ""
+            return None
 
 
 class PlanGenerator:
@@ -217,7 +217,7 @@ def test_the_template_leaves_out_what_the_validation_hook_changes_or_refuses(tmp
         "list_members (only when person is empty)")
     always = FIELD.format(field="name: str").replace(
         '    class Input', '    @staticmethod\n    def validate_extracted_parameters(workflow, command, p):\n'
-        '        p.name = "x"\n        return True, ""\n\n    class Input')
+        '        p.name = "x"\n        return None\n\n    class Input')
     assert "changes or refuses every placeholder combination" in \
         _load_error(_write(tmp_path / "always", {"bad": always}))
 
@@ -364,11 +364,13 @@ class PlanGenerator:
     ("kind: Literal[1, 2]", "a Literal of text values only"),
     ("name: str = Field(json_schema_extra={'colour': 'red'})", "unknown key"),
     ("name: str = Field(json_schema_extra={'verify': True})", "option verify does not apply to field 'name' of type str"),
-    ("name: str = Field(json_schema_extra={'strip': 'group'})", "strip must be a list of words"),
-    ("name: str = Field(json_schema_extra={'subject': 'yes'})", "subject must be true or false"),
+    ("name: str = Field(json_schema_extra={'strip': ['group']})", "option strip is retired: write in_request"),
+    ("name: str = Field(json_schema_extra={'subject': 'yes'})", "option subject is retired: write in_request"),
+    ("name: str = Field(json_schema_extra={'in_request': 'yes'})", "in_request must be true, false, \"subject\" or a dict"),
     ("count: int = Field(default=1, json_schema_extra={'requires': 'name'})",
      "requires is not a planning command option; .*Signature.validate_extracted_parameters"),
-    ("kind: Literal['a', 'b'] = Field(json_schema_extra={'means': {'c': 'x'}})", "'c' is not a value of it"),
+    ("kind: Literal['a', 'b'] = Field(json_schema_extra={'verify': {'c': 'x'}})", "'c' is not a value of it"),
+    ("kind: Literal['a', 'b'] = Field(json_schema_extra={'means': {'a': 'x'}})", "option means is retired"),
     ("reasoning: int = 1", "bad parameter name 'reasoning'"),
 ])
 def test_a_malformed_input_field_fails_the_load(tmp_path, field, message):
@@ -395,7 +397,7 @@ class Signature:
     @staticmethod
     def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
         SEEN.append(cmd_parameters.owner)
-        return True, ""
+        return None
 
 
 SEEN = []
@@ -499,7 +501,7 @@ def test_the_validation_hook_can_refuse_or_correct_a_call(tmp_path):
     def correcting(workflow, name, params, command_text=None):
         seen.append((workflow, name, command_text))
         params.name = params.name.upper()
-        return True, ""
+        return None
 
     from dataclasses import replace
     notes: list[str] = []

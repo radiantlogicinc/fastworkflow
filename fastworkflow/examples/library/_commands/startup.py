@@ -6,6 +6,6 @@ from ..application.library import Library
 
 class ResponseGenerator:
     def __call__(self, workflow: fastworkflow.Workflow, command: str,
-                 command_parameters: None) -> str:
+                 input: None) -> str:
         workflow.root_command_context = Library()
         return "The library is open."

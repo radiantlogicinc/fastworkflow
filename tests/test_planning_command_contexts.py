@@ -655,7 +655,7 @@ class Signature:
 
     class Input(BaseModel):
         title: str = Field(description="the book's title",
-                           json_schema_extra={"subject": True})
+                           json_schema_extra={"in_request": "subject"})
         copies: int = Field(default=1, description="how many copies the request asks about",
                             json_schema_extra={"in_request": True})
         loaned: bool = Field(default=False, description="whether the request asks about loans",

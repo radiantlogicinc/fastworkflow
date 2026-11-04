@@ -20,10 +20,8 @@ class Signature:
 
 
 class ResponseGenerator:
-    def __call__(self, workflow: fastworkflow.Workflow, command: str,
-                 command_parameters: Signature.Input) -> fastworkflow.CommandOutput:
-        found = library.find_members(command_parameters.query)
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, input: Signature.Input) -> Signature.Output:
+        found = library.find_members(input.query)
         output = Signature.Output(member_uids=found, names=[library.MEMBERS[u] for u in found],
                                   total=len(found))
-        return fastworkflow.CommandOutput(command_response=fastworkflow.CommandResponse(
-            response=output.model_dump_json(), output=output))
+        return output

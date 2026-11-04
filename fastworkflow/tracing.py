@@ -322,6 +322,11 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # only a pronoun or only a kind word or field name of the workflow, and was treated as not given. A
 # span recorded before this carries no such key.
 #
+# v32: fw.nlu.param_extraction v8 (fix-3rsq.one-hook) -- the validation hook replaces db_lookup as the one
+# place a parameter is corrected or refused. `db_lookup` is no longer written; `validation_hook` records
+# `changed_fields` (a value the hook rewrote in place binds the slot, signal "validation_hook") and
+# `refused_fields` (the fields of a fastworkflow.Refused). A span recorded before this carries `db_lookup`
+# and no change list.
 # v31: fw.approval v1 (new) -- one span per approval-binding transition (ADR-EXP-025 section 12):
 # the gate's refuse, queue, ask, shadow and each resolution. It carries hashes, state and the
 # identity class and reference, never the token or the raw parameters.
@@ -329,7 +334,7 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # by owner decision 2026-10-30. `experiment_arm`, `fast_path` and `recipe_choice` (the v25 keys of the
 # planner span) and `fast_path_refusal_asked` (the v28 key of the executor span) are no longer declared
 # or written. A span recorded before this carries them as it wrote them; nothing reads them as a live path.
-SPAN_CONTRACT_VERSION = 31
+SPAN_CONTRACT_VERSION = 32
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -795,7 +800,12 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         # v7 (word screens): `word_screen_values` records a free-text value that was
         # only a pronoun or only a kind word or field name of the workflow and was
         # treated as not given. Absent on earlier versions.
-        version=7,
+        # v8 (fix-3rsq.one-hook): `db_lookup` is no longer written (the lookup moved into the
+        # validate_extracted_parameters hook, and db_lookup is a load error). `validation_hook`
+        # now also carries `changed_fields` (fields the hook rewrote in place) and `refused_fields`
+        # (the fields a fastworkflow.Refused named). A span carrying v7 has `db_lookup` and no
+        # `validation_hook` change list, and a reader must not read one as the other.
+        version=8,
         attributes=frozenset(
             {
                 "command_name",
@@ -811,7 +821,6 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "extraction_method",
                 "missing_fields",
                 "invalid_fields",
-                "db_lookup",
                 "validation_hook",
                 "decision_uncertainty",
                 "parameters_valid",

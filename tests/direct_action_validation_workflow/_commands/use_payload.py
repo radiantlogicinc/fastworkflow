@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
 from fastworkflow.workflow import Workflow
 from pydantic import BaseModel, Field
 
@@ -35,21 +34,15 @@ class Signature:
         workflow: fastworkflow.Workflow,
         command: str,
         cmd_parameters: "Signature.Input",
-    ) -> tuple[bool, str]:
+    ) -> None:
         if not workflow.context.get("payload"):
-            return (False, HOOK_MISSING_PAYLOAD)
-        return (True, "")
+            raise fastworkflow.Refused(HOOK_MISSING_PAYLOAD)
+        return None
 
 
 class ResponseGenerator:
-    def __call__(
-        self,
-        workflow: Workflow,
-        command: str,
-        command_parameters: Signature.Input,
-    ) -> CommandOutput:
+    def __call__(self, workflow: Workflow, command: str, input: Signature.Input) -> fastworkflow.CommandResponse:
         payload = workflow.context.get("payload")
-        response = f"payload={payload}; note={command_parameters.note}"
-        return CommandOutput(
-            command_response=CommandResponse(response=response)
-        )
+        response = f"payload={payload}; note={input.note}"
+        return fastworkflow.CommandResponse(
+            response=response, output=Signature.Output(result=response))

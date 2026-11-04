@@ -3,7 +3,6 @@ from typing import List
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.workflow import Workflow
-from fastworkflow import CommandOutput, CommandResponse
 
 # Domain helpers
 from ..retail_data import load_data
@@ -20,9 +19,8 @@ class Signature:
         """Parameters taken from user utterance."""
 
         email: str = Field(
-            default="NOT_FOUND",
             description="The email address to search for",
-            pattern=r"^(NOT_FOUND|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})$",
+            pattern=r"^([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})$",
             examples=["user@example.com"],
         )
 
@@ -62,15 +60,10 @@ class ResponseGenerator:
         workflow: Workflow,
         command: str,
         command_parameters: Signature.Input,
-    ) -> CommandOutput:
+    ) -> fastworkflow.CommandResponse:
         output = self._process_command(workflow, command_parameters)
-        return CommandOutput(
-            command_response=
-                CommandResponse(
-                    response=f"The user id is: {output.user_id}",
-                    output=Signature.Output(user_id=output.user_id),
-                ),
-        )
+        return fastworkflow.CommandResponse(
+            response=f"The user id is: {output.user_id}", output=output)
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()

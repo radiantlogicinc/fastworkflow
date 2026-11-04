@@ -109,11 +109,12 @@ def test_a_bare_value_answer_stops_the_climb_where_it_is_given(
          "TodoListManager": ["list_todo_lists"]},
         consulted))
 
-    output = wildcard.ResponseGenerator()(cme, "3")
+    output = wildcard.ResponseGenerator()(cme, "3", None)
 
     assert consulted == ["TodoItem"]
-    assert output.command_name == "ErrorCorrection/you_misunderstood"
-    assert not output.command_response.artifacts.get("command_name")
+    # Handled by the you_misunderstood path: the routing Output is handled and names no command to run.
+    assert output.handled
+    assert output.command_name is None
 
 
 def test_a_bare_value_at_an_ancestor_does_not_climb_further(
@@ -127,10 +128,11 @@ def test_a_bare_value_at_an_ancestor_does_not_climb_further(
          "TodoListManager": ["list_todo_lists"]},
         consulted))
 
-    output = wildcard.ResponseGenerator()(cme, "3")
+    output = wildcard.ResponseGenerator()(cme, "3", None)
 
     assert consulted == ["TodoItem", "TodoList"]
-    assert output.command_name == "ErrorCorrection/you_misunderstood"
+    assert output.handled
+    assert output.command_name is None
 
 
 def test_a_decline_still_climbs_to_the_ancestor_that_answers(
@@ -144,7 +146,7 @@ def test_a_decline_still_climbs_to_the_ancestor_that_answers(
          "TodoListManager": ["list_todo_lists"]},
         consulted))
 
-    wildcard.ResponseGenerator()(cme, "show the children")
+    wildcard.ResponseGenerator()(cme, "show the children", None)
 
     assert consulted == ["TodoItem", "TodoList"]
     assert cme.context["command_name"] == "TodoList/get_all_children"

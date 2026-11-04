@@ -223,7 +223,8 @@ def test_go_up_at_the_top_level_names_the_commands_to_use_instead():
     wrapper.context = {"app_workflow": app}
     assert app.is_current_command_context_root
 
-    text = ResponseGenerator()(wrapper, "IntentDetection/go_up").command_response.response
+    # Short form: the three-argument call (no Input for this command) returns the text itself.
+    text = ResponseGenerator()(wrapper, "IntentDetection/go_up", None)
 
     assert text.startswith("Already at the top-level 'global' context. From here, use one of: ")
     names = text.removeprefix("Already at the top-level 'global' context. From here, use one of: ")

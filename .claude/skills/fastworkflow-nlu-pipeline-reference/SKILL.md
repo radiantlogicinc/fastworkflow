@@ -245,8 +245,9 @@ Full training walkthrough + metrics math: [references/intent-model-training.md](
 ## 3. Synthetic utterance generation (train-time)
 
 `fastworkflow/train/generate_synthetic.py::generate_diverse_utterances`. Called from each
-command file's generated `generate_utterances` staticmethod (template:
-`build/command_file_template.py:112-115`). Per command:
+command's utterances: the framework default `command_directory.default_generate_utterances`
+(the command name in words, then `generate_diverse_utterances(plain_utterances)`); a command file
+that defines its own `Signature.generate_utterances` overrides it. Per command:
 
 - Samples `SYNTHETIC_UTTERANCE_GEN_NUMOF_PERSONAS` (template default 4) personas from
   HuggingFace `proj-persona/PersonaHub` `persona.jsonl`, batches
@@ -308,7 +309,7 @@ Run-time parameter extraction detail (`utils/signatures.py`):
 - Results are built with `model_construct(**param_dict)` — **no Pydantic validation** —
   with `NOT_FOUND` sentinels for gaps (:309-313); validation happens separately in
   `validate_parameters` (:315-670) which coerces types, checks regex `pattern`s, and runs
-  `db_lookup`/`validate_extracted_parameters` hooks.
+  the `validate_extracted_parameters` hook (which holds any fuzzy lookup).
 - Agent mode tries **regex XML extraction first** (`<field>value</field>` per
   `parameter_extraction.py:71-80, 296-357`); the LLM is only called if regex fails. All
   fields must be present or it falls back.

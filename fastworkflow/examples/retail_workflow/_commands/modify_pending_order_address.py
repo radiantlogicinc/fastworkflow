@@ -3,7 +3,7 @@ from typing import List
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.workflow import Workflow
-from fastworkflow import CommandOutput, CommandResponse, from_
+from fastworkflow import from_
 
 from ..retail_data import load_data
 from ..tools.modify_pending_order_address import ModifyPendingOrderAddress
@@ -14,25 +14,22 @@ class Signature:
     class Input(BaseModel):
         order_id: str = from_(
             "get_user_details",
-            default="NOT_FOUND",
             description="The order ID to modify",
-            pattern=r"^(#?[\w\d]+|NOT_FOUND)$",
+            pattern=r"^(#?[\w\d]+)$",
             examples=["#W0000000"],
         )
-        address1: str = Field(default="NOT_FOUND", description="First line of address", examples=["123 Main St"])
-        address2: str = Field(default="NOT_FOUND", description="Second line of address", examples=["Apt 1"])
-        city: str = Field(default="NOT_FOUND", description="City name", examples=["San Francisco"])
+        address1: str = Field(description="First line of address", examples=["123 Main St"])
+        address2: str = Field(description="Second line of address", examples=["Apt 1"])
+        city: str = Field(description="City name", examples=["San Francisco"])
         state: str = Field(
-            default="NOT_FOUND",
             description="State code",
-            pattern=r"^([A-Z]{2}|NOT_FOUND)$",
+            pattern=r"^([A-Z]{2})$",
             examples=["CA"],
         )
-        country: str = Field(default="NOT_FOUND", description="Country name", examples=["USA"])
+        country: str = Field(description="Country name", examples=["USA"])
         zip: str = Field(
-            default="NOT_FOUND",
             description="ZIP code",
-            pattern=r"^(\d{5}|NOT_FOUND)$",
+            pattern=r"^(\d{5})$",
             examples=["12345"],
         )
 
@@ -61,21 +58,16 @@ class Signature:
     def validate_extracted_parameters(
         workflow: fastworkflow.Workflow, 
         command: str, cmd_parameters: "Signature.Input"
-    ) -> tuple[bool, str]:
+    ) -> None:
         if not cmd_parameters.order_id.startswith('#'):
             cmd_parameters.order_id = f'#{cmd_parameters.order_id}'
-        return (True, '')
+        return None
 
 
 class ResponseGenerator:
-    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandOutput:
+    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> Signature.Output:
         output = self._process_command(workflow, command_parameters)
-        response = (
-            f'Response: Modified details: {output.status}'
-        )
-        return CommandOutput(
-            command_response=CommandResponse(response=response),
-        )
+        return output
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()

@@ -2,7 +2,6 @@
 from pydantic import ConfigDict
 
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
 from fastworkflow.workflow import Workflow
 from fastworkflow.utils.signatures import InputForParamExtraction
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
@@ -33,8 +32,8 @@ class Signature:
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
     @staticmethod
-    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> tuple[bool, str]:
-        return (True, '')
+    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> None:
+        return None
 
 class ResponseGenerator:
     def _process_command(self, workflow: Workflow) -> Signature.Output:
@@ -44,12 +43,9 @@ class ResponseGenerator:
         todoitems = todolist.get_all_children()
         return Signature.Output(todoitem_ids=[todoitem.id for todoitem in todoitems])
 
-    def __call__(self, workflow: Workflow, command: str) -> CommandOutput:
+    def __call__(self, workflow: Workflow, command: str, input: None) -> fastworkflow.CommandResponse:
         output = self._process_command(workflow)
         response = (
             f'Response: {output.model_dump_json()}'
         )
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=response)
-        )
+        return fastworkflow.CommandResponse(response=response, output=output)

@@ -30,6 +30,7 @@ import pytest
 import fastworkflow
 from fastworkflow import ModuleType
 from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.utils.signatures import InputForParamExtraction
 from fastworkflow.workflow_agent import _explicit_agent_command
 
 # Fixtures and helpers reused from the sibling test modules (not copied).
@@ -116,7 +117,7 @@ def test_a_switch_to_a_user_said_on_a_user_is_resolved_by_the_climb_and_bound_to
         messaging_on_a_user, monkeypatch, setup_test_environment):
     """Said on a User record (alice), switching to bob, by the exact name of set_current_user, which
     lives on the ChatRoom (the root). The exact-name lookup climbs the live chain to the ChatRoom
-    scope, binds the command to the chat room before parameter extraction, and its db_lookup reads
+    scope, binds the command to the chat room before parameter extraction, and its validation hook reads
     the chat room's user list, so 'bob' resolves there. The current record does not move in routing.
 
     Why the exact name and not the natural phrasing ("switch to bob"): on this copy the User head
@@ -146,23 +147,21 @@ def test_a_switch_to_a_user_said_on_a_user_is_resolved_by_the_climb_and_bound_to
     assert app.command_context_for_response_generation is root
     assert app.current_command_context is user
 
+    # The workflow's validate_extracted_parameters hook does the fuzzy match that db_lookup did (fix-3rsq.one-hook),
+    # and it runs through validate_parameters: the same correction is written back, the same suggestions offered.
     routing = fastworkflow.RoutingRegistry.get_definition(app.folderpath)
-    input_cls = routing.get_command_class(
-        command_name, ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)
-    signature = _signature_with_db_lookup(input_cls)
-    matched, corrected, _suggestions = signature.db_lookup(app, "user_name", "bob")
-    assert matched is True, "db_lookup must read the bound chat room's users"
-    assert corrected == "bob"
+    signature = routing.get_command_class(command_name, ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)
+    extraction = InputForParamExtraction.create(app, command_name, "set current user to bob")
 
+    exact_case = signature.Input(user_name="Bob")
+    is_valid, _message, _, _ = extraction.validate_parameters(app, command_name, exact_case)
+    assert is_valid, "the hook must read the bound chat room's users"
+    assert exact_case.user_name == "bob", "the hook writes the corrected value back to the input"
 
-def _signature_with_db_lookup(cls):
-    """The command's Signature: the input class's module carries it (the trainer's own layout)."""
-    import sys
-
-    module = sys.modules[cls.__module__]
-    signature = getattr(module, "Signature", None)
-    assert signature is not None and hasattr(signature, "db_lookup"), cls.__module__
-    return signature
+    near_miss = signature.Input(user_name="bobb")
+    is_valid, message, _, fields = extraction.validate_parameters(app, command_name, near_miss)
+    assert not is_valid and fields == ["user_name"]
+    assert "Did you mean" in message and "bob" in message, message
 
 
 def test_library_hours_is_reachable_by_exact_name_from_inside_a_book(

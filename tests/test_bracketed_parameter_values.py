@@ -9,6 +9,7 @@ from typing import List, Optional
 import pytest
 from pydantic import BaseModel, Field
 
+import fastworkflow
 from fastworkflow.utils import signatures
 from fastworkflow.utils.signatures import (
     InputForParamExtraction,
@@ -105,7 +106,7 @@ def test_validation_unwraps_before_the_hook_sees_the_value():
         @staticmethod
         def validate_extracted_parameters(workflow, command, cmd_parameters):
             seen["item_uid"] = cmd_parameters.item_uid
-            return True, ""
+            return None
 
     params = ItemParams.model_construct(item_uid="<9a1b2c3d4e5f60718293a4b5c6d7e8f9>")
     diagnostics = {}
@@ -125,7 +126,7 @@ def test_a_placeholder_is_refused_with_a_message_naming_the_field():
         @staticmethod
         def validate_extracted_parameters(workflow, command, cmd_parameters):
             hook_calls.append(command)
-            return True, ""
+            return None
 
     params = ItemParams.model_construct(item_uid="<item_uid>")
     diagnostics = {}
@@ -140,23 +141,26 @@ def test_a_placeholder_is_refused_with_a_message_naming_the_field():
     assert diagnostics["invalid_fields"] == ["item_uid"]
 
 
-def test_a_placeholder_is_not_sent_to_db_lookup():
-    lookups = []
+def test_a_placeholder_is_not_sent_to_the_validation_hook():
+    # The placeholder check runs before the workflow's hook, so the hook never sees "<uid>" as a value to match
+    # (the hook does the lookup that db_lookup used to do; fix-3rsq.one-hook). Were it called, it would refuse
+    # with a suggestion; the refusal is not reached, so no suggestion is offered.
+    hook_calls = []
 
     class LookupParams(BaseModel):
-        item_uid: str = Field(description="uid", json_schema_extra={"db_lookup": True})
+        item_uid: str = Field(description="uid")
 
     class Hook:
         @staticmethod
-        def db_lookup(workflow, field_name, field_value):
-            lookups.append(field_value)
-            return False, None, ["abc"]
+        def validate_extracted_parameters(workflow, command, cmd_parameters):
+            hook_calls.append(cmd_parameters.item_uid)
+            raise fastworkflow.Refused("Did you mean abc?", field="item_uid")
 
     is_valid, message, _, fields = _validate(
         LookupParams.model_construct(item_uid="<uid>"), Hook)
 
     assert not is_valid and fields == ["item_uid"]
-    assert lookups == []
+    assert hook_calls == []
     assert "Did you mean" not in message
 
 

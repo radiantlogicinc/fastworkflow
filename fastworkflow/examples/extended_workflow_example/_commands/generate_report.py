@@ -1,5 +1,4 @@
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from pydantic import BaseModel
 
@@ -20,7 +19,7 @@ class Signature:
 
 
 class ResponseGenerator:
-    def __call__(self, workflow: fastworkflow.Workflow, command: str, cmd_parameters: Signature.Input) -> CommandOutput:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, cmd_parameters: Signature.Input) -> str:
         # This is a new command specific to the extended workflow
         report_data = {
             "report_type": cmd_parameters.report_type,
@@ -38,10 +37,7 @@ class ResponseGenerator:
             "report": report_data
         }
         
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=str(response))
-        )
+        return str(response)
     
     def _count_workitems(self, workitem) -> int:
         """Count total number of workitems in the hierarchy"""

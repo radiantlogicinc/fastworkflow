@@ -14,8 +14,8 @@ A preview, in the order of the planning command-file layout (``docs/planning_com
 1. the planning command's name, its description (the ``Signature`` docstring) and its kind (flat
    steps, or phases);
 2. its inputs: name, type, default, the sample value the preview renders with, the
-   ``verify`` and ``subject`` flags and the description, then the other options
-   (``strip``, ``means``, ``in_request``);
+   ``verify`` and ``in_request`` flags and the description, then the verify meanings
+   (``verify`` dict);
 3. its ``plain_utterances``;
 4. for a phased planning command (``plan()``): when ``plan()`` returns phases at all (when some inputs
    make the call run flat), then the phases, each with its output model, when it runs and
@@ -1149,7 +1149,7 @@ def _inputs_section(command) -> list[str]:
         return lines + ["None: the steps are fixed.", ""]
     if not command.params:
         return lines + ["None: every call runs the same plan.", ""]
-    lines += ["| input | type | default | sample | verify | subject | description |",
+    lines += ["| input | type | default | sample | verify | in_request | description |",
               "|---|---|---|---|---|---|---|"]
     notes = []
     for p in command.params:
@@ -1166,12 +1166,10 @@ def _inputs_section(command) -> list[str]:
                        _code(json.dumps(sample)) if isinstance(sample, list) else
                        _code(sample) if sample != "" else '`""`')
         lines.append(f"| `{p.name}` | {_text(type_text, True)} | {default} | {sample_text.replace('|', chr(92) + '|')} "
-                     f"| {'yes' if p.verify else ''} | {'yes' if p.subject else ''} | {_text(p.desc, True)} |")
-        if p.strip:
-            notes.append(f"- `{p.name}` strips the words {', '.join(_code(w) for w in p.strip)} from its ends.")
+                     f"| {'yes' if p.verify else ''} | {_in_request_cell(p)} | {_text(p.desc, True)} |")
         if p.means:
             notes.append(f"- `{p.name}` means: " + "; ".join(f"{_code(v)}: {_text(t)}" for v, t in p.means) + ".")
-        if p.in_request:
+        if p.in_request and not p.subject:   # the subject column says it (in_request "subject")
             if p.type == "str":
                 notes.append(f"- `{p.name}` must be written in the request (`in_request`).")
             else:
@@ -1180,6 +1178,15 @@ def _inputs_section(command) -> list[str]:
     if notes:
         lines += notes + [""]
     return lines
+
+
+def _in_request_cell(p) -> str:
+    """The ``in_request`` column of an input row: ``subject`` for the subject option, ``yes`` for
+    ``in_request: True``, empty otherwise; the words it ignores at either end follow (``ignore``)."""
+    cell = "subject" if p.subject else ("yes" if p.in_request else "")
+    if p.ignore:
+        cell = (f"{cell}; " if cell else "") + "ignore " + ", ".join(_code(w) for w in p.ignore)
+    return cell
 
 
 def _utterances_section(utterances) -> list[str]:

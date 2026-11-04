@@ -16,6 +16,7 @@ from tests.test_text_planner_and_split import (  # noqa: F401 - workflow_env is 
 LOOKUP = '''
 from typing import Literal
 
+import fastworkflow
 from pydantic import BaseModel, Field
 
 FIND = {"group": "find_group", "feed": "find_feed"}
@@ -31,7 +32,7 @@ class Signature:
 
     class Input(BaseModel):
         name: str = Field(description="the record's name",
-                          json_schema_extra={"strip": ["group", "feed"], "in_request": True})
+                          json_schema_extra={"in_request": {"ignore": ["group", "feed"]}})
         kind: Literal["group", "feed"] = Field(description="group, or feed (a source of logins)")
         person: str = Field(default="", description="one named person to check for; empty lists everyone",
                             json_schema_extra={"in_request": True})
@@ -43,7 +44,7 @@ class Signature:
     def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
         if not cmd_parameters.include_risk:   # an owner only for the risk comparison
             cmd_parameters.owner = ""
-        return True, ""
+        return None
 
 
 class PlanGenerator:
@@ -118,7 +119,7 @@ def test_a_planning_command_file_gives_typed_params_and_the_description(tmp_path
         ("name", "str", True, None), ("kind", "enum", True, None), ("person", "str", False, ""),
         ("include_risk", "bool", False, False), ("count", "int", False, 2), ("owner", "str", False, "")]
     assert command.param("kind").values == ("group", "feed")
-    assert command.param("name").strip == ("group", "feed")
+    assert command.param("name").ignore == ("group", "feed")
     assert callable(command.validate)
     # what the matcher sees is the description, as for a plain skill
     assert workflow_agent._job_types_for(folder) == f"- lookup: {command.description}"
@@ -258,8 +259,9 @@ def test_strip_words_remove_a_kind_word_and_its_possessive(tmp_path):
     command = _command(tmp_path)
     args, _ = sc.check_arguments(command, {"name": "Ann Lee's feed", "kind": "feed"}, "Show Ann Lee's logins")
     assert args["name"] == "Ann Lee"
+    assert sc.strip_words("Ann Lee's feed", ("feed",)) == "Ann Lee"
     # never down to nothing
-    assert sc._strip_words("group", ("group",)) == "group"
+    assert sc.strip_words("group", ("group",)) == "group"
 
 
 def test_a_one_element_list_is_its_element_and_a_longer_list_is_not(tmp_path):
@@ -528,8 +530,8 @@ CHECKED = LOOKUP.replace(
     '''kind: Literal["group", "feed"] = Field(description="group, or feed (a source of logins)")''',
     '''kind: Literal["group", "feed"] = Field(
             description="group, or feed (a source of logins)",
-            json_schema_extra={"verify": True, "means": {"group": "a group of people",
-                                                         "feed": "a feed that logins arrive on"}})''',
+            json_schema_extra={"verify": {"group": "a group of people",
+                                          "feed": "a feed that logins arrive on"}})''',
 ).replace(
     '''include_risk: bool = Field(default=False, description="the request asks how risky it is")''',
     '''include_risk: bool = Field(default=False, description="the request asks how risky it is",
@@ -575,11 +577,14 @@ class PlanGenerator:
 
 @pytest.mark.parametrize("field, message", [
     ("name: str = Field(json_schema_extra={'verify': True})", "option verify does not apply to field 'name' of type str"),
-    ("flag: bool = Field(default=False, json_schema_extra={'subject': True})", "option subject does not apply to field 'flag' of type bool"),
-    ("flag: bool = Field(default=False, json_schema_extra={'verify': 'yes'})", "verify must be true or false"),
+    ("flag: bool = Field(default=False, json_schema_extra={'in_request': 'subject'})", "option in_request: \"subject\" does not apply to field 'flag' of type bool"),
+    ("flag: bool = Field(default=False, json_schema_extra={'subject': True})", "option subject is retired: write in_request: \"subject\""),
+    ("flag: bool = Field(default=False, json_schema_extra={'verify': 'yes'})", "verify must be true, false or a dict"),
+    ("flag: bool = Field(default=False, json_schema_extra={'verify': {'true': 'asked'}})",
+     "option verify \\(a dict of meanings\\) does not apply to field 'flag' of type bool"),
     ("flag: bool = Field(default=False, json_schema_extra={'means': {'true': 'asked'}})",
-     "option means does not apply to field 'flag' of type bool"),
-    ("kind: Literal['a', 'b'] = Field(json_schema_extra={'means': {'c': 'x'}})", "'c' is not a value of it"),
+     "option means is retired: write verify: \\{value: meaning"),
+    ("kind: Literal['a', 'b'] = Field(json_schema_extra={'verify': {'c': 'x'}})", "'c' is not a value of it"),
     ("kind: Literal['a', 'b'] = Field(json_schema_extra={'in_request': True})",
      "option in_request does not apply to field 'kind' of type enum"),
 ])
@@ -696,9 +701,10 @@ class Signature:
     """A person asks for a right."""
 
     class Input(BaseModel):
-        right: str = Field(description="the right's name", json_schema_extra={"strip": ["right"], "subject": True})
+        right: str = Field(description="the right's name",
+                           json_schema_extra={"in_request": {"subject": True, "ignore": ["right"]}})
         person: str = Field(default="", description="the person asking for it",
-                            json_schema_extra={"subject": True, "verify": True})
+                            json_schema_extra={"in_request": "subject", "verify": True})
         note: str = Field(default="", description="free text")
 
 
@@ -1091,11 +1097,11 @@ def test_input_validators_refuse_a_call_with_a_message_that_says_what_to_fix(tmp
 
 
 def test_a_hook_refusal_is_an_input_error_and_a_hook_exception_is_not(tmp_path):
-    hooked = LOOKUP.replace('        return True, ""', '        if cmd_parameters.count > 5:\n'
-                            '            return False, "count is at most 5"\n'
+    hooked = LOOKUP.replace('        return None', '        if cmd_parameters.count > 5:\n'
+                            '            raise fastworkflow.Refused("count is at most 5")\n'
                             '        if cmd_parameters.count < 0:\n'
                             '            raise RuntimeError("bug")\n'
-                            '        return True, ""')
+                            '        return None')
     command = _command(tmp_path, hooked)
     with pytest.raises(sc.PlanningCommandInputError, match="count is at most 5"):
         sc._validate_arguments(command, _args(count=9), "Who is in Payroll?")

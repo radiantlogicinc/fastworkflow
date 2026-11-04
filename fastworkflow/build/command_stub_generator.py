@@ -222,71 +222,38 @@ class CommandStubGenerator:
 
         return """\"\"\"Command to {display_command_lower} in the {context} context.\"\"\"
 
-from typing import Optional, Dict, Any
+import fastworkflow
 from pydantic import BaseModel, ConfigDict
-
-
 
 
 class Signature:
     \"\"\"Execute {display_command} command in {context} context.\"\"\"
-    
+
     class Input(BaseModel):
         \"\"\"Parameters for {display_command}.\"\"\"
         # TODO: Define command parameters here
-        
+
         model_config = ConfigDict(extra="forbid")
-    
+
     class Output(BaseModel):
         \"\"\"Result of {display_command}.\"\"\"
         # TODO: Define command output here
         result: str
-        
+
     # Utterance examples for intent detection
     plain_utterances = [
         # TODO: Add example utterances
         "{command_name}",
     ]
-    
-    template_utterances = []
-    
-    @staticmethod
-    def generate_utterances():
-        \"\"\"Generate additional utterances dynamically.\"\"\"
-        return []
-    
-    @staticmethod
-    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> tuple[bool, str]:
-        \"\"\"Any additional validation of extracted parameters after individual parameter validation.\"\"\"
-        # TODO: Add parameter validation logic if needed
-        return (True, '')
 
 
 class ResponseGenerator:
     \"\"\"Generates response for the command.\"\"\"
-    
-    def __call__(self, workflow, command, input_obj=None):
-        \"\"\"Execute the command and generate a response.
-        
-        Args:
-            workflow: The workflow
-            command: The original command text
-            input_obj: The parsed input parameters
-            
-        Returns:
-            The command output
-        \"\"\"
-        from fastworkflow import CommandOutput, CommandResponse
-        
+
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, input: Signature.Input) -> Signature.Output:
+        \"\"\"Execute the command and return its Output. Refuse with raise fastworkflow.Refused(message).\"\"\"
         # TODO: Implement command logic
-        result = "Executed {command_name} command"
-        
-        return CommandOutput(
-            command_response=CommandResponse(
-                response=result,
-                artifacts={{"result": result}}
-            )
-        )
+        return Signature.Output(result="Executed {command_name} command")
 """.format(
             display_command_lower=display_command.lower(),
             display_command=display_command,

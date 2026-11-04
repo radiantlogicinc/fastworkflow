@@ -3,7 +3,7 @@ from typing import List
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.workflow import Workflow
-from fastworkflow import CommandOutput, CommandResponse, from_
+from fastworkflow import from_
 
 # Domain helpers
 from ..retail_data import load_data
@@ -15,11 +15,10 @@ class Signature:
     class Input(BaseModel):
         order_id: str = from_(
             "get_user_details",
-            default="NOT_FOUND",
             description=(
                 "The order ID to get details for"
             ),
-            pattern=r"^(#?[\w\d]+|NOT_FOUND)$",
+            pattern=r"^(#?[\w\d]+)$",
             examples=["#W0000000"],
         )
 
@@ -68,10 +67,10 @@ class Signature:
     def validate_extracted_parameters(
         workflow: fastworkflow.Workflow, 
         command: str, cmd_parameters: "Signature.Input"
-    ) -> tuple[bool, str]:
+    ) -> None:
         if not cmd_parameters.order_id.startswith('#'):
             cmd_parameters.order_id = f'#{cmd_parameters.order_id}'
-        return (True, '')
+        return None
 
 
 class ResponseGenerator:
@@ -80,12 +79,9 @@ class ResponseGenerator:
         workflow: Workflow,
         command: str,
         command_parameters: Signature.Input,
-    ) -> CommandOutput:
+    ) -> Signature.Output:
         output = self._process_command(workflow, command_parameters)
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=f"Order details: {output.order_details}"),
-        )
+        return output
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()

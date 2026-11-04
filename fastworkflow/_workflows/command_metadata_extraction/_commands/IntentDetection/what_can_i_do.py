@@ -134,7 +134,8 @@ class ResponseGenerator:
         self,
         workflow: fastworkflow.Workflow,
         command: str,
-    ) -> fastworkflow.CommandOutput:
+        input: None,
+    ) -> str:
         # Check if we're in agent mode by looking for chat session run_as_agent flag
         is_agent_mode = False
         with contextlib.suppress(Exception):
@@ -161,10 +162,6 @@ class ResponseGenerator:
             "NLU_Pipeline_Stage", 
             fastworkflow.NLUPipelineStage.INTENT_DETECTION)
         success = nlu_pipeline_stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION
-        return fastworkflow.CommandOutput(
-            command_response=
-                fastworkflow.CommandResponse(
-                    response=response,
-                    success=success
-                )
-        ) 
+        if not success:
+            raise fastworkflow.Refused(response)
+        return response 

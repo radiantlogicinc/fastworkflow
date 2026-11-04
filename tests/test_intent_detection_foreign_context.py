@@ -919,7 +919,7 @@ class TestTheHintReachesTheFailureMessage:
         app_workflow = self._AppWorkflow(["Identity", "DirectoryExplorer", "*"])
         cme_workflow = self._Workflow(app_workflow)
         output = wildcard_command.ResponseGenerator()(
-            cme_workflow, "list_permissions")
+            cme_workflow, "list_permissions", None)
         return output, contexts_seen, actions_run, cme_workflow
 
     def test_the_message_names_the_owner_and_how_to_get_there(
@@ -931,12 +931,12 @@ class TestTheHintReachesTheFailureMessage:
         output, contexts_seen, actions_run, cme_workflow = self._run(
             monkeypatch, hint)
 
-        response = output.command_response.response
+        response = output.response
         assert response == hint
         assert "Account context" in response
         assert "open_account_by_uid <account_uid>" in response
-        assert output.success is False
-        assert output.command_handled is True
+        assert output.routed is False
+        assert output.handled is True
         # The whole chain was asked before the message was composed.
         assert contexts_seen == ["Identity", "DirectoryExplorer", "*"]
         # Not a misunderstanding: no you_misunderstood, and no clarification
@@ -952,7 +952,7 @@ class TestTheHintReachesTheFailureMessage:
         """Free text that no context could route still gets the plain message:
         the hint is for a name the workflow owns, and nothing else."""
         output, _, actions_run, cme_workflow = self._run(monkeypatch, None)
-        assert output.command_response.response == (
+        assert output.response == (
             "I couldn't determine which available command matches your request.")
         assert actions_run == ["ErrorCorrection/you_misunderstood"]
         assert cme_workflow.context["NLU_Pipeline_Stage"] == (
@@ -1062,11 +1062,11 @@ class TestTheHintPathOnARealWorkflow:
         monkeypatch.setattr(
             intent_detection, "CommandRouter", _refusing_router([]))
 
-        output = wildcard_module.ResponseGenerator()(cme_workflow, "get_properties")
+        output = wildcard_module.ResponseGenerator()(cme_workflow, "get_properties", None)
 
-        response = output.command_response.response
-        assert output.success is False
-        assert output.command_handled is True
+        response = output.response
+        assert output.routed is False
+        assert output.handled is True
         assert "'get_properties' is a command of the TodoItem, TodoList contexts" in response
         assert "'get_todo_list <id>'" in response
         assert "I couldn't determine" not in response
@@ -1091,11 +1091,11 @@ class TestTheHintPathOnARealWorkflow:
         monkeypatch.setattr(
             intent_detection, "CommandRouter", _labelling_router("wildcard"))
 
-        output = wildcard_module.ResponseGenerator()(cme_workflow, "tell me a joke")
+        output = wildcard_module.ResponseGenerator()(cme_workflow, "tell me a joke", None)
 
-        assert output.command_response.response.startswith(
+        assert output.response.startswith(
             "I couldn't determine which available command matches your request.")
-        assert output.command_handled is True
+        assert output.handled is True
         stage = cme_workflow.context["NLU_Pipeline_Stage"]
         assert stage == MISUNDERSTANDING
 
@@ -1113,16 +1113,16 @@ class TestTheHintPathOnARealWorkflow:
         app_workflow, cme_workflow = workflows
         monkeypatch.setattr(
             intent_detection, "CommandRouter", _labelling_router("wildcard"))
-        wildcard_module.ResponseGenerator()(cme_workflow, "tell me a joke")
+        wildcard_module.ResponseGenerator()(cme_workflow, "tell me a joke", None)
         assert cme_workflow.context["NLU_Pipeline_Stage"] == MISUNDERSTANDING
 
         monkeypatch.setattr(
             intent_detection, "CommandRouter", _refusing_router([]))
-        output = wildcard_module.ResponseGenerator()(cme_workflow, "get_properties")
+        output = wildcard_module.ResponseGenerator()(cme_workflow, "get_properties", None)
 
-        response = output.command_response.response
-        assert output.success is False
-        assert output.command_handled is True
+        response = output.response
+        assert output.routed is False
+        assert output.handled is True
         assert "'get_properties' is a command of the TodoItem, TodoList contexts" in response
         assert "Enter TodoList with: 'get_todo_list <id>'." in response
         assert cme_workflow.context["NLU_Pipeline_Stage"] == INTENT_DETECTION

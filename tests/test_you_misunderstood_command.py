@@ -30,10 +30,10 @@ def _create_workflows():
 
 
 def _assert_neutral_misunderstanding_response(cme_workflow):
-    output = MisunderstoodResponseGenerator()(
-        cme_workflow, "none of these commands"
+    # Short form: the three-argument call returns the CommandResponse (text and artifacts).
+    command_response = MisunderstoodResponseGenerator()(
+        cme_workflow, "none of these commands", None
     )
-    command_response = output.command_response
     response = command_response.response
 
     assert "couldn't determine which available command matches" in response
@@ -54,9 +54,9 @@ def _assert_abort_resets_for_the_next_rephrased_turn(cme_workflow):
     )
     cme_workflow.context = workflow_context
 
-    abort_output = AbortResponseGenerator()(cme_workflow, "abort")
+    abort_output = AbortResponseGenerator()(cme_workflow, "abort", None)
 
-    assert abort_output.command_response.response == "command aborted\n"
+    assert abort_output.response == "command aborted\n"
     assert (
         cme_workflow.context["NLU_Pipeline_Stage"]
         == fastworkflow.NLUPipelineStage.INTENT_DETECTION

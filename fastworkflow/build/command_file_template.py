@@ -35,17 +35,28 @@ def _refuses_overwrite(file_path: str) -> bool:
         return True
     return False
 
-def get_import_block():
-    return (
-        f"import fastworkflow\n"
-        f"from fastworkflow import CommandOutput, CommandResponse\n"
-        f"from fastworkflow.workflow import Workflow\n"
-        f"from fastworkflow.utils.signatures import InputForParamExtraction\n"
-        f"from fastworkflow.train.generate_synthetic import generate_diverse_utterances\n"
-        f"from fastworkflow.utils.context_utils import list_context_names\n"
-        f"from typing import Any, Dict, Optional\n"
-        f"from pydantic import BaseModel, Field, ConfigDict\n"
-    )
+_TYPING_NAMES = ("Any", "Dict", "List", "Optional", "Union", "Literal", "Tuple", "Set")
+
+
+def get_import_block(body: str = "") -> str:
+    """The imports the generated file needs, and only those: an unused import is a lint error in the file.
+
+    The body is the rest of the file, so a name is imported when the code uses it (a parameter's
+    annotation may name a typing object, and ``Field``/``ConfigDict`` appear only when the body does).
+    """
+    def used(name: str) -> bool:
+        return re.search(rf"\b{name}\b", body) is not None
+
+    lines = []
+    if used("fastworkflow"):
+        lines.append("import fastworkflow")
+    lines.append("from fastworkflow.workflow import Workflow")
+    typing_used = [name for name in _TYPING_NAMES if used(name)]
+    if typing_used:
+        lines.append(f"from typing import {', '.join(typing_used)}")
+    pydantic_used = ["BaseModel"] + [name for name in ("Field", "ConfigDict") if used(name)]
+    lines.append(f"from pydantic import {', '.join(pydantic_used)}")
+    return "\n".join(lines) + "\n"
 
 def create_function_command_file(function_info: FunctionInfo, output_dir: str, file_name: str = None, source_dir: str = None, overwrite: bool = False) -> str:
     """Generate a FastWorkflow command file for a global function."""
@@ -110,57 +121,22 @@ def create_function_command_file(function_info: FunctionInfo, output_dir: str, f
     # Generate utterances
     plain_utterances = ",\n".join([f'        "{u}"' for u in generate_utterances(None, function_info.name, function_info.parameters, is_function=True)])
 
-    # Build the command file content
-    command_file_content = GENERATED_FILE_HEADER + "\n" + get_import_block() + "\n\n" + "class Signature:\n"
-
-    # Add Input class if needed
+    # Build the command file content: one Signature and one ResponseGenerator whose __call__ returns the Output
+    body = "class Signature:\n"
+    input_annotation = "None"
     if has_input:
-        command_file_content += f"    class Input(BaseModel):\n{input_fields}\n\n"
-        input_param_type = '"Signature.Input"'
-        input_param = ", input: Signature.Input"
-        call_param = ", command_parameters: Signature.Input"
-        call_arg = ", command_parameters"
-    else:
-        input_param_type = "None"
-        input_param = ""
-        call_param = ""
-        call_arg = ""
-
-    # Add Output class with arbitrary_types_allowed for non-Pydantic return types
-    command_file_content += f"    class Output(BaseModel):\n"
-    command_file_content += f"        model_config = ConfigDict(arbitrary_types_allowed=True)\n"
-    command_file_content += f"{output_fields}\n\n"
-
-    # Add utterances
-    command_file_content += f"    plain_utterances = [\n{plain_utterances}\n    ]\n\n"
-    command_file_content += f"    template_utterances = []\n\n"
-
-    # Add generate_utterances method
-    command_file_content += """    @staticmethod
-    def generate_utterances(workflow: Workflow, command_name: str) -> list[str]:
-        return [
-            command_name.split('/')[-1].lower().replace('_', ' ')
-        ] + generate_diverse_utterances(Signature.plain_utterances, command_name)\n\n"""
-
-    # Add validate_extracted_parameters method
-    command_file_content +=  "    @staticmethod\n"
-    command_file_content += f"    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: {input_param_type}) -> tuple[bool, str]:\n"
-    command_file_content += "        return (True, '')\n\n"
-
-    # Add ResponseGenerator class
-    command_file_content += "class ResponseGenerator:\n"
-    command_file_content += f"    def _process_command(self, workflow: Workflow{input_param}) -> Signature.Output:\n"
-    command_file_content += f"        \"\"\"{docstring}\"\"\"\n"
-    command_file_content += f"{process_logic_str}\n"
-    command_file_content += f"        return Signature.Output({output_return})\n\n"
-
-    # Add __call__ method
-    command_file_content += f"    def __call__(self, workflow: Workflow, command: str{call_param}) -> CommandOutput:\n"
-    command_file_content += f"        output = self._process_command(workflow{call_arg})\n"
-    command_file_content += """        return CommandOutput(
-            command_response=CommandResponse(response=output.model_dump_json())
-        )
-"""
+        body += f"    class Input(BaseModel):\n{input_fields}\n\n"
+        input_annotation = "Signature.Input"
+    body += f"    class Output(BaseModel):\n"
+    body += f"        model_config = ConfigDict(arbitrary_types_allowed=True)\n"
+    body += f"{output_fields}\n\n"
+    body += f"    plain_utterances = [\n{plain_utterances}\n    ]\n\n"
+    body += "class ResponseGenerator:\n"
+    body += f"    def __call__(self, workflow: Workflow, command: str, input: {input_annotation}) -> Signature.Output:\n"
+    body += f"        \"\"\"{docstring}\"\"\"\n"
+    body += f"{process_logic_str}\n"
+    body += f"        return Signature.Output({output_return})\n"
+    command_file_content = GENERATED_FILE_HEADER + "\n" + get_import_block(body) + "\n\n" + body
 
     # Write the command file, unless it is a planning command (refused even with overwrite=True)
     if _refuses_overwrite(file_path):
@@ -325,13 +301,11 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
 
     # Utterances
     plain_utterances = ",\n".join([f'        "{u}"' for u in generate_utterances(class_info.name, method_info.name, method_info.parameters)])
-    template_utterances = "[]"
 
     # Use new import block logic
     if source_dir is None:
         raise ValueError("source_dir must be provided to create_command_file")
-    import_block = get_import_block()
-    import_block += generate_import_statements(class_info, source_dir, class_name_to_module_path=class_name_to_module_map)
+    app_import_source = generate_import_statements(class_info, source_dir, class_name_to_module_path=class_name_to_module_map)
 
     # Prepare conditional sections
     if has_input:
@@ -339,8 +313,8 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
         input_class = f"    class Input(BaseModel):\n{input_fields}\n"
         input_param_type = '"Signature.Input"'
         input_param = ", input: Signature.Input"
-        call_param = ", command_parameters: Signature.Input"
-        call_arg = ", command_parameters"
+        call_param = ", input: Signature.Input"
+        call_arg = ", input"
     else:
         # No Input class
         input_class = ""
@@ -349,48 +323,28 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
         call_param = ""
         call_arg = ""
 
-    # Build the command file content using string concatenation instead of template formatting
-    command_file_content = GENERATED_FILE_HEADER + "\n" + import_block + "\n\n" + "class Signature:\n"
-
-    # Add Input class if needed
-    command_file_content += input_class
-
-    # Add Output class with arbitrary_types_allowed for non-Pydantic return types
-    command_file_content += f"    class Output(BaseModel):\n"
-    command_file_content += f"        model_config = ConfigDict(arbitrary_types_allowed=True)\n"
-    command_file_content += f"{output_fields}\n\n"
-
-    # Add utterances
-    command_file_content += f"    plain_utterances = [\n{plain_utterances}\n    ]\n\n"
-    command_file_content += f"    template_utterances = {template_utterances}\n\n"
-
-    # Add generate_utterances method
-    command_file_content += """    @staticmethod
-    def generate_utterances(workflow: Workflow, command_name: str) -> list[str]:
-        return [
-            command_name.split('/')[-1].lower().replace('_', ' ')
-        ] + generate_diverse_utterances(Signature.plain_utterances, command_name)\n\n"""
-
-    # Add validate_extracted_parameters method
-    command_file_content +=  "    @staticmethod\n"
-    command_file_content += f"    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: {input_param_type}) -> tuple[bool, str]:\n"
-    command_file_content += "        return (True, '')\n\n"
-
-    # Add ResponseGenerator class
-    command_file_content += "class ResponseGenerator:\n"
-    command_file_content += f"    def _process_command(self, workflow: Workflow{input_param}) -> Signature.Output:\n"
-    command_file_content += f"        \"\"\"{docstring}\"\"\"\n"
-    command_file_content += f"        app_instance = workflow.command_context_for_response_generation  # type: {app_class_name}\n"
-    command_file_content += f"{process_logic_str}\n"
-    command_file_content += f"        return Signature.Output({output_return})\n\n"
-
-    # Add __call__ method
-    command_file_content += f"    def __call__(self, workflow: Workflow, command: str{call_param}) -> CommandOutput:\n"
-    command_file_content += f"        output = self._process_command(workflow{call_arg})\n"
-    command_file_content += """        return CommandOutput(
-            command_response=CommandResponse(response=output.model_dump_json())
-        )
-"""
+    # Build the command file content: one Signature and one ResponseGenerator whose __call__ returns the Output
+    body = "class Signature:\n"
+    input_annotation = "None"
+    if has_input:
+        body += f"    class Input(BaseModel):\n{input_fields}\n\n"
+        input_annotation = "Signature.Input"
+    body += f"    class Output(BaseModel):\n"
+    body += f"        model_config = ConfigDict(arbitrary_types_allowed=True)\n"
+    body += f"{output_fields}\n\n"
+    body += f"    plain_utterances = [\n{plain_utterances}\n    ]\n\n"
+    body += "class ResponseGenerator:\n"
+    body += f"    def __call__(self, workflow: Workflow, command: str, input: {input_annotation}) -> Signature.Output:\n"
+    body += f"        \"\"\"{docstring}\"\"\"\n"
+    body += f"        app_instance: {app_class_name} = workflow.command_context_for_response_generation\n"
+    body += f"{process_logic_str}\n"
+    body += f"        return Signature.Output({output_return})\n"
+    app_imports = [
+        line for line in app_import_source.splitlines()
+        if line.startswith("# You may need") or (line.startswith("from ...") and line.rsplit(" ", 1)[-1] in body)
+    ]
+    import_text = get_import_block(body) + "".join(f"{line}\n" for line in app_imports)
+    command_file_content = GENERATED_FILE_HEADER + "\n" + import_text + "\n\n" + body
 
     # Write the command file
     if file_name is None:

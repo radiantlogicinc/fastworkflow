@@ -427,33 +427,41 @@ def test_slot_binding_source_comes_from_the_allowed_vocabulary():
         assert source.signal_version.startswith("param-extraction/")
 
 
-def test_db_lookup_is_a_binding_source_only_when_it_rewrote_the_value():
-    """`applied` alone means the catalogue agreed with what was extracted; only a
-    rewrite makes db_lookup the thing that bound the slot."""
+def test_a_hook_is_a_binding_source_only_when_it_rewrote_the_value():
+    """`is_valid` alone means the hook agreed with what was extracted; only a
+    rewrite (`changed_fields`) makes validation_hook the thing that bound the slot
+    (fix-3rsq.one-hook: the hook replaces db_lookup)."""
+    def hook(**overrides):
+        verdict = {"ran": True, "is_valid": True, "message": None,
+                   "changed_fields": [], "refused_fields": []}
+        verdict.update(overrides)
+        return verdict
+
     agreed = slot_binding_uncertainty({
         "extraction_method": "llm",
-        "db_lookup": [{"field": "user_name", "outcome": "applied",
-                       "corrected": False, "suggestions": []}],
+        "validation_hook": hook(),
     })
     assert [s.value for s in agreed.signals] == ["llm"]
 
     rewrote = slot_binding_uncertainty({
         "extraction_method": "llm",
-        "db_lookup": [{"field": "user_name", "outcome": "applied",
-                       "corrected": True, "suggestions": []}],
+        "validation_hook": hook(changed_fields=["user_name"]),
     })
-    assert [s.value for s in rewrote.signals] == ["llm", "db_lookup"]
+    assert [s.value for s in rewrote.signals] == ["llm", "validation_hook"]
 
 
-def test_rejected_db_lookup_suggestions_are_the_candidate_set():
+def test_a_refusal_binds_nothing_and_its_suggestions_are_words_not_candidates():
+    """A refusal's suggestions live in its message; the extractor binds one value per slot and
+    enumerates no structured alternatives, so the candidate set stays one and the slot is reducible."""
     uncertainty = slot_binding_uncertainty({
         "extraction_method": "llm",
-        "db_lookup": [{"field": "user_name", "outcome": "rejected",
-                       "corrected": False, "suggestions": ["Alice", "Bob"]}],
+        "validation_hook": {"ran": True, "is_valid": False,
+                            "message": "Did you mean Alice or Bob?",
+                            "changed_fields": [], "refused_fields": ["user_name"]},
         "invalid_fields": ["user_name"],
     })
-    # The extracted value, plus the two the catalogue offered instead.
-    assert uncertainty.candidate_count == 3
+    assert [s.value for s in uncertainty.signals] == ["llm"]
+    assert uncertainty.candidate_count == 1
     assert uncertainty.reducible is True
 
 
@@ -489,7 +497,7 @@ def test_capture_failure_degrades_instead_of_failing_the_turn():
     )
     assert parameter_extraction._recorded_slot_binding_uncertainty(
         _ANY_SPAN,
-        {"extraction_method": "xml_regex", "db_lookup": "not-a-list-of-events"},
+        {"extraction_method": "xml_regex", "validation_hook": "not-a-dict-of-outcomes"},
     ) == {"capture_error": "AttributeError"}
 
 

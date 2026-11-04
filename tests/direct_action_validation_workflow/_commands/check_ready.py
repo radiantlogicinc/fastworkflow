@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import Optional
 
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
 from fastworkflow.workflow import Workflow
 from pydantic import BaseModel, Field
 
@@ -44,19 +43,13 @@ class Signature:
         workflow: fastworkflow.Workflow,
         command: str,
         cmd_parameters: "Signature.Input",
-    ) -> tuple[bool, str]:
+    ) -> None:
         if not workflow.context.get("ready"):
-            return (False, HOOK_NOT_READY)
-        return (True, "")
+            raise fastworkflow.Refused(HOOK_NOT_READY)
+        return None
 
 
 class ResponseGenerator:
-    def __call__(
-        self,
-        workflow: Workflow,
-        command: str,
-        command_parameters: Signature.Input,
-    ) -> CommandOutput:
-        return CommandOutput(
-            command_response=CommandResponse(response="ready=true")
-        )
+    def __call__(self, workflow: Workflow, command: str, input: Signature.Input) -> fastworkflow.CommandResponse:
+        return fastworkflow.CommandResponse(
+            response="ready=true", output=Signature.Output(status="ready=true"))

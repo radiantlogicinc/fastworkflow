@@ -54,13 +54,12 @@ A planning command file::
 
         class Input(BaseModel):
             name: str = Field(description="the record's name",
-                              json_schema_extra={"strip": ["group", "unit"], "subject": True})
+                              json_schema_extra={"in_request": {"subject": True, "ignore": ["group", "unit"]}})
             kind: Literal["group", "unit"] = Field(
                 description="what the request is about",
-                json_schema_extra={"verify": True,
-                                   "means": {"group": "a group of people", "unit": "an organisation unit"}})
+                json_schema_extra={"verify": {"group": "a group of people", "unit": "an organisation unit"}})
             person: str = Field(default="", description="one named person to check for; empty for everyone",
-                                json_schema_extra={"subject": True})
+                                json_schema_extra={"in_request": "subject"})
             include_risk: bool = Field(default=False, description="the request asks how risky it is",
                                        json_schema_extra={"verify": True})
             count: int = Field(default=2, ge=0, le=20, description="how many members to open",
@@ -71,8 +70,7 @@ A planning command file::
         @staticmethod
         def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
             if cmd_parameters.include_risk and cmd_parameters.person:
-                return False, "the risk is assessed for the whole record, not for one person"
-            return True, ""
+                raise fastworkflow.Refused("the risk is assessed for the whole record, not for one person")
 
 
     class PlanGenerator:
@@ -100,10 +98,7 @@ A planning command file::
   argument screen (see ``check_arguments``). The planning command options go in ``json_schema_extra``
   (each optional; unknown keys fail the load):
 
-  - ``strip`` (a ``str``; a list of words): removed from either end of the argument, with a
-    possessive ``'s`` before a trailing one: a kind word the model appends to a name ("HR
-    feed" -> "HR").
-  - ``subject: True`` (a ``str``): the argument names a record of the request (a person, a
+  - ``in_request: "subject"`` (a ``str``): the argument names a record of the request (a person, a
     group, a product, a code). Besides being written in the request it must hold one of the
     request's subjects whole (``split_merge.request_subjects``, with the workflow's identifier
     patterns) or a name-like word (capitalised and not a common word, or holding a digit or
@@ -112,11 +107,13 @@ A planning command file::
     are refused (an optional argument takes its default; a required one fails the call). One
     cut short, mid-word or at a space, at the start or end of exactly one subject becomes
     that subject ("Payroll_Admin" of "Payroll_Administrator", "Ann" of "Ann Lee").
-  - ``verify: True`` (a ``bool``, an enum or a ``subject`` str): a classifier model decides
-    the argument again from the request alone, when the planner path has one
+    It implies ``in_request``. It replaces the retired ``subject: True`` option.
+  - ``verify: True`` (a ``bool``, an enum, or a ``str`` with ``in_request: "subject"``): a classifier
+    model decides the argument again from the request alone, when the planner path has one
     (``typed_planning_call``'s ``check_lm``); its answer replaces the planner's when it is at least
-    ``VERIFY_THRESHOLD`` sure. It reads the field's ``description``, and an enum's ``means``:
-    a dict giving each value's meaning (``{"group": "a group, people are its members"}``).
+    ``VERIFY_THRESHOLD`` sure. It reads the field's ``description``, and an enum's meanings. An enum
+    takes ``verify: {"group": "a group, people are its members", ...}`` instead: a dict giving each
+    value's meaning, every key one of the enum's values (it replaces the retired ``means`` option).
     For a subject it chooses among the request's subjects (at most ``MAX_SUBJECT_OPTIONS``)
     or ``NO_SUBJECT`` ("none": the default, or a failed call for a required parameter); a
     request naming no subject is not checked.
@@ -126,6 +123,10 @@ A planning command file::
     arguments); otherwise it takes the only one written, or its default when that is
     written, and with several others the call fails ("the first two" never runs as 3); a
     ``list[str]`` keeps each item the request writes and drops the others.
+  - ``in_request: {"ignore": [words]}`` (a ``str``): words removed from either end of the value before
+    the check (the cleanup the retired ``strip`` option did; it implies ``in_request``). A field with no
+    check takes its cleanup in code: ``strip_words(text, words)`` in its validator or in
+    ``Signature.validate_extracted_parameters``.
   - No check is implied by a field's type (design 2.46): a field without an option is not
     checked against the request, on either kind of command. A check option on a field of a
     type it does not apply to fails the load, naming the option and the type.
@@ -168,8 +169,9 @@ A planning command file::
   ``fastworkflow command preview --check`` fails); a ``"from"`` naming a command or field the
   workflow lacks is a logged warning (``check_phase_sources``), not a load failure.
 - ``validate_extracted_parameters`` (optional, the signature of a command's): called with
-  the checked arguments as an ``Input`` (``_validate_arguments``); ``(False, message)`` refuses the
-  call (the planner gets the message and one more try, see the rules below), an exception
+  the checked arguments as an ``Input`` (``_validate_arguments``); it returns None to accept, and
+  ``raise fastworkflow.Refused(message, field=...)`` refuses the call (the planner gets the message and
+  one more try, see the rules below); any other return is a call error; an exception
   fails it (the planner falls back), and a field it corrects in place is used. An argument that only means something when other arguments take some value is
   normalised here: the hook writes its default back (``if not cmd_parameters.include_risk:
   cmd_parameters.owner = ""``). ``placeholder_template`` runs the hook too, on each
@@ -304,10 +306,15 @@ class PlanningCommandCallError(ValueError):
 
 class PlanningCommandInputError(PlanningCommandCallError):
     """The arguments are refused: a pydantic validator of the planning command's ``Input`` raised,
-    ``validate_extracted_parameters`` returned ``(False, message)``, or a guard of
+    ``validate_extracted_parameters`` raised ``fastworkflow.Refused``, or a guard of
     ``check_arguments`` refused one of the planner's arguments (missing, not a valid value, not
     written in the request). The message says what to fix; ``typed_planning_call`` gives it to the
-    planner for one more typed call."""
+    planner for one more typed call. ``fields`` names the arguments a ``Refused(field=...)`` named:
+    the question put to the user then asks for those arguments."""
+
+    def __init__(self, message: str = "", fields=()):
+        super().__init__(message)
+        self.fields: tuple[str, ...] = tuple(fields)
 
 
 #: The refusal of one argument: ``name=<value repr> <why>`` (see ``check_arguments``).
@@ -401,6 +408,11 @@ def refusal_question(command: PlanningCommandCommand, refusal: PlanningCommandIn
     """
     task = command.name.replace("_", " ")
     text = str(refusal)
+    if refusal.fields:
+        # A Refused(field=...) from the hook: the arguments it named are asked for, with its message
+        labels = " and ".join(name.replace("_", " ") for name in refusal.fields)
+        detail = re.sub(r"^validate_extracted_parameters: ", "", text)
+        return f"I can't run {task} yet: {detail}. What should the {labels} be?"
     if match := _MISSING_ARGUMENT.match(text):
         return missing_argument_question(command, match["name"])
     match = _ARGUMENT_REFUSAL.match(text)
@@ -442,11 +454,14 @@ class Param:
     default: object = None
     required: bool = False
     desc: str = ""
-    strip: tuple[str, ...] = ()
     verify: bool = False
+    #: A verify check's {value: meaning} (an enum), in the order of ``values``.
     means: tuple[tuple[str, str], ...] = ()
+    #: ``in_request: True`` or ``in_request: "subject"`` (which also sets ``subject``).
     in_request: bool = False
     subject: bool = False
+    #: ``in_request: {"ignore": [words]}`` (a str): words removed from either end of the value before the check.
+    ignore: tuple[str, ...] = ()
 
     def type_text(self) -> str:
         return "|".join(self.values) if self.type == "enum" else self.type
@@ -518,8 +533,7 @@ def _parse_param(name: str, spec, where: str) -> Param:
         raise PlanningCommandFormatError(f"{where}: bad parameter name {name!r}")
     if not isinstance(spec, dict):
         raise PlanningCommandFormatError(f"{where}: parameter {name!r} must be a block with a type")
-    _check_keys(spec, {"type", "default", "desc", "strip", "verify", "means", "in_request",
-                       "subject"},
+    _check_keys(spec, {"type", "default", "desc", "verify", "in_request", "ignore"},
                 f"parameter {name!r}", where)
     type_text = spec.get("type")
     if not isinstance(type_text, str):
@@ -567,39 +581,44 @@ def _parse_param(name: str, spec, where: str) -> Param:
             default = raw_default
         else:
             default = raw_default
-    strip: tuple[str, ...] = ()
-    if "strip" in spec:
+    # in_request: True (a str, an int or a list[str]) or "subject" (a str; implies in_request)
+    in_request_text = spec.get("in_request", "false")
+    subject = in_request_text == "subject"
+    if subject:
         if kind != "str":
-            raise option_error(where, "strip", name, kind, "a str")
-        if not isinstance(spec["strip"], str):
-            raise PlanningCommandFormatError(f"{where}: strip of {name!r} must be a list of words")
-        strip = tuple(w.strip() for w in spec["strip"].split(",") if w.strip())
-    subject = _flag(spec, "subject", name, where)
-    if subject and kind != "str":
-        raise option_error(where, "subject", name, kind, "a str")
-    verify = _flag(spec, "verify", name, where)
-    if verify and kind not in ("bool", "enum") and not subject:
-        raise option_error(where, "verify", name, kind, "a bool, an enum or a subject str")
+            raise option_error(where, 'in_request: "subject"', name, kind, "a str")
+    elif in_request_text not in ("true", "false"):
+        raise PlanningCommandFormatError(f"{where}: parameter {name!r} in_request must be true, false or \"subject\"")
+    in_request = subject or in_request_text == "true"
+    ignore: tuple[str, ...] = ()
+    if "ignore" in spec:
+        if kind != "str":
+            raise option_error(where, "in_request ignore", name, kind, "a str")
+        ignore = tuple(spec["ignore"])
+    if in_request and not subject and kind not in ("str", "int", "list[str]"):
+        raise option_error(where, "in_request", name, kind, "a str, an int or a list[str]")
+    # verify: True (a bool, an enum, or a subject str) or a {value: meaning} dict on an enum
+    verify_spec = spec.get("verify", "false")
     means: tuple[tuple[str, str], ...] = ()
-    if "means" in spec:
-        block = spec["means"]
+    if isinstance(verify_spec, dict):
+        block = verify_spec
         if kind != "enum":
-            raise option_error(where, "means", name, kind, "an enum")
-        if not isinstance(block, dict) or not block:
-            raise PlanningCommandFormatError(f"{where}: means of {name!r} must be a block of its enum values")
+            raise option_error(where, "verify (a dict of meanings)", name, kind, "an enum")
+        if not block:
+            raise PlanningCommandFormatError(f"{where}: verify of {name!r} must be a dict of its enum values' meanings")
         for key, text in block.items():
             if key not in values or not isinstance(text, str):
-                raise PlanningCommandFormatError(f"{where}: means of {name!r}: {key!r} is not a value of it, or not text")
+                raise PlanningCommandFormatError(f"{where}: verify of {name!r}: {key!r} is not a value of it, or not text")
         means = tuple((v, block[v]) for v in values if v in block)
-        if not verify:
-            raise PlanningCommandFormatError(f"{where}: option means on field {name!r} needs verify (means gives the "
-                                             "verify check each value's meaning)")
-    in_request = _flag(spec, "in_request", name, where)
-    if in_request and kind not in ("str", "int", "list[str]"):
-        raise option_error(where, "in_request", name, kind, "a str, an int or a list[str]")
+        verify = True
+    else:
+        verify = _flag({"verify": verify_spec}, "verify", name, where)
+        if verify and kind not in ("bool", "enum") and not subject:
+            raise option_error(where, "verify", name, kind,
+                               'a bool, an enum or a str with in_request "subject"')
     return Param(name=name, type=kind, values=values, default=default, required=required,
-                 desc=desc, strip=strip, verify=verify, means=means, in_request=in_request,
-                 subject=subject)
+                 desc=desc, verify=verify, means=means, in_request=in_request, subject=subject,
+                 ignore=ignore)
 
 
 def option_error(where: str, option: str, name: str, kind: str, takes: str) -> PlanningCommandFormatError:
@@ -639,8 +658,21 @@ def _flag(spec: dict, key: str, name: str, where: str) -> bool:
 # ---------------------------------------------------------------- planning command files (_commands/<name>.py)
 
 #: Keys a planning command file's ``Input`` field may set in ``json_schema_extra``.
-PLANNING_COMMAND_FIELD_KEYS = frozenset({"strip", "subject", "verify", "means", "in_request",
-                              "from", "available_from"})
+PLANNING_COMMAND_FIELD_KEYS = frozenset({"verify", "in_request", "from", "available_from"})
+
+#: The retired check options (the two-option form, design 2.46): a load error naming the new spelling.
+RETIRED_OPTIONS = {
+    "subject": 'option subject is retired: write in_request: "subject"',
+    "means": "option means is retired: write verify: {value: meaning, ...}",
+    "strip": 'option strip is retired: write in_request: {"ignore": [...]}',
+}
+
+
+def _retired_option_error(where: str, name: str, keys) -> None:
+    """The load error of a retired check option among a field's ``json_schema_extra`` *keys*."""
+    for key in RETIRED_OPTIONS:
+        if key in keys:
+            raise PlanningCommandFormatError(f"{where}: field {name!r}: {RETIRED_OPTIONS[key]}")
 
 
 def _allowed_planning_command_field_json_schema_extra_keys() -> set[str]:
@@ -701,21 +733,56 @@ def _spec_from_field(name: str, info, where: str) -> dict:
     if "requires" in extra:
         raise PlanningCommandFormatError(f"{where}: field {name!r}: requires is not a planning command option; reset the "
                                "argument (or refuse the call) in Signature.validate_extracted_parameters")
+    _retired_option_error(where, name, extra)
     _check_keys(extra, _allowed_planning_command_field_json_schema_extra_keys(),
                 f"field {name!r} json_schema_extra", where)
-    for key in ("subject", "verify", "in_request"):
-        if key in extra:
-            if not isinstance(extra[key], bool):
-                raise PlanningCommandFormatError(f"{where}: parameter {name!r} {key} must be true or false")
-            spec[key] = "true" if extra[key] else "false"
-    if "strip" in extra:
-        words = extra["strip"]
-        if isinstance(words, str) or not isinstance(words, (list, tuple)) or \
-                not all(isinstance(w, str) for w in words):
-            raise PlanningCommandFormatError(f"{where}: parameter {name!r} strip must be a list of words")
-        spec["strip"] = ", ".join(words)
-    if "means" in extra:
-        spec["means"] = extra["means"]
+    spec.update(check_option_spec(name, extra, where))
+    return spec
+
+
+def check_option_spec(name: str, options: dict, where: str) -> dict:
+    """The ``_parse_param`` spec of a field's check options, read from its ``json_schema_extra``:
+    ``in_request`` true, false, "subject", or a dict ``{"subject": True, "ignore": [words]}`` (each key
+    optional; the dict implies ``in_request``); ``verify`` true, false or a dict of the enum's meanings
+    (2.46). Text values, as ``_parse_param`` reads them."""
+    spec: dict = {}
+    if "in_request" in options:
+        value = options["in_request"]
+        if value == "subject":
+            spec["in_request"] = "subject"
+        elif isinstance(value, bool):
+            spec["in_request"] = "true" if value else "false"
+        elif isinstance(value, dict):
+            unknown = sorted(set(value) - {"subject", "ignore"})
+            if unknown:
+                raise PlanningCommandFormatError(f"{where}: parameter {name!r} in_request has unknown key(s) "
+                                                 f"{', '.join(unknown)}; its keys are subject and ignore")
+            if not value:
+                raise PlanningCommandFormatError(f"{where}: parameter {name!r} in_request {{}} is empty; give "
+                                                 "subject, ignore, or in_request: true")
+            subject = value.get("subject", False)
+            if not isinstance(subject, bool):
+                raise PlanningCommandFormatError(f"{where}: parameter {name!r} in_request subject must be true or false")
+            spec["in_request"] = "subject" if subject else "true"
+            if "ignore" in value:
+                words = value["ignore"]
+                if isinstance(words, str) or not isinstance(words, (list, tuple)) or \
+                        not all(isinstance(w, str) for w in words):
+                    raise PlanningCommandFormatError(f"{where}: parameter {name!r} in_request ignore must be a "
+                                                     "list of words")
+                spec["ignore"] = tuple(words)
+        else:
+            raise PlanningCommandFormatError(f"{where}: parameter {name!r} in_request must be true, false, "
+                                             "\"subject\" or a dict")
+    if "verify" in options:
+        value = options["verify"]
+        if isinstance(value, dict):
+            spec["verify"] = value
+        elif isinstance(value, bool):
+            spec["verify"] = "true" if value else "false"
+        else:
+            raise PlanningCommandFormatError(f"{where}: parameter {name!r} verify must be true, false or a dict "
+                                             "of its enum values' meanings")
     return spec
 
 
@@ -1406,6 +1473,8 @@ def planning_command_from_parts(name: str, signature, path: str, *, steps_fn: Ca
     utterances = getattr(signature, "plain_utterances", ())
     if isinstance(utterances, str) or not all(isinstance(u, str) for u in utterances):
         raise PlanningCommandFormatError(f"{path}: plain_utterances must be a list of str")
+    from fastworkflow.utils.signatures import reject_retired_db_lookup
+    reject_retired_db_lookup(signature, input_model, path)
     validate = getattr(signature, "validate_extracted_parameters", None)
     if validate is not None and not callable(validate):
         raise PlanningCommandFormatError(f"{path}: validate_extracted_parameters must be a function")
@@ -2645,15 +2714,15 @@ def _run_validate(command: PlanningCommandCommand, args: dict, request: str, wor
     kwargs = {"command_text": request} if "command_text" in inspect.signature(hook).parameters else {}
     import fastworkflow
 
+    from fastworkflow.utils.signatures import check_hook_accepts
+
     try:
         result = hook(workflow, command.name, instance, **kwargs)
     except fastworkflow.Refused as refusal:
-        result = (False, str(refusal))
+        raise PlanningCommandInputError(f"validate_extracted_parameters: {refusal}", fields=refusal.fields) from None
     except Exception as exc:  # noqa: BLE001 - workflow code; the planner falls back to the template
         raise PlanningCommandCallError(f"validate_extracted_parameters raised {type(exc).__name__}: {exc}") from None
-    ok, message = result if isinstance(result, tuple) else (bool(result), "")
-    if not ok:
-        raise PlanningCommandInputError(f"validate_extracted_parameters: {message}")
+    check_hook_accepts(result, command.name)
     fields = command.input_model.model_fields
     out = {p.name: getattr(instance, p.name, args.get(p.name)) for p in command.params}
     # an Optional[str] field set to None is the absent argument, "" (``_absent_as_none``)
@@ -2672,7 +2741,11 @@ def _validate_arguments(command: PlanningCommandCommand, args: dict, request: st
     for p in command.params:
         if checked[p.name] != args.get(p.name) and notes is not None:
             notes.append(f"{p.name}={args.get(p.name)!r} -> {checked[p.name]!r} (validate_extracted_parameters)")
-    check_input(command, checked, request, workflow)
+    written = check_input(command, checked, request, workflow)
+    if written:
+        if notes is not None:
+            notes += [f"{n}={checked[n]!r} -> {v!r} (Input validator)" for n, v in written.items()]
+        checked = {**checked, **written}
     _check_roles(command, checked, request)
     return checked
 
@@ -2688,17 +2761,22 @@ def _validation_text(error) -> str:
     return "; ".join(parts)
 
 
-def check_input(command: PlanningCommandCommand, args: dict, request: str, workflow=None) -> None:
+def check_input(command: PlanningCommandCommand, args: dict, request: str, workflow=None) -> dict:
     """Validate ``args`` against the planning command's ``Input`` (its field types and its validators), with
     the context ``{"request": request, "workflow": workflow}``. Raises PlanningCommandInputError, whose
-    message says which field breaks which rule."""
+    message says which field breaks which rule.
+
+    Returns the fields the validators changed, ``{name: value}``, which the caller writes back onto the
+    arguments (an Input validator's returned value is kept, design 3.4). Empty when none changed."""
     from pydantic import ValidationError
 
+    passed = _absent_as_none(command, args)
     try:
-        command.input_model.model_validate(_absent_as_none(command, args),
-                                           context={"request": request, "workflow": workflow})
+        validated = command.input_model.model_validate(passed, context={"request": request, "workflow": workflow})
     except ValidationError as exc:
         raise PlanningCommandInputError(f"the arguments break a rule of {command.name}: {_validation_text(exc)}") from None
+    return {name: getattr(validated, name) for name in command.input_model.model_fields
+            if name in passed and getattr(validated, name) != passed[name]}
 
 
 def _check_roles(command: PlanningCommandCommand, args: dict, request: str) -> None:
@@ -2725,7 +2803,16 @@ def _clean_str(value) -> str:
     return text.rstrip(" .;,")
 
 
-def _strip_words(text: str, words: tuple[str, ...]) -> str:
+def strip_words(text: str, words) -> str:
+    """``text`` without the *words* at either end (case-insensitive; the words are whole words of ``text``).
+
+    The value cleanup for a field with no check, as ordinary code: call it from an Input's field
+    validator (whose returned value is written back) or from ``Signature.validate_extracted_parameters``.
+    A field with a check takes ``in_request: {"ignore": [words]}`` instead, which runs before the match.
+    A possessive ``'s`` left on a name stripped from its end goes with it ("Ann's group" -> "Ann").
+    Text of one word is kept whole.
+    """
+    words = tuple(words)
     if not words:
         return text
     lowered = {w.lower() for w in words}
@@ -3010,7 +3097,7 @@ def extraction_sentences(p: Param) -> tuple[str, ...]:
 
 
 #: The check options (2.46), read from a field's ``json_schema_extra`` for a command of either kind.
-CHECK_OPTIONS = ("in_request", "subject", "strip", "verify", "means")
+CHECK_OPTIONS = ("in_request", "verify")
 
 
 def option_params(input_model, where: str) -> tuple[Param, ...]:
@@ -3025,6 +3112,7 @@ def option_params(input_model, where: str) -> tuple[Param, ...]:
         extra = info.json_schema_extra
         if not isinstance(extra, dict):
             continue
+        _retired_option_error(where, name, extra)
         options = {k: v for k, v in extra.items() if k in CHECK_OPTIONS}
         if not options:
             continue
@@ -3109,7 +3197,7 @@ def check_arguments(command: PlanningCommandCommand, raw: dict, request: str,
       "not given" marker counts as missing), a bool true/false; a list[str] is its elements
       (cleaned; no check that the request writes them: design 2.22), a list written as JSON text
       or comma-separated text;
-    - a str argument loses surrounding quotes and its strip words, and must then be a
+    - a str argument loses surrounding quotes, and must then be a
       verbatim (case-insensitive; any Unicode dash matches "-") substring of ``request``;
       it takes the request's own spelling. One that is not: an optional argument takes its default, a required one
       fails the call (the planner fills it once more, then falls back to the template path);
@@ -3162,7 +3250,7 @@ def check_arguments(command: PlanningCommandCommand, raw: dict, request: str,
             continue
         if sure is not None and p.type == "str":
             chosen = None if sure[0] == NO_SUBJECT else sure[0]
-            given = "" if _empty(value) or p.name in refused else _strip_words(_clean_str(value), p.strip)
+            given = "" if _empty(value) or p.name in refused else strip_words(_clean_str(value), p.ignore)
             if (chosen or "").lower() != given.lower():
                 notes.append(f"{p.name}={shown!r} -> {chosen or p.default!r} (check {sure[1]:.2f})")
             if chosen is None:
@@ -3231,7 +3319,7 @@ def check_arguments(command: PlanningCommandCommand, raw: dict, request: str,
                 raise PlanningCommandInputError(f"{p.name}={shown!r} is not one of {', '.join(p.values)}")
             args[p.name] = text
         else:
-            text = _strip_words(_clean_str(value), p.strip)
+            text = strip_words(_clean_str(value), p.ignore)
             if text.strip() == "None":
                 # the missing-value marker, not a value: the argument is absent (as the parameter
                 # screen treats it), so a required one is missing and an optional one takes its default

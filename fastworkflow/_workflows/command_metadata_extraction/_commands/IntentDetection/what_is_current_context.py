@@ -29,16 +29,11 @@ class ResponseGenerator:  # noqa: D101
     def __call__(
         self,
         workflow: fastworkflow.Workflow,
-        command: str,
-    ) -> fastworkflow.CommandOutput:
+        command: str, input: None,
+    ) -> str:
         app_workflow = workflow.context["app_workflow"]
         current_context = (
             'global' if app_workflow.current_command_context_name == '*'
             else app_workflow.current_command_context_name
         )
-        return fastworkflow.CommandOutput(
-            command_response=
-                fastworkflow.CommandResponse(
-                    response = f"Current context is '{current_context}'"
-                ),
-        )
+        return f"Current context is '{current_context}'"

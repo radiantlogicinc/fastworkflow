@@ -57,15 +57,9 @@ class ResponseGenerator:
     def __call__(self, workflow: 
                  fastworkflow.Workflow, 
                  command: str, 
-                 command_parameters: Signature.Input) -> fastworkflow.CommandOutput:
+                 command_parameters: Signature.Input) -> Signature.Output:
         """The framework will call this function to process the command"""
         output = self._process_command(workflow, command_parameters)
         
-        response = (
-            f'Response: {output.model_dump_json()}'
-        )
 
-        return fastworkflow.CommandOutput(
-            command_response=
-                fastworkflow.CommandResponse(response=response)
-        )
+        return output

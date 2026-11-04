@@ -132,6 +132,7 @@ from fastworkflow.conversation_labeling import (
     TOPIC_GENERATION_MAX_RETRIES,
     TOPIC_GENERATION_TIMEOUT_ENV_VAR,
 )
+from fastworkflow.mcp_server import command_schema_listing
 from fastworkflow.observability.store import ObservabilityStore
 from fastworkflow.observability.store import get_observability_sink, writer_incarnation_id
 from fastworkflow.experiment.runner import experiment_store_readiness
@@ -1346,6 +1347,52 @@ async def get_turn_trace(
             "spans": _span_bodies(await _store_read(store.get_spans, turn_key)),
         }
     )
+
+
+@app.get(
+    "/command_schemas",
+    operation_id="get_command_schemas",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": (
+                "Every listed command of the channel's workflow, by qualified name: "
+                "{kind: 'execution' | 'planning', input: <JSON Schema or null>, "
+                "output: <JSON Schema or null>}. Framework and internal CME commands are "
+                "not listed."
+            )
+        },
+        401: {"description": "Invalid or expired JWT token"},
+        404: {"description": "Session not found, or no workflow bound to it"},
+    },
+)
+async def get_command_schemas(
+    session: SessionData = Depends(get_session_and_ensure_runtime),
+) -> dict[str, dict[str, Any]]:
+    """
+    The schemas a client needs to call each command and read its result (design 3.14).
+
+    `input` is the command's `Signature.Input` JSON Schema, and `output` its `Signature.Output`
+    JSON Schema when it declares one: a command's `command_response.output` in a turn is the
+    instance of that `output` schema. The listing is read from the channel's app workflow, so a
+    client sees the same commands the MCP tool listing and the agent see.
+    """
+    channel_id = session.channel_id
+    async with session_manager.leased_session(channel_id) as runtime:
+        if not runtime:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User session not found: {channel_id}",
+            )
+        workflow = runtime.execution_context.app_workflow
+        if workflow is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No workflow is bound to channel_id: {channel_id}",
+            )
+        folderpath = workflow.folderpath
+    # Reading signatures imports workflow modules: keep that off the event loop.
+    return await asyncio.get_running_loop().run_in_executor(None, command_schema_listing, folderpath)
 
 
 @app.post(

@@ -3,7 +3,6 @@ from typing import List
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.workflow import Workflow
-from fastworkflow import CommandOutput, CommandResponse
 
 # Domain helpers
 from ..retail_data import load_data
@@ -14,21 +13,18 @@ class Signature:
     """Find user id by name and zip"""
     class Input(BaseModel):
         first_name: str = Field(
-            default="NOT_FOUND",
             description="The first name of the customer",
-            pattern=r"^(NOT_FOUND|[A-Za-z]+)$",
+            pattern=r"^([A-Za-z]+)$",
             examples=["John"],
         )
         last_name: str = Field(
-            default="NOT_FOUND",
             description="The last name of the customer",
-            pattern=r"^(NOT_FOUND|[A-Za-z]+)$",
+            pattern=r"^([A-Za-z]+)$",
             examples=["Doe"],
         )
         zip: str = Field(
-            default="NOT_FOUND",
             description="The zip code of the customer",
-            pattern=r"^(NOT_FOUND|\d{5})$",
+            pattern=r"^(\d{5})$",
             examples=["12345"],
         )
 
@@ -72,15 +68,9 @@ class ResponseGenerator:
         workflow: Workflow,
         command: str,
         command_parameters: Signature.Input,
-    ) -> CommandOutput:
+    ) -> Signature.Output:
         output = self._process_command(workflow, command_parameters)
-        return CommandOutput(
-            command_response=
-                CommandResponse(
-                    response=f"The user id is: {output.user_id}",
-                    output=Signature.Output(user_id=output.user_id),
-                ),
-        )
+        return output
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()

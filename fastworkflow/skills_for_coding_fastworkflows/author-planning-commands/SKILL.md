@@ -99,7 +99,7 @@ class Signature:
 
     class Input(BaseModel):
         name: str = Field(description="the item's name",
-                          json_schema_extra={"subject": True})
+                          json_schema_extra={"in_request": "subject"})
         checks: bool = Field(default=False, description="the request asks about its open checks",
                              json_schema_extra={"verify": True})
 
@@ -163,9 +163,10 @@ class PlanGenerator:
 | A `bool` defaults to false; `default=True` fails the load (the model sets it true only when the request asks) | `planning_commands.py` `_parse_param` |
 | No default: required. A `str` the request may leave out defaults to `""` or is `Optional[str] = None` (the code then gets `None`); a default like `"NOT_FOUND"` is written into the steps | `planning_commands` module doc; `input_instance` |
 | Names `user_query`, `available_commands`, `steps_before`, `steps_after`, `reasoning` are reserved | `planning_commands.py` `RESERVED_NAMES` |
-| `in_request` (in `json_schema_extra`) is allowed on a `str` or `int` field only; see below | `planning_commands.py` `_spec_from_field`, `check_arguments` |
+| `in_request` (in `json_schema_extra`) is allowed on a `str`, `int` or `list[str]` field; `"subject"` on a `str` only; see below | `planning_commands.py` `_spec_from_field`, `check_arguments` |
+| The retired options `subject`, `means` and `strip` fail the load, naming the new spelling | `planning_commands.py` `RETIRED_OPTIONS` |
 | A rule across fields is a pydantic validator on `Input` raising `ValueError` with what to fix; the request is `(info.context or {}).get("request", "")`, `""` when the template is rendered | `planning_commands.py` `check_input` |
-| `validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None)` returns `(False, message)` to refuse a call; a refusal gets the planner one more typed call, a second falls back to the text planner | `planning_commands.py` `_validate_arguments`, `typed_planning_call` |
+| `validate_extracted_parameters(workflow, command, input, command_text=None)` returns `None` to accept, and raises `fastworkflow.Refused(message, field=...)` to refuse a call; a refusal gets the planner one more typed call, a second falls back to the text planner | `planning_commands.py` `_validate_arguments`, `typed_planning_call` |
 
 ### Field options (`json_schema_extra`)
 
@@ -174,25 +175,32 @@ to planning commands' `Input` fields today (`planning_commands.PLANNING_COMMAND_
 `_spec_from_field`). Execution commands get the same options in a later release. Any other key fails
 the load.
 
-- `in_request` (`str` or `int`): the value must be in the request. A `str` must appear in it
-  exactly as written (a verbatim substring). An `int` must be a number the request writes (digits, or
-  the words zero to twenty outside the other arguments' text); otherwise it takes the only number
-  written, or its default when that one is written, and with several candidates the call fails.
-- `subject` (`str`): the value names a record of the request (a person, a group, a product, a code).
-  It must hold one of the request's subjects whole, or a name-like word, and must not cut one. A value
-  cut short at the start or end of exactly one subject becomes that subject ("Ann" of "Ann Lee"). An
-  optional argument takes its default when refused; a required one fails the call.
-- `strip` (`str` only; a list of words): removed from either end of the value, with a possessive `'s`
-  before a trailing one, for example a kind word the model appends to a name ("HR feed" becomes "HR").
-- `verify` (`bool`, an enum, or a `subject` `str`): a classifier decides the value again from the request
-  alone, and its answer replaces the planner's when it is sure enough. It reads the field's
-  `description`. It needs `JEV_API_KEY`: without the key no classifier is available and the check
-  does not run (`planning_commands.check_verdicts` returns nothing when there is no model).
-- `means` (an enum, with `verify`): a dict giving each enum value's meaning, which the classifier reads,
-  for example `{"group": "a group of people", "unit": "an organisation unit"}`. Its keys must be values
-  of the enum.
+- `in_request: True` (`str`, `int` or `list[str]`): the value must be in the request. A `str` must
+  appear in it exactly as written (a verbatim substring); a `list[str]` keeps each item the request
+  writes. An `int` must be a number the request writes (digits, or the words zero to twenty outside the
+  other arguments' text); otherwise it takes the only number written, or its default when that one is
+  written, and with several candidates the call fails.
+- `in_request: {"ignore": ["group", "unit"]}` (`str` only): the named words are removed from either end of
+  the value before the check, for example a kind word the model appends to a name ("Payroll group" becomes
+  "Payroll"). It implies `in_request`. `in_request: {"subject": True, "ignore": [...]}` is the subject with
+  the same words removed.
+- `in_request: "subject"` (`str` only): the value names a record of the request (a person, a group, a
+  product, a code). It must hold one of the request's subjects whole, or a name-like word, and must not
+  cut one. A value cut short at the start or end of exactly one subject becomes that subject ("Ann" of
+  "Ann Lee"). An optional argument takes its default when refused; a required one fails the call.
+- `verify: True` (`bool`, an enum, or a `str` with `in_request: "subject"`): a classifier decides the
+  value again from the request alone, and its answer replaces the planner's when it is sure enough. It
+  reads the field's `description`. It needs `JEV_API_KEY`: without the key no classifier is available and
+  the check does not run (`planning_commands.check_verdicts` returns nothing when there is no model).
+- `verify: {"group": "a group of people", "unit": "an organisation unit"}` (an enum): the same check,
+  with each value's meaning, which the classifier reads. Its keys must be values of the enum.
 
-The code appends the rule sentence of `in_request` and `subject` to the field's description for the
+A field with no check is cleaned in code: `strip_words(text, words)` from `fastworkflow.planning_commands`,
+called in the field's validator or in `Signature.validate_extracted_parameters`. An `Input` validator's
+returned value is written back to the arguments (a refusing validator still refuses). The retired
+`subject`, `means` and `strip` options fail the load and name the new spelling.
+
+The code appends the rule sentence of `in_request` (and of `in_request: "subject"`) to the field's description for the
 planner (`extraction_sentences`), so the description does not repeat it. Full rules: the
 `planning_commands` module doc.
 
@@ -230,7 +238,7 @@ planner (`extraction_sentences`), so the description does not repeat it. Full ru
   its name).
 - `@phase(over="<phase>.<list field>")` (or a function of `input` giving the items) fans a phase out,
   one sub-plan per item (at most `FANOUT_MAX_ITEMS`, 10, unless `max_items` says otherwise); its one
-  parameter that is neither `input` nor a phase gets the item; `until`, `max_items`, `noun`, `bind`
+  parameter that is neither `input` nor a phase gets the item; `max_items`, `noun`, `bind`
   tune it (`docs/planning_command_phases.md`, "Fan-out phases"). `@phase(optional=True)`: the job goes
   on when it fails.
 - The template (what the planner sees; `planning_commands.py` `placeholder_template`) calls each
@@ -364,7 +372,7 @@ it conditional).
 | `open_x with the uid of the Alpha match`, right after a step code ran (`find_x query=Alpha`) | Pick: code sends `open_x x_uid=<uid>` when exactly one row of that run's Output holds `Alpha` whole, or it has one row; the one unwritten required field must be a uid (`uid`, `id`, `*_uid`, `*_id`). A uid containing `(` or `;` is quoted | `planning_phases.py` `pick_step`, `_is_uid_field`; `planning.py` `pick` |
 | `cmd x_uid=<the Alpha uid> other=v` after the lookup | Pick with the other values sent as written; the uid's must be the only placeholder | `planning_phases.py` `pick_step` |
 | `cmd (full list)`; also `every page`, `all pages`, `until complete`, `page through` (any case) in the note | Code reads page 1, then each later page the output names, as more code-run steps, up to `CODE_MAX_PAGES` (20) pages; then code goes on | `planning_phases.py` `FULL_LIST_PHRASES`, `_paging`, `_next_page`, `CODE_MAX_PAGES` |
-| `cmd start=20` (`start`, `offset`, `skip`) | That page only; code never computes a next page | `facts.py` `PAGING_PARAMETERS` |
+| `cmd start=20` (`start`) | That page only; code never computes a next page | `facts.py` `PAGING_PARAMETERS` |
 | `cmd start=<n>`, or a step `next page with start=<n> until the list is read` | Open: the agent pages | `planning_phases.py` `_code_step` |
 | any other note, or none, on a paged command | Page 1 is what the step wants; code goes on | `planning_phases.py` `_paging` |
 | a condition word before the command (or in its chain, next row): `if`, `only`, `when`, `whenever`, `unless`, `otherwise`, `optional(ly)`, `in case`, `as needed`, `where needed`, `where applicable`, `else` | Conditional: the agent decides; the finish check does not hold it; it stops code and keeps the phase from being answer-only | `finish_check.py` `_CONDITION_RE`, `_classify` |

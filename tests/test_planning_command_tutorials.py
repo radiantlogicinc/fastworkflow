@@ -57,15 +57,18 @@ def _run(routing, command: str):
     """Run *command* (``name k=v ...``) with the tutorial workflow's own ResponseGenerator."""
     from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
         ParameterExtraction)
+    from fastworkflow.command_executor import call_response_generator
 
     name = command.split()[0]
     cls = routing.get_command_class(name, ModuleType.COMMAND_PARAMETERS_CLASS)
     generator = routing.get_command_class(name, ModuleType.RESPONSE_GENERATION_INFERENCE)()
+    # The executor's own framing (call_response_generator) turns the generator's short form
+    # (its Signature.Output or a CommandResponse) into the CommandOutput a turn carries.
     if cls is None:
-        return {}, generator(None, name).command_response.output
+        return {}, call_response_generator(generator, None, name, None).command_response.output
     bound = (cls() if command == name else
              ParameterExtraction._extract_parameters_from_key_values(command, cls, name))
-    return bound.model_dump(), generator(None, name, bound).command_response.output
+    return bound.model_dump(), call_response_generator(generator, None, name, bound).command_response.output
 
 
 def dry_run(planning_command: str, args: dict, folder: str = WORKFLOW) -> str:

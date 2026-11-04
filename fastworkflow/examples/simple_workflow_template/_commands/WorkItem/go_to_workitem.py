@@ -1,7 +1,7 @@
 import sys
 from typing import Optional
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
+from fastworkflow.utils.signatures import NOT_FOUND
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from pydantic import BaseModel, Field
 
@@ -54,19 +54,19 @@ class Signature:
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
     @staticmethod
-    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> tuple[bool, str]:
-        if cmd_parameters.path == fastworkflow.get_env_var('NOT_FOUND'):
+    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> None:
+        if cmd_parameters.path == NOT_FOUND:
             cmd_parameters.path = None
-        if cmd_parameters.workitem_type == fastworkflow.get_env_var('NOT_FOUND'):
+        if cmd_parameters.workitem_type == NOT_FOUND:
             cmd_parameters.workitem_type = None
-        if cmd_parameters.id == fastworkflow.get_env_var('NOT_FOUND'):
+        if cmd_parameters.id == NOT_FOUND:
             cmd_parameters.id = None
         if cmd_parameters.index == -sys.maxsize:
             cmd_parameters.index = None
 
         if not cmd_parameters.path:
             if not cmd_parameters.workitem_type:
-                return (False, "Provide the absolute path or the child workitem type and optionally its id or index")
+                raise fastworkflow.Refused("Provide the absolute path or the child workitem type and optionally its id or index")
 
             current_workitem: WorkItem = workflow.command_context_for_response_generation
             absolute_path_of_current_workitem = current_workitem.get_absolute_path()
@@ -83,7 +83,7 @@ class Signature:
         cmd_parameters.id = None
         cmd_parameters.index = None
 
-        return (True, '')
+        return None
 
 
 class ResponseGenerator:
@@ -110,15 +110,9 @@ class ResponseGenerator:
             new_context = new_context)
 
     def __call__(self, workflow: fastworkflow.Workflow, command: str, 
-                 command_parameters: Signature.Input) -> CommandOutput:
+                 command_parameters: Signature.Input) -> Signature.Output:
         output = self._process_command(workflow, command_parameters)
         
         # Format the status information
-        response = (
-            f'Response: {output.model_dump_json()}'
-        )
         
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=response)
-        )
+        return output

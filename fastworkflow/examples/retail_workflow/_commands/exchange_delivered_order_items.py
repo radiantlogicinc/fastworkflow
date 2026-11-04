@@ -3,7 +3,7 @@ from typing import List
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.workflow import Workflow
-from fastworkflow import CommandOutput, CommandResponse, from_
+from fastworkflow import from_
 
 from ..retail_data import load_data
 from ..tools.exchange_delivered_order_items import ExchangeDeliveredOrderItems
@@ -14,9 +14,8 @@ class Signature:
     class Input(BaseModel):
         order_id: str = from_(
             "get_user_details",
-            default="NOT_FOUND",
             description="The order ID to exchange",
-            pattern=r"^(#?[\w\d]+|NOT_FOUND)$",
+            pattern=r"^(#?[\w\d]+)$",
             examples=["#W00000000"],
         )
         item_ids: List[str] = from_(
@@ -33,9 +32,8 @@ class Signature:
         )
         payment_method_id: str = from_(
             ["get_order_details", "get_user_details"],
-            default="NOT_FOUND",
             description="Payment method ID for price difference.",
-            pattern=r"^((gift_card|credit_card|paypal)_\d+|NOT_FOUND)$",
+            pattern=r"^((gift_card|credit_card|paypal)_\d+)$",
             examples=["gift_card_0000000", "credit_card_0000000", "paypal_0000000"],
         )
 
@@ -64,7 +62,7 @@ class Signature:
     def validate_extracted_parameters(
         workflow: fastworkflow.Workflow, 
         command: str, cmd_parameters: "Signature.Input"
-    ) -> tuple[bool, str]:
+    ) -> None:
         if not cmd_parameters.order_id.startswith('#'):
             cmd_parameters.order_id = f'#{cmd_parameters.order_id}'
 
@@ -96,18 +94,15 @@ class Signature:
             common_items_str = ', '.join(common_items)
             error_message += f'cannot exchange items for themselves: {common_items_str}. new item ids must differ from item ids\n'
 
-        return (False, error_message) if error_message else (True, '')
+        if error_message:
+            raise fastworkflow.Refused(error_message)
+        return None
 
 
 class ResponseGenerator:
-    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandOutput:
+    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> Signature.Output:
         output = self._process_command(workflow, command_parameters)
-        response = (
-            f'Response: {output.status}'
-        )
-        return CommandOutput(
-            command_response=CommandResponse(response=response),
-        )
+        return output
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()

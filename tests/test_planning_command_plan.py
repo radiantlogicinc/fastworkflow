@@ -336,20 +336,20 @@ def test_a_fan_out_runs_per_item_and_stops_on_until():
 
 def test_refused_from_a_response_generator_is_a_failed_output():
     class Generator:
-        def __call__(self, workflow, command):
+        def __call__(self, workflow, command, input):
             raise fastworkflow.Refused("no detail view here")
 
-    out = call_response_generator(Generator(), None, "show")
+    out = call_response_generator(Generator(), None, "show", None)
     assert out.command_response.success is False
     assert out.command_response.response == "no detail view here"
     assert issubclass(fastworkflow.Refused, ValueError)
 
     class Crash:
-        def __call__(self, workflow, command):
+        def __call__(self, workflow, command, input):
             raise ValueError("HTTP 503")
 
     with pytest.raises(ValueError):
-        call_response_generator(Crash(), None, "show")
+        call_response_generator(Crash(), None, "show", None)
 
 
 def test_refused_from_a_planning_command_hook_is_its_refusal():
@@ -360,7 +360,7 @@ def test_refused_from_a_planning_command_hook_is_its_refusal():
         def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
             if cmd_parameters.name == "Nope":
                 raise fastworkflow.Refused("name the item")
-            return True, ""
+            return None
 
     module = types.ModuleType("skill")
     module.Signature, module.PlanGenerator = Refusing, PlanGenerator

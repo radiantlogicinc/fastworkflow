@@ -23,12 +23,10 @@ class Signature:
 
 
 class ResponseGenerator:
-    def __call__(self, workflow: fastworkflow.Workflow, command: str,
-                 command_parameters: Signature.Input) -> fastworkflow.CommandOutput:
-        found = library.find_books(command_parameters.query)
-        rows = library.page(found, command_parameters.start)
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, input: Signature.Input) -> fastworkflow.CommandResponse:
+        found = library.find_books(input.query)
+        rows = library.page(found, input.start)
         output = Signature.Output(book_uids=rows, titles=[library.BOOKS[u]["title"] for u in rows],
                                   total=len(found))
         listing = ", ".join(f"{t} ({u})" for u, t in zip(output.book_uids, output.titles))
-        return fastworkflow.CommandOutput(command_response=fastworkflow.CommandResponse(
-            response=f"{output.total} books: {listing or 'none'}", output=output))
+        return fastworkflow.CommandResponse(response=f"{output.total} books: {listing or 'none'}", output=output)

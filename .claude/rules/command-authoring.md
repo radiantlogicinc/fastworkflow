@@ -29,38 +29,33 @@ New commands use a **single `.py` file** in `_commands/`. Legacy commands with s
 # _commands/<command_name>.py
 
 class Signature:
-    plain_utterances: list[str] = [...]   # Seed utterances for training
-    template_utterances: list[str] = [...] # Optional parameterized patterns
+    plain_utterances: list[str] = [...]   # Seed utterances; the framework adds the synthetic variants
 
-    class Input(BaseModel):               # Pydantic params; use NOT_FOUND default
-        model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
-        some_param: Annotated[str, Field(default="NOT_FOUND", description="...", examples=[...])]
+    class Input(BaseModel):               # Pydantic params; no default = required (asked for if missing)
+        some_param: str = Field(description="...", examples=[...])
+        note: Optional[str] = None        # Optional[...] = None = optional
 
     class Output(BaseModel):              # Structured result
         ...
 
-    @staticmethod
-    def generate_utterances(...): ...     # Optional: diverse utterance generation
-
-    @staticmethod                          # Optional; see the section below
-    def db_lookup(workflow, field_name, field_value
-                  ) -> tuple[bool, str | None, list[str]]: ...
-    @staticmethod                          # Optional post-extraction check, called on the class
-    def validate_extracted_parameters(workflow, command: str, cmd_parameters: "Signature.Input"
-                                      ) -> tuple[bool, str]:
-        return (True, '')                  # (False, message) refuses the call with message
+    @staticmethod                          # Optional; see the validation-hook section below
+    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str,
+                                      input: "Signature.Input") -> None:
+        ...                                # return None to accept; assign to input.<field> to correct;
+                                           # raise fastworkflow.Refused(message, field=...) to refuse
 
 
 class ResponseGenerator:
-    def _process_command(self, workflow: fastworkflow.Workflow, input: Signature.Input) -> Signature.Output:
-        # Your business logic here
+    def __call__(self, workflow: fastworkflow.Workflow, command: str,
+                 input: Signature.Input) -> Signature.Output:
+        # input is None when the command has no Signature.Input.
+        # Return the Output (the framework fills the envelope), a str (response text),
+        # or fastworkflow.CommandResponse (artifacts or next actions only).
+        # Refuse with raise fastworkflow.Refused(message).
         ...
-
-    def __call__(self, workflow: fastworkflow.Workflow, command: str, command_parameters: Signature.Input) -> fastworkflow.CommandOutput:
-        output = self._process_command(workflow, command_parameters)
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response=output.model_dump_json()))
 ```
+
+A two-argument `__call__` is a load error. `CommandOutput` is not a return value.
 
 ## `plain_utterances` — the seed list is the highest-leverage thing you write
 
@@ -95,54 +90,56 @@ Judging whether adding seeds actually helped is a measurement problem with its o
 pitfalls (two training runs are not reproducible): see the
 `fastworkflow-intent-training-convergence` skill before comparing two runs.
 
-## `db_lookup` — validating a parameter against a live set of legal values
+## Validating a parameter against a live set of legal values
 
-Mark the field, then implement the hook:
+There is one validation hook, `Signature.validate_extracted_parameters`. A value lookup goes in it.
+`db_lookup` is retired: a `json_schema_extra={'db_lookup': True}` key or a `Signature.db_lookup`
+method is a load error. Do the lookup in the hook instead:
 
 ```python
-class Input(BaseModel):
-    user_name: str = Field(description="Name of a person",
-                           json_schema_extra={'db_lookup': True})
+class Signature:
+    class Input(BaseModel):
+        user_name: str = Field(description="Name of a person")
 
-@staticmethod
-def db_lookup(workflow: fastworkflow.Workflow, field_name: str, field_value: str
-              ) -> tuple[bool, str | None, list[str]]:
-    if field_name == 'user_name':
+    @staticmethod
+    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str,
+                                      input: "Signature.Input") -> None:
         candidates = workflow.command_context_for_response_generation.list_users()
-        return DatabaseValidator.fuzzy_match(field_value, candidates)
-    return (False, None, [])
+        matched, corrected, suggestions = DatabaseValidator.fuzzy_match(input.user_name, candidates)
+        if matched:
+            input.user_name = corrected
+        elif suggestions:
+            raise fastworkflow.Refused(
+                f"No user named '{input.user_name}'. Did you mean {', '.join(suggestions)}?",
+                field="user_name")
+        # else: accept
 ```
 
-`messaging_app_4`'s `ChatRoom/set_current_user` is the working example.
+`DatabaseValidator` is `fastworkflow.utils.signatures.DatabaseValidator`. The three outcomes:
 
-**The return value has three states, not two, and the third is the one people miss:**
+| `fuzzy_match` result | what the hook does | what the framework records |
+|---|---|---|
+| `matched` | assigns `input.<field> = corrected` | `changed_fields` lists the field |
+| `suggestions` non-empty | `raise fastworkflow.Refused(msg, field="<field>")` | `refused_fields` lists the field; the field is reset to missing and asked again with the message |
+| neither | returns `None` | nothing: the value is accepted |
 
-| return | what the framework does |
-|---|---|
-| `(True, corrected_value, [])` | overwrites the field with `corrected_value` |
-| `(False, None, [suggestions])` | fails validation and shows the suggestions |
-| `(False, None, [])` | **nothing** — no overwrite, no failure |
-
-The third state means "I have no opinion, leave the extracted value alone", and it is
-what you want whenever a field can legitimately hold a value that is not in your
-candidate list. Feeding real uids to a field whose candidates are display names
-rejected 34 of 40 valid uids before this was understood, because *any* non-empty
-suggestion list fails validation. Decline instead:
+The last outcome means "I have no opinion, leave the extracted value alone", and it is what you want
+whenever a field can legitimately hold a value that is not in your candidate list. Any non-empty
+suggestion list refuses the field, so feeding real uids to a field whose candidates are display names
+rejects valid input. Decline instead, before the lookup:
 
 ```python
-    if _looks_like_a_uid(field_value):
-        return (False, None, [])       # not a name; not mine to judge
+    if _looks_like_a_uid(input.user_name):
+        return                         # not a name; not mine to judge
 ```
 
-**Return the value the field holds, not the value you matched on.** `set_current_user`
-returns the matched *label*, which is right for a field holding a name. Copy that shape
-onto a `*_uid` field and you leave a display name in the uid field, and the command then
-queries the backend by display name. Map back yourself: `return (True, uid_of[label], [])`.
+**Assign the value the field holds, not the value you matched on.** A lookup that returns a display
+label is right for a field holding a name. On a `*_uid` field, map the label back to the uid yourself:
+`input.user_uid = uid_of[corrected]`.
 
 **Tuning the match, per command.** `DatabaseValidator.fuzzy_match` runs a
 case-insensitive exact match, then Levenshtein, then `difflib`, and each stage
-short-circuits. Because the hook is your code, you tune it by passing arguments — there
-is no `json_schema_extra` key for this:
+short-circuits. Because the hook is your code, you tune it by passing arguments:
 
 - `auto_apply_threshold` (default `0.2`) — how far off a *unique* match may be before
   the framework rewrites the user's value. Deliberately strict: at `0.7`, `"Batman"`
@@ -154,10 +151,10 @@ is no `json_schema_extra` key for this:
   at all.
 - `threshold` (default `0.6`) — `difflib` cutoff for the final suggestion-only stage.
   Only values that nothing came within `suggest_threshold` of reach it, so loosening
-  this yields unrelated suggestions — which, per the table above, *reject* the value.
+  this yields unrelated suggestions, which refuse the value.
 
-Errors are not caught. Unlike `validate_extracted_parameters`, the `db_lookup` call is
-unguarded, so an exception propagates out of parameter validation.
+Exceptions other than `fastworkflow.Refused` raised from the hook are caught and become a call error
+naming the command, so raise `Refused` for any refusal you mean the user to see.
 
 ## `positional` — binding `command value` without the LLM
 
@@ -186,7 +183,7 @@ value. The form declines (and the LLM extracts as before) when the first token i
 the command's own name, when the text holds `=` or XML, when the first word names
 another field, or when the value holds `*`, `` ` ``, `?`, `\`, ` / `, `<>{}` or no letter
 or digit. A leading word naming the target field itself (`uid 9f2c…`) is dropped, and
-matching surrounding quotes are removed. The usual validation and `db_lookup` run after.
+matching surrounding quotes are removed. The usual validation runs after.
 
 A lone value that binds to no field (`command_name value` where the LLM fills nothing)
 is refused with a message naming the parameters that could take it, instead of running

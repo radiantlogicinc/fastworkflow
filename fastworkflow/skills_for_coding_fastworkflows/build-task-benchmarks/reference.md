@@ -83,19 +83,16 @@ def execute(workflow, command_path, context, params):
     workflow.command_context_for_response_generation = context
     workflow.current_command_context = context
     if not hasattr(module.Signature, "Input"):
-        return generator(workflow, command_name), workflow.current_command_context
+        return generator(workflow, command_name, None), workflow.current_command_context
 
     parameters = module.Signature.Input(**params)
     if hasattr(module.Signature, "validate_extracted_parameters"):
-        ok, message = module.Signature.validate_extracted_parameters(
-            workflow, command_name, parameters)
-        if not ok:
-            # A soft outcome, not an exception: the runtime hands the message back
-            # to the caller to correct, so a bad call stays a conversation.
-            return (fastworkflow.CommandOutput(
-                command_response=fastworkflow.CommandResponse(
-                    response=f"rejected its parameters: {message}", success=False)),
-                context)
+        try:
+            module.Signature.validate_extracted_parameters(workflow, command_name, parameters)
+        except fastworkflow.Refused as refusal:
+            # A soft outcome, not an exception: the runtime turns the refusal into the call's answer
+            # and hands the message back to the caller to correct, so a bad call stays a conversation.
+            return refusal.as_output(), context
     return generator(workflow, command_name, parameters), workflow.current_command_context
 ```
 

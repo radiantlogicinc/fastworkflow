@@ -1,4 +1,4 @@
-"""Tests for Levenshtein fuzzy matching and the db_lookup validator built on it.
+"""Tests for Levenshtein fuzzy matching and the DatabaseValidator built on it (a validation hook calls it).
 
 Covers fix-86c: `find_best_matches` scored candidates on their leading window
 only, so a candidate containing the input anywhere else could lose to an
