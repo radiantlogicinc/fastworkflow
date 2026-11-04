@@ -292,7 +292,10 @@ strings work too; the helpers only make the wording exact.
 ## Descriptions written for people
 
 - The `Signature` docstring says the job in one or two sentences, as a person would describe it.
-  The planner's matcher reads it (its whitespace is collapsed to one line).
+  The planner's matcher reads it (its whitespace is collapsed to one line). Make the first
+  sentence the plain purpose and put conditions after it: when the intent classifier is unsure,
+  the tie-break offers each candidate by its first sentence only (see the `evaluate-intent-routing`
+  skill).
 - A field's `description` says what the field holds, in words a person would use. The planner reads
   it; so does a `verify` check. Do not repeat the rule sentences the options add (`in_request`).
 - `plain_utterances` are example requests in the words people use for that job. Keep them generic,

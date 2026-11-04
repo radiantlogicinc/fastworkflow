@@ -3720,8 +3720,10 @@ def _check_options(p: Param, subjects: list[str] = ()) -> tuple[tuple[str, str],
             (NO_SUBJECT, f"the request names no {p.name}; each name it writes is something else"),)
     if p.type == "bool":
         if p.default is True:
-            return (("true", f"no: the request does not ask against {p.name}"),
-                    ("false", f"yes: the request asks against {p.name} ({p.desc or p.name})"))
+            # fix-jd9o.9: the value form, not "asks against" (a double negative Jev read near coin-flip:
+            # 0.47 on mark_as_complete.is_complete; 0.70 -> 0.97 across default-true bools).
+            return (("true", f"true: the request does not mention {p.name}, or says or implies it"),
+                    ("false", f"false: the request says not to, or says the opposite of {p.name}"))
         return (("true", f"yes: {p.desc or p.name}"),
                 ("false", "no: the request does not ask for this, or says not to"))
     means = dict(p.means)
@@ -3733,7 +3735,8 @@ def _check_one(lm, command: PlanningCommandCommand, p: Param, request: str) -> t
     from dspy.experimental import Choice
 
     if p.type == "bool":
-        question = (f"Does the request ask against this: {p.desc or p.name}?" if p.default is True
+        question = (f"Which value should the argument '{p.name}' take? It means: {p.desc or p.name}."
+                    if p.default is True
                     else f"Does the request ask for this: {p.desc or p.name}?")
     elif p.type == "str":
         question = f"Which record named in the request is the {p.name}? {p.desc}".strip()

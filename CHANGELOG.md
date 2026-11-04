@@ -840,6 +840,13 @@ error that names the new form; there is no legacy support, except where an item 
 
 ### Changed
 
+- **`verify` on a bool that defaults to true asks which value the argument takes** (fix-jd9o.9).
+  Before, the check asked "Does the request ask against this?". Jev read that double negative close
+  to a coin flip: 0.47 on one field, and 0.70 across bools that default to true. The check now asks
+  "Which value should the argument take?", with the options "true: the request does not mention
+  it, or says or implies it" and "false: the request says not to, or says the opposite". On a fresh,
+  blind-labelled set that scored 0.97, and no field got worse. A bool that defaults to false keeps
+  its wording, because neither form won there: each failed a different kind of case.
 - **Navigation warns once when a command moves the workflow into a context it does not declare.** A
   warning names the command and the target, and says to declare `descends_to`. It is logged once per
   command and target in each process (fix-3rsq.10.4).
