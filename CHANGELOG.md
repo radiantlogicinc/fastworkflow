@@ -216,6 +216,20 @@ error that names the new form; there is no legacy support, except where an item 
   names, Jev picked wrongly. In the pre-registered test it made 97 confident picks with 1 wrong, and
   unnecessary questions fell from 89 to 41. It runs only with `JEV_API_KEY`; set
   `FW_JEV_VALUE_PICK=off` to turn it off.
+- **Assistant mode reads the reply to a missing-value prompt before merging it** (fix-jd9o.6). Jev
+  decides what the reply does. An answer is merged as before. A request to stop runs the existing
+  abort, and a "wrong command" reply runs the existing "you misunderstood". A request for something
+  else leaves the pending command and runs as a new request. A hesitation ("hmm, hold on") gets
+  "OK, take your time." and the missing fields; the pending command and its values stay as they
+  were. A non-answer needs probability 0.5 (`MISSING_VALUE_REPLY_THRESHOLD`). Measured on 280
+  persona replies to real prompts: 0 of 130 answers diverted, 30 of 30 hesitations recognised. A
+  question back is, for now, treated as a request for something else. It runs only with
+  `JEV_API_KEY` and only in assistant mode; set `FW_JEV_MISSING_VALUE_REPLY=off` to turn it off.
+- **Agent mode: a hesitation in reply to `ask_user` keeps the question open** (fix-jd9o.11).
+  `classify_user_reply` has a fourth intent, `wait`. On a hesitation the agent does not replan;
+  it says it will wait and asks the same question again, and `ask_user` stays available. Before
+  this, 23 of 30 hesitations were read as "stop asking", which removed `ask_user` for the rest of
+  the turn. Set `FW_JEV_REPLY_WAIT=off` to keep the three earlier intents.
 - **Check options on any command's `Input`** (fix-3rsq.11). `in_request` and `verify` apply to an
   execution command's `Input` field as well as a planning command's. Each option is checked by the same
   rule for both kinds. (Phase 12 cut the five Phase 11 options to these two; see Upgrading from Phase 11.)

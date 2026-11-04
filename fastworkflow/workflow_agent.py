@@ -894,7 +894,10 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
 
 
 def _apply_reply_intent(agent, intent: str) -> None:
-    """Take ask_user away after a reply that stops the asking; leave only finish after an abort."""
+    """Take ask_user away after a reply that stops the asking; leave only finish after an abort.
+
+    "wait" and "answer" change nothing: a hesitation keeps ask_user for the question asked again.
+    """
     if intent == "stop_asking":
         agent.disabled_tools = agent.disabled_tools | {"ask_user"}
     elif intent == "abort":
@@ -956,6 +959,8 @@ def _post_ask_user_response(
     Steps 2-4 after the user answers an ask_user clarification (Topology-A parity).
 
     Appends the dialog to the session action log, sets raw_user_message, and replans.
+    On a "wait" reply (the user is checking, not answering) it does not replan: it returns
+    an instruction to ask the same question again, which the ReAct loop reads as the observation.
     Returns the observation string for the ReAct loop.
     """
     _append_action_record(
@@ -973,10 +978,14 @@ def _post_ask_user_response(
     if workflow:
         workflow.context["raw_user_message"] = user_response
 
-    _apply_reply_intent(
-        chat_session_obj.workflow_tool_agent,
-        classify_user_reply(user_response, clarification_request),
-    )
+    intent = classify_user_reply(user_response, clarification_request)
+    _apply_reply_intent(chat_session_obj.workflow_tool_agent, intent)
+    if intent == "wait":
+        # A hesitation is not an answer: no replan, and the ReAct loop asks the same question again.
+        return (
+            "The user asked for a moment and has not answered yet. Reply briefly that you will wait, "
+            f"and ask the same question again with ask_user: {clarification_request}"
+        )
     planner_lm = getattr(chat_session_obj, '_current_planner_lm', None)
     return build_query_with_next_steps(
         user_response,
@@ -2058,6 +2067,7 @@ REPLY_INTENTS = (
     ("answer", "The reply answers the question or gives direction for the work to go on."),
     ("stop_asking", "The reply declines to answer or says not to ask again, but does not ask to stop the work."),
     ("abort", "The reply asks to stop, cancel or abort the work."),
+    ("wait", "The reply asks for a moment or says the user is checking; it gives no value and asks nothing."),
 )
 
 
@@ -2069,18 +2079,35 @@ class ClassifyReply(dspy.Signature):
     intent: Choice[REPLY_INTENTS] = dspy.OutputField(desc="What does the reply do?")
 
 
-def classify_user_reply(reply: str, question: str) -> str:
-    """The reply's intent: "abort", "stop_asking", or "answer" (the default).
+def _reply_wait_enabled() -> bool:
+    """False when FW_JEV_REPLY_WAIT is set to off, 0 or false (case-insensitive)."""
+    value = str(fastworkflow.get_env_var("FW_JEV_REPLY_WAIT", default="on"))
+    return value.strip().lower() not in {"off", "0", "false"}
 
-    Any other intent needs Jev to be confident. Never raises: without a Jev key,
-    or on a failure, the reply is taken as an answer.
+
+def _classify_reply_predictor():
+    """The predictor for ClassifyReply; with FW_JEV_REPLY_WAIT off, "wait" is not an offered option."""
+    if _reply_wait_enabled():
+        return dspy.Predict(ClassifyReply)
+    options = tuple(option for option in REPLY_INTENTS if option[0] != "wait")
+    return dspy.Predict(ClassifyReply.with_updated_fields("intent", type_=Choice[options]))
+
+
+def classify_user_reply(reply: str, question: str) -> str:
+    """The reply's intent: "abort", "stop_asking", "wait", or "answer" (the default).
+
+    "wait" is a hesitation ("hold on", "one sec"): the user has not answered yet. Any non-answer
+    intent needs Jev to be confident at REPLY_INTENT_THRESHOLD. With FW_JEV_REPLY_WAIT off, "wait"
+    is not offered to Jev at all, so the result is one of the other three. Never raises: without
+    a Jev key, or on a failure, the reply is taken as an answer.
     """
     jev_lm = _jev_lm()
     if jev_lm is None:
         return "answer"
     try:
+        predictor = _classify_reply_predictor()
         with dspy.context(lm=jev_lm):
-            choice = dspy.Predict(ClassifyReply)(question=question, reply=reply).intent
+            choice = predictor(question=question, reply=reply).intent
         value, probability = _choice_value_and_probability(choice)
         logger.info(f"reply intent for {reply!r}: {value} (confidence {probability:.2f})")
         if value != "answer" and probability >= REPLY_INTENT_THRESHOLD:

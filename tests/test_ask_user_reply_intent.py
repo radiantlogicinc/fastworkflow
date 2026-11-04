@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import get_args
 
 import dspy
 import pytest
@@ -10,8 +11,14 @@ from dspy.utils import DummyLM
 
 from fastworkflow import workflow_agent
 from fastworkflow.utils.react import fastWorkflowReAct
-from fastworkflow.workflow_agent import _apply_reply_intent, classify_user_reply
+from fastworkflow.workflow_agent import (
+    REPLY_INTENTS,
+    _apply_reply_intent,
+    _post_ask_user_response,
+    classify_user_reply,
+)
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from tests.test_jev_field_given import jev_env  # noqa: F401  (fixture: real Jev, skipped without a key)
 
 
 def ask_user(clarification_request: str) -> str:
@@ -160,3 +167,108 @@ def test_clearing_the_subtask_state_enables_every_tool_again():
 
     assert agent.disabled_tools == frozenset()
     assert _listed_tools(agent) == {"ask_user", "lookup", "finish"}
+
+
+def _offered_values(signature) -> tuple[str, ...]:
+    """The option values the intent field of the classifier signature offers to Jev."""
+    choice_type = signature.output_fields["intent"].annotation
+    return get_args(choice_type.model_fields["value"].annotation)
+
+
+def test_reply_intents_are_the_three_measured_options_plus_wait_with_verbatim_texts():
+    assert REPLY_INTENTS == (
+        ("answer", "The reply answers the question or gives direction for the work to go on."),
+        ("stop_asking", "The reply declines to answer or says not to ask again, but does not ask to stop the work."),
+        ("abort", "The reply asks to stop, cancel or abort the work."),
+        ("wait", "The reply asks for a moment or says the user is checking; it gives no value and asks nothing."),
+    )
+
+
+def test_a_confident_wait_is_returned(monkeypatch):
+    _use_predictor(monkeypatch, _fake_intent_predictor("wait", 0.9))
+    assert classify_user_reply("hmm, hold on", "Which repository should I search?") == "wait"
+
+
+def test_an_unconfident_wait_is_an_answer(monkeypatch):
+    _use_predictor(monkeypatch, _fake_intent_predictor("wait", 0.49))
+    assert classify_user_reply("hmm", "Which repository should I search?") == "answer"
+
+
+def _record_offered(monkeypatch, offered: list) -> None:
+    """Record the options each classifier signature offers to Jev; Jev answers "answer" with confidence."""
+    monkeypatch.setattr(workflow_agent, "_jev_lm", lambda: DummyLM([]))
+
+    def predict_factory(signature):
+        offered.append(_offered_values(signature))
+        return _fake_intent_predictor("answer", 0.99)
+
+    monkeypatch.setattr(workflow_agent.dspy, "Predict", predict_factory)
+
+
+@pytest.mark.parametrize("setting", ["off", "OFF", "0", "false", " False "])
+def test_with_the_wait_option_off_wait_is_not_offered_and_nothing_returns_wait(monkeypatch, setting):
+    monkeypatch.setenv("FW_JEV_REPLY_WAIT", setting)
+    offered = []
+    _record_offered(monkeypatch, offered)
+    assert classify_user_reply("hmm, hold on", "Which repository should I search?") == "answer"
+    assert offered == [("answer", "stop_asking", "abort")]
+
+
+def test_with_the_wait_option_on_jev_is_offered_all_four(monkeypatch):
+    monkeypatch.setenv("FW_JEV_REPLY_WAIT", "on")
+    offered = []
+    _record_offered(monkeypatch, offered)
+    classify_user_reply("the billing one", "Which repository should I search?")
+    assert offered == [("answer", "stop_asking", "abort", "wait")]
+
+
+def test_wait_changes_no_disabled_tools():
+    agent = _agent()
+    _apply_reply_intent(agent, "wait")
+    assert agent.disabled_tools == frozenset()
+    assert _listed_tools(agent) == {"ask_user", "lookup", "finish"}
+
+
+class _Session:
+    """The chat session surface _post_ask_user_response uses: the action log, the pending ask_user entry, the agent."""
+
+    def __init__(self, agent):
+        self.workflow_tool_agent = agent
+        self._current_planner_lm = None
+        self.actions = []
+        self.completed = []
+
+    def append_action_log(self, record):
+        self.actions.append(record)
+
+    def complete_ask_user_entry(self, answer):
+        self.completed.append(answer)
+
+    def get_active_workflow(self):
+        return None
+
+
+def test_post_ask_user_response_on_wait_asks_again_without_replanning(monkeypatch):
+    question = "Which repository should I search?"
+    agent = _agent()  # built before dspy.Predict is patched: the react step itself uses it
+    session = _Session(agent)
+    _use_predictor(monkeypatch, _fake_intent_predictor("wait", 0.9))
+
+    def planner_must_not_run(*_args, **_kwargs):
+        raise AssertionError("a wait reply must not replan")
+
+    monkeypatch.setattr(workflow_agent, "build_query_with_next_steps", planner_must_not_run)
+
+    observation = _post_ask_user_response(question, "hmm, hold on, let me check", session)
+
+    assert observation.startswith("The user asked for a moment and has not answered yet.")
+    assert observation.endswith(f"ask_user: {question}")
+    assert session.completed == ["hmm, hold on, let me check"]
+    assert session.actions == [{"agent_query": question, "user_response": "hmm, hold on, let me check"}]
+    assert agent.disabled_tools == frozenset()
+
+
+def test_real_jev_hesitation_is_wait_and_an_answer_is_answer(jev_env):
+    question = "Which repository should I search?"
+    assert classify_user_reply("hmm, hold on, let me check", question) == "wait"
+    assert classify_user_reply("the billing one", question) == "answer"

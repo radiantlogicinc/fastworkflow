@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from pydantic_core import PydanticUndefined
 
 import fastworkflow
+import dspy
 from fastworkflow.utils.logging import logger
 from fastworkflow import ModuleType, tracing
 from fastworkflow.observability.decision_signals import (
@@ -1111,3 +1112,87 @@ class ParameterExtraction:
 
         # Return a new instance without validation
         return stored_params.__class__.model_construct(**params_data)
+
+
+# ---------------------------------------------------------------------------
+# Jev's reading of a reply to a missing-value prompt (fix-jd9o.6).
+#
+# In assistant mode the PARAMETER_EXTRACTION stage asks for the missing values and
+# merges the next message as an answer. Jev reads that message first: an answer
+# is merged as before; a hesitation waits; a request to stop, a wrong-command
+# report or a different request leaves the pending round (wildcard.py dispatches it).
+# ---------------------------------------------------------------------------
+
+#: A non-answer intent applies only at or above this Jev probability (measured: 30/30 hesitations).
+MISSING_VALUE_REPLY_THRESHOLD = 0.5
+_MISSING_VALUE_REPLY_OFF = frozenset({"off", "0", "false"})
+MISSING_VALUE_REPLY_OPTIONS = (
+    ("answer", "The reply gives the value asked for, even if unsure or with a question tag ('X, I think?'); it may add or change other values."),
+    ("different_command", "The reply asks the system to do something else instead, even when phrased as a question ('can you show me the users?')."),
+    ("misunderstood", "The reply says the system picked the wrong command."),
+    ("abort", "The reply asks to stop or cancel."),
+    ("wait", "The reply asks for a moment or says the user is checking; it gives no value and asks nothing."),
+)
+
+
+def missing_value_reply_enabled() -> bool:
+    """False when FW_JEV_MISSING_VALUE_REPLY is set to off, 0 or false (case-insensitive)."""
+    value = str(fastworkflow.get_env_var("FW_JEV_MISSING_VALUE_REPLY", default="on"))
+    return value.strip().lower() not in _MISSING_VALUE_REPLY_OFF
+
+
+def missing_value_question(command_name: str, missing_fields: list[str]) -> str:
+    """The missing-value prompt as the user saw it, reconstructed from stored state.
+
+    The prompt's text is not stored, so this rebuilds its lead line and its
+    'Missing parameter values' line from the command name and the stored fields.
+    """
+    return (f"PARAMETER EXTRACTION ERROR FOR COMMAND '{command_name}'\n"
+            f"{MISSING_INFORMATION_ERRMSG}{', '.join(missing_fields)}")
+
+
+def pending_missing_fields(app_workflow, command_name: str, stored_params: BaseModel,
+                           command: str) -> list[str]:
+    """The fields the pending round still asks for, read from the markers it stored.
+
+    No validation is run: validation can call the workflow's hooks (database or backend
+    lookups), and this runs on every reply to the prompt. ``_extract_impl`` stored each
+    missing or invalid field with a "not given" marker, which ``_is_asked_field`` reads.
+    """
+    fields = type(stored_params).model_fields
+    return [name for name, info in fields.items()
+            if ParameterExtraction._is_asked_field(info, getattr(stored_params, name, None))]
+
+
+def classify_missing_value_reply(question: str, reply: str) -> str:
+    """Jev's intent for a reply to the missing-value prompt: a non-answer intent at or above
+    MISSING_VALUE_REPLY_THRESHOLD, otherwise "answer". Never raises: no Jev LM or any failure
+    means "answer", which is the behaviour before this check.
+    """
+    try:
+        from dspy.experimental import Choice
+        from fastworkflow.workflow_agent import _jev_lm
+
+        jev_lm = _jev_lm()
+        if jev_lm is None:
+            return "answer"
+
+        class ClassifyMissingValueReply(dspy.Signature):
+            """Decide what a user's reply to the system's question does."""
+
+            question: str = dspy.InputField(desc="the question the system asked the user")
+            reply: str = dspy.InputField(desc="the user's reply")
+            intent: Choice[MISSING_VALUE_REPLY_OPTIONS] = dspy.OutputField(desc="What does the reply do?")
+
+        with dspy.context(lm=jev_lm):
+            choice = dspy.Predict(ClassifyMissingValueReply)(question=question, reply=reply).intent
+        value = str(choice.value)
+        probability = (choice.probabilities or {}).get(value, choice.confidence)
+        logger.info(f"missing-value reply {reply!r}: {value} (probability {float(probability):.2f})")
+        if value != "answer" and probability >= MISSING_VALUE_REPLY_THRESHOLD:
+            return value
+        return "answer"
+    except Exception:  # noqa: BLE001 - the reply is then an answer; never fail the turn
+        logger.warning("could not classify the missing-value reply; treating it as an answer",
+                       exc_info=True)
+        return "answer"

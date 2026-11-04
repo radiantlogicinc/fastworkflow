@@ -7,8 +7,17 @@ from fastworkflow import Action, NLUPipelineStage
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.nlu_labels import PARAMETER_VALUE_PLACEHOLDERS
 
+from fastworkflow.utils.logging import logger
+from fastworkflow.utils.signatures import MISSING_INFORMATION_ERRMSG
+
 from ..intent_detection import CommandNamePrediction
-from ..parameter_extraction import ParameterExtraction
+from ..parameter_extraction import (
+    ParameterExtraction,
+    classify_missing_value_reply,
+    missing_value_question,
+    missing_value_reply_enabled,
+    pending_missing_fields,
+)
 
 class Signature:
     class Output(BaseModel):
@@ -74,6 +83,63 @@ def _confident_global_command(output) -> bool:
             and output.error_msg is None
             and not output.answered_bare_value
             and not output.is_cme_command)
+
+
+def _run_cme_command(workflow, command: str, command_name: str,
+                     nlu_pipeline_stage: NLUPipelineStage) -> Signature.Output:
+    """Run a framework (CME) command the message routed to, and wrap its result as the routing output."""
+    workflow_context = workflow.context
+    if command_name == 'ErrorCorrection/you_misunderstood':
+        workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
+        workflow_context["command"] = command
+    elif (
+        nlu_pipeline_stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION or
+        command_name == 'ErrorCorrection/abort'
+    ):
+        workflow.end_command_processing()
+    workflow.context = workflow_context
+
+    startup_action = Action(
+        command_name=command_name,
+        command=command,
+    )
+    command_output = CommandExecutor.perform_action(workflow, startup_action)
+    handled = (
+        nlu_pipeline_stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION or
+        command_name == 'ErrorCorrection/abort'
+    )
+    return Signature.Output(
+        handled=handled,
+        routed=command_output.success,
+        response=command_output.command_response.response,
+        output=command_output.command_response.output,
+    )
+
+
+def _missing_value_reply_intent(workflow, app_workflow, command_name: str,
+                                command: str) -> tuple[str, list[str]]:
+    """Jev's reading of a reply to the pending missing-value prompt, with the fields it asked for.
+
+    Returns ("answer", []) whenever the check does not apply or fails: the switch is off, the
+    session is in agent mode, nothing is pending, no Jev LM is configured, or any step raises.
+    """
+    if app_workflow.context.get("run_as_agent") or not missing_value_reply_enabled():
+        return "answer", []
+    stored_params = ParameterExtraction._get_stored_parameters(workflow)
+    if stored_params is None:
+        return "answer", []
+    try:
+        from fastworkflow.workflow_agent import _jev_lm
+
+        if _jev_lm() is None:
+            return "answer", []
+        fields = pending_missing_fields(
+            app_workflow, command_name, stored_params, workflow.context.get("command", command))
+        intent = classify_missing_value_reply(missing_value_question(command_name, fields), command)
+        return intent, fields
+    except Exception:  # noqa: BLE001 - a failed check is an answer, as before this check existed
+        logger.warning("missing-value reply check failed; treating the reply as an answer", exc_info=True)
+        return "answer", []
 
 
 class ResponseGenerator:
@@ -157,33 +223,8 @@ class ResponseGenerator:
                 workflow.context = workflow_context
         
         if cnp_output.is_cme_command:
-            workflow_context = workflow.context
-            if cnp_output.command_name == 'ErrorCorrection/you_misunderstood':
-                workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
-                workflow_context["command"] = command
-            elif (
-                nlu_pipeline_stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION or
-                cnp_output.command_name == 'ErrorCorrection/abort'
-            ):
-                workflow.end_command_processing()
-            workflow.context = workflow_context
+            return _run_cme_command(workflow, command, cnp_output.command_name, nlu_pipeline_stage)
 
-            startup_action = Action(
-                command_name=cnp_output.command_name,
-                command=command,
-            )
-            command_output = CommandExecutor.perform_action(workflow, startup_action)
-            handled = (
-                nlu_pipeline_stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION or
-                cnp_output.command_name == 'ErrorCorrection/abort'
-            )
-            return Signature.Output(
-                handled=handled,
-                routed=command_output.success,
-                response=command_output.command_response.response,
-                output=command_output.command_response.output,
-            )
-        
         if nlu_pipeline_stage in {
                 NLUPipelineStage.INTENT_DETECTION,
                 NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
@@ -281,6 +322,29 @@ class ResponseGenerator:
                 workflow_context["command"] = command
                 workflow.context = workflow_context
             else:
+                # Jev reads the reply first: a hesitation waits, a request to stop, a wrong-command
+                # report or a different request leaves the pending round. Only an answer is merged.
+                intent, missing_fields = _missing_value_reply_intent(
+                    workflow, app_workflow, command_name, command)
+                if intent == "wait":
+                    return Signature.Output(
+                        handled=False,
+                        routed=False,
+                        response="\n".join(
+                            ["OK, take your time.",
+                             f"{MISSING_INFORMATION_ERRMSG}{', '.join(missing_fields)}"]),
+                    )
+                if intent in ("abort", "misunderstood"):
+                    return _run_cme_command(
+                        workflow, command,
+                        "ErrorCorrection/abort" if intent == "abort"
+                        else "ErrorCorrection/you_misunderstood",
+                        nlu_pipeline_stage)
+                if intent == "different_command":
+                    # The pending command is left: the stored parameters go with it
+                    # (end_command_processing), and the reply runs as a fresh request in INTENT_DETECTION.
+                    workflow.end_command_processing()
+                    return self(workflow, command, input)
                 # An answer to the pending round: what gets merged is this text,
                 # not the stored command it answers.
                 extraction_text = f'{command_name}: {command}'
