@@ -11,9 +11,9 @@ Depth: 1 (lower bound; open steps name no command)
 
 ## Inputs
 
-| input | type | default | sample | verify | subject | description |
+| input | type | default | sample | verify | in_request | description |
 |---|---|---|---|---|---|---|
-| `author` | str | required | `<author>` |  |  | the author's name |
+| `author` | str | required | `<author>` |  | yes | the author's name |
 
 - `author` must be written in the request (`in_request`).
 

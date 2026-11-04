@@ -105,14 +105,12 @@ from fastworkflow.templates.template_workflow._commands.get_task_summary import 
 
 class Signature(BaseSig):
     @staticmethod
-    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> tuple[bool, str]:
-        # call default checks first
-        success, error_msg = super(Signature, Signature).validate_extracted_parameters(workflow, command, cmd_parameters)
-        if not success:
-            return (False, error_msg)
+    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> None:
+        # call default checks first; a refusal raises fastworkflow.Refused and stops here
+        super(Signature, Signature).validate_extracted_parameters(workflow, command, cmd_parameters)
 
         if len(cmd_parameters.task_id) > 10:
-            return (False, "Task id too long for this org policy")
+            raise fastworkflow.Refused("Task id too long for this org policy", field="task_id")
 ```
 
 No other attributes or methods need to be copied.

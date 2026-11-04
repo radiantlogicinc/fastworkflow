@@ -84,10 +84,10 @@ that calls the app (page 1, Which kind to write). A sketch, not a file of the sa
 
 ```python
 class ResponseGenerator:
-    def __call__(self, workflow, command, command_parameters: Signature.Input) -> str:
+    def __call__(self, workflow, command, input: Signature.Input) -> str:
         library: Library = workflow.command_context_for_response_generation
-        found = library.find_books(command_parameters.query)
-        return f"{command_parameters.query} matches {count(len(found), 'book')}."
+        found = library.find_books(input.query)
+        return f"{input.query} matches {count(len(found), 'book')}."
 ```
 
 It answers the same, runs in assistant mode and through direct API and MCP calls too, and

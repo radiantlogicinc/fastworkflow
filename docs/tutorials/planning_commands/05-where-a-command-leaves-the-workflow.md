@@ -45,12 +45,12 @@ class ResponseGenerator:
     descends_to = "Book"
 
     def __call__(self, workflow: fastworkflow.Workflow, command: str,
-                 command_parameters: Signature.Input) -> Signature.Output:
+                 input: Signature.Input) -> Signature.Output:
         library: Library = workflow.command_context_for_response_generation
-        book = library.books.get(command_parameters.book_uid)
+        book = library.books.get(input.book_uid)
         if book is None:
             raise fastworkflow.Refused(
-                f"no book has the uid {command_parameters.book_uid}; find_book lists the uids")
+                f"no book has the uid {input.book_uid}; find_book lists the uids")
         workflow.current_command_context = book
         return Signature.Output(book_uid=book.uid, title=book.title, author=book.author,
                                 copies=book.copies)
@@ -140,10 +140,10 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow: fastworkflow.Workflow, command: str,
-                 command_parameters: Signature.Input) -> Signature.Output:
+                 input: Signature.Input) -> Signature.Output:
         book: Book = workflow.command_context_for_response_generation
         loans = book.library.loans_of_book(book.uid)
-        rows = page(loans, command_parameters.start)
+        rows = page(loans, input.start)
         return Signature.Output(borrowers=[m for m, _ in rows], due_dates=[d for _, d in rows],
                                 total=len(loans))
 ```

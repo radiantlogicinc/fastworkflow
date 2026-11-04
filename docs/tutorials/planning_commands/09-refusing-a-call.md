@@ -12,11 +12,17 @@ field as on a planning command's:
 
 | option | on a field of type | what it checks |
 |---|---|---|
-| `in_request` | `str`, `int` | a `str` is written in the request (case and dashes aside); an `int` is a number the request writes |
-| `subject` | `str` | as `in_request`, and the value names a record the request names |
-| `strip` | `str` | removes these words from either end before the check (`["group", "unit"]`) |
-| `verify` | `bool`, `Literal`, or a `subject` str | a classifier decides the value again from the request; it needs `JEV_API_KEY`, and without it checks nothing |
-| `means` | `Literal` with `verify` | gives each value its meaning, for `verify` |
+| `in_request: True` | `str`, `int`, `list[str]` | a `str` is written in the request (case and dashes aside); an `int` is a number the request writes; each item of a `list[str]` is written |
+| `in_request: "subject"` | `str` | as `in_request`, and the value names a record the request names |
+| `in_request: {"ignore": [...]}` | `str` | as `in_request`, after the named words are removed from either end of the value (the cleanup the retired `strip` option did) |
+| `verify: True` | `bool`, `Literal`, or a `str` with `in_request: "subject"` | a classifier decides the value again from the request; it needs `JEV_API_KEY`, and without it checks nothing |
+| `verify: {value: meaning, ...}` | `Literal` | the same check, and gives each value its meaning (every key one of the enum's values) |
+
+Two options is the whole list: `in_request` (with `"subject"` and the `ignore` words inside it) and
+`verify`. A field with no check is cleaned in code: call `strip_words(text, words)` from
+`fastworkflow.planning_commands` in its validator or in the `validate_extracted_parameters` hook. An
+`Input` validator's returned value is written back, so a validator that cleans a value changes the
+argument. The retired `subject`, `means` and `strip` options fail the load and name the new spelling.
 
 A field with no option is checked by its type alone, and an option on a type it does not
 apply to fails the load. For each option it finds, the framework adds a sentence to the
@@ -30,10 +36,10 @@ field's description when it asks the parameter extractor to fill it (page 2).
 class Signature:
     ...
     @staticmethod
-    def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
-        if cmd_parameters.member.casefold() in EVERYONE:
+    def validate_extracted_parameters(workflow, command, input, command_text=None):
+        if input.member.casefold() in EVERYONE:
             raise fastworkflow.Refused(
-                f"member is {cmd_parameters.member!r}, which names no one member; this "
+                f"member is {input.member!r}, which names no one member; this "
                 "command reports on one member: give that member's name")
         return True, ""
 
@@ -46,15 +52,15 @@ EVERYONE = {"everyone", "everybody", "all", "all members", "every member"}
 ## Line by line
 
 - **`validate_extracted_parameters`** is the hook an execution command's `Signature` has,
-  with the same signature. It gets the arguments as an `Input` (`cmd_parameters`) after they
+  with the same signature. It gets the arguments as an `Input` (`input`) after they
   were filled and checked, before the `PlanGenerator` is called. `command_text` is the
   request the arguments were filled from.
 - **`raise fastworkflow.Refused(message)`** refuses the call. Write the message as what to
-  fix. Returning `(False, message)` refuses the same way; `(True, "")` accepts.
+  fix. Return `None` to accept; a tuple such as `(False, message)` is a call error.
 - **Any other exception** the hook raises fails the call; `Refused` is the one that means
   "these arguments are wrong".
-- **The hook may correct** as well as refuse: set a field of `cmd_parameters` (a name in the
-  catalogue's spelling, say) and return `(True, "")`. It runs once per call, after the
+- **The hook may correct** as well as refuse: set a field of `input` (a name in the
+  catalogue's spelling, say) and return `None`. It runs once per call, after the
   options' checks, so a value it corrects is not checked again against the request.
 - **A rule that ties fields together**, or a field to the request, can instead be a
   pydantic validator on `Input` raising `ValueError` (see "Rules on the arguments" in
@@ -162,8 +168,8 @@ Phase answer
 ## What you learned
 
 A planning command's arguments are checked the way any command's are, whether a typed call or
-a step filled them: by the options their fields carry (`in_request`, `subject`, `strip`,
-`verify`, `means`), then `validate_extracted_parameters`, once, then the `Input`'s validators;
+a step filled them: by the options their fields carry (`in_request`, `verify`), then
+`validate_extracted_parameters`, once, then the `Input`'s validators;
 `raise fastworkflow.Refused(...)` sends the caller back with what to fix. A missing argument
 on a typed call is asked for in a question code writes, in an attended turn; on a step it
 comes back as the same message an execution command's does, and the agent asks for it.

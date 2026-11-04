@@ -2,6 +2,138 @@
 
 ## Unreleased
 
+### Upgrading from Phase 11 (check options, one hook, short forms, plain required fields)
+
+Every BREAKING item below gives the old form and the new one. Each old form is a load error or a call
+error that names the new form; there is no legacy support, except where an item says a form still works.
+
+1. **BREAKING: the check options are two (fix-3rsq.two-options).** The Phase 11 options `subject`,
+   `means` and `strip` are retired. Each one that is still declared fails the load, and the message
+   names the new spelling. Migrate each declaration as the table says:
+
+   | Old (Phase 11) | New | Notes |
+   |---|---|---|
+   | `subject: True` on a `str` | `in_request: "subject"` | same check; it implies `in_request` |
+   | `means: {v: text}` on an enum, with `verify: True` | `verify: {v: text}` | the dict is the check; each key must be a value of the enum, else a load error |
+   | `strip: ["group", "unit"]` on a `str`, with a check (`in_request` or `subject`) | `in_request: {"ignore": ["group", "unit"]}` (or `{"subject": True, "ignore": [...]}`) | the same cleanup, before the match, as before |
+   | `strip: [...]` on a `str` with no check | `strip_words(name, ("group", "unit"))` in the field's validator or in `validate_extracted_parameters` | the field had no check, so `in_request` would add one; the cleanup is code |
+   | `verify: True` on a `str` with `subject` | `verify: True` on a `str` with `in_request: "subject"` | unchanged meaning |
+
+   - `in_request: {"ignore": [...]}` runs the cleanup that `strip` ran: before the match, on the
+     extracted value. The outcomes match the old `strip` on the cases checked (required, optional and
+     `subject` fields alike).
+   - The rule sentences the extractor reads are the same. The previews show the new spelling: the
+     column `in_request` holds `yes` or `subject`, followed by `ignore` and the words, and a `verify`
+     dict's meanings are the preview's notes.
+   - Each field a check was declared on needs the option now: a `str` or `int` is checked only when it
+     carries `in_request` or `subject`. A field with neither is taken as the extractor gives it.
+
+2. **BREAKING where it changes a value: Input validators write back.** A value that an `Input` validator
+   returns instead of its input is written back to the arguments, for both kinds of command. Before
+   this release the returned value was checked and then discarded. Inventory: no `Input` validator in
+   the app, the bundled examples, the test workflows or the tests returns a different value, so none
+   changes its behaviour. A validator that refuses still refuses. The Facts models of the app's
+   `_phase_facts.py` are outputs, not inputs.
+
+3. **BREAKING: short forms only.** Each old form is a load or call error that names the new form.
+
+   | Job | Old form | New form |
+   |---|---|---|
+   | Call a command | `def __call__(self, workflow, command)` | `def __call__(self, workflow, command, input)`; `input` is the Input, or `None` for a command with no Input |
+   | Return a result | `return CommandOutput(command_response=CommandResponse(response=X))` | `return X` (a `str`), or the command's `Signature.Output` instance |
+   | Return with artifacts or next actions | `return CommandOutput(command_response=CommandResponse(response=X, artifacts=...))` | `return fastworkflow.CommandResponse(response=X, artifacts=...)` |
+   | Refuse a call | `return CommandOutput(command_response=CommandResponse(response=M, success=False))`, or a `CommandResponse(..., success=False)` return | `raise fastworkflow.Refused(M)` |
+   | Refuse one value | `return (False, M)` from `validate_extracted_parameters`, or a `db_lookup` rejection | `raise fastworkflow.Refused(M, field="name")` (the field is reset and asked for again; `field=` takes a list too) |
+   | Accept | `return (True, "")`, `return True, ""` | `return None` (or fall off the end) |
+   | Generated command file | `_process_command` plus a `CommandOutput` `__call__`, and a `validate_extracted_parameters` stub | one `__call__(self, workflow, command, input) -> Signature.Output` (regenerate) |
+
+   - `CommandOutput` is not a return value. Commands that return one fail with an error naming the
+     command. A handled-but-not-successful router answer is the routing `Signature.Output` (handled and
+     routed flags); the framework builds the turn's `CommandOutput` from it.
+   - A call error names the command and the value it returned, for example "... returned a
+     CommandResponse with success=False ..." or "must return None to accept and raise
+     fastworkflow.Refused(message, field=...) to refuse; it returned tuple".
+   - The bundled simple workflow template raises `Refused` for a failed create. The Phase 10 item
+     "Check command return values" is superseded by this item.
+
+4. **BREAKING: one validation hook; `db_lookup` is retired.** `validate_extracted_parameters` is the
+   one hook for checks that need the workflow, the request text, several parameters together, or
+   suggestions. Its return is `None` (accept). A non-None return is a `TypeError`. An exception other
+   than `fastworkflow.Refused` becomes a call error that names the command, so raise `Refused` for any
+   refusal the user should see. Pydantic `Input` validators are for self-contained per-value rules
+   (format, range) that need no context.
+
+   | Old | New |
+   |---|---|
+   | `json_schema_extra={'db_lookup': True}` on a field, or a `Signature.db_lookup` method | a lookup in `validate_extracted_parameters`: `matched, corrected, suggestions = DatabaseValidator.fuzzy_match(...)`; assign `input.<field> = corrected`, or `raise fastworkflow.Refused("... Did you mean ...?", field="<field>")` |
+   | a `*_uid` field corrected from a display name | map the label back to the uid yourself: `input.user_uid = uid_of[corrected]` |
+
+   - A lookup that matches nothing and offers no suggestion returns `None`: the value is accepted.
+   - The param-extraction span no longer writes `db_lookup`. A value the hook rewrites is recorded as
+     the slot binding `validation_hook`, and a refusal with `field=` is recorded as an invalid field.
+     Span contract v32 (`fw.nlu.param_extraction` v8); the decision signal contract is v2. A span
+     recorded before this carries `db_lookup` and no change list.
+   - Planning commands follow the same hook rule. Their `__result__` forms are unchanged: a `str`, the
+     `Output`, or a `CommandResponse`.
+   - The bundled `messaging_app_4` example's `set_current_user` does its lookup in its hook.
+   - The coding skills (`resolve-parameter-values`, `validate-command-parameters`,
+     `integrate-chat-agent`) teach only these forms. Projects that copied the old forms migrate by the table.
+
+5. **BREAKING: required fields are plain fields (fix-3rsq.plain-required).** A field with no default and
+   no `Optional[...]` is required. Write it plainly:
+
+   | Old | New |
+   |---|---|
+   | `name: str = Field(default="NOT_FOUND", description="...")` | `name: str = Field(description="...")` |
+
+   - The framework supplies `NOT_FOUND` (or the field type's own sentinel) internally while the value is
+     missing, so the Input can be built, then asks the user as before. Both command kinds, and the
+     str, int, float and list fields, work this way.
+   - `default="NOT_FOUND"` still loads but logs one WARNING at load for each field that declares it.
+     Planning commands are exempt from that warning.
+   - A direct call (MCP, REST, `perform_action`) that omits a required field now gets the same ask as the
+     chat path, not a raw pydantic `Field required` error. The MCP tool schema lists plain required fields
+     under `required`.
+   - Editing a command's source changes its fingerprint, so the next `fastworkflow train` retrains that
+     command.
+
+6. **Environment sentinels are constants, not env keys.** `NOT_FOUND`, `INVALID`,
+   `MISSING_INFORMATION_ERRMSG`, `INVALID_INFORMATION_ERRMSG` and `PARAMETER_EXTRACTION_ERROR_MSG` are
+   constants in `fastworkflow.utils.signatures`. The framework does not read them from the environment,
+   so delete any such line from `fastworkflow.env`. Import the constant where a command needs it. The env template
+   lists `FW_TURN_MAX_STEPS` (commented; default 400).
+
+7. **No generated utterance boilerplate.** A generated command file no longer contains
+   `generate_utterances` or `template_utterances`. The framework default generates the synthetic
+   variants from `plain_utterances`, so a file needs only the seed list. Files that already define them
+   keep working; delete them when you next touch the file. The stub's zero-argument
+   `generate_utterances()` that returned `[]` is gone.
+
+8. **Paging recognises only `start`, and a paged command declares `total`.** A paging field is named
+   `start` and is `int` or `Optional[int]`; `offset` and `skip` are no longer paging names. A command with
+   a paging field whose Output has no `total: int` is a load error that names the field. A field that is
+   not a page (for example a `datetime` named `start`) is an ordinary field. Rename a paging field that is
+   not a page.
+
+   | Old | New |
+   |---|---|
+   | `offset: Optional[int]` on Input | `start: Optional[int]` on Input |
+   | Output without a total | `total: int` on the Output |
+
+   - When rows remain, the response text ends with a paging line, for example
+     `Rows 1-20 of 57; next page: start=20.` **Clients that parse the response as JSON must read
+     `structuredContent` instead** (MCP), which carries the Output without that line.
+
+9. **Schemas for clients (additive).** `GET /command_schemas` (operation `get_command_schemas`) lists
+   every listed command with its kind and schemas; framework commands and the internal command-metadata
+   commands are hidden. A per-command MCP tool declares `outputSchema` for a command that has an Output,
+   and returns `structuredContent` (the Output as JSON) beside its text content. The REST turn body keeps
+   `next_actions` and `recommendations` in each `command_response`.
+
+10. **The Input is named `input`.** Docs, the scaffold and the bundled examples name the Input instance
+    `input`. The framework passes it positionally, so a command that names it differently still runs. New
+    code uses `input`.
+
 ### Upgrading to Phase 11 (check options, one validation step)
 
 1. **Declare the checks a field needs.** The framework no longer checks a `str` or an `int` by its
@@ -12,9 +144,9 @@
    `check_arguments` and then the command's `validate_parameters`, which is the only validation step
    for both kinds of command. Replace each `validate_call` call with those two.
 3. **Fix any check option on the wrong type.** A load error names the command, the field and the
-   option. `in_request` takes a `str`, an `int` or a `list[str]`. `subject` and `strip` take a `str`.
-   `means` takes an enum. `verify` takes a `bool`, an enum or a subject `str`. A `means` block needs
-   `verify` too, because `means` gives the verify check each value's meaning.
+   option. `in_request` takes a `str`, an `int` or a `list[str]`; `in_request: "subject"` takes a `str`.
+   `verify` takes a `bool`, an enum, or a `str` with `in_request: "subject"`; on an enum it may be
+   a dict of each value's meaning (see Upgrading from Phase 11, item 1).
 4. **Check the defaults of `bool` fields with `verify`.** A `bool` may now default to true. The
    extractor is then told "False only when the request asks against it."
 5. **Check the previews.** An open-ended type (such as a `float`, a `list[str]` or a `str`) shows one
@@ -39,10 +171,10 @@
    that the prompt takes `yes`, `no` or `always`. `FW_APPROVAL_BINDING` takes `off`, `shadow` or
    `enforce` (the default). `off` restores the earlier path, and `shadow` records each decision
    without asking.
-4. **Check command return values.** A command may return its own `Signature.Output`, a `str`, a
-   `CommandResponse` or a `CommandOutput`. Any other type fails that call with a `TypeError` that
-   names the command. A command with no `Input` receives `None` as its parameters when its
-   `__call__` declares a third argument.
+4. **Check command return values.** A command may return its own `Signature.Output`, a `str`, or a
+   `CommandResponse`. Phase 12 removed `CommandOutput` as a return value (see Upgrading from Phase 11,
+   item 3). Any other type fails that call with an error that names the command. A command with no
+   `Input` receives `None` as its parameters when its `__call__` declares a third argument.
 5. **Assistant mode** runs a planning command only when you name it exactly and it is mechanical.
    Any other planning command is refused, with the reasons. Direct API and MCP calls still refuse
    planning commands.
@@ -60,9 +192,9 @@
 
 ### Added
 
-- **Check options on any command's `Input`** (fix-3rsq.11). `in_request`, `subject`, `strip`,
-  `verify` and `means` apply to an execution command's `Input` field as well as a planning
-  command's. Each option is checked by the same rule for both kinds.
+- **Check options on any command's `Input`** (fix-3rsq.11). `in_request` and `verify` apply to an
+  execution command's `Input` field as well as a planning command's. Each option is checked by the same
+  rule for both kinds. (Phase 12 cut the five Phase 11 options to these two; see Upgrading from Phase 11.)
 - **Typed inputs `float` and `list[str]`** (fix-3rsq.11). A planning command's `Input` takes a
   `float` or a `list[str]`. A `list[str]` with `in_request` keeps only the items the request writes.
   A `bool` may default to true.
@@ -83,8 +215,8 @@
   `mandatory` and "(may need your approval)" for `delegatable`.
 
 - **Command return forms** (fix-3rsq.12.early). A command returns its own `Signature.Output`, a
-  `str`, a `CommandResponse` or a `CommandOutput`. The framework wraps the first three, so the
-  command does not fill the envelope. `fastworkflow.Refused(message)` gives `success=False` with that
+  `str` or a `CommandResponse`. The framework fills the envelope, so the command does not build a
+  `CommandOutput`. (`CommandOutput` was removed as a return value in Phase 12.) `fastworkflow.Refused(message)` gives `success=False` with that
   message. A command with no `Input` receives `None` as its parameters when its `__call__` declares a
   third argument.
 
@@ -146,10 +278,9 @@
   noun=..., optional=...)` for fan-outs and optional phases; `pick` and the filters
   `num`, `count`, `listed` for steps. Skills are unreleased, so the old form is gone.
   A step naming a command or parameter the workflow lacks is a load error.
-- **`fastworkflow.Refused(message)`** (commands, backward compatible): raised from a
-  `ResponseGenerator.__call__` it is a failed `CommandOutput` with that message; from a
-  `validate_extracted_parameters` hook (a command's or a skill's) it is `(False,
-  message)`. A `Signature` without `generate_utterances` gets the standard body as a
+- **`fastworkflow.Refused(message)`** (commands): raised from a `ResponseGenerator.__call__` or from a
+  `validate_extracted_parameters` hook it is a failed answer with that message. `Refused(message,
+  field=...)` also names the refused field. The Phase 10 `(False, message)` return is retired. A `Signature` without `generate_utterances` gets the standard body as a
   default; a defined or inherited one wins.
 - **`fact_from("<command>.<field>")`** (fix-ajir.15, `docs/skill_phases.md`):
   the field of a facts model copied from a command field,
@@ -353,8 +484,8 @@
   logged and skipped, its files not loaded. `class Signature` carries the description (its
   docstring, what the skill matcher and the text planner read), a pydantic
   `Input` (`str`, `bool`, `int`, `Literal[...]` for an enum; `Field(default=...,
-  description=...)`; the skill options `strip`, `subject`, `verify`, `means`,
-  `in_request` in `json_schema_extra`), and optionally
+  description=...)`; the check options `in_request` and `verify` in
+  `json_schema_extra`; the Phase 11 options were cut to these two), and optionally
   `plain_utterances`, a `template` (the text the planner falls back to) and
   `validate_extracted_parameters(workflow, command, cmd_parameters,
   command_text=None)`. A module-level `steps(input) -> list[str]` returns the
@@ -401,7 +532,7 @@
     request alone (one `Choice` call per verified parameter, in parallel with the
     planner's typed call); a verdict at or above `VERIFY_THRESHOLD` (0.65)
     replaces the planner's argument and stands in for a missing or invalid enum.
-    An enum's `means` (a dict) gives Jev each value's meaning (`"group": "a
+    An enum's `verify` dict (a `{value: meaning}` map) gives Jev each value's meaning (`"group": "a
     group, which people are members of"`). A failed check leaves the planner's argument.
     This targets a wrong record kind for a name ("Payroll" planned as a feed) and
     flags set or left unset against what the request asks.
@@ -415,7 +546,7 @@
     `list_logins`, which the agent runs on the record in context instead of
     passing the placeholder on as a value. A step holding a uid-shaped token the
     request does not write is dropped; their descriptions now say so.
-  - `subject: true` on a `str` parameter: the argument must name a record of
+  - `in_request: "subject"` on a `str` parameter: the argument must name a record of
     the request: hold one of its subjects (`split_merge.request_subjects`, with
     the workflow's identifier patterns) whole, or a name-like word, and cut no
     subject. "I" of "Before I approve" or "Payroll" of "Payroll_Approver" is
@@ -435,8 +566,8 @@
 
 - **Skills as parameterized commands** (`fastworkflow/skill_commands.py`): a
   skill may declare typed parameters (its skill file's `Input`: `str`, `bool`,
-  `int` or an enum, with a default, a description and, for a string, `strip`
-  words) that `steps(input)` expands into its steps. The
+  `int` or an enum, with a default, a description and, for a string, the words to
+  ignore in `in_request`) that `steps(input)` expands into its steps. The
   description is still what the skill matcher sees; a skill without parameters
   is read as before. An `@<skill>` include is plain text and cannot name a skill
   with params. A malformed skill fails the load with a `SkillFormatError`

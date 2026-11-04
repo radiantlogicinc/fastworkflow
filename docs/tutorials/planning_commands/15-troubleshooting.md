@@ -60,8 +60,8 @@ class.
 
 ## Outputs
 
-**A paged command without `total`.** A command whose `Input` has an integer `start`,
-`offset` or `skip` is paged, and the runtime reads its pages from its `Output` (page 7):
+**A paged command without `total`.** A command whose `Input` has an integer `start`
+is paged, and the runtime reads its pages from its `Output` (page 7):
 
 ```text
 _commands/Book/list_loans.py: Input.start makes list_loans a paged command, but its Output declares no total; declare total: int, how many rows there are on every page, or rename start if it is not a page
@@ -79,11 +79,39 @@ class Input(BaseModel):
 ```
 
 ```text
-_commands/Library/member_report.py: only a str or int parameter takes in_request ('loans')
+_commands/Library/member_report.py: option in_request does not apply to field 'loans' of type bool (it takes a str, an int or a list[str])
 ```
 
 **Fix:** drop the option, or use one that applies: `verify` decides a `bool` again from the
 request (with `JEV_API_KEY`).
+
+**A retired option.** The check options are two now: `in_request` and `verify`. `subject`,
+`means` and `strip` fail the load and name the new spelling. Write `in_request: "subject"` for a
+record name, `verify: {value: meaning, ...}` for an enum's meanings, and `in_request: {"ignore": [...]}`
+for the words `strip` removed from a value's ends (page 9).
+
+<!-- broken: retired_subject -->
+```python
+from pydantic import BaseModel, Field
+from fastworkflow.planning import run
+
+
+class Signature:
+    """Show the thing."""
+
+    class Input(BaseModel):
+        title: str = Field(description="the title", json_schema_extra={"subject": True})
+
+
+class PlanGenerator:
+    def find(self, input):
+        return [run("list_branches")]
+```
+
+<!-- load-error -->
+```text
+PlanningCommandFormatError: _commands/retired_subject.py: field 'title': option subject is retired: write in_request: "subject"
+```
 
 ## `from_`
 
@@ -185,20 +213,6 @@ _commands/Book/shelf_report.py: Shelf.borrowers is list[str]; a facts field is t
 `self.loans.borrowers`.
 
 ## The answer and the `Output`
-
-**An answer written as `say that` lines.** Code no longer copies them into the answer:
-
-```python
-def answer(self, input, book):
-    return [f"say that {book.title} is by {book.author}"]
-```
-
-```text
-_commands/Library/book_by_title.py: phase 'answer' writes the answer as 'say that' lines, which code no longer copies; return the text from __result__(self, input, ...) instead
-```
-
-**Fix:** rename the method `__result__`, and return the text:
-`return f"{book.title} is by {book.author}."`.
 
 **A hook parameter that names no phase.** `__result__` reads `input` and the phases by name:
 

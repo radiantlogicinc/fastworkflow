@@ -11,9 +11,9 @@ Depth: 1 (lower bound; open steps name no command)
 
 ## Inputs
 
-| input | type | default | sample | verify | subject | description |
+| input | type | default | sample | verify | in_request | description |
 |---|---|---|---|---|---|---|
-| `query` | str | required | `<query>` |  |  | the title or author words |
+| `query` | str | required | `<query>` |  | yes | the title or author words |
 
 - `query` must be written in the request (`in_request`).
 

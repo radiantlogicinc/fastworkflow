@@ -155,7 +155,7 @@ extractor's `NOT_FOUND` sentinel or invalid-number marker, or equal to its
 `Signature.Input` default (when `signatures` is given) is not given, and a paging
 parameter at `0` is the first page. The paging parameters are those a field names
 in `"page_by"` (`{"from": "list_items.item_uids", "page_by": "cursor"}`), else
-`start`, `offset` and `skip` (`PAGING_PARAMETERS`); the other given parameters
+`start` (`PAGING_PARAMETERS`); the other given parameters
 form the run's query. A list value joins only the pages of the broadest query
 (fewest given parameters; between equally broad ones, the latest), one per
 paging position, a re-read replacing the earlier read in place: the same page

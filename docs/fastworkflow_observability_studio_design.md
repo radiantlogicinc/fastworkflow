@@ -58,9 +58,9 @@ There is also no manual-testing UX beyond the CLI.
   confidence + ambiguity threshold + model tier via
   `CommandRouter.predict_with_details`, candidate set and discarded escalation
   labels on an ambiguity) and `fw.nlu.param_extraction` (extraction method,
-  NOT_FOUND retry round, structured missing/invalid fields, per-field
-  `db_lookup` events with the three-state outcome, and the
-  `validate_extracted_parameters` verdict — via an additive `diagnostics`
+  NOT_FOUND retry round, structured missing/invalid fields, the
+  `validation_hook` record (`changed_fields` for a value the hook corrected, `refused_fields` for a
+  `fastworkflow.Refused` with `field=`), and the `validate_extracted_parameters` verdict — via an additive `diagnostics`
   out-param on `validate_parameters`). The root `fw.turn` span additionally
   records `context_mutations` (shallow diff of the app workflow context across
   the turn). Purpose: make conversation logs a first-class diagnosis surface

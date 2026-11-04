@@ -53,12 +53,12 @@ class Signature:
                             description="whether to show the notes on the member's record")
 
     @staticmethod
-    def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
-        if cmd_parameters.member.casefold() in EVERYONE:
+    def validate_extracted_parameters(workflow, command, input, command_text=None):
+        if input.member.casefold() in EVERYONE:
             raise fastworkflow.Refused(
-                f"member is {cmd_parameters.member!r}, which names no one member; this "
+                f"member is {input.member!r}, which names no one member; this "
                 "command reports on one member: give that member's name")
-        return True, ""
+        return None
 
 
 class PlanGenerator:

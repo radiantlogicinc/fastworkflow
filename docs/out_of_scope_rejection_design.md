@@ -185,7 +185,7 @@ Classifying the 20 confident mis-routes by that gate:
 |---|---|---|
 | CME meta-command, executes immediately, read-only or navigational | 12 | `what_can_i_do` ×6, `what_is_current_context` ×3, `reset_context` ×2, `go_up` ×1 |
 | App command with a **zero-field** `Input`, executes immediately, read-only | 2 | `list_all_product_types` ×2 |
-| App command with ≥1 required field; utterance contains no extractable value, so the turn becomes a parameter prompt | 6 | `get_user_details` ×2 (1 field), `calculate` (1), `modify_pending_order_payment` (2), `modify_pending_order_items` (4), `transfer_to_human_agents` (1, default `NOT_FOUND`) |
+| App command with ≥1 required field; utterance contains no extractable value, so the turn becomes a parameter prompt | 6 | `get_user_details` ×2 (1 field), `calculate` (1), `modify_pending_order_payment` (2), `modify_pending_order_items` (4), `transfer_to_human_agents` (1, plain required) |
 
 **Zero of 50 out-of-scope utterances cause a state mutation.** Not one reaches a write.
 The single most common outcome — 6 of 20 confident cases, 10 of 50 overall — is

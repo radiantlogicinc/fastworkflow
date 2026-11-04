@@ -200,7 +200,6 @@ The agent introspects your code and generates `_commands/cancel_order.py`, `_com
 ```python
 # _commands/cancel_order.py  ← new file; wraps your existing code
 import fastworkflow
-from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from pydantic import BaseModel, Field
 
 from your_app.orders import OrderService
@@ -208,10 +207,9 @@ from your_app.orders import OrderService
 
 class Signature:
     class Input(BaseModel):
-        order_id: str = Field(
+        order_id: str = Field(                  # no default: required, so a missing ID is asked for
             description="The order ID to cancel",
             examples=["44821", "ORD-2024-001"],
-            default="NOT_FOUND",          # missing → fastWorkflow asks instead of guessing
         )
         refund_method: str = Field(
             description="How to refund the customer",
@@ -219,15 +217,13 @@ class Signature:
             default="original_payment",
         )
 
+    class Output(BaseModel):
+        status: str
+
     plain_utterances = [
         "Cancel order #44821 and give store credit",
         "cancel that blue jacket order, I want credit not a refund",
     ]
-
-    @staticmethod
-    def generate_utterances(workflow: fastworkflow.Workflow, command_name: str) -> list[str]:
-        return [command_name.split("/")[-1].lower().replace("_", " ")] + \
-            generate_diverse_utterances(Signature.plain_utterances, command_name)
 
 
 class ResponseGenerator:
@@ -235,15 +231,13 @@ class ResponseGenerator:
         self,
         workflow: fastworkflow.Workflow,
         command: str,
-        command_parameters: Signature.Input,
-    ) -> fastworkflow.CommandOutput:
+        input: Signature.Input,
+    ) -> Signature.Output:
         result = OrderService().cancel_order(
-            order_id=command_parameters.order_id,
-            refund_method=command_parameters.refund_method,
+            order_id=input.order_id,
+            refund_method=input.refund_method,
         )
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response=str(result))
-        )
+        return Signature.Output(status=str(result))  # returning the Output is enough
 ```
 
 Then `fastworkflow train` and `fastworkflow run` against your workflow directory. That's the entire integration pattern: a thin command layer over code you already have.
@@ -357,7 +351,7 @@ fw.turn                        the whole logical turn (stable across ask_user su
                 ├── fw.nlu.intent            which matching layer decided, classifier
                 │                            confidence vs threshold, candidates on ambiguity
                 └── fw.nlu.param_extraction  extraction method, missing/invalid fields,
-                    │                        db_lookup outcomes, validation-hook verdict
+                    │                        validation-hook outcomes (changed and refused fields)
                     └── fw.llm.call          the LLM extraction call, when one ran
 fw.ask_user                    a clarifying question, and how long the user took
 
@@ -522,7 +516,7 @@ from fastworkflow.utils.dspy_utils import dspySignature
 import dspy
 
 dspy_sig = dspySignature(Signature.Input, Signature.Output)
-prediction = dspy.Predict(dspy_sig)(command_parameters)
+prediction = dspy.Predict(dspy_sig)(input)
 ```
 
 **Startup commands & headless mode** — initialize context or run non-interactively (batch/CI) by combining a startup command/action with `--keep_alive False`:

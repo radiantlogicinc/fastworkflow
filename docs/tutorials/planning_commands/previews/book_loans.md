@@ -11,9 +11,9 @@ Depth: 1 (lower bound; open steps name no command)
 
 ## Inputs
 
-| input | type | default | sample | verify | subject | description |
+| input | type | default | sample | verify | in_request | description |
 |---|---|---|---|---|---|---|
-| `title` | str | required | `<title>` |  |  | the book's title |
+| `title` | str | required | `<title>` |  | yes | the book's title |
 
 - `title` must be written in the request (`in_request`).
 

@@ -11,9 +11,9 @@ Depth: 1 (lower bound; open steps name no command)
 
 ## Inputs
 
-| input | type | default | sample | verify | subject | description |
+| input | type | default | sample | verify | in_request | description |
 |---|---|---|---|---|---|---|
-| `name` | str | required | `<name>` |  |  | the name to look for |
+| `name` | str | required | `<name>` |  | yes | the name to look for |
 | `kind` | one of book, member | `book` | `book` |  |  | whether the request is about a book or a member |
 
 - `name` must be written in the request (`in_request`).

@@ -41,9 +41,9 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow: fastworkflow.Workflow, command: str,
-                 command_parameters: Signature.Input) -> Signature.Output:
+                 input: Signature.Input) -> Signature.Output:
         library: Library = workflow.command_context_for_response_generation
-        return Signature.Output(total=library.overdue_count(command_parameters.branch))
+        return Signature.Output(total=library.overdue_count(input.branch))
 ```
 
 - **It lives in `_commands/Library/`**, so it belongs to the `Library` context: it runs on
@@ -51,7 +51,7 @@ class ResponseGenerator:
 - **`class Signature`** says what it does (the docstring), what it takes (`Input`), what it
   returns (`Output`) and how people ask for it (`plain_utterances`).
 - **`class ResponseGenerator`** makes it an execution command. Every `__call__` takes
-  `(workflow, command, command_parameters)`: `command_parameters` is the filled `Input`, or
+  `(workflow, command, input)`: `input` is the filled `Input`, or
   `None` for a command that has no `Input` (its annotation then says `None`). Adding an
   `Input` later changes nothing else.
 - **`__call__` returns the command's `Output`.** The framework does the rest: it writes the

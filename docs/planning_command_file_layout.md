@@ -57,15 +57,14 @@ the order written. (2) Its parameters name what it reads: `input`, and earlier p
 facts model it fills: each field says its source, `fact_from("command.field")`. (4) It
 returns its steps, exactly the lines the agent reads. `return []` skips it: decided when the
 phase is reached, on the real facts. A planning command with no `Input` fields may have phases too
-(methods without `input`; every call has the one plan). A `PlanGenerator` may subclass a base
-class in a `_` module (`_commands/_<name>.py`, not a command of its own): it reaches the base's
-phases through `self`; a method of the same name overrides one and may extend its steps with
-`super()` (`return [*super().answer(input, find), "say that ..."]`). Subclassing another
-planning command's `PlanGenerator` is a load error: to reuse its whole job, call that command in
-a `run()` step; to share phases, move them to a base class in a `_` module. A subclass that only
-overrides keeps the base's plan; one that adds phases, or has phases from two bases, writes
-`__phases__` with the order (else a load error), the base's placed anywhere: `return [self.find,
-self.book, self.loans, self.answer]`.
+(methods without `input`; every call has the one plan).
+
+**Sharing phases.** A base class in a `_` module (`_commands/_book_phases.py`, `class BookPhases`,
+as in `tests/planning_tutorial_workflow`) holds phases two commands share; `class PlanGenerator(BookPhases)`
+keeps them and adds its own, and a method of the same name overrides one. A `PlanGenerator` may not
+subclass another command's `PlanGenerator` (a load error): to reuse that command's whole job, call it in
+a `run()` step. With `__phases__` the order is explicit: `return [self.find, self.book, self.loans,
+self.answer]` (default: every phase, in the order written).
 
 **Steps.** `run("command", k=v)` writes a step code runs when every value is given:
 `find_item query=Dune`. `full_list("command")` writes one that code reads through every page
@@ -162,20 +161,36 @@ class Input(BaseModel):
 An `Input` field takes options in `json_schema_extra` (an unknown key fails the load). They work
 on planning commands today; `fastworkflow.planning_commands` has the full rules.
 
-- `strip` (a `str`): words removed from either end of the argument, with a possessive `'s`
-  before a trailing one: a kind word the planner appends to a name ("HR feed" becomes "HR").
-- `subject: True` (a `str`): the argument names a record of the request (a person, a group, a
-  product, a code). It must be one of the request's subjects, a name-like word, or a name written
-  in lower case; one cut short at the start or end of a single subject becomes that subject.
-- `verify: True` (a `bool`, an enum, or a `subject` `str`): a classifier model decides the
-  argument again from the request alone, and its answer replaces the planner's when it is sure
-  enough. It needs `JEV_API_KEY`: without it nothing is checked, and the load logs one INFO line
-  that says so.
-- `means` (an enum, with `verify`): a dict giving each value's meaning, which `verify` reads. Without `verify` it is a load error.
-- `in_request: True` (a `str` or an `int`): a `str` must appear in the request as a verbatim
-  substring; an `int` must be a number the request writes. Otherwise the one value the request
-  writes is taken, or the default when that is written; with several candidates the call is
-  refused.
+There are two check options (the two-option form, fix-3rsq.two-options):
+
+- `in_request: True` (a `str`, an `int` or a `list[str]`): a `str` must appear in the request as a
+  verbatim substring (per item for a `list[str]`, which keeps the items the request writes); an
+  `int` must be a number the request writes. Otherwise the one value the request writes is taken,
+  or the default when that is written; with several candidates the call is refused.
+- `in_request: "subject"` (a `str`): the argument names a record of the request (a person, a group,
+  a product, a code). It must be one of the request's subjects, a name-like word, or a name written
+  in lower case; one cut short at the start or end of a single subject becomes that subject. It
+  implies `in_request`.
+- `verify: True` (a `bool`, an enum, or a `str` with `in_request: "subject"`): a classifier model
+  decides the argument again from the request alone, and its answer replaces the planner's when it
+  is sure enough. It needs `JEV_API_KEY`: without it nothing is checked, and the load logs one INFO
+  line that says so. On an enum, `verify` may instead be a dict giving each value's meaning, which
+  the check reads: `verify={"group": "a group of people", "unit": "an organisation unit"}`. Every
+  key must be one of the enum's values.
+
+`in_request: {"ignore": [words]}` (a `str`): the named words are removed from either end of the value
+before the check, so a kind word the model appends to a name ("Payroll group" becomes "Payroll") is
+cleaned as the request writes it. This is the retired `strip` option, which fails the load. A field
+with no check is cleaned in code instead: `strip_words(text, words)` from `fastworkflow.planning_commands`,
+called in the field's validator or in `Signature.validate_extracted_parameters`.
+
+An `Input` validator's returned value is written back to the arguments: a validator that cleans a
+value changes the argument, and a refusing one still refuses. The checks run first, then
+`validate_extracted_parameters`, then the validators.
+
+The retired options fail the load and name the new spelling: `subject` (write
+`in_request: "subject"`), `means` (write `verify: {value: meaning, ...}`) and `strip` (write
+`in_request: {"ignore": [...]}`, or call `strip_words(...)` for a field with no check).
 
 ## Approval annotation (`approval`)
 
@@ -227,18 +242,18 @@ Intent confirmations and plan review are not approvals. Neither one lets an anno
 
 ## Return values of an execution command
 
-A `ResponseGenerator.__call__` may return one of four forms. The framework wraps each one, so the
-command does not build the envelope itself:
+A `ResponseGenerator.__call__(self, workflow, command, input)` may return one of three forms. The
+framework wraps each one, so the command does not build the envelope itself:
 
 - its own `Signature.Output`: the output is the value, and its JSON is the response;
 - a `str`: the response, with no typed output;
-- a `CommandResponse(response=..., output=...)`;
-- a `CommandOutput`, as before.
+- a `fastworkflow.CommandResponse`, for artifacts, next actions, recommendations or output. It must
+  not set `success=False`.
 
-Any other type fails the call with a `TypeError` that names the command and the type. To decline a
-call, raise `fastworkflow.Refused(message)`: the call returns `success=False` with that message. A
-command with no `Input` receives `None` as its parameters when its `__call__` declares a third
-argument. Otherwise the two-argument form still works.
+Any other type, including a hand-built `CommandOutput`, fails the call with a `TypeError` that names
+the command and the type. To decline a call, raise `fastworkflow.Refused(message)`; with `field=` it
+resets those fields to missing and asks the user for them again. `input` is the filled `Input`
+instance, or `None` when the command has no `Input`. A two-argument `__call__` is a load error.
 
 ## Previews
 
@@ -257,15 +272,15 @@ A preview follows the order above:
 1. the planning command's name, its description and its kind (flat, phased, or fixed steps without
    inputs);
 2. the inputs table: name, type, default, the sample value it is rendered with, the
-   `verify` and `subject` flags and the description, then the other options (`strip`,
-   `means`, `in_request`);
+   `verify` flag, the `in_request` column (`yes`, or `subject`) and the description, then the
+   verify meanings (a `verify` dict);
 3. the example requests (`plain_utterances`);
 4. for a phased planning command, the phases (output model, when each runs, and how it fans out)
    and the facts each output model holds, with their `"from"` sources. When some inputs
    make a call run flat, one line above the table says when it runs as phases, and the
    table is about the phased calls. A phase's condition reads "only when <the tests its
-   method made on the facts>" (`find.uids`); a callable option (`until`) reads as its source;
-   the "fans out" column gives `over`, `item`, `max_items`, `until` (by its source) and
+   method made on the facts>" (`find.uids`);
+   the "fans out" column gives `over`, `item`, `max_items` and
    `bind=False`. A cell that differs by input (the output model, the `when`, the fan-out)
    lists each value with the inputs that give it ("when kind = crate: `CrateMatch`");
 5. the steps for the sample inputs: phase by phase for a phased planning command, the `steps()` list

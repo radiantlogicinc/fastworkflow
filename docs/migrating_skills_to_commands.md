@@ -199,7 +199,7 @@ json_schema_extra={"in_request": True}
 
 On this branch, a planning command's `str` argument is still checked against the request
 (it must be written in the request). The check is implied by the type. Add `in_request` to every
-`str` field of a planning command that relies on that check and has no `subject`. The option makes
+`str` field of a planning command that relies on that check and has no `in_request: "subject"`. The option makes
 the check explicit, and it is the check you keep when the implied one goes:
 
 ```python
@@ -208,8 +208,9 @@ class Input(BaseModel):
                        json_schema_extra={"in_request": True})
 ```
 
-A `str` field that carries `subject` already has the check, so leave it as it is.
-`in_request` takes a `str` or an `int`. On any other type it is a load error.
+A `str` field that carries `in_request: "subject"` already has the check, so leave it as it is.
+`in_request` takes a `str`, an `int` or a `list[str]`; `"subject"` takes a `str`. On any other type it
+is a load error.
 
 ### `PlanGenerator.__call__` is now `__phases__`
 
