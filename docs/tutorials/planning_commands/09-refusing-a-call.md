@@ -167,10 +167,8 @@ Phase member
   1. list_member_loans with the uid of the Raj Patel match
   code runs: list_member_loans member_uid=m2
   facts: Loans(titles=['Dune', 'Emma'], total=2)
-Phase answer
-  1. say that Raj Patel has 2 books (Dune, Emma) on loan
-  answer written by code:
-    Raj Patel has 2 books (Dune, Emma) on loan.
+answer written by __result__:
+  Raj Patel has 2 books (Dune, Emma) on loan.
 ```
 
 ## What you learned

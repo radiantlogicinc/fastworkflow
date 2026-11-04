@@ -86,7 +86,6 @@ The template the planner reads for `author_books`:
 ```text
 find_book query=<author>
 show_book book_uid=<uid>
-say that <books by>
 ```
 
 ## What the agent plans from
@@ -136,7 +135,6 @@ The preview: `book` fans out once per book the search found.
 |---|---|---|---|
 | `find` | `Found` | always | no |
 | `book` | `Book` | always | per item of `find.book_uids` as `uid` (books); at most 5; not bound to a record |
-| `answer` | none | always | no |
 ```
 
 ## At run time
@@ -186,10 +184,8 @@ Phase book (item b4)
   1. show_book book_uid=b4
   code runs: show_book book_uid=b4
   facts: Book(name='Persuasion', copies=1)
-Phase answer
-  1. say that the books by Jane Austen: Emma (2 copies); Persuasion (1 copy)
-  answer written by code:
-    The books by Jane Austen: Emma (2 copies); Persuasion (1 copy).
+answer written by __result__:
+  The books by Jane Austen: Emma (2 copies); Persuasion (1 copy).
 ```
 
 ## What you learned

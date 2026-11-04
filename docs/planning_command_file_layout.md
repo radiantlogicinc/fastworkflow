@@ -42,10 +42,10 @@ class PlanGenerator:                  # a command generates a response; a planni
         return [pick("open_item_by_uid", named=input.name),
                 full_list("list_parts")]
 
-    def answer(self, input, item=None):                   # None: item was skipped
+    def __result__(self, input, item=None):               # the answer; None: item was skipped
         if item is None:
-            return [f"say that no item named {input.name} was found", "apply no change"]
-        return [f"say that {item.uid} has parts {self._parts(item)}", "apply no change"]
+            return f"No item named {input.name} was found."
+        return f"{item.uid} has parts {self._parts(item)}."
 
     def _parts(self, item):                               # _name: a helper, not a phase
         return ", ".join(item.parts) or "none"
@@ -57,7 +57,10 @@ the order written. (2) Its parameters name what it reads: `input`, and earlier p
 facts model it fills: each field says its source, `fact_from("command.field")`. (4) It
 returns its steps, exactly the lines the agent reads. `return []` skips it: decided when the
 phase is reached, on the real facts. A planning command with no `Input` fields may have phases too
-(methods without `input`; every call has the one plan).
+(methods without `input`; every call has the one plan). (5) `__result__` is the one method
+that is not a phase: it returns the call's answer from the phases' facts, and its parameters
+name `input` and the phases (`__result__(self, input, item=None)`). It may return `None` to let
+the agent answer, as a planning command without `__result__` does.
 
 **Sharing phases.** A base class in a `_` module (`_commands/_book_phases.py`, `class BookPhases`,
 as in `tests/planning_tutorial_workflow`) holds phases two commands share; `class PlanGenerator(BookPhases)`
@@ -71,9 +74,10 @@ self.answer]` (default: every phase, in the order written).
 (`(full list)`). `pick("command", named=name)` opens the row a find listed, the one whose
 label matches `name` (`pick("command", x_uid=uid, named=name)` when the uid is known).
 `when("condition", step)` writes a step the agent decides (`only when ...`), and
-`do_not_run("command")` a guard code passes over. `say that ...` is an answer line code copies
-word for word; `apply no change` and `do not run X` are guards; any other line is the agent's.
-A last phase of only `say that` lines and guards is answered by code. A note in parentheses
+`do_not_run("command")` a guard code passes over. `say that ...` is a verbatim line that writes no
+answer by itself in a phase before the last (only `__result__` can use its text); `apply no change`
+and `do not run X` are guards; any other line is the agent's. A last phase of only `say that` lines
+does not load: return the answer from `__result__(self, input, <phase facts...>)`. A note in parentheses
 after a step is never sent. Text helpers: `num(x)`, `count(n, "login")`, `listed(names, total,
 "group")`.
 

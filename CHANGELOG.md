@@ -134,6 +134,27 @@ error that names the new form; there is no legacy support, except where an item 
     `input`. The framework passes it positionally, so a command that names it differently still runs. New
     code uses `input`.
 
+11. **BREAKING: a declared Output must be returned (fix-3rsq.declared-output-required).** Before this
+    release, a command that declared `Signature.Output` but returned a `str`, or a `CommandResponse`
+    without that output, only logged a warning, and its MCP tool advertised `outputSchema` with no
+    `structuredContent`. Now it is a call error that names the fix. Return the Output, or
+    `CommandResponse(response=<the same text>, output=<Output>)` when the response text must stay as it
+    was. A command that declares no Output is unchanged. Planning commands are not affected: their
+    `__result__` fallback still writes text without an output, and that is still only logged.
+
+12. **BREAKING: a last phase of 'say that' lines is a load error (fix-3rsq.p14.1, Phase 14).** A planning
+    command whose last phase is made of `say that` lines (and guards) no longer loads: its message reads
+    `phase '<name>' writes the answer as 'say that' lines, which code no longer copies; return the text from
+    __result__(self, input, <phase facts...>) instead`. Return the answer from
+    `__result__(self, input, <phase facts...>)` (a phase's name is a parameter, its facts the value). A flat
+    planning command whose answer is `say that` lines is refused the same way, at load where the load check
+    can see its steps and at run time otherwise (fix-3rsq.p14.6). A non-last phase made only of `say that`
+    lines is skipped: no model call, and its text reaches the answer only through `__result__` (fix-3rsq.p14.6).
+    `__result__` returning `None` means no code-written answer on that path (fix-3rsq.p14.6): the answer is
+    written as if the command had no `__result__`, with no warning. A flat call's agent answers. A phased
+    call's last phase runs its steps only, and its answer is one model call with the phases' facts (a span
+    `fw.skill.answer`, span contract v34).
+
 ### Upgrading to Phase 11 (check options, one validation step)
 
 1. **Declare the checks a field needs.** The framework no longer checks a `str` or an `int` by its

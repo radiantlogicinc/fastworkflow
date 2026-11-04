@@ -26,7 +26,6 @@ Depth: 1 (lower bound; open steps name no command)
 |---|---|---|---|
 | `find` | `Found` | always | no |
 | `book` | `Book` | only when `find.book_uids` | no |
-| `answer` | none | always | no |
 
 ## Facts
 
@@ -66,12 +65,6 @@ _Steps below are rendered with placeholder facts: `<phase.fact>` stands for that
 
 1. `show_book book_uid=<find.book_uids[0]>`
 
-### Phase 3: `answer`
+## Answer
 
-Reads: `book`. Output: none.
-
-_Steps below are rendered with placeholder facts: `<phase.fact>` stands for that fact as read at run time, and 999999 (or 999,999) for a number fact the code converted; values computed from facts (counts, comparisons, matches) are not real._
-
-1. `say that <book.name> is by <book.author>; the library owns <book.copies> copies`
-
-Answer: written by code, word for word (step 1 verbatim).
+Written by `__result__`: \<book.name> is by \<book.author>; the library owns \<book.copies> copies.

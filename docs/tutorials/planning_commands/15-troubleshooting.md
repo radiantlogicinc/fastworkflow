@@ -544,3 +544,29 @@ class PlanGenerator:
 _commands/fact_source.py: Found.uid (from 'list_shelves.uid'): no command named 'list_shelves'
 ```
 
+
+<!-- broken: say_that_last -->
+```python
+from pydantic import BaseModel, Field
+from fastworkflow.planning import run
+
+
+class Signature:
+    """Show the branches."""
+
+
+class PlanGenerator:
+    class Branches(BaseModel):
+        names: list[str] = Field(default_factory=list, description="the branch names")
+
+    def find(self) -> Branches:
+        return [run("list_branches")]
+
+    def answer(self, find):
+        return [f"say that {len(find.names)} branches"]
+```
+
+<!-- load-error -->
+```text
+PlanningCommandFormatError: _commands/say_that_last.py: phase 'answer' writes the answer as 'say that' lines, which code no longer copies; return the text from __result__(self, input, ...) instead
+```

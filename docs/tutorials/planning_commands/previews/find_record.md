@@ -28,7 +28,6 @@ Depth: 1 (lower bound; open steps name no command)
 | phase | output | runs | fans out |
 |---|---|---|---|
 | `find` | when kind = book: `BookMatch`<br>when kind = member: `MemberMatch` | always | no |
-| `answer` | none | always | no |
 
 ## Facts
 
@@ -62,16 +61,6 @@ Reads no earlier facts. Output: `BookMatch`.
 
 Pages: step 1 reads page 1 only.
 
-#### Phase 2: `answer`
-
-Reads: `find`. Output: none.
-
-_Steps below are rendered with placeholder facts: `<phase.fact>` stands for that fact as read at run time, and 999999 (or 999,999) for a number fact the code converted; values computed from facts (counts, comparisons, matches) are not real._
-
-1. `say that <name> matches <find.total> book (<find.labels[0]>)`
-
-Answer: written by code, word for word (step 1 verbatim).
-
 ### Plan when kind = member
 
 #### Phase 1: `find`
@@ -80,12 +69,12 @@ Reads no earlier facts. Output: `MemberMatch`.
 
 1. `find_member query=<name>`
 
-#### Phase 2: `answer`
+## Answer
 
-Reads: `find`. Output: none.
+### Answer when kind = book
 
-_Steps below are rendered with placeholder facts: `<phase.fact>` stands for that fact as read at run time, and 999999 (or 999,999) for a number fact the code converted; values computed from facts (counts, comparisons, matches) are not real._
+Written by `__result__`: \<name> matches \<find.total> book (\<find.labels[0]>).
 
-1. `say that <name> matches <find.total> member (<find.labels[0]>)`
+### Answer when kind = member
 
-Answer: written by code, word for word (step 1 verbatim).
+Written by `__result__`: \<name> matches \<find.total> member (\<find.labels[0]>).

@@ -125,8 +125,6 @@ The template the planner reads for `book_loans`:
 find_book query=<title>
 show_book with the uid of the <title> match (only when find.book_uids)
 list_loans book_uid=<book.uid> (full list)
-say that <book.name> is by <book.author>; the library owns <book.copies> copies
-say that it is on loan to <loans.total> borrowers (<loans.borrowers>)
 ```
 
 ## What the agent plans from
@@ -159,7 +157,6 @@ The preview: the phases `book_loans` runs, one of them through the nested `book_
 | `find` | `Found` | always | no |
 | `book` | `Book` | only when `find.book_uids` | no |
 | `loans` | `Loans` | always | no |
-| `answer` | none | always | no |
 ```
 
 ## At run time

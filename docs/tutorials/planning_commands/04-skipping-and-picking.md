@@ -127,7 +127,6 @@ The template the planner reads for `book_by_title`:
 ```text
 find_book query=<title>
 show_book with the uid of the <title> match (only when find.book_uids)
-say that <book.name> is by <book.author>; the library owns <book.copies> copies
 ```
 
 ## What the agent plans from
@@ -167,7 +166,6 @@ The preview lists the phases, and `book` runs only when `find` found a book uid.
 |---|---|---|---|
 | `find` | `Found` | always | no |
 | `book` | `Book` | only when `find.book_uids` | no |
-| `answer` | none | always | no |
 ```
 
 ## At run time
@@ -248,10 +246,8 @@ Phase book
   1. show_book with the uid of the Dune match
   code runs: show_book book_uid=b1
   facts: Book(uid='b1', name='Dune', author='Frank Herbert', copies=3)
-Phase answer
-  1. say that Dune is by Frank Herbert; the library owns 3 copies
-  answer written by code:
-    Dune is by Frank Herbert; the library owns 3 copies.
+answer written by __result__:
+  Dune is by Frank Herbert; the library owns 3 copies.
 ```
 
 ## What you learned

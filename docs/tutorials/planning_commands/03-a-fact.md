@@ -66,7 +66,8 @@ class PlanGenerator:
 - **It returns a `str`**, as an execution command's `__call__` returns a `str` when it has no
   `Output`: that text is the call's answer, as it is. When this command is the whole plan
   for a request, the user reads it as written: no model rewrites it. `__result__` can also
-  return the command's `Output`, or both (page 11).
+  return the command's `Output`, or both (page 11). Returning `None` instead leaves the answer
+  to the agent, as with no `__result__`.
 - **`count(find.total, 'book')`** writes "1 book" or "2 books" (page 7 has the other
   helpers).
 - **`query`** describes what this command takes, in its own words. Here that happens to be
@@ -99,7 +100,6 @@ The template the planner reads for `count_books` (its steps with the query unkno
 <!-- template: count_books -->
 ```text
 find_book query=<query>
-say that <find.total> books match <query>
 ```
 
 ## What the agent plans from
@@ -146,7 +146,6 @@ The planning command's preview: its phases and its facts.
 | phase | output | runs | fans out |
 |---|---|---|---|
 | `find` | `Found` | always | no |
-| `answer` | none | always | no |
 ```
 
 ## At run time
@@ -180,7 +179,7 @@ Page 1's overview could say its branches the same way: annotate its `branches` p
 `ListBranches.Output`, imported from `list_branches.py`, and read it through a parameter
 named `branches`.
 
-Run offline, `find` hands its fact on and `answer` writes the sentence from it:
+Run offline, `find` hands its fact on and `__result__` writes the sentence from it:
 
 <!-- dry-run: count_books {"query": "Dune"} -->
 ```text
@@ -188,10 +187,8 @@ Phase find
   1. find_book query=Dune
   code runs: find_book query=Dune
   facts: Found(total=2)
-Phase answer
-  1. say that 2 books match Dune
-  answer written by code:
-    2 books match Dune.
+answer written by __result__:
+  2 books match Dune.
 ```
 
 ## What you learned

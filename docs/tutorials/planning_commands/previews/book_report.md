@@ -24,14 +24,11 @@ Depth: 1 (lower bound; open steps name no command)
 
 ## Phases
 
-The call runs as phases only when brief = false; for other inputs it runs flat, as one plan. The table is about the phased calls.
-
 | phase | output | runs | fans out |
 |---|---|---|---|
 | `find` | `Found` | always | no |
-| `book` | `Book` | only when `find.book_uids` | no |
-| `loans` | `Loans` | only when loans = true | no |
-| `answer` | none | always | no |
+| `book` | `Book` | only when brief = false, and then only when `find.book_uids` | no |
+| `loans` | `Loans` | only when loans = true, brief = false | no |
 
 ## Facts
 
@@ -82,24 +79,11 @@ _Steps below are rendered with placeholder facts: `<phase.fact>` stands for that
 
 1. `show_book with the uid of the <title> match`
 
-#### Phase 3: `answer`
-
-Reads: `book`. Output: none.
-
-_Steps below are rendered with placeholder facts: `<phase.fact>` stands for that fact as read at run time, and 999999 (or 999,999) for a number fact the code converted; values computed from facts (counts, comparisons, matches) are not real._
-
-1. `say that <book.name> is by <book.author>; the library owns <book.copies> copies`
-
-Answer: written by code, word for word (step 1 verbatim).
-
 ### Plan when brief = true
 
-For these inputs the call runs flat: one phase that reads no facts, as one plan.
+#### Phase 1: `find`
 
-1. `find_book query=<title>`
-2. `say whether the library has the book`
-
-Pages: step 1 reads page 1 only.
+As in the plan when loans = false, brief = false.
 
 ### Plan when loans = true, brief = false
 
@@ -121,13 +105,16 @@ _Steps below are rendered with placeholder facts: `<phase.fact>` stands for that
 
 Pages: step 1 reads up to 20 pages.
 
-#### Phase 4: `answer`
+## Answer
 
-Reads: `book`, `loans`. Output: none.
+### Answer when loans = false, brief = false
 
-_Steps below are rendered with placeholder facts: `<phase.fact>` stands for that fact as read at run time, and 999999 (or 999,999) for a number fact the code converted; values computed from facts (counts, comparisons, matches) are not real._
+Written by `__result__`: \<book.name> is by \<book.author>; the library owns \<book.copies> copies.
 
-1. `say that <book.name> is by <book.author>; the library owns <book.copies> copies`
-2. `say that it is on loan to <loans.total> borrower (<loans.borrowers[0]>)`
+### Answer when brief = true
 
-Answer: written by code, word for word (steps 1 and 2 verbatim).
+Written by `__result__`: Yes, the library has \<title>.
+
+### Answer when loans = true, brief = false
+
+Written by `__result__`: \<book.name> is by \<book.author>; the library owns \<book.copies> copies. It is on loan to \<loans.total> borrower (\<loans.borrowers[0]>).

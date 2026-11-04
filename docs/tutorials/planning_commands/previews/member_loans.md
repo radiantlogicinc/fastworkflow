@@ -26,7 +26,6 @@ Depth: 1 (lower bound; open steps name no command)
 |---|---|---|---|
 | `find` | `Found` | always | no |
 | `member` | `Loans` | only when `find.member_uids` | no |
-| `answer` | none | always | no |
 
 ## Facts
 
@@ -66,12 +65,6 @@ _Steps below are rendered with placeholder facts: `<phase.fact>` stands for that
 
 Pages: step 1 reads page 1 only.
 
-### Phase 3: `answer`
+## Answer
 
-Reads: `member`. Output: none.
-
-_Steps below are rendered with placeholder facts: `<phase.fact>` stands for that fact as read at run time, and 999999 (or 999,999) for a number fact the code converted; values computed from facts (counts, comparisons, matches) are not real._
-
-1. `say that <member> has <member.total> book (<member.titles[0]>) on loan`
-
-Answer: written by code, word for word (step 1 verbatim).
+Written by `__result__`: \<member> has \<member.total> book (\<member.titles[0]>) on loan.

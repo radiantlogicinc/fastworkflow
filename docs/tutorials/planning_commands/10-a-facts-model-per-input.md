@@ -192,7 +192,6 @@ The template the planner reads for `find_record`:
 <!-- template: find_record -->
 ```text
 <find_book or find_member, by kind> query=<name>
-say that <name> matches <find.total> <books or members, by kind> (<find.labels>)
 ```
 
 ## What the agent plans from
@@ -215,7 +214,6 @@ The preview lists the phases its facts models come from.
 | phase | output | runs | fans out |
 |---|---|---|---|
 | `find` | when kind = book: `BookMatch`<br>when kind = member: `MemberMatch` | always | no |
-| `answer` | none | always | no |
 ```
 
 ## What you learned

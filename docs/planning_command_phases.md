@@ -21,7 +21,7 @@ from fastworkflow.planning import full_list, pick, run
 class PlanGenerator:
     def __phases__(self, input):                      # the shape of this call
         notes = [self.notes] if input.notes else []
-        return [self.find, self.book, *notes, self.report]
+        return [self.find, self.book, *notes]
 
     def find(self, input) -> Found:
         return [run("open_library"), run("find_book", query=input.name)]
@@ -33,8 +33,8 @@ class PlanGenerator:
     def notes(self, book):
         return [run("count_notes", book_uid=book.uid)]
 
-    def report(self, book):
-        return [f"say that {book.uid} has loans {self._loans(book)}"]
+    def __result__(self, input, book):           # the answer: not a phase
+        return f"{book.uid} has loans {self._loans(book)}."
 
     def _loans(self, book):
         return ", ".join(book.loan_uids) or "none"
@@ -121,8 +121,14 @@ It returns a `str` (the answer), a `CommandResponse`, or an instance of the plan
 (`planning_phases.command_response_from_call_result`). A declared `Signature.Output` is built only
 by `__result__`, so it is a load error without one. Any other return, an empty `str`, or an
 exception makes one model call write the answer instead, with a logged warning
-(`planning_phases.run_call_result`). When `__result__` is present its answer is the call's
-answer, and the answers of the phases are not shown.
+(`planning_phases.run_call_result`). `None` is not a failure: it means no code-written answer on
+this path (3.16). The answer is then written as if the command had no `__result__`, with no
+warning: the agent's answer for a flat call, and for a phased call one model call with the phases'
+facts (`fw.skill.answer`, fix-3rsq.p14.6). A phased call's last phase runs its steps only and writes no
+answer of its own. A last phase that names no command gets one model call with no tools either way.
+Return `None` to let the model answer.
+When `__result__` returns text, its answer is the call's answer and the answers of the phases are
+not shown; a model call that would write a phase's answer runs only when `__result__` returns `None`.
 
 ## How a phased planning command call runs
 
@@ -291,8 +297,8 @@ instead of one executor run on the whole list.
    run. No text a phase's run wrote is shown: the failed phase's own answer
    may report what it never read. The turn goes on with its other sub-tasks and
    completes; the failure is visible in the answer and on the phase's span.
-7. **The answer.** The sub-task has one answer: the **last** phase's, unless the planning
-   command defines `__result__` (see "The result" above). The last phase
+7. **The answer.** The sub-task has one answer: the **last** phase's, unless its `__result__`
+   returns text (see "The result" above). The last phase
    writes it from the facts its steps carry, built in code by its `steps_fn` (for
    example a final phase that runs no command and whose steps state the values to
    report). Earlier phases' answers are not shown, except when the call fails. A
@@ -327,15 +333,20 @@ instead of one executor run on the whole list.
        since only the author knows whether the facts already answer the head, and a guard
        word with no negation (`apply a 10% discount to the total`).
 
-     When every step is verbatim or a guard (and one at least is verbatim), there is no
-     model call: `answer_from_steps` writes one line per step, in step order, unnumbered,
-     guards dropped: `say that P` is `P.` (first letter in capitals, a full stop added
-     when it has none), so `say that what X holds: facts` is `What X holds: facts.`. A
-     `say that` followed by an instruction (`say that the riskier one is whichever has
-     more findings`) is copied too: write the finished sentence. One judgement step and the model
-     writes the whole answer, as below. This is always on (its temporary switch was
-     removed after stages 12 and 13 confirmed the gain). The phase's span says which
-     (`answer_by_code`).
+     When every step is verbatim or a guard (and one at least is verbatim), code can write
+     the answer from the steps with no model call (`answer_from_steps`: one line per step, in
+     step order, unnumbered, guards dropped: `say that P` is `P.`, the first letter in
+     capitals and a full stop added when it has none). Since Phase 14 that is only a flat
+     call's answer (its steps are the answer) and the fallback when the model's reply is
+     empty. The phase's span says which (`answer_by_code`). One judgement step and the model
+     writes the whole answer, as below.
+     A phase before the last made only of `say that` lines writes no answer and is skipped
+     (3.16 (a)): its text reaches the answer only through `__result__`. A last phase of only
+     `say that` lines does not load (the 3.16 error, `last_phase_say_that_message`): write its
+     answer as the return value of `__result__(self, input, <phase facts...>)` instead. A phased
+     last phase whose steps, built with the run's facts, are only `say that` lines is refused
+     at run time with the same message: that phase fails, and the turn's answer names the
+     failure (3.16 (b)). A flat call is not refused: its `say that` lines are its answer.
      So write a step's facts as the answer should read them: an instruction left in the
      facts (`..., and name every one of them:`) is copied into the answer.
    - **The answer-only answer is checked in code** (`planning_phases.answer_only_answer`).
@@ -679,6 +690,11 @@ Nothing changes for the app developer.
 
 ## Tracing
 
+The deferred answer of a phased call (one model call with the phases' facts, made only when `__result__`
+returns `None`) is one `fw.skill.answer` span
+(span contract v34, `fw.skill.answer` v1) with `skill`, `phase`, `phase_index` and `phase_count`. It is
+not a phase, so it has no `fw.agent.execute` child.
+
 Each phase run (each item of a fan-out phase) is one `fw.skill.phase` span (span
 contract v24, `fw.skill.phase` v6), the parent of that run's `fw.agent.execute`:
 
@@ -688,7 +704,7 @@ contract v24, `fw.skill.phase` v6), the parent of that run's `fw.agent.execute`:
 | `step_budget`, `first_step` | the run's budget and its first step number |
 | `answer_only` | the phase named no command: one model call with no tools wrote its answer (its `fw.agent.execute` is the child, with no tool calls) |
 | `answer_by_code` | an answer-only phase only: `true` when code wrote its answer from its steps, with no model call (every step verbatim or a guard, `answer_by_code`) |
-| `uses_result` | an answer-only phase of a command with a result method, written when that phase is skipped (no executor, no model call) |
+| `uses_result` | an answer-only phase of a command with a result method: its span is skipped (no executor); its model call, if it needs one, runs only when `__result__` returns `None` (3.16) |
 | `item`, `item_index`, `item_count`, `items_total` | one item of a fan-out phase: the item, its 0-based index of `item_count` items run, of `items_total` before the cap |
 | `record_issues` | a bound item's record-check flags (a list, `[]` when none); `record` is then the item's bound record |
 | `skipped` | the phase's callable `when` was false: nothing ran, no child span (`false` with `facts_error` when deciding it failed) |

@@ -112,7 +112,8 @@ the load.
 fails the call. A planning command's runs took many steps and still answer the request, so a
 `__result__` that raises, or returns something other than its three forms (an `Output` of
 another class included), keeps the call: a model writes the answer from the phases' runs,
-`output` is `None`, and the warning names the command and the exception.
+`output` is `None`, and the warning names the command and the exception. A `None` return is not
+a failure: the answer is the agent's, as with no `__result__`, with no warning.
 
 ## What the agent plans from
 

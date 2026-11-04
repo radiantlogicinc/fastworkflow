@@ -27,7 +27,6 @@ Depth: 1 (lower bound; open steps name no command)
 |---|---|---|---|
 | `find` | `Found` | always | no |
 | `book` | `Book` | always | per item of `find.book_uids` as `uid` (books); at most 5; not bound to a record |
-| `answer` | none | always | no |
 
 ## Facts
 
@@ -70,12 +69,6 @@ For each later item (shown for the second), `uid` = `<find.book_uids[1]>`:
 
 1. `show_book book_uid=<find.book_uids[1]>`
 
-### Phase 3: `answer`
+## Answer
 
-Reads: `book`. Output: none.
-
-_Steps below are rendered with placeholder facts: `<phase.fact>` stands for that fact as read at run time, and 999999 (or 999,999) for a number fact the code converted; values computed from facts (counts, comparisons, matches) are not real._
-
-1. `say that the books by <author>: <book[0].name> (<book[0].copies> copy); <book[1].name> (<book[1].copies> copy)`
-
-Answer: written by code, word for word (step 1 verbatim).
+Written by `__result__`: The books by \<author>: \<book[0].name> (\<book[0].copies> copy); \<book[1].name> (\<book[1].copies> copy).
