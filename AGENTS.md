@@ -117,6 +117,15 @@ per planning command to `<workflow_folder>/../docs/planning_command_previews/`. 
 nothing and exits 1 when a preview is stale, missing or extra, or when a `from_` edge does not resolve.
 `command preview` replaced `fastworkflow skill preview`.
 
+Running one call with no model: `fastworkflow command run-code <workflow_folder> <command> [--input '<json>']
+[--start-with '<step>' ...]` runs a planning command phase by phase (its steps as the runtime writes them, each
+step code can run, the facts, the answer), stopping at the first open step with exit 0, or an execution command
+and prints its `CommandOutput`. It runs the workflow's real commands, so use a development instance. Exit 1 when
+the command does not load, a step fails or a hook raises. `fastworkflow.planning.run_code` is the same run for
+integration tests (`tests/test_run_code.py`). Command files that do not load are reported by `fastworkflow run`
+(before its first prompt), `fastworkflow train` (before training) and the FastAPI server (at startup), all through
+`command_preview.load_problems`.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
 ## Beads Issue Tracker
 

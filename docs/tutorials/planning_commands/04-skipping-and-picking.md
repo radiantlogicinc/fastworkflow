@@ -214,7 +214,7 @@ Phase find
   facts: Output(book_uids=['b1', 'b2'], titles=['Dune', 'Dune Messiah'], total=2)
 Phase book
   1. open_book with the uid of the Dun match
-  step 1 is open: the agent runs it and the rest (the dry run stops here)
+  step 1 is open: the agent would run it and the rest
 ```
 
 No match:

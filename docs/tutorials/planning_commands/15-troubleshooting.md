@@ -2,14 +2,17 @@
 
 A command file that does not load is skipped, and the workflow's other commands still load.
 `fastworkflow run` prints the error before its first prompt, `fastworkflow train` stops on
-it, and `fastworkflow command preview --check` fails naming the file and its error. Each
+it before any training, `run_fastapi_mcp` logs it at startup, and
+`fastworkflow command preview --check` fails naming the file and its error. Each
 snippet below is a file saved in a copy of the sample workflow, at the path its message
 names.
 
 A call that loads but does not do what you meant is easiest to see with no model in the
-way. The runs shown on these pages are produced offline, with no model, by the tutorial's
-test helper (`dry_run` in `tests/test_planning_command_tutorials.py`), and the test checks
-them against the code.
+way: `fastworkflow command run-code <workflow> <command> --input '<json>'` runs one call phase
+by phase, as the runtime does, and stops at the first step code cannot run (exit 0). Its output
+is the runs the pages show, and a hook that raises exits 1 naming the hook (for example the
+`__result__()` of `Library/book_loans`). Use `--start-with` for a command of a record's context
+(`shelf_report` in the sample workflow needs a book first: `--start-with 'open_book book_uid=b1'`). The tests check the pages' runs against the code.
 
 ## Where commands live
 

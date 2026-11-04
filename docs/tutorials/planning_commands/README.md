@@ -130,6 +130,7 @@ From the repository root:
 
 ```sh
 fastworkflow command preview fastworkflow/examples/library --out /tmp/library_previews
+fastworkflow command run-code fastworkflow/examples/library book_loans --input '{"title": "Dune"}'
 fastworkflow train fastworkflow/examples/library
 fastworkflow run fastworkflow/examples/library
 ```
@@ -142,12 +143,18 @@ of `fastworkflow run`: `--assistant` runs deterministic mode and refuses a plann
 matches a planning command, so the planner plans from each one's template, and the `verify`
 option checks nothing (pages 9 and 14).
 
-The *runs* shown on these pages are produced offline, with no model, by the tutorial's test
-helper, `dry_run` in `tests/test_planning_command_tutorials.py`, and the test checks them
-against the code. A run shows each phase's steps as the runtime writes them, the steps code
-runs against the sample commands, the facts filled from those runs, and where code hands over
-to the agent. A phase's facts are printed as the model that holds them: `Output(...)` is the
-phase's command `Output`, handed on as it is.
+The *runs* shown on these pages are what `fastworkflow command run-code` prints for the call,
+run with no model: the same text the tutorial's test gets from `fastworkflow.planning.run_code`
+(`tests/test_planning_command_tutorials.py`), which checks the pages against the code. A run shows
+each phase's steps as the runtime writes them, the steps code runs against the sample commands
+(on a real session of the sample workflow, so their effects are real: run it on a copy of the
+workflow, not on your app's data), each move onto a record (`now in:`), the facts filled from
+those runs, and where code hands over to the agent. A phase's facts are printed as the model
+that holds them: `Output(...)` is the phase's command `Output`, handed on as it is. A step that
+names another planning command runs that call indented. `run-code` exits 0 when the run completes
+or stops at the first step code cannot run, and 1 when the command does not load or a step or a
+hook fails. `--start-with 'open_book book_uid=b1'` puts the workflow on a record first, for a
+command of that record's context (`shelf_report` is one).
 
 The reference for everything here: [planning_command_file_layout.md](../../planning_command_file_layout.md)
 (the one-page guide) and [planning_command_phases.md](../../planning_command_phases.md)

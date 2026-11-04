@@ -238,8 +238,8 @@ phase's runs. Nothing else passes from one phase to the next: the branches the f
 listed are not in the answer. To say them too, the first phase must hand them on as a
 **fact**: page 3.
 
-This trace is what the tutorial's dry run prints for the call: it runs every step code can
-run, against the sample commands, with no model, and stops where the agent would take over.
+This trace is what `fastworkflow command run-code` prints for the call: it runs every step code
+can run, against the sample commands, with no model, and stops where the agent would take over.
 
 Planning commands run only in agent mode. In assistant mode (`fastworkflow run --assistant`,
 or a message typed with a leading `/`), naming one gets `Library/overdue_summary is a

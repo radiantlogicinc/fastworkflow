@@ -213,6 +213,16 @@ error that names the new form; there is no legacy support, except where an item 
 
 ### Added
 
+- **`fastworkflow command run-code`, and `fastworkflow.planning.run_code`** (fix-3rsq.17.1). One call of a command,
+  run with no model: a planning command phase by phase, as the tutorial's runs show it, stopping at the first
+  open step with exit 0; `--start-with` puts the workflow on a record first; a step naming a planning command
+  runs it indented; an execution command runs and prints its `CommandOutput`. A hook that raises exits 1, naming
+  it. The steps are the workflow's real commands on a real session, so the help says to use a development
+  instance. The tutorial test's `dry_run` is now a call to `run_code`, and the pages' traces are unchanged except
+  the open-step line, which now reads `step <n> is open: the agent would run it and the rest`.
+- **Load problems where developers look** (fix-3rsq.17.3). `fastworkflow run` prints the command files that do not
+  load before its first prompt, `fastworkflow train` stops with them before training, and `run_fastapi_mcp` logs
+  them at startup. All three use `command_preview.load_problems`.
 - **Jev chooses among an ambiguous intent's candidates** (fix-jd9o.1). When the intent classifier
   returns several candidates, Jev picks one before the "command is ambiguous" prompt is shown. The
   turn routes to Jev's pick when Jev is at least 0.9 sure (`INTENT_TIEBREAK_THRESHOLD`); otherwise the
