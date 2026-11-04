@@ -175,6 +175,35 @@ def escalation_outcome_of(predictions: list[str]) -> str:
     return ESCALATION_OUTCOME_SUPPRESSED_BY_AMBIGUITY
 
 
+def _jev_intent_tiebreak(utterance: str, predictions: list[str], folderpath: str,
+                         context: str, nlu_trace: dict) -> Optional[str]:
+    """The label Jev chooses among the classifier's ambiguous *predictions*, or None.
+
+    Records the question and its answer in ``nlu_trace["jev_tiebreak"]`` whenever Jev was asked.
+    The import is lazy: ``workflow_agent`` imports this stack, so a top-level import would be circular.
+    """
+    from fastworkflow.workflow_agent import (
+        INTENT_TIEBREAK_THRESHOLD, choose_ambiguous_command, intent_tiebreak_descriptions)
+    candidates = [str(p) for p in predictions]
+    descriptions = intent_tiebreak_descriptions(folderpath, context, candidates)
+    label, probability = choose_ambiguous_command(utterance, candidates, descriptions)
+    if label is not None:
+        nlu_trace["jev_tiebreak"] = {
+            "choice": label,
+            "probability": probability,
+            "threshold": INTENT_TIEBREAK_THRESHOLD,
+            "candidates": candidates,
+        }
+        return label
+    if probability is not None:
+        nlu_trace["jev_tiebreak"] = {
+            "choice": None,
+            "probability": probability,
+            "threshold": INTENT_TIEBREAK_THRESHOLD,
+        }
+    return None
+
+
 def _classifier_signal_version(model_artifact_path: str, model_tier: str) -> str:
     """Identity of the trained artifact behind a classifier signal.
 
@@ -285,6 +314,11 @@ def command_identity_uncertainty(nlu_trace: dict) -> DecisionUncertainty:
         # embedding similarity, so the structured record genuinely cannot carry it.
         # "not-instrumented" is the honest report of a decision whose measurement
         # the contract cannot represent yet.
+        signals_absent_reason = "not-instrumented"
+    elif matcher_layer == "jev_tiebreak":
+        # Jev chose among the classifier's candidates. Its probability is on the span as
+        # `jev_tiebreak`, but §6.6.1 has no signal kind for an LLM's probability, so the
+        # record says so. The candidate count is kept: the ambiguity was real.
         signals_absent_reason = "not-instrumented"
     elif matcher_layer == "classifier":
         signal_version = nlu_trace["classifier_signal_version"]
@@ -769,6 +803,14 @@ class CommandNamePrediction:
 
                     if len(predictions)==1:
                         command_name = predictions[0].split('/')[-1]
+                    elif jev_label := _jev_intent_tiebreak(
+                            command, predictions, self.app_workflow_folderpath,
+                            command_context_name, nlu_trace):
+                        # Jev chose among the candidates, confidently: route to it as if the
+                        # classifier had. The ambiguity prompt is not shown. The choice is not
+                        # written to the utterance cache: only the clarification stages do that.
+                        command_name = jev_label.split('/')[-1]
+                        nlu_trace["matcher_layer"] = "jev_tiebreak"
                     else:
                         # If confidence is low, treat as ambiguous command (type 1)
                         if escalation_signals := self.escalation_signals_in(predictions):

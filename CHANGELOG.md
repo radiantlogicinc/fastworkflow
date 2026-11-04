@@ -192,6 +192,30 @@ error that names the new form; there is no legacy support, except where an item 
 
 ### Added
 
+- **Jev chooses among an ambiguous intent's candidates** (fix-jd9o.1). When the intent classifier
+  returns several candidates, Jev picks one before the "command is ambiguous" prompt is shown. The
+  turn routes to Jev's pick when Jev is at least 0.9 sure (`INTENT_TIEBREAK_THRESHOLD`); otherwise the
+  prompt is shown as before. A confident `wildcard` takes the existing not-here path to the parent
+  context. Jev's pick is never written to the utterance cache, and the span records it under
+  `jev_tiebreak` with `matcher_layer` set to `jev_tiebreak`. It runs only with `JEV_API_KEY`; set
+  `FW_JEV_INTENT_TIEBREAK=off` to turn it off.
+- **Jev checks the fields an LLM extraction filled** (fix-jd9o.3). After LLM parameter extraction,
+  Jev decides for each filled field whether the request gives that value. A field Jev is at least 0.9
+  sure is not given (`FIELD_GIVEN_THRESHOLD`) is reset to its not-given value: an optional field takes
+  its default, and a required field is asked for. Values the extractor invented, such as
+  `filter='Jane Doe'` from a bare `show_group_members`, are therefore no longer run. The deterministic
+  forms (tags, `name=value`, positional) are not checked. The reset fields are in the extraction span's
+  diagnostics as `fields_reset_not_given`. It runs only with `JEV_API_KEY`; set `FW_JEV_FIELD_GIVEN=off`
+  to turn it off.
+- **`DatabaseValidator.fuzzy_match_with_request`: Jev picks among close values** (fix-jd9o.5). The helper
+  returns the same three-tuple as `fuzzy_match`, and a unique fuzzy match still stands. When fuzzy
+  matching leaves several candidates, Jev reads the request and each candidate's description. It
+  returns the intended value when Jev is at least 0.9 sure (`VALUE_PICK_THRESHOLD`); otherwise the hook
+  asks as before. The helper takes the request from the hook's `command_text` parameter and a
+  `{value: description}` dict. Descriptions are required, and with none Jev is not called: from bare
+  names, Jev picked wrongly. In the pre-registered test it made 97 confident picks with 1 wrong, and
+  unnecessary questions fell from 89 to 41. It runs only with `JEV_API_KEY`; set
+  `FW_JEV_VALUE_PICK=off` to turn it off.
 - **Check options on any command's `Input`** (fix-3rsq.11). `in_request` and `verify` apply to an
   execution command's `Input` field as well as a planning command's. Each option is checked by the same
   rule for both kinds. (Phase 12 cut the five Phase 11 options to these two; see Upgrading from Phase 11.)

@@ -302,6 +302,8 @@ class ParameterExtraction:
                         self.command_name,
                         app_workflow_folderpath)
                     diagnostics["extraction_method"] = "llm"
+                    if reset := getattr(input_for_param_extraction, "fields_reset_not_given", None):
+                        diagnostics["fields_reset_not_given"] = {n: float(p) for n, p in reset.items()}
 
                 # A lone value that bound to nothing is refused, not dropped: run
                 # with defaults, the command does something other than what was
@@ -324,6 +326,8 @@ class ParameterExtraction:
                     self.command_name,
                     app_workflow_folderpath)
                 diagnostics["extraction_method"] = "llm"
+                if reset := getattr(input_for_param_extraction, "fields_reset_not_given", None):
+                    diagnostics["fields_reset_not_given"] = {n: float(p) for n, p in reset.items()}
 
         is_valid, error_msg, suggestions, missing_invalid_fields = \
             input_for_param_extraction.validate_parameters(

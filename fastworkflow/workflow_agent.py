@@ -2091,6 +2091,110 @@ def classify_user_reply(reply: str, question: str) -> str:
         return "answer"
 
 
+#: Jev's probability an ambiguous intent choice needs before it routes; below it the ambiguity prompt is shown.
+INTENT_TIEBREAK_THRESHOLD = 0.9
+_INTENT_TIEBREAK_OFF = frozenset({"off", "0", "false"})
+_INTENT_TIEBREAK_WILDCARD = "wildcard"
+_INTENT_TIEBREAK_PARAMETER_VALUE = "parameter_value"
+_INTENT_TIEBREAK_RESERVED = {
+    _INTENT_TIEBREAK_WILDCARD:
+        "None of these commands: the message is not a command of the current context.",
+    _INTENT_TIEBREAK_PARAMETER_VALUE:
+        "The message is a bare value answering an earlier question, not a command.",
+}
+
+
+def _intent_tiebreak_enabled() -> bool:
+    """False when FW_JEV_INTENT_TIEBREAK is set to off, 0 or false (case-insensitive)."""
+    value = str(fastworkflow.get_env_var("FW_JEV_INTENT_TIEBREAK", default="on"))
+    return value.strip().lower() not in _INTENT_TIEBREAK_OFF
+
+
+@functools.lru_cache(maxsize=None)
+def _command_first_sentences(workflow_folderpath: str, context: str) -> dict[str, str]:
+    """``{leaf command name: first sentence of its docstring}`` for the commands *context* offers."""
+    info = CommandMetadataAPI.get_enhanced_command_info(
+        subject_workflow_path=workflow_folderpath,
+        cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
+        active_context_name=context,
+    )
+    sentences: dict[str, str] = {}
+    for cmd in info.get("commands", []) or []:
+        name = str(cmd.get("name") or "").rpartition("/")[2]
+        doc = " ".join(str(cmd.get("doc_string") or "").split())
+        if name and doc:
+            sentences[name] = re.split(r"(?<=[.!?])\s", doc, maxsplit=1)[0]
+        elif name:
+            # No docstring: the command's example utterances describe it instead. fix-jd9o.1 measured
+            # descriptions against bare names: 148/148 routes right with them, 148/151 without.
+            examples = [" ".join(str(u).split()) for u in (cmd.get("plain_utterances") or [])[:3]
+                        if str(u).strip()]
+            if examples:
+                sentences[name] = "e.g. " + "; ".join(examples)
+    return sentences
+
+
+def intent_tiebreak_descriptions(workflow_folderpath: str, context: str,
+                                 candidates: list[str]) -> dict[str, str]:
+    """``{candidate: description}`` for the candidates of an ambiguous intent: the first sentence of
+    each command's docstring in *context*, matched by leaf name. Never raises: {} on a failure."""
+    try:
+        sentences = _command_first_sentences(workflow_folderpath, context)
+        return {str(c): sentences[str(c).rpartition("/")[2]]
+                for c in candidates if sentences.get(str(c).rpartition("/")[2])}
+    except Exception:  # noqa: BLE001 - descriptions only sharpen Jev's choice; never fail the turn
+        logger.warning("could not read the command docstrings for the intent tie-break", exc_info=True)
+        return {}
+
+
+def choose_ambiguous_command(utterance: str, candidates: list[str],
+                             descriptions: dict[str, str]) -> tuple[str | None, float | None]:
+    """``(label, probability)`` of the candidate Jev chooses for an ambiguous *utterance*, when it is
+    confident (>= ``INTENT_TIEBREAK_THRESHOLD``); ``(None, probability)`` otherwise.
+
+    ``(None, None)`` without calling anything when there is no Jev key, the tie-break is switched off,
+    or there are fewer than two distinct candidates. Never raises.
+    """
+    try:
+        jev_lm = _jev_lm()
+        if jev_lm is None or not _intent_tiebreak_enabled():
+            return None, None
+        labels = list(dict.fromkeys(str(c) for c in candidates))
+        if len(labels) < 2:
+            return None, None
+        options = []
+        for label in labels:
+            leaf = label.rpartition("/")[2]   # a reserved label may come context-qualified
+            if leaf in _INTENT_TIEBREAK_RESERVED:
+                description = _INTENT_TIEBREAK_RESERVED[leaf]
+            else:
+                description = (descriptions.get(label)
+                               or label.rpartition("/")[2].replace("_", " "))
+            options.append((label, description))
+        options.append(("none", "None of these commands fits the message."))
+        options = tuple(options)
+
+        class IntentTiebreak(dspy.Signature):
+            """Decide which command a message to a workflow asks for."""
+
+            # The wording measured in fix-jd9o.1 (agent mode sends the agent's message, not the user's).
+            message: str = dspy.InputField(desc="the message sent to the workflow")
+            command: Choice[options] = dspy.OutputField(
+                desc="Which command does the message ask for? 'none' if none fits.")
+
+        with dspy.context(lm=jev_lm):
+            choice = dspy.Predict(IntentTiebreak)(message=utterance).command
+        value, probability = _choice_value_and_probability(choice)
+        logger.info(f"intent tie-break for {utterance!r} among {labels}: {value} "
+                    f"(confidence {probability:.2f})")
+        if value != "none" and probability >= INTENT_TIEBREAK_THRESHOLD:
+            return value, probability
+        return None, probability
+    except Exception:  # noqa: BLE001 - the ambiguity prompt is then shown as today; never fail the turn
+        logger.warning("could not choose among the ambiguous commands", exc_info=True)
+        return None, None
+
+
 #: Phrases that point at other parts of the request instead of naming them; a sub-task with one is broken.
 _UNRESOLVED_REFERENCE = re.compile(
     r"\b(?:each of them|both of them|all of them|the same treatment|the same look)\b", re.IGNORECASE)

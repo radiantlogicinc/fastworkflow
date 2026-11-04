@@ -3,6 +3,7 @@ import ast
 import inspect
 import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
+from dspy.experimental import Choice
 import os
 from contextlib import suppress
 from dataclasses import dataclass, field as dataclass_field
@@ -11,10 +12,11 @@ from typing import Literal, Optional, Tuple, Union, Dict, Any, Type, List, get_a
 from enum import Enum
 from datetime import date
 import re
-from difflib import get_close_matches
+from difflib import SequenceMatcher, get_close_matches
+from concurrent.futures import ThreadPoolExecutor
 import json
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pydantic_core import PydanticUndefined
 
 import fastworkflow
@@ -741,9 +743,18 @@ def get_trainset(subject_command_name,workflow_folderpath) -> List[Dict[str, Any
         return trainset
 
 
+# Jev's pick among the candidates of an undecided fuzzy match (DatabaseValidator.fuzzy_match_with_request).
+# Measured: with value descriptions, 97 confident picks and 1 wrong; without them (value names alone)
+# 6 wrong picks in 26, so the helper never calls Jev without descriptions. 0.9 is the conservative bar.
+VALUE_PICK_THRESHOLD = 0.9
+VALUE_PICK_ENV_VAR = "FW_JEV_VALUE_PICK"
+_VALUE_PICK_OFF = ("off", "0", "false")
+_VALUE_PICK_FALLBACK_CANDIDATES = 5
+
+
 class DatabaseValidator:
     """Generic validator for database lookups with fuzzy matching"""
-    
+
     @staticmethod
     def fuzzy_match(value: str, key_values: list[str], threshold: float = 0.6,
                     suggest_threshold: float = 0.7,
@@ -814,6 +825,84 @@ class DatabaseValidator:
 
         return False, None, []
 
+    @staticmethod
+    def fuzzy_match_with_request(value: str, key_values: list[str], request: str,
+                                 descriptions: Optional[Dict[str, str]],
+                                 threshold: float = 0.6, suggest_threshold: float = 0.7,
+                                 auto_apply_threshold: float = 0.2,
+                                 argument_name: str = "") -> Tuple[bool, Optional[str], List[str]]:
+        """``fuzzy_match``, and when that is not decisive, Jev reads the request to pick the intended value.
+
+        Same return contract as ``fuzzy_match``. A unique fuzzy match stands and Jev is not called. When
+        fuzzy matching leaves several candidates (its suggestions, or the five closest keys by ``difflib``
+        when it has none), one Jev call sees the *request* and each candidate with its description. The
+        pick is returned as a match only when Jev is at least ``VALUE_PICK_THRESHOLD`` sure of it and it is
+        one of the candidates; "ask" or a less sure answer returns ``fuzzy_match``'s result, so the hook
+        still asks the user to choose.
+
+        Descriptions are required. ``descriptions`` maps each key value to a short description of what it
+        is. Without them Jev picks from bare names and makes wrong picks (measured: 6 wrong in 26), so with
+        no descriptions (None or {}) Jev is not called. An empty *request* also makes no call.
+
+        A hook gets the request text through its ``command_text`` parameter: ``validate_parameters`` passes
+        the command's request (its statement) to a hook that declares ``command_text`` and to no other hook.
+        Pass that text as *request*.
+
+        Jev is not called when the value is empty or NOT_FOUND, *key_values* is empty, no Jev LM is
+        configured (no JEV_API_KEY), or the switch ``FW_JEV_VALUE_PICK`` is off (``off``, ``0`` or ``false``,
+        case-insensitive; default on). The call never raises: a failure logs a warning and returns
+        ``fuzzy_match``'s result.
+        """
+        fuzzy = DatabaseValidator.fuzzy_match(value, key_values, threshold, suggest_threshold,
+                                              auto_apply_threshold)
+        if fuzzy[0]:
+            return fuzzy
+        if not request or not descriptions or not value or value == NOT_FOUND or not key_values:
+            return fuzzy
+        switch = str(fastworkflow.get_env_var(VALUE_PICK_ENV_VAR, default="on")).strip().lower()
+        if switch in _VALUE_PICK_OFF:
+            return fuzzy
+        try:
+            from fastworkflow.workflow_agent import _jev_lm   # read at call time (workflow_agent imports this module)
+            lm = _jev_lm()
+            if lm is None:
+                return fuzzy
+            candidates = list(dict.fromkeys(fuzzy[2]))
+            if not candidates:
+                candidates = sorted(
+                    key_values,
+                    key=lambda k: SequenceMatcher(None, value.lower(), k.lower()).ratio(),
+                    reverse=True,
+                )[:_VALUE_PICK_FALLBACK_CANDIDATES]
+                candidates = list(dict.fromkeys(candidates))
+            if "ask" in candidates:
+                return fuzzy
+            options = tuple(
+                (v, f"{v} ({descriptions.get(v, 'no other details')})") for v in candidates
+            ) + (("ask", "The request does not say which one; the user must choose."),)
+            signature = dspy.make_signature({
+                "request": (str, dspy.InputField(desc="the user's request")),
+                "argument": (str, dspy.InputField(
+                    desc="the argument being filled and the value written for it")),
+                "value": (Choice[options], dspy.OutputField(
+                    desc="Which of these does the request mean? 'ask' if it does not say.")),
+            }, "Decide which candidate value the user's request means for the argument.")
+            where = f"{argument_name}; " if argument_name else ""
+            with dspy.context(lm=lm):
+                choice = dspy.Predict(signature)(
+                    request=request,
+                    argument=f"{where}value written for it: '{value}'",
+                ).value
+            picked = str(choice.value)
+            probability = float((choice.probabilities or {}).get(picked, choice.confidence))
+            logger.info(f"value pick for '{value}': {picked} (probability {probability:.2f})")
+            if picked != "ask" and picked in candidates and probability >= VALUE_PICK_THRESHOLD:
+                return True, picked, []
+            return fuzzy
+        except Exception:  # noqa: BLE001 - the pick is an extra; fuzzy_match's result stands
+            logger.warning(f"could not pick the value for '{value}' from the request", exc_info=True)
+            return fuzzy
+
 
 def _planning_command_of(app_workflow, subject_command_name: str):
     """The loaded planning command *subject_command_name* of *app_workflow*, or None."""
@@ -871,6 +960,109 @@ def reject_retired_db_lookup(signature_class, input_model, where: str) -> None:
             raise ValueError(f"{where}: field {name!r} has json_schema_extra 'db_lookup': {_RETIRED_DB_LOOKUP}")
 
 
+# Jev's check of the fields an LLM extraction filled (fields_not_given). A filled field is reset
+# to its not-given value when Jev is at least FIELD_GIVEN_THRESHOLD sure the statement does not
+# give it a value. Measured: 775/778 agreement with a reference model, and at probability >= 0.7
+# it never blanked a correct value; 0.9 is the conservative bar.
+FIELD_GIVEN_THRESHOLD = 0.9
+FIELD_GIVEN_ENV_VAR = "FW_JEV_FIELD_GIVEN"
+_FIELD_GIVEN_OFF = ("off", "0", "false")
+_FIELD_GIVEN_OPTIONS = (
+    ("given", "The statement states a value for this argument, in any form."),
+    ("not_given", "The statement does not state a value for this argument; it would have to be guessed."),
+)
+
+
+def _field_given_enabled() -> bool:
+    value = str(fastworkflow.get_env_var(FIELD_GIVEN_ENV_VAR, default="on")).strip().lower()
+    return value not in _FIELD_GIVEN_OFF
+
+
+def _declared_default(field_info: Any) -> Any:
+    """The field's declared default (a factory is called), or PydanticUndefined when it has none."""
+    if field_info.default is not PydanticUndefined:
+        return field_info.default
+    if field_info.default_factory is not None:
+        return field_info.default_factory()
+    return PydanticUndefined
+
+
+def _is_filled(field_info: Any, value: Any) -> bool:
+    """True when an extracted value is a real value: not None, NOT_FOUND, empty, the not-given value
+    or the declared default. Only a filled value is checked against the statement."""
+    if value is None or value == NOT_FOUND:
+        return False
+    if isinstance(value, (str, list)) and len(value) == 0:
+        return False
+    # The extraction prompt asks for a marker number when an int/float is not mentioned (an Optional
+    # field's not_given_value is None, so the comparison below would miss it): a marker is not a value.
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and is_sentinel_number(value):
+        return False
+    if value == not_given_value(field_info):
+        return False
+    default = _declared_default(field_info)
+    if default is not PydanticUndefined and value == default:
+        return False
+    return True
+
+
+def _check_field_given(lm, statement: str, name: str, field_info: Any) -> tuple[str, float]:
+    """``(verdict, probability)`` of one Jev check: does *statement* give a value for this field?"""
+    argument = f"{name}: {field_info.description or ''}"
+    signature = dspy.make_signature({
+        "statement": (str, dspy.InputField(desc="the command statement sent to the workflow")),
+        "argument": (str, dspy.InputField(desc="the argument's name and description")),
+        "verdict": (Choice[_FIELD_GIVEN_OPTIONS],
+                    dspy.OutputField(desc="Does the statement give a value for this argument?")),
+    }, "Decide whether a command statement gives a value for one argument.")
+    with dspy.context(lm=lm):
+        choice = dspy.Predict(signature)(statement=statement, argument=argument).verdict
+    value = str(choice.value)
+    probability = float((choice.probabilities or {}).get(value, choice.confidence))
+    return value, probability
+
+
+def fields_not_given(statement: str, model_class: Type[BaseModel], values: dict) -> dict[str, float]:
+    """``{field_name: probability}`` for the filled fields of *values* that Jev is at least
+    FIELD_GIVEN_THRESHOLD sure the *statement* does not give a value for. One Jev call per filled
+    field, in parallel. Empty without a Jev LM or when FW_JEV_FIELD_GIVEN is off. A failed check
+    leaves the extracted value standing; never raises."""
+    try:
+        if not _field_given_enabled():
+            return {}
+        from fastworkflow.workflow_agent import _jev_lm   # read at call time (workflow_agent imports this module)
+        lm = _jev_lm()
+        if lm is None:
+            return {}
+        checks = [(name, info) for name, info in model_class.model_fields.items()
+                  if _is_filled(info, values.get(name))]
+        if not checks:
+            return {}
+
+        def one(item):
+            name, info = item
+            try:
+                verdict, probability = _check_field_given(lm, statement, name, info)
+                return name, verdict, probability
+            except Exception:  # noqa: BLE001 - a check is an extra; the extracted value stands
+                logger.warning(f"could not check whether the statement gives {name}", exc_info=True)
+                return None
+
+        with ThreadPoolExecutor(len(checks)) as pool:
+            results = [r for r in pool.map(one, checks) if r is not None]
+        return {name: probability for name, verdict, probability in results
+                if verdict == "not_given" and probability >= FIELD_GIVEN_THRESHOLD}
+    except Exception:  # noqa: BLE001
+        logger.warning("could not check which fields the statement gives", exc_info=True)
+        return {}
+
+
+def reset_to_not_given(model_class: Type[BaseModel], values: dict, fields) -> None:
+    """Set each of *fields* in *values* to its not-given value (``not_given_value``)."""
+    for name in fields:
+        values[name] = not_given_value(model_class.model_fields[name])
+
+
 class InputForParamExtraction(BaseModel):
     """Extract parameters from a user query using step-by-step reasoning.
 Today's date is {today}.
@@ -878,6 +1070,8 @@ Today's date is {today}.
     command: str
     input_for_param_extraction_class: Optional[Type[Any]] = None
     input_for_param_extraction: Optional[Any] = None
+    # Set by extract_parameters: the fields Jev judged not given, {name: probability} (fields_not_given).
+    fields_reset_not_given: Dict[str, float] = Field(default_factory=dict, exclude=True)
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
     @classmethod
@@ -1019,6 +1213,7 @@ Today's date is {today}.
         """
         global LLM_PARAM_EXTRACTION, LITELLM_API_KEY_PARAM_EXTRACTION
 
+        self.fields_reset_not_given = {}
         if not LLM_PARAM_EXTRACTION:
             LLM_PARAM_EXTRACTION = fastworkflow.get_env_var("LLM_PARAM_EXTRACTION")
             LITELLM_API_KEY_PARAM_EXTRACTION = fastworkflow.get_env_var("LITELLM_API_KEY_PARAM_EXTRACTION")
@@ -1080,6 +1275,11 @@ Today's date is {today}.
                     param_dict[field_name] = getattr(dspy_result, field_name, default)
             except Exception as exc:
                 logger.warning(PARAMETER_EXTRACTION_ERROR_MSG.format(error=exc))
+
+        # A filled field the statement does not give (Jev, fields_not_given) is not a value: reset it
+        # to its not-given value, so an optional field takes its default and a required one is asked for.
+        self.fields_reset_not_given = fields_not_given(self.command, model_class, param_dict)
+        reset_to_not_given(model_class, param_dict, self.fields_reset_not_given)
 
         # IMPORTANT: Do *not* instantiate the original model via the regular
         # constructor – that would invoke full validation including regex

@@ -131,6 +131,26 @@ matched, corrected, suggestions = DatabaseValidator.fuzzy_match(
 
 You may also implement matching yourself. The hook only needs the three-tuple from your own logic.
 
+### When several values are close: `fuzzy_match_with_request`
+
+When `fuzzy_match` leaves several suggestions, the hook otherwise asks the user to choose. If the
+request itself says which one is meant ("restart the billing api **on staging**"),
+`DatabaseValidator.fuzzy_match_with_request(value, key_values, request, descriptions)` lets Jev read
+the request and pick. It has the same return contract as `fuzzy_match`, and a unique fuzzy match
+stands without a Jev call. Pass each key's description in `descriptions` (a `{key: description}` dict):
+**descriptions are required**. Measured, Jev picks well from descriptions (97 confident picks, 1
+wrong) but from bare names it made 6 wrong picks in 26, so with no descriptions (None or `{}`) the
+helper makes no call. A pick is returned as a match only at probability 0.9 or more and only when it
+is one of the candidates; otherwise the `fuzzy_match` result stands and the hook still asks.
+
+Get the request text from the hook's `command_text` parameter: declare
+`command_text` as a keyword parameter of `validate_extracted_parameters(workflow, command, input, command_text)`; the framework
+passes the command's request to a hook that declares it and to no other hook.
+
+The off switch is the environment variable `FW_JEV_VALUE_PICK` set to `off`, `0` or `false`
+(case-insensitive; default on). With no `JEV_API_KEY` there is no Jev and the helper returns the
+`fuzzy_match` result.
+
 ## Choosing the key set
 
 The key set is the whole design decision.
