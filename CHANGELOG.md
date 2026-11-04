@@ -1107,6 +1107,8 @@ error that names the new form; there is no legacy support, except where an item 
 
 ### Fixed
 
+- **Parameter extraction maps `<UNKNOWN>` to "not given", so unstated arguments are asked for** (fix-1pfu). A `<UNKNOWN>` (or bracketed unknown variant) from the model now becomes "not given" (`NOT_FOUND`, or `[]` for a list), instead of running as the value `UNKNOWN`. The JSON schema is kept for its type checks. Measured on Bedrock: retail 96.6% exact cases vs 71-76% before; airline 96-97%.
+
 - **Held-out planning requests no longer repeat training rows** (fix-3rsq.10.17). The test-set
   builder for planning-command matching dropped held-out requests that matched rows the trained
   version was built from. Its measurements were optimistic before this fix.

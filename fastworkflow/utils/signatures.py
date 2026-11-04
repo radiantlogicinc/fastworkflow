@@ -142,7 +142,8 @@ def _is_placeholder_text(inner: str, field_name: str) -> bool:
     ``9a1b2c3d...``, ``Ann Lee``, ``PayHub``.
     """
     core = re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9]+$", "", inner)
-    if not core:
+    if not core or core.lower() == "unknown":
+        # ``<UNKNOWN>`` is the extractor's not-given marker (fix-1pfu), never a value.
         return True
     if not (core.islower() or core.isupper()):
         return False
@@ -1063,6 +1064,26 @@ def reset_to_not_given(model_class: Type[BaseModel], values: dict, fields) -> No
         values[name] = not_given_value(model_class.model_fields[name])
 
 
+# The not-given marker some models write in angle brackets for an argument the request does not give
+# (``<UNKNOWN>``). It is never a value: at the extraction boundary it becomes the field's not-given value.
+_UNKNOWN_MARKER = re.compile(r"^\s*<+\s*unknown\s*>+\s*$", re.IGNORECASE)
+
+
+def is_unknown_marker(value: Any) -> bool:
+    """Whether *value* is the bracketed ``<UNKNOWN>`` marker (a string, not a value)."""
+    return isinstance(value, str) and _UNKNOWN_MARKER.match(value) is not None
+
+
+def drop_unknown_markers(value: Any, not_given: Any) -> Any:
+    """*value* with the ``<UNKNOWN>`` marker removed: a marker string gives *not_given*, and a list
+    loses its marker items."""
+    if is_unknown_marker(value):
+        return not_given
+    if isinstance(value, list):
+        return [item for item in value if not is_unknown_marker(item)]
+    return value
+
+
 class InputForParamExtraction(BaseModel):
     """Extract parameters from a user query using step-by-step reasoning.
 Today's date is {today}.
@@ -1272,7 +1293,8 @@ Today's date is {today}.
                 dspy_result = best_of_3(command=self.command)
                 for field_name in field_names:
                     default = not_given_value(model_class.model_fields[field_name])
-                    param_dict[field_name] = getattr(dspy_result, field_name, default)
+                    value = getattr(dspy_result, field_name, default)
+                    param_dict[field_name] = drop_unknown_markers(value, default)
             except Exception as exc:
                 logger.warning(PARAMETER_EXTRACTION_ERROR_MSG.format(error=exc))
 
