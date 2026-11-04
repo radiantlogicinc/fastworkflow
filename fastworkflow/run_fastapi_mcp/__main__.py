@@ -404,6 +404,12 @@ async def lifespan(_app: FastAPI):
             env_vars.update(dotenv_values(ARGS.passwords_file_path))
         fastworkflow.init(env_vars=env_vars)
 
+        # Command files that do not load are skipped by the server; log each one at startup.
+        from fastworkflow.command_preview import load_problems
+
+        for problem in load_problems(ARGS.workflow_path):
+            logger.error(f"command file does not load, so the server does not serve it: {problem}")
+
         # A FastAPI process serves exactly one workflow. Pin it on the manager
         # now, before any lazily-built store reads it, so conversation, session
         # and checkpoint trees are namespaced under this workflow's state dir.

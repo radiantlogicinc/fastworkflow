@@ -135,6 +135,12 @@ def run_main(args):
         "[bold green]Tips:[/bold green] Type '//exit' to quit the application. Type '//new' to start a new conversation. " 
         "[bold green]Tips:[/bold green] Prefix natural language commands with a single '/' to execute them in deterministic (non-agentic) mode")
 
+    # Command files that do not load are skipped; say so before the first prompt (not only in the log).
+    from fastworkflow.command_preview import load_problems
+
+    for problem in load_problems(args.workflow_path):
+        console.print(f"[bold red]Load problem:[/bold red] {problem}")
+
     # ------------------------------------------------------------------
     # Startup progress bar ------------------------------------------------
     # ------------------------------------------------------------------

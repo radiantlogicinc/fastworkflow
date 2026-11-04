@@ -298,7 +298,8 @@ def add_run_parser(subparsers):
     parser_run.set_defaults(func=lambda args: run_with_defaults(args))
 
 def add_command_parser(subparsers):
-    """Add the 'command' group: 'command preview' renders a workflow's planning commands to markdown."""
+    """Add the 'command' group: 'command preview' renders a workflow's planning commands to markdown; 'command run-code'
+    runs one call of a command with no model."""
     parser_command = subparsers.add_parser("command", help="Work with a workflow's planning commands (_commands/<name>.py).")
     command_subparsers = parser_command.add_subparsers(dest="action", required=True)
     parser_preview = command_subparsers.add_parser(
@@ -323,6 +324,32 @@ def add_command_parser(subparsers):
             sys.exit(code)
 
     parser_preview.set_defaults(func=_preview_main_wrapper)
+
+    parser_run_code = command_subparsers.add_parser(
+        "run-code",
+        help="Run one call of a command with no model: a planning command phase by phase, stopping at its first "
+             "open step; an execution command's output. It runs the workflow's real commands, so use a development "
+             "instance of the app.",
+    )
+    parser_run_code.add_argument("workflow_folder", help="Path to the workflow folder")
+    parser_run_code.add_argument("command", help="The command to run (a planning or an execution command)")
+    parser_run_code.add_argument(
+        "--input", default=None,
+        help="The command's arguments as a JSON object, e.g. '{\"title\": \"Dune\"}'",
+    )
+    parser_run_code.add_argument(
+        "--start-with", action="append", default=[], metavar="STEP",
+        help="A step run by code before the command, to put the workflow where it starts, e.g. "
+             "'open_book book_uid=b1' (repeatable; a step code cannot run is an error)",
+    )
+
+    def _run_code_main_wrapper(args):
+        from .planning_code_run import run_code_main
+        code = run_code_main(args)
+        if code:
+            sys.exit(code)
+
+    parser_run_code.set_defaults(func=_run_code_main_wrapper)
 
 def add_run_chatbot_parser(subparsers):
     """Add subparser for the 'run_chatbot' command (browser chat + observability viewer)."""

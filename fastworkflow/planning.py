@@ -100,6 +100,7 @@ __all__ = [
     "phase",
     "pick",
     "run",
+    "run_code",
     "when",
 ]
 
@@ -676,3 +677,17 @@ def planning_command_parts(cls: type) -> tuple[Callable, Optional[Callable]]:
                    and _output(cls, methods[0][1], {}, None) is None
                    and not has_result)
     return steps_fn, (None if always_flat else plan_fn)
+
+
+def run_code(workflow_folder: str, command: str, input: Optional[dict] = None,
+             start_with: tuple[str, ...] = ()):
+    """One call of *command* on the workflow at *workflow_folder*, run with no model, as ``fastworkflow command
+    run-code`` runs it (``fastworkflow.planning_code_run``): a planning command phase by phase, stopping at its
+    first open step, or an execution command's CommandOutput. Returns a ``CodeRun`` (``text``, ``answer``,
+    ``output``, ``facts``, ``open_step``); raises ``RunCodeError`` when the command does not load, a step fails
+    or a hook raises. *start_with* are steps run by code first. Its steps are real commands on a real session:
+    use it on a development instance, and in tests on a copy of the workflow.
+    """
+    from fastworkflow.planning_code_run import run_code as _run_code
+
+    return _run_code(workflow_folder, command, input, start_with)

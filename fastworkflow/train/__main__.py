@@ -4,6 +4,7 @@ import functools
 import os
 import json
 import shutil
+import sys
 import time
 from datetime import datetime, timezone
 from dotenv import dotenv_values
@@ -839,6 +840,16 @@ def train_main(args):
         print(
             f"{Fore.RED}Error: The specified workflow path '{workflow_path}' is not a valid directory.{Style.RESET_ALL}"
         )
+        exit(1)
+
+    # A command file that does not load would be missing from the model: stop before any training work.
+    from fastworkflow.command_preview import load_problems
+
+    if problems := load_problems(workflow_path):
+        print(f"{Fore.RED}Error: {len(problems)} command file(s) do not load; training stopped before it started:"
+              f"{Style.RESET_ALL}", file=sys.stderr)
+        for problem in problems:
+            print(f"  {problem}", file=sys.stderr)
         exit(1)
 
     env_vars = {

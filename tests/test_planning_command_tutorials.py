@@ -14,12 +14,12 @@ Every tutorial page marks what it shows with an HTML comment right above a fence
   with a top-level ``PlanGenerator``) in a copy of the tutorial workflow, gives that load error,
   ``command preview --check`` problem, or template line.
 
-``dry_run`` runs a skill call offline, with no model: each phase's steps as the runtime
-writes them, the leading steps code runs (``planning_phases.plan_code_steps``, ``pick_listing``
-and ``pick_step``, the rules ``CodeSteps`` uses) run against the tutorial workflow's commands, each phase's
-facts filled from those runs (``planning_phases.fill_output``), and the answer code writes.
-Where code stops (an open step) the agent would take over; the dry run says so and stops
-that phase. Try it: ``python -m tests.test_planning_command_tutorials book_by_title '{"title": "Dune"}'``.
+``dry_run`` is ``fastworkflow.planning.run_code`` (``fastworkflow command run-code``) on the tutorial
+workflow: each phase's steps as the runtime writes them, the steps code runs against the tutorial workflow's
+commands on a real session (``planning_phases.plan_code_steps``, ``pick_listing`` and ``pick_step``), each
+phase's facts filled from those runs (``planning_phases.fill_output``), and the answer code writes. Where code
+stops (an open step) the agent would take over; the run says so and stops. Try it:
+``python -m tests.test_planning_command_tutorials book_by_title '{"title": "Dune"}'``.
 """
 from __future__ import annotations
 
@@ -53,124 +53,12 @@ def _routing(folder: str = WORKFLOW):
     return RoutingRegistry.get_definition(folder)
 
 
-def _run(routing, command: str):
-    """Run *command* (``name k=v ...``) with the tutorial workflow's own ResponseGenerator."""
-    from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
-        ParameterExtraction)
-    from fastworkflow.command_executor import call_response_generator
-
-    name = command.split()[0]
-    cls = routing.get_command_class(name, ModuleType.COMMAND_PARAMETERS_CLASS)
-    generator = routing.get_command_class(name, ModuleType.RESPONSE_GENERATION_INFERENCE)()
-    # The executor's own framing (call_response_generator) turns the generator's short form
-    # (its Signature.Output or a CommandResponse) into the CommandOutput a turn carries.
-    if cls is None:
-        return {}, call_response_generator(generator, None, name, None).command_response.output
-    bound = (cls() if command == name else
-             ParameterExtraction._extract_parameters_from_key_values(command, cls, name))
-    return bound.model_dump(), call_response_generator(generator, None, name, bound).command_response.output
-
-
 def dry_run(planning_command: str, args: dict, folder: str = WORKFLOW) -> str:
-    """What a call of *skill* with *args* runs, phase by phase, offline (see the module doc)."""
-    routing = _routing(folder)
-    planning = planning_commands.resolve_field_sources(folder).planning_commands
-    parameters = sp.parameter_classes(routing, planning)
-    planning_names = {plain_command_name(name).lower() for name in planning}
-    commands = sorted({n for n in routing.routing_definition_map if n != "wildcard" and "/" not in n}
-                      | {plain_command_name(name) for name in planning})
-    command = workflow_agent.load_planning_command_map(folder)[planning_command]
-    args = {p.name: p.default for p in command.params if not p.required} | args
-    phases = planning_commands.call_phases(command, args)
-    lines: list[str] = []
-    if len(phases) == 1 and phases[0].name == planning_command:
-        lines.append("Runs flat: one plan, one executor run.")
-    outputs: dict = {}
-    call_runs: list[dict] = []
+    """What a call of *planning_command* with *args* runs, phase by phase, with no model: the text of
+    ``fastworkflow.planning.run_code`` (its steps are the tutorial workflow's real commands, run on a real session)."""
+    from fastworkflow.planning import run_code
 
-    def run_steps(steps: list[str], last: bool):
-        text = planning_commands.number(steps)
-        lines.extend(f"  {line}" for line in text.splitlines())
-        runs, open_step = [], False
-        for step, run, _ in sp.plan_code_steps(text, commands, CORE, parameters):
-            if run == "":
-                continue
-            if run is None:
-                found = sp.pick_listing(step, call_runs, parameters(step.command))
-                if found is not None:
-                    run, _ = sp.pick_step(step, *found, parameters(step.command))
-            if run is None:
-                lines.append(f"  step {step.number} is open: the agent runs it and the rest "
-                             "(the dry run stops here)")
-                open_step = True
-                break
-            if run.split()[0].lower() in planning_names:
-                lines.append(f"  step {step.number} runs planning command {run.split()[0]}: "
-                             "the dry run does not run planning commands (the dry run stops here)")
-                open_step = True
-                break
-            given, output = _run(routing, run)
-            lines.append(f"  code runs: {run}")
-            entry = {"command": run.split()[0], "input": given, "output": output.model_dump(),
-                     "success": True, "context_clause": ""}
-            runs.append(entry)
-            call_runs.append(entry)
-        if sp.is_answer_only(text, commands, CORE):
-            if sp.answer_by_code(text):
-                lines.append("  answer written by code:")
-                lines.extend(f"    {line}" for line in sp.answer_from_steps(text).splitlines())
-            else:
-                lines.append("  answer written by the model (one call, no tools)")
-        elif last and not open_step and not command.uses_result:
-            lines.append("  the agent writes the answer from these runs")
-        return text, runs, open_step
-
-    for index, phase in enumerate(phases):
-        last = index == len(phases) - 1
-        if phase.fans_out:
-            items, _ = sp.fan_out_items(phase, outputs)
-            filled = []
-            if not items:
-                lines.append(f"Phase {phase.name}: no items, so it runs nothing")
-            for item in items:
-                lines.append(f"Phase {phase.name} (item {item})")
-                text, runs, stop = run_steps(sp.phase_steps(phase, outputs, item), last)
-                if stop:
-                    return "\n".join(lines)
-                if phase.output is not None:
-                    filled.append(sp.fill_output(phase.output, runs, record=None,
-                                                 plan_text=text, commands=commands))
-                    lines.append(f"  facts: {filled[-1]!r}")
-            outputs[phase.name] = filled
-            continue
-        if not sp.runs_now(phase, outputs):
-            lines.append(f"Phase {phase.name}: skipped (its method returned [])")
-            continue
-        lines.append(f"Phase {phase.name}")
-        text, runs, stop = run_steps(sp.phase_steps(phase, outputs), last)
-        if stop:
-            return "\n".join(lines)
-        if phase.output is not None:
-            outputs[phase.name] = sp.fill_output(phase.output, runs, record=None,
-                                                 plan_text=text, commands=commands)
-            lines.append(f"  facts: {outputs[phase.name]!r}")
-    if command.uses_result:
-        lines.append("answer written by __result__:")
-        lines.extend(f"  {line}" for line in _result_text(command, args, outputs, phases).splitlines())
-    return "\n".join(lines)
-
-
-def _result_text(command, args: dict, outputs: dict, phases) -> str:
-    """The text the command's ``__result__`` returns for these phase outputs, as the runtime
-    calls it (``planning_phases.run_call_result``, without its model fallback)."""
-    from fastworkflow import planning_commands as pc
-
-    result_fn = sp._result_fn_on_class(command.plan_cls)
-    kwargs = sp.bound_result_arguments(
-        result_fn, pc.input_instance(command, args), sp.typed_phase_outputs(outputs, phases),
-        phase_names=frozenset(pc._phase_names_for_command(command)))
-    raw = result_fn(command.plan_cls(), **kwargs)
-    return raw if isinstance(raw, str) else raw.response
+    return run_code(folder, planning_command, args).text
 
 
 def refusal(planning_command: str, args: dict) -> str:
@@ -320,7 +208,7 @@ def test_pick_opens_the_exact_title_and_else_leaves_the_row_to_code_or_the_agent
     assert "code runs: show_book book_uid=b2" in near
     two = dry_run("book_by_title", {"title": "Dun"})
     assert "1. show_book with the uid of the Dun match" in two
-    assert two.endswith("step 1 is open: the agent runs it and the rest (the dry run stops here)")
+    assert two.endswith("step 1 is open: the agent would run it and the rest")
 
 
 def test_call_shapes_the_plan_and_a_brief_call_runs_flat():

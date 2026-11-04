@@ -1792,6 +1792,32 @@ def _load_error(name: str, path: str, folder: str) -> str:
     return f"{name}: skipped by the loader (see the log)"
 
 
+def load_problems(workflow_folder: str) -> list[str]:
+    """The workflow's command files that do not load, each as ``<name>: <error>``: the load problems
+    ``fastworkflow command preview --check`` reports for them (``_load_error``). Empty when every planning
+    command file loads. One function for the three places a developer looks: ``fastworkflow run`` prints
+    them before its first prompt, ``fastworkflow train`` stops on them before training, and the FastAPI
+    server logs them at startup. A retired ``_skills`` folder is one problem, as it is for the preview.
+    """
+    from fastworkflow import workflow_agent
+    from fastworkflow.command_directory import check_no_planning_commands_folder
+
+    folder = os.path.abspath(workflow_folder)
+    try:
+        check_no_planning_commands_folder(folder)
+    except ValueError as error:
+        return [str(error)]
+    root = os.path.join(folder, "_commands")
+    if not os.path.isdir(root):
+        return []
+    try:
+        loaded = {name for name, _, _ in workflow_agent.load_planning_commands(folder)}
+    except Exception as error:  # noqa: BLE001 - a file the command directory cannot parse fails the whole load
+        return [f"the workflow's commands do not load: {type(error).__name__}: {error}"]
+    return [_load_error(name, path, folder) for name, path in workflow_agent._planning_command_files(root)
+            if name not in loaded]
+
+
 def _present_previews(out_dir: str) -> list[str]:
     """The ``.md`` previews present in *out_dir* (``<name>.md`` at the root and
     ``<Context>/<name>.md`` one subfolder down, with ``/`` on every OS)."""
