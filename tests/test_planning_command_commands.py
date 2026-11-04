@@ -579,7 +579,7 @@ class PlanGenerator:
     ("name: str = Field(json_schema_extra={'verify': True})", "option verify does not apply to field 'name' of type str"),
     ("flag: bool = Field(default=False, json_schema_extra={'in_request': 'subject'})", "option in_request: \"subject\" does not apply to field 'flag' of type bool"),
     ("flag: bool = Field(default=False, json_schema_extra={'subject': True})", "option subject is retired: write in_request: \"subject\""),
-    ("flag: bool = Field(default=False, json_schema_extra={'verify': 'yes'})", "verify must be true, false or a dict"),
+    ("flag: bool = Field(default=False, json_schema_extra={'verify': 'yes'})", 'verify must be true, false, "alone" or a dict'),
     ("flag: bool = Field(default=False, json_schema_extra={'verify': {'true': 'asked'}})",
      "option verify \\(a dict of meanings\\) does not apply to field 'flag' of type bool"),
     ("flag: bool = Field(default=False, json_schema_extra={'means': {'true': 'asked'}})",

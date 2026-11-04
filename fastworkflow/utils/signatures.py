@@ -918,15 +918,18 @@ Today's date is {today}.
     def create_signature_from_pydantic_model(
         pydantic_model: Type[BaseModel],
         sentences: Optional[Dict[str, Tuple[str, ...]]] = None,
+        skip: frozenset = frozenset(),
     ) -> Type[dspy.Signature]:
         """
         Create a DSPy Signature class from a Pydantic model with type annotations.
-        
+
         Args:
             pydantic_model: The Pydantic model class to convert
             sentences: ``{field: rule sentences}`` appended after that field's description
                 (``planning_commands.extraction_sentences_for``); nothing else reads them
-            
+            skip: fields the extractor is not asked for (``verify: "alone"``, which the classifier
+                decides: ``planning_commands.classifier_alone_fields``)
+
         Returns:
             A DSPy Signature class
         """
@@ -938,6 +941,8 @@ Today's date is {today}.
         field_num = 1
 
         for attribute_name, attribute_metadata in pydantic_model.model_fields.items():
+            if attribute_name in skip:
+                continue
             is_optional = False
             attribute_type = attribute_metadata.annotation
 
@@ -1026,7 +1031,8 @@ Today's date is {today}.
         
         params_signature = self.create_signature_from_pydantic_model(
             model_class,
-            planning_commands.option_sentences(model_class))
+            planning_commands.option_sentences(model_class),
+            planning_commands.classifier_alone_fields(model_class))
         
         class ParamExtractor(dspy.Module):
             def __init__(self, signature):
@@ -1054,7 +1060,7 @@ Today's date is {today}.
             def basic_checks(args, pred):
                 for field_name in field_names:
                     # return 0 if it extracts an example value instead of correct value | None
-                    extracted_param_value = getattr(pred, field_name)
+                    extracted_param_value = getattr(pred, field_name, None)   # None: not asked for
                     examples = model_class.model_fields[field_name].examples
                     if examples and extracted_param_value in examples:
                         return 0.0

@@ -19,7 +19,9 @@ field as on a planning command's:
 | `verify: {value: meaning, ...}` | `Literal` | the same check, and gives each value its meaning (every key one of the enum's values) |
 
 Two options is the whole list: `in_request` (with `"subject"` and the `ignore` words inside it) and
-`verify`. A field with no check is cleaned in code: call `strip_words(text, words)` from
+`verify` (with `"alone"` for a bool only the classifier decides, such as a part of the job the
+request may leave out; see "Field options" in
+[planning_command_file_layout.md](../../planning_command_file_layout.md)). A field with no check is cleaned in code: call `strip_words(text, words)` from
 `fastworkflow.planning_commands` in its validator or in the `validate_extracted_parameters` hook. An
 `Input` validator's returned value is written back, so a validator that cleans a value changes the
 argument. The retired `subject`, `means` and `strip` options fail the load and name the new spelling.
@@ -40,8 +42,8 @@ class Signature:
         if input.member.casefold() in EVERYONE:
             raise fastworkflow.Refused(
                 f"member is {input.member!r}, which names no one member; this "
-                "command reports on one member: give that member's name")
-        return True, ""
+                "command reports on one member: give that member's name", field="member")
+        return None
 
 ...
 
@@ -55,8 +57,12 @@ EVERYONE = {"everyone", "everybody", "all", "all members", "every member"}
   with the same signature. It gets the arguments as an `Input` (`input`) after they
   were filled and checked, before the `PlanGenerator` is called. `command_text` is the
   request the arguments were filled from.
-- **`raise fastworkflow.Refused(message)`** refuses the call. Write the message as what to
-  fix. Return `None` to accept; a tuple such as `(False, message)` is a call error.
+- **`raise fastworkflow.Refused(message, field="member")`** refuses the call. Write the message
+  as what to fix. `field` names the input the user can fix: on a typed call in an attended
+  turn, that input is asked for. Leave `field` out when no answer could fix the call, because
+  the command does not fit the request ("the owner is read only for an application"): the
+  request is then planned without the command, and the user is not asked. Return `None` to
+  accept; a tuple such as `(False, message)` is a call error.
 - **Any other exception** the hook raises fails the call; `Refused` is the one that means
   "these arguments are wrong".
 - **The hook may correct** as well as refuse: set a field of `input` (a name in the
@@ -92,8 +98,10 @@ against the user's request and what the turn's earlier steps found, not the plan
 words, so a value the planner made up is refused (page 14).
 
 **Who gets a refusal.** For a typed call, the planner, which fills the call once more with
-the message in front of it; refused again, the call is not made: an attended turn asks the user (see below), and an
-  unattended one plans from the template. For a step, the
+the message in front of it; refused again, the call is not made. An attended turn asks the
+user when the refusal names an input (a missing argument, a value the request does not
+write, or `Refused(..., field=...)`; see below). Every other refusal, and every refusal in an
+unattended turn, plans the request from the template instead. For a step, the
 agent that ran it, as a failed step whose text is the message. It can rewrite the step, run
 another command first, or tell the user.
 

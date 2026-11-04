@@ -443,6 +443,25 @@ def refusal_question(command: PlanningCommandCommand, refusal: PlanningCommandIn
     return f"I can't run {task} yet: {detail}. What should I change?"
 
 
+def refusal_names_an_input(command: PlanningCommandCommand, refusal: PlanningCommandInputError) -> bool:
+    """Whether a refused planning command call is something to ask the user: the refusal names one of
+    the command's inputs (``Refused(..., field=...)`` from the hook, a missing argument, or a guard's
+    refusal of one argument's value).
+
+    A refusal that names no input (``Refused(message)`` without ``field``, or an ``Input`` rule) says
+    the call does not fit the request: "owner is read only with kind='application'" is the choice of
+    command, not a value the user can supply. The turn then plans the request with the text planner,
+    as an unattended turn does, instead of putting the rule to the user.
+    """
+    if refusal.fields:
+        return True
+    text = str(refusal)
+    if _MISSING_ARGUMENT.match(text):
+        return True
+    match = _ARGUMENT_REFUSAL.match(text)
+    return match is not None and any(p.name == match["name"] for p in command.params)
+
+
 # ---------------------------------------------------------------- the parsed planning command
 
 @dataclass(frozen=True)
@@ -455,6 +474,10 @@ class Param:
     required: bool = False
     desc: str = ""
     verify: bool = False
+    #: ``verify: "alone"`` (a bool): the classifier alone decides the field from the request; the typed
+    #: call and the parameter extractor never fill it, and it keeps its default when the classifier is
+    #: not sure or there is no JEV_API_KEY (also sets ``verify``).
+    alone: bool = False
     #: A verify check's {value: meaning} (an enum), in the order of ``values``.
     means: tuple[tuple[str, str], ...] = ()
     #: ``in_request: True`` or ``in_request: "subject"`` (which also sets ``subject``).
@@ -600,6 +623,7 @@ def _parse_param(name: str, spec, where: str) -> Param:
     # verify: True (a bool, an enum, or a subject str) or a {value: meaning} dict on an enum
     verify_spec = spec.get("verify", "false")
     means: tuple[tuple[str, str], ...] = ()
+    alone = False
     if isinstance(verify_spec, dict):
         block = verify_spec
         if kind != "enum":
@@ -611,14 +635,18 @@ def _parse_param(name: str, spec, where: str) -> Param:
                 raise PlanningCommandFormatError(f"{where}: verify of {name!r}: {key!r} is not a value of it, or not text")
         means = tuple((v, block[v]) for v in values if v in block)
         verify = True
+    elif verify_spec == "alone":
+        if kind != "bool":
+            raise option_error(where, 'verify "alone"', name, kind, "a bool")
+        verify = alone = True
     else:
         verify = _flag({"verify": verify_spec}, "verify", name, where)
         if verify and kind not in ("bool", "enum") and not subject:
             raise option_error(where, "verify", name, kind,
                                'a bool, an enum or a str with in_request "subject"')
     return Param(name=name, type=kind, values=values, default=default, required=required,
-                 desc=desc, verify=verify, means=means, in_request=in_request, subject=subject,
-                 ignore=ignore)
+                 desc=desc, verify=verify, alone=alone, means=means, in_request=in_request,
+                 subject=subject, ignore=ignore)
 
 
 def option_error(where: str, option: str, name: str, kind: str, takes: str) -> PlanningCommandFormatError:
@@ -780,9 +808,11 @@ def check_option_spec(name: str, options: dict, where: str) -> dict:
             spec["verify"] = value
         elif isinstance(value, bool):
             spec["verify"] = "true" if value else "false"
+        elif value == "alone":
+            spec["verify"] = "alone"
         else:
-            raise PlanningCommandFormatError(f"{where}: parameter {name!r} verify must be true, false or a dict "
-                                             "of its enum values' meanings")
+            raise PlanningCommandFormatError(f"{where}: parameter {name!r} verify must be true, false, \"alone\" "
+                                             "or a dict of its enum values' meanings")
     return spec
 
 
@@ -3130,6 +3160,15 @@ def option_command(input_model, name: str, identifiers: tuple = ()) -> PlanningC
                                   identifiers=identifiers, input_model=input_model)
 
 
+def classifier_alone_fields(input_model) -> frozenset[str]:
+    """The fields of an ``Input`` (of either kind of command) marked ``verify: "alone"``: the parameter
+    extractor does not ask for them, as the typed call does not; the classifier decides them."""
+    if input_model is None:
+        return frozenset()
+    return frozenset(p.name for p in option_params(input_model, getattr(input_model, "__name__", "Input"))
+                     if p.alone)
+
+
 def option_sentences(input_model) -> dict[str, tuple[str, ...]]:
     """``{field: sentences}`` the CME parameter extractor appends to the descriptions of an ``Input``'s fields
     (3.4, Descriptions), for each field whose options have a sentence. Empty for a field without options,
@@ -3210,6 +3249,8 @@ def check_arguments(command: PlanningCommandCommand, raw: dict, request: str,
     - ``verdicts`` (``{param: (value, probability)}``, from ``check_verdicts``): a sure
       verdict on a ``verify`` parameter replaces its argument, and stands in for a missing
       or invalid enum (for a subject, ``NO_SUBJECT`` resets it, or fails a required one);
+      a ``verify: "alone"`` bool ignores any argument given for it: a sure verdict decides it,
+      and it keeps its default otherwise;
     - an optional str argument equal to another str argument takes its default.
 
     An argument that only applies when others take some value is reset afterwards, by the
@@ -3223,6 +3264,8 @@ def check_arguments(command: PlanningCommandCommand, raw: dict, request: str,
 
     notes: list[str] = []
     args: dict = {}
+    # verify "alone": no model fills the field; its default stands until a sure verdict replaces it
+    raw = {**raw, **{p.name: p.default for p in command.params if p.alone}}
     folded = _fold(request).lower()
     subjects = _request_subjects(command, request)
     named = {subject.lower() for subject in subjects}
@@ -3645,6 +3688,8 @@ def typed_signature(command: PlanningCommandCommand):
 
     fields: dict = {"user_query": (str, dspy.InputField())}
     for p in command.params:
+        if p.alone:   # verify "alone": the classifier decides it, the planner is not asked
+            continue
         kind = {"str": str, "bool": bool, "int": int, "float": float, "list[str]": list[str]}.get(p.type)
         if p.type == "enum":
             kind = Literal[p.values]

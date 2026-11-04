@@ -1166,7 +1166,7 @@ def _inputs_section(command) -> list[str]:
                        _code(json.dumps(sample)) if isinstance(sample, list) else
                        _code(sample) if sample != "" else '`""`')
         lines.append(f"| `{p.name}` | {_text(type_text, True)} | {default} | {sample_text.replace('|', chr(92) + '|')} "
-                     f"| {'yes' if p.verify else ''} | {_in_request_cell(p)} | {_text(p.desc, True)} |")
+                     f"| {'alone' if p.alone else 'yes' if p.verify else ''} | {_in_request_cell(p)} | {_text(p.desc, True)} |")
         if p.means:
             notes.append(f"- `{p.name}` means: " + "; ".join(f"{_code(v)}: {_text(t)}" for v, t in p.means) + ".")
         if p.in_request and not p.subject:   # the subject column says it (in_request "subject")

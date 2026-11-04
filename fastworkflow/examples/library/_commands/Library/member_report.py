@@ -43,7 +43,7 @@ class Signature:
         if input.member.casefold() in EVERYONE:
             raise fastworkflow.Refused(
                 f"member is {input.member!r}, which names no one member; this "
-                "command reports on one member: give that member's name")
+                "command reports on one member: give that member's name", field="member")
         return None
 
 

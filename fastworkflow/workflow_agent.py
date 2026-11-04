@@ -27,7 +27,8 @@ from fastworkflow import tracing
 from fastworkflow import approval_binding
 from fastworkflow import planning_commands
 from fastworkflow.planning_commands import (
-    PlanningCommandCommand, PlanningCommandFormatError, PlanningCommandInputError, typed_planning_call, refusal_question)
+    PlanningCommandCommand, PlanningCommandFormatError, PlanningCommandInputError, typed_planning_call, refusal_question,
+    refusal_names_an_input)
 from fastworkflow.split_merge import (
     definite_descriptions, merge_subtasks, request_subjects, subjects_in, unnamed_subjects, with_referent)
 from fastworkflow.utils.logging import logger
@@ -927,6 +928,23 @@ def _planning_command_refusal_may_ask(chat_session_obj) -> bool:
         _refusal_may_ask_attended(chat_session_obj)
         and not getattr(chat_session_obj, "_turn_outputs", True)
     )
+
+
+def planning_command_refusal_to_ask(chat_session_obj, command: PlanningCommandCommand,
+                                    refusal: PlanningCommandInputError) -> str | None:
+    """The question a refused planning command call puts to the user, or None when the text planner
+    plans the request instead.
+
+    Asked only when the turn may ask (``_planning_command_refusal_may_ask``) and the refusal names one
+    of the command's inputs (``refusal_names_an_input``): a missing or guessed value is the user's to
+    give. A refusal that names no input says the command does not fit the request, which the user
+    cannot fix by answering, so it is not put to them.
+    """
+    if not _planning_command_refusal_may_ask(chat_session_obj):
+        return None
+    if not refusal_names_an_input(command, refusal):
+        return None
+    return refusal_question(command, refusal)
 
 
 def _post_ask_user_response(
@@ -2406,8 +2424,8 @@ def build_query_with_next_steps(user_query: str,
                                 + (f" ({'; '.join(call.notes)})" if call.notes else ""))
                 except PlanningCommandInputError as exc:  # asked of the user, or the text planner takes over
                     planning_command_fallback = f"{type(exc).__name__}: {exc}"[:500]
-                    if _planning_command_refusal_may_ask(chat_session_obj):
-                        refusal_ask = refusal_question(planning_command, exc)
+                    refusal_ask = planning_command_refusal_to_ask(chat_session_obj, planning_command, exc)
+                    if refusal_ask is not None:
                         logger.info(f"planning command call {planning_command.name} refused, asking the user: {refusal_ask!r}")
                     else:
                         logger.info(f"planning command call {planning_command.name} failed, planning from its template: {planning_command_fallback}")

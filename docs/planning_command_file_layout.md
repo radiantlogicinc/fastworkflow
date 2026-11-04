@@ -177,6 +177,20 @@ There are two check options (the two-option form, fix-3rsq.two-options):
   line that says so. On an enum, `verify` may instead be a dict giving each value's meaning, which
   the check reads: `verify={"group": "a group of people", "unit": "an organisation unit"}`. Every
   key must be one of the enum's values.
+- `verify: "alone"` (a `bool`): the classifier alone decides the field from the request. The typed
+  planning call and the parameter extractor are not asked for it, and it keeps its default when the
+  classifier is not sure or there is no `JEV_API_KEY`. Use it for a part of the job the request may
+  leave out, worded as the exclusion with a false default, and read it in `__phases__`:
+
+  ```python
+  leave_out_risk: bool = Field(
+      default=False,
+      description="the request says to leave out the risk score, or asks only for other parts",
+      json_schema_extra={"verify": "alone"})
+  ```
+
+  Word it as the exclusion, not as "the request asks for the risk score": asked of a part the
+  request does not mention, that question would drop it.
 
 `in_request: {"ignore": [words]}` (a `str`): the named words are removed from either end of the value
 before the check, so a kind word the model appends to a name ("Payroll group" becomes "Payroll") is

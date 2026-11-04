@@ -85,9 +85,74 @@ def test_a_refusal_from_a_planning_commands_own_rule_is_put_in_its_own_words():
     with pytest.raises(sc.PlanningCommandInputError) as refused:
         sc._validate_arguments(command, {"member": "everyone"}, "Which books does everyone have on loan?", None)
 
+    # The hook names the field it refuses (Refused(..., field="member")): the question asks for it.
+    assert refused.value.fields == ("member",)
     assert sc.refusal_question(command, refused.value) == (
         "I can't run member loans yet: member is 'everyone', which names no one member; this skill "
-        "reads one member's loans: give that member's name. What should I change?")
+        "reads one member's loans: give that member's name. What should the member be?")
+
+
+def _refusal(command: sc.PlanningCommandCommand, values: dict, asked_in: str) -> sc.PlanningCommandInputError:
+    """The real refusal a call of ``command`` with ``values`` gets: the guards, then the hook."""
+    with pytest.raises(sc.PlanningCommandInputError) as refused:
+        args, _notes = sc.check_arguments(command, _raw(command, **values), asked_in)
+        sc._validate_arguments(command, args, asked_in, None)
+    return refused.value
+
+
+#: A refusal naming no input, worded as the hook path words a ``Refused(message)`` without ``field``
+#: (``_run_validate``), and as an ``Input`` rule is worded (``check_input``): the command does not
+#: fit the request, which no answer from the user fixes.
+NOT_THIS_JOB = sc.PlanningCommandInputError(
+    "validate_extracted_parameters: fact='owner' does not fit kind='login': the owner of any other "
+    "kind is not this job")
+INPUT_RULE = sc.PlanningCommandInputError("the arguments break a rule of member_loans: the two names are one record")
+
+
+@pytest.mark.parametrize("planning_command, values, asked_in", [
+    ("member_loans", {"member": ""}, REQUEST),                                  # missing
+    ("find_books", {"query": "Dune"}, "which books by Asimov"),                 # not written in the request
+    ("member_loans", {"member": "everyone"}, "Which books does everyone have on loan?"),  # Refused(field=)
+], ids=["missing", "not-written", "hook-names-the-field"])
+def test_a_refusal_naming_an_input_is_one_to_ask(planning_command, values, asked_in):
+    command = _planning_command(planning_command)
+
+    assert sc.refusal_names_an_input(command, _refusal(command, values, asked_in)) is True
+
+
+@pytest.mark.parametrize("refusal", [NOT_THIS_JOB, INPUT_RULE], ids=["hook-names-no-field", "input-rule"])
+def test_a_refusal_naming_no_input_is_not_one_to_ask(refusal):
+    assert sc.refusal_names_an_input(_planning_command("member_loans"), refusal) is False
+
+
+def test_an_attended_turn_asks_about_a_refusal_naming_an_input(workflow_env):
+    workflow_env()
+    ctx, _wf = _session(RecordingTraceSink(), folder=PLANNING_COMMANDS)
+    ctx._begin_turn(REQUEST)
+    command = _planning_command("member_loans")
+
+    question = workflow_agent.planning_command_refusal_to_ask(ctx, command, _refusal(command, {"member": ""}, REQUEST))
+
+    assert question == MEMBER_QUESTION
+
+
+@pytest.mark.parametrize("refusal", [NOT_THIS_JOB, INPUT_RULE], ids=["hook-names-no-field", "input-rule"])
+def test_an_attended_turn_does_not_ask_about_a_refusal_naming_no_input(workflow_env, refusal):
+    workflow_env()
+    ctx, _wf = _session(RecordingTraceSink(), folder=PLANNING_COMMANDS)
+    ctx._begin_turn(REQUEST)  # attended, nothing run, nothing asked: a question would be allowed
+
+    assert workflow_agent._planning_command_refusal_may_ask(ctx) is True
+    assert workflow_agent.planning_command_refusal_to_ask(ctx, _planning_command("member_loans"), refusal) is None
+
+
+def test_an_unattended_turn_does_not_ask_about_a_refusal_naming_an_input(workflow_env):
+    workflow_env()
+    ctx, _wf = _session(RecordingTraceSink(), folder=PLANNING_COMMANDS)
+    ctx._begin_turn(REQUEST, unattended=True)
+    command = _planning_command("member_loans")
+
+    assert workflow_agent.planning_command_refusal_to_ask(ctx, command, _refusal(command, {"member": ""}, REQUEST)) is None
 
 
 def test_refused_planning_command_call_gets_the_refusal_question(request):

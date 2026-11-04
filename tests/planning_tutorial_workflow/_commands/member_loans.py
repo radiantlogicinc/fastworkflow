@@ -23,7 +23,7 @@ class Signature:
         if input.member.casefold() in EVERYONE:
             raise fastworkflow.Refused(
                 f"member is {input.member!r}, which names no one member; this skill "
-                "reads one member's loans: give that member's name")
+                "reads one member's loans: give that member's name", field="member")
         return None
 
 
