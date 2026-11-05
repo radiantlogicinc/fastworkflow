@@ -18,10 +18,11 @@ from fastworkflow.observability.decision_signals import (
     slot_binding_source,
 )
 
+from fastworkflow.utils import argument_checks
 from fastworkflow.utils.signatures import (
     InputForParamExtraction,
     INVALID, INVALID_INFORMATION_ERRMSG, MISSING_INFORMATION_ERRMSG,
-    NOT_FOUND, PARAMETER_EXTRACTION_ERROR_MSG)
+    NOT_FOUND, PARAMETER_EXTRACTION_ERROR_MSG, _planning_command_of)
 
 
 INVALID_INT_VALUE = -sys.maxsize
@@ -298,13 +299,9 @@ class ParameterExtraction:
 
                 # If regex extraction fails, fall back to LLM-based extraction
                 if new_params is None:
-                    new_params = input_for_param_extraction.extract_parameters(
-                        command_parameters_class,
-                        self.command_name,
-                        app_workflow_folderpath)
-                    diagnostics["extraction_method"] = "llm"
-                    if reset := getattr(input_for_param_extraction, "fields_reset_not_given", None):
-                        diagnostics["fields_reset_not_given"] = {n: float(p) for n, p in reset.items()}
+                    new_params = self._llm_extract(
+                        input_for_param_extraction, command_parameters_class,
+                        app_workflow_folderpath, diagnostics)
 
                 # A lone value that bound to nothing is refused, not dropped: run
                 # with defaults, the command does something other than what was
@@ -322,13 +319,9 @@ class ParameterExtraction:
                         cmd_parameters=new_params)
             else:
                 # Use LLM-based extraction for assistant mode
-                new_params = input_for_param_extraction.extract_parameters(
-                    command_parameters_class,
-                    self.command_name,
-                    app_workflow_folderpath)
-                diagnostics["extraction_method"] = "llm"
-                if reset := getattr(input_for_param_extraction, "fields_reset_not_given", None):
-                    diagnostics["fields_reset_not_given"] = {n: float(p) for n, p in reset.items()}
+                new_params = self._llm_extract(
+                    input_for_param_extraction, command_parameters_class,
+                    app_workflow_folderpath, diagnostics)
 
         is_valid, error_msg, suggestions, missing_invalid_fields = \
             input_for_param_extraction.validate_parameters(
@@ -358,6 +351,9 @@ class ParameterExtraction:
         self._store_parameters(self.cme_workflow, new_params)
 
         if not is_valid:
+            if refusals := diagnostics.get("argument_check_refusals_final"):
+                # Why a value the request seemed to give is asked for again (fix-qjf4).
+                error_msg = "Values not used: " + "; ".join(refusals) + "\n" + error_msg
             if params_str := self._format_parameters_for_display(new_params):
                 error_msg = f"Extracted parameters so far:\n{params_str}\n\n{error_msg}"
 
@@ -376,6 +372,55 @@ class ParameterExtraction:
         return self.Output(
             parameters_are_valid=True,
             cmd_parameters=new_params)
+
+    def _llm_extract(self, input_for_param_extraction: InputForParamExtraction,
+                     command_parameters_class: type[BaseModel], app_workflow_folderpath: str,
+                     diagnostics: dict) -> BaseModel:
+        """The LLM extractor's values, checked against the command text it read (fix-qjf4).
+
+        ``argument_checks.check_extracted_values`` checks the values (grounding, placeholders,
+        allowed values, numbers). When it refuses one, the extractor is asked once more with the
+        refusal appended to the command text (``REFUSED_EXTRACTION_NOTE``, as ``typed_planning_call``
+        does); the second answer is checked against the original command text, and a value still
+        refused takes the field's not-given value, so a required field is asked for (the NOT_FOUND
+        path) and an optional one takes its default. A planning command's ``Input`` is left to
+        ``check_arguments``; ``FW_EXTRACTION_ARGUMENT_CHECKS=off`` turns the checks off.
+        """
+        def extract() -> BaseModel:
+            params = input_for_param_extraction.extract_parameters(
+                command_parameters_class, self.command_name, app_workflow_folderpath)
+            diagnostics["extraction_method"] = "llm"
+            if reset := getattr(input_for_param_extraction, "fields_reset_not_given", None):
+                diagnostics["fields_reset_not_given"] = {n: float(p) for n, p in reset.items()}
+            return params
+
+        params = extract()
+        if not argument_checks.checks_enabled() or \
+                _planning_command_of(self.app_workflow, self.command_name) is not None:
+            return params
+        # The request is the command text the extractor read (self.command, prefix stripped, which
+        # InputForParamExtraction.create was given): see argument_checks for why it is not more.
+        request = self.command
+        check = argument_checks.check_extracted_values(params, request)
+        if check.refused:
+            diagnostics["argument_check_refusals"] = check.refusal_texts()
+            diagnostics["argument_check_retry"] = True
+            input_for_param_extraction.command = f"{request}\n\n{check.note()}"
+            try:
+                params = extract()
+            except Exception as exc:  # noqa: BLE001 - the retry is an extra: the first answer stands
+                logger.warning(f"parameter extraction retry failed: {exc!r}")
+            finally:
+                # validate_parameters reads the request from here: the original command text
+                input_for_param_extraction.command = request
+            check = argument_checks.check_extracted_values(params, request)
+            if check.refused:
+                diagnostics["argument_check_refusals_final"] = check.refusal_texts()
+        if check.respelled:
+            diagnostics["argument_check_respelled"] = {
+                name: str(spelled) for name, (_, spelled) in check.respelled.items()}
+        check.apply(params)
+        return params
 
     @staticmethod
     def _get_stored_parameters(cme_workflow: fastworkflow.Workflow):

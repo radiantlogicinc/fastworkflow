@@ -1,5 +1,6 @@
 import sys
 import ast
+import html
 import inspect
 import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
@@ -119,6 +120,23 @@ def parameters_with_unfilled(model_class: Type[BaseModel], values: Dict[str, Any
 # with brackets inside it, or text outside them, is left alone.
 _BRACKETED_VALUE = re.compile(r"^\s*<+\s*([^<>]*?)\s*>+\s*$")
 
+# How many rounds of HTML entity decoding a value gets before it is matched. A model that answers
+# through a forced tool call sometimes writes the brackets escaped (``&lt;UNKNOWN&gt;``), and once
+# more for a doubly escaped reply (``&amp;lt;UNKNOWN&amp;gt;``) (fix-3koe).
+_ENTITY_DECODE_ROUNDS = 3
+
+
+def decode_entities(text: str) -> str:
+    """*text* with HTML entities decoded, repeated until it no longer changes (at most
+    ``_ENTITY_DECODE_ROUNDS`` rounds). Used only to match the bracket shapes below: a value with
+    no bracketed shape keeps its own text (``AT&amp;T`` is not rewritten)."""
+    for _ in range(_ENTITY_DECODE_ROUNDS):
+        decoded = html.unescape(text)
+        if decoded == text:
+            break
+        text = decoded
+    return text
+
 # Lowercase words joined by ``_`` or ``-``, no digits: the shape of a variable
 # name, which is what a usage-text placeholder is.
 _IDENTIFIER_SHAPE = re.compile(r"[a-z]+(?:[_\-][a-z]+)*")
@@ -177,7 +195,8 @@ def classify_bracketed_value(value: Any, field_name: str) -> Tuple[str, Any]:
         return ("unwrapped", items) if changed else ("unchanged", value)
     if not isinstance(value, str) or isinstance(value, Enum):
         return "unchanged", value
-    match = _BRACKETED_VALUE.match(value)
+    # Escaped brackets (``&lt;item_uid&gt;``) are brackets: matched on the decoded text (fix-3koe).
+    match = _BRACKETED_VALUE.match(decode_entities(value))
     if not match:
         return "unchanged", value
     inner = match[1]
@@ -1065,13 +1084,16 @@ def reset_to_not_given(model_class: Type[BaseModel], values: dict, fields) -> No
 
 
 # The not-given marker some models write in angle brackets for an argument the request does not give
-# (``<UNKNOWN>``). It is never a value: at the extraction boundary it becomes the field's not-given value.
+# (``<UNKNOWN>``, or HTML-escaped ``&lt;UNKNOWN&gt;`` through a forced tool call). It is never a value:
+# at the extraction boundary it becomes the field's not-given value.
 _UNKNOWN_MARKER = re.compile(r"^\s*<+\s*unknown\s*>+\s*$", re.IGNORECASE)
 
 
 def is_unknown_marker(value: Any) -> bool:
-    """Whether *value* is the bracketed ``<UNKNOWN>`` marker (a string, not a value)."""
-    return isinstance(value, str) and _UNKNOWN_MARKER.match(value) is not None
+    """Whether *value* is the bracketed ``<UNKNOWN>`` marker (a string, not a value), also written
+    with its brackets HTML-escaped once or more (``&lt;UNKNOWN&gt;``, ``&amp;lt;UNKNOWN&amp;gt;``:
+    fix-3koe)."""
+    return isinstance(value, str) and _UNKNOWN_MARKER.match(decode_entities(value)) is not None
 
 
 def drop_unknown_markers(value: Any, not_given: Any) -> Any:
@@ -1196,6 +1218,11 @@ Today's date is {today}.
             if isinstance(attribute_type, type) and issubclass(attribute_type, Enum):
                 possible_values = [f"'{option.value}'" for option in attribute_type]
                 info_text += f". Valid values: {', '.join(possible_values)}"
+            elif isinstance(extra := attribute_metadata.json_schema_extra, dict) and \
+                    isinstance(declared := extra.get("enum"), (list, tuple)) and declared:
+                # allowed values declared outside the type (JSON Schema ``enum``): the model is told
+                # them, and argument_checks refuses any other value (fix-1pfu.enum-in-extra, fix-qjf4)
+                info_text += f". Valid values: {', '.join(repr(str(v)) for v in declared)}"
 
             if attribute_metadata.examples:
                 sample_values = ", ".join([f"'{sample}'" for sample in attribute_metadata.examples])

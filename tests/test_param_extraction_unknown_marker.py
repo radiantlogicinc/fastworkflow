@@ -121,3 +121,48 @@ def test_drop_unknown_markers_keeps_real_list_items():
     assert drop_unknown_markers(["sku-1", "<UNKNOWN>"], []) == ["sku-1"]
     assert drop_unknown_markers("<UNKNOWN>", NOT_FOUND) == NOT_FOUND
     assert drop_unknown_markers("Oak Street", NOT_FOUND) == "Oak Street"
+
+
+# --- HTML-escaped marker (fix-3koe) ------------------------------------------------------------
+#
+# Claude on Bedrock (a forced tool call) also writes the marker with its brackets HTML-escaped. The
+# escaped forms are the same marker: decoded (repeatedly, bounded) before the match.
+
+ESCAPED_MARKERS = ["&lt;UNKNOWN&gt;", "&lt;unknown&gt;", "&amp;lt;UNKNOWN&amp;gt;", " &lt; UNKNOWN &gt; ",
+                   "&lt;&lt;UNKNOWN&gt;&gt;", "&#60;UNKNOWN&#62;"]
+
+
+@pytest.mark.parametrize("marker", ESCAPED_MARKERS)
+def test_escaped_unknown_is_the_marker(marker):
+    assert signatures.is_unknown_marker(marker)
+    assert drop_unknown_markers(marker, NOT_FOUND) == NOT_FOUND
+    assert drop_unknown_markers(["sku-1", marker], []) == ["sku-1"]
+    kind, value = classify_bracketed_value(marker, "address")
+    assert kind == "placeholder"
+    assert value == marker
+
+
+def test_escaped_marker_from_the_model_is_not_given(extraction):
+    """``&lt;UNKNOWN&gt;`` from the model becomes the not-given value, as ``<UNKNOWN>`` does, for a str
+    field and for list items."""
+    _, result = extraction({
+        "reasoning": "address and items not stated",
+        "order_id": "#W1",
+        "address": "&lt;UNKNOWN&gt;",
+        "item_ids": ["&amp;lt;UNKNOWN&amp;gt;", "sku-1"],
+    })
+    assert result.order_id == "#W1"
+    assert result.address == NOT_FOUND
+    assert result.item_ids == ["sku-1"]
+
+
+def test_entities_in_a_real_value_are_left_alone():
+    """Decoding is for matching the marker only: a value with entities but no bracket shape keeps its
+    text, and an escaped bracketed real value is unwrapped to its decoded inner text."""
+    assert not signatures.is_unknown_marker("AT&amp;T")
+    assert drop_unknown_markers("AT&amp;T", NOT_FOUND) == "AT&amp;T"
+    assert classify_bracketed_value("AT&amp;T", "company") == ("unchanged", "AT&amp;T")
+    assert classify_bracketed_value("&lt;9a1b2c3d&gt;", "item_uid") == ("unwrapped", "9a1b2c3d")
+    assert classify_bracketed_value("&lt;item_uid&gt;", "item_uid")[0] == "placeholder"
+    assert not signatures.is_unknown_marker("")
+    assert drop_unknown_markers("", NOT_FOUND) == ""
