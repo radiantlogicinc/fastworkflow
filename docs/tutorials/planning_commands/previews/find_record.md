@@ -37,15 +37,13 @@ What each phase's output holds, filled in code from the commands the phase ran.
 
 | fact | type | from |
 |---|---|---|
-| `labels` | `list[str]` | `find_book.titles` |
-| `total` | `int` | `find_book.total` |
+| `find` | `Output` | `find_book`'s `Output` |
 
 ### `find` -> `MemberMatch`
 
 | fact | type | from |
 |---|---|---|
-| `labels` | `list[str]` | `find_member.names` |
-| `total` | `int` | `find_member.total` |
+| `find` | `Output` | `find_member`'s `Output` |
 
 ## Plan
 
@@ -73,8 +71,8 @@ Reads no earlier facts. Output: `MemberMatch`.
 
 ### Answer when kind = book
 
-Written by `__result__`: \<name> matches \<find.total> book (\<find.labels[0]>).
+Written by `__result__`: \<name> matches \<find.find.total> book (\<find.find.titles[0]>).
 
 ### Answer when kind = member
 
-Written by `__result__`: \<name> matches \<find.total> member (\<find.labels[0]>).
+Written by `__result__`: \<name> matches \<find.find.total> member (\<find.find.names[0]>).

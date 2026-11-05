@@ -164,7 +164,7 @@ The preview lists the phases, and `book` runs only when `find` found a book uid.
 ```markdown
 | phase | output | runs | fans out |
 |---|---|---|---|
-| `find` | `Found` | always | no |
+| `find` | `find_book`'s `Output` | always | no |
 | `book` | `Book` | only when `find.book_uids` | no |
 ```
 
@@ -241,11 +241,11 @@ Run offline for the title Dune, the pick opens the one exact match:
 Phase find
   1. find_book query=Dune
   code runs: find_book query=Dune
-  facts: Found(book_uids=['b1', 'b2'], titles=['Dune', 'Dune Messiah'])
+  facts: Output(book_uids=['b1', 'b2'], titles=['Dune', 'Dune Messiah'], total=2)
 Phase book
   1. show_book with the uid of the Dune match
   code runs: show_book book_uid=b1
-  facts: Book(uid='b1', name='Dune', author='Frank Herbert', copies=3)
+  facts: Book(show=Output(book_uid='b1', title='Dune', author='Frank Herbert', copies=3, on_loan=2))
 answer written by __result__:
   Dune is by Frank Herbert; the library owns 3 copies.
 ```

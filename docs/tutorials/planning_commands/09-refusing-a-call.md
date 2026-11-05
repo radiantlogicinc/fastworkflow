@@ -162,11 +162,11 @@ Run offline for Raj Patel, the call passes its check and finds the member:
 Phase find
   1. find_member query=Raj Patel
   code runs: find_member query=Raj Patel
-  facts: Found(member_uids=['m2'], names=['Raj Patel'])
+  facts: Output(member_uids=['m2'], names=['Raj Patel'], total=1)
 Phase member
   1. list_member_loans with the uid of the Raj Patel match
   code runs: list_member_loans member_uid=m2
-  facts: Loans(titles=['Dune', 'Emma'], total=2)
+  facts: Output(titles=['Dune', 'Emma'], due_dates=['2026-10-20', '2026-11-05'], total=2)
 answer written by __result__:
   Raj Patel has 2 books (Dune, Emma) on loan.
 ```

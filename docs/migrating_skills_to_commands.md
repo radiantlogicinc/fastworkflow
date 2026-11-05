@@ -336,9 +336,10 @@ Apps write or import these names. Check the app for each one.
 | `load_skills` | `load_planning_commands` (only an app that calls it) |
 | `PlanGenerator.__call__` | `PlanGenerator.__phases__` (section 5) |
 | `FW_SKILL_PHASE_MAX_STEPS`, `FW_SKILL_FANOUT_MAX_ITEMS`, `FW_SKILL_FACTS_MAX_LIST_ITEMS` | Module constants, `PHASE_MAX_STEPS` (15), `FANOUT_MAX_ITEMS` (10) and `FACTS_MAX_LIST_ITEMS` (100) in `fastworkflow.planning_phases`. The environment settings are no longer read. Remove them from the app's env files. |
+| `fact_from`, a `"from"` key on a facts model's field, `facts_from_runs`, `facts_from_archive`, `check_fact_sources`, `check_phase_sources`, `FactSourceError`, `AmbiguousFactSourceError` | Removed. A facts field is typed with a command's `Output` or `Input` (section 12). |
 
-The `fastworkflow.planning` module exports `count`, `do_not_run`, `fact_from`, `from_`, `full_list`,
-`listed`, `num`, `phase`, `pick`, `run` and `when`. Import from there.
+The `fastworkflow.planning` module exports `count`, `do_not_run`, `from_`, `full_list`, `listed`,
+`num`, `phase`, `pick`, `run` and `when`. Import from there.
 
 ## 10. Declare which command enters a context
 
@@ -366,12 +367,27 @@ app that do not enter a context need no change.
 - **Return values.** A command returns its own `Signature.Output`, a `str`, a `CommandResponse` or a
   `CommandOutput`. Any other type fails that call with a `TypeError` that names the command.
 
+## 12. Facts are typed fields, not copies
+
+A facts field no longer copies a value out of a command with `fact_from` or a `"from"` key. It is
+typed with the command whose value it is, so the command's `Output` (or `Input`) is the field's type.
+Each old form below is a load error. Copy fields fail with the message that copies are no longer read.
+
+| Old (copy edges) | New (typed facts) |
+|---|---|
+| `class Found(BaseModel): book_uids: list[str] = fact_from("find_book.book_uids")` with `def find(self, input) -> Found` | `def find(self, input) -> FindBook.Output` (`from .find_book import Signature as FindBook`) |
+| `class Book(BaseModel): name: str = fact_from("show_book.title")` | `class Book(BaseModel): show: ShowBook.Output`, with `@property def name(self) -> str: return self.show.title` |
+| `total: int = fact_from("list_loans.total", min_length=1)` | the field typed `ListLoans.Output`, its check in a `@model_validator` or the phase method |
+| a value a copy computed by name (`count: int = Field(json_schema_extra={"from": ...})`) | a property or method of the facts model, over a field typed with the command's `Output` |
+
+A value a copy renamed, filtered or joined across commands is a property or method of the facts model,
+over the fields typed with the commands' `Output`s. `from_` on a command's `Input` field (a producer
+edge) is unchanged. The previews show each field's origin.
+
 ## Coming in later releases
 
 These items are not in this release. Do them when the release that lands them comes out.
 
-- **Facts models as typed fields.** A group of `fact_from` copy fields that reads one command's
-  output will become one field typed with that output. Copy fields will stop loading.
 - **Answers in `__result__`.** A last phase written as `say that` lines will stop loading. Write the
   answer in `__result__`, which already works on this branch (see the library example
   [book_by_title.py](../fastworkflow/examples/library/_commands/Library/book_by_title.py)).

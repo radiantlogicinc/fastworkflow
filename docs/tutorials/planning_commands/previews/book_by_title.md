@@ -26,28 +26,26 @@ Depth: 1 (lower bound; open steps name no command)
 
 | phase | output | runs | fans out |
 |---|---|---|---|
-| `find` | `Found` | always | no |
+| `find` | `find_book`'s `Output` | always | no |
 | `book` | `Book` | only when `find.book_uids` | no |
 
 ## Facts
 
 What each phase's output holds, filled in code from the commands the phase ran.
 
-### `find` -> `Found`
+### `find` -> `find_book`'s `Output`
 
 | fact | type | from |
 |---|---|---|
-| `book_uids` | `list[str]` | `find_book.book_uids` |
-| `titles` | `list[str]` | `find_book.titles` |
+| `book_uids` | `list[str]` | `find_book`'s `Output` |
+| `titles` | `list[str]` | `find_book`'s `Output` |
+| `total` | `int` | `find_book`'s `Output` |
 
 ### `book` -> `Book`
 
 | fact | type | from |
 |---|---|---|
-| `uid` | `str` | `show_book.book_uid` |
-| `name` | `str` | `show_book.title` |
-| `author` | `str` | `show_book.author` |
-| `copies` | `int` | `show_book.copies` |
+| `show` | `Output` | `show_book`'s `Output` |
 
 ## Plan
 
@@ -55,7 +53,7 @@ For the sample inputs; no input changes them.
 
 ### Phase 1: `find`
 
-Reads no earlier facts. Output: `Found`.
+Reads no earlier facts. Output: `Output`.
 
 1. `find_book query=<title>`
 
@@ -71,4 +69,4 @@ _Steps below are rendered with placeholder facts: `<phase.fact>` stands for that
 
 ## Answer
 
-Written by `__result__`: \<book.name> is by \<book.author>; the library owns \<book.copies> copies.
+Written by `__result__`: \<book.show.title> is by \<book.show.author>; the library owns \<book.show.copies> copies.

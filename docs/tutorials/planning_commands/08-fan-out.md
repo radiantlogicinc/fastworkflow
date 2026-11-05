@@ -133,8 +133,8 @@ The preview: `book` fans out once per book the search found.
 ```markdown
 | phase | output | runs | fans out |
 |---|---|---|---|
-| `find` | `Found` | always | no |
-| `book` | `Book` | always | per item of `find.book_uids` as `uid` (books); at most 5; not bound to a record |
+| `find` | `find_book`'s `Output` | always | no |
+| `book` | `show_book`'s `Output` | always | per item of `find.book_uids` as `uid` (books); at most 5; not bound to a record |
 ```
 
 ## At run time
@@ -175,15 +175,15 @@ Run offline for Jane Austen, `book` runs once for each of the two books:
 Phase find
   1. find_book query=Jane Austen
   code runs: find_book query=Jane Austen
-  facts: Found(book_uids=['b3', 'b4'])
+  facts: Output(book_uids=['b3', 'b4'], titles=['Emma', 'Persuasion'], total=2)
 Phase book (item b3)
   1. show_book book_uid=b3
   code runs: show_book book_uid=b3
-  facts: Book(name='Emma', copies=2)
+  facts: Output(book_uid='b3', title='Emma', author='Jane Austen', copies=2, on_loan=1)
 Phase book (item b4)
   1. show_book book_uid=b4
   code runs: show_book book_uid=b4
-  facts: Book(name='Persuasion', copies=1)
+  facts: Output(book_uid='b4', title='Persuasion', author='Jane Austen', copies=1, on_loan=1)
 answer written by __result__:
   The books by Jane Austen: Emma (2 copies); Persuasion (1 copy).
 ```

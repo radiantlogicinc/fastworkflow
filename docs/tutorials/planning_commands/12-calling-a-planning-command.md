@@ -154,9 +154,9 @@ The preview: the phases `book_loans` runs, one of them through the nested `book_
 ```markdown
 | phase | output | runs | fans out |
 |---|---|---|---|
-| `find` | `Found` | always | no |
+| `find` | `find_book`'s `Output` | always | no |
 | `book` | `Book` | only when `find.book_uids` | no |
-| `loans` | `Loans` | always | no |
+| `loans` | `list_loans`'s `Output` | always | no |
 ```
 
 ## At run time

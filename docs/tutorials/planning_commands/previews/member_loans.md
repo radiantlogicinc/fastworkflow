@@ -24,26 +24,28 @@ Depth: 1 (lower bound; open steps name no command)
 
 | phase | output | runs | fans out |
 |---|---|---|---|
-| `find` | `Found` | always | no |
-| `member` | `Loans` | only when `find.member_uids` | no |
+| `find` | `find_member`'s `Output` | always | no |
+| `member` | `list_member_loans`'s `Output` | only when `find.member_uids` | no |
 
 ## Facts
 
 What each phase's output holds, filled in code from the commands the phase ran.
 
-### `find` -> `Found`
+### `find` -> `find_member`'s `Output`
 
 | fact | type | from |
 |---|---|---|
-| `member_uids` | `list[str]` | `find_member.member_uids` |
-| `names` | `list[str]` | `find_member.names` |
+| `member_uids` | `list[str]` | `find_member`'s `Output` |
+| `names` | `list[str]` | `find_member`'s `Output` |
+| `total` | `int` | `find_member`'s `Output` |
 
-### `member` -> `Loans`
+### `member` -> `list_member_loans`'s `Output`
 
 | fact | type | from |
 |---|---|---|
-| `titles` | `list[str]` | `list_member_loans.titles` |
-| `total` | `int` | `list_member_loans.total` |
+| `titles` | `list[str]` | `list_member_loans`'s `Output` |
+| `due_dates` | `list[str]` | `list_member_loans`'s `Output` |
+| `total` | `int` | `list_member_loans`'s `Output` |
 
 ## Plan
 
@@ -51,13 +53,13 @@ For the sample inputs; no input changes them.
 
 ### Phase 1: `find`
 
-Reads no earlier facts. Output: `Found`.
+Reads no earlier facts. Output: `Output`.
 
 1. `find_member query=<member>`
 
 ### Phase 2: `member`
 
-Reads: `find`. Output: `Loans`. Settings: `when=find.member_uids`.
+Reads: `find`. Output: `Output`. Settings: `when=find.member_uids`.
 
 _Steps below are rendered with placeholder facts: `<phase.fact>` stands for that fact as read at run time, and 999999 (or 999,999) for a number fact the code converted; values computed from facts (counts, comparisons, matches) are not real._
 

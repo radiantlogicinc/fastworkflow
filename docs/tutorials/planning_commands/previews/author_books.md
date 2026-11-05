@@ -25,25 +25,30 @@ Depth: 1 (lower bound; open steps name no command)
 
 | phase | output | runs | fans out |
 |---|---|---|---|
-| `find` | `Found` | always | no |
-| `book` | `Book` | always | per item of `find.book_uids` as `uid` (books); at most 5; not bound to a record |
+| `find` | `find_book`'s `Output` | always | no |
+| `book` | `show_book`'s `Output` | always | per item of `find.book_uids` as `uid` (books); at most 5; not bound to a record |
 
 ## Facts
 
 What each phase's output holds, filled in code from the commands the phase ran.
 
-### `find` -> `Found`
+### `find` -> `find_book`'s `Output`
 
 | fact | type | from |
 |---|---|---|
-| `book_uids` | `list[str]` | `find_book.book_uids` |
+| `book_uids` | `list[str]` | `find_book`'s `Output` |
+| `titles` | `list[str]` | `find_book`'s `Output` |
+| `total` | `int` | `find_book`'s `Output` |
 
-### `book` -> `Book`
+### `book` -> `show_book`'s `Output`
 
 | fact | type | from |
 |---|---|---|
-| `name` | `str` | `show_book.title` |
-| `copies` | `int` | `show_book.copies` |
+| `book_uid` | `str` | `show_book`'s `Output` |
+| `title` | `str` | `show_book`'s `Output` |
+| `author` | `str` | `show_book`'s `Output` |
+| `copies` | `int` | `show_book`'s `Output` |
+| `on_loan` | `int` | `show_book`'s `Output` |
 
 ## Plan
 
@@ -51,7 +56,7 @@ For the sample inputs; no input changes them.
 
 ### Phase 1: `find`
 
-Reads no earlier facts. Output: `Found`.
+Reads no earlier facts. Output: `Output`.
 
 1. `find_book query=<author>`
 
@@ -59,7 +64,7 @@ Pages: step 1 reads page 1 only.
 
 ### Phase 2: `book`
 
-Reads no earlier facts. Output: `Book`. Settings: `over='find.book_uids'`, `item='uid'`, `max_items=5`, `bind=False`, `noun='books'`.
+Reads no earlier facts. Output: `Output`. Settings: `over='find.book_uids'`, `item='uid'`, `max_items=5`, `bind=False`, `noun='books'`.
 
 For the first item, `uid` = `<find.book_uids[0]>`:
 
@@ -71,4 +76,4 @@ For each later item (shown for the second), `uid` = `<find.book_uids[1]>`:
 
 ## Answer
 
-Written by `__result__`: The books by \<author>: \<book[0].name> (\<book[0].copies> copy); \<book[1].name> (\<book[1].copies> copy).
+Written by `__result__`: The books by \<author>: \<book[0].title> (\<book[0].copies> copy); \<book[1].title> (\<book[1].copies> copy).

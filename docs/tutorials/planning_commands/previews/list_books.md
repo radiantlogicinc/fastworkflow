@@ -23,18 +23,19 @@ Depth: 1 (lower bound; open steps name no command)
 
 | phase | output | runs | fans out |
 |---|---|---|---|
-| `find` | `Found` | always | no |
+| `find` | `find_book`'s `Output` | always | no |
 
 ## Facts
 
 What each phase's output holds, filled in code from the commands the phase ran.
 
-### `find` -> `Found`
+### `find` -> `find_book`'s `Output`
 
 | fact | type | from |
 |---|---|---|
-| `titles` | `list[str]` | `find_book.titles` |
-| `total` | `int` | `find_book.total` |
+| `book_uids` | `list[str]` | `find_book`'s `Output` |
+| `titles` | `list[str]` | `find_book`'s `Output` |
+| `total` | `int` | `find_book`'s `Output` |
 
 ## Plan
 
@@ -42,7 +43,7 @@ For the sample inputs; no input changes them.
 
 ### Phase 1: `find`
 
-Reads no earlier facts. Output: `Found`.
+Reads no earlier facts. Output: `Output`.
 
 1. `find_book query=<query>`
 

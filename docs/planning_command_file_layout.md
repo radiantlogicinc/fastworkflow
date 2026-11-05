@@ -15,7 +15,11 @@ step-by-step tutorial, on a sample workflow:
 ```python
 from pydantic import BaseModel, Field
 
-from fastworkflow.planning import fact_from, full_list, pick, run
+from fastworkflow.planning import full_list, pick, run
+
+from .find_item import Signature as FindItem
+from .list_parts import Signature as ListParts
+from .open_item_by_uid import Signature as OpenItemByUid
 
 
 class Signature:                      # exactly a command's Signature
@@ -25,19 +29,24 @@ class Signature:                      # exactly a command's Signature
         name: str = Field(description="the item's name")
 
 class PlanGenerator:                  # a command generates a response; a planning command, a plan
-    class Found(BaseModel):
-        uids: list[str] = fact_from("find_item.item_uids")
-
-    def find(self, input) -> Found:                       # phase 1; it fills Found
+    def find(self, input) -> FindItem.Output:             # phase 1; it fills find_item's Output
         return [run("open_catalog"),
                 run("find_item", query=input.name)]
 
-    class Item(BaseModel):                                # its facts, like an Output
-        uid: str = fact_from("open_item_by_uid.item_uid")
-        parts: list[str] = fact_from("list_parts.labels")
+    class Item(BaseModel):                                # its facts: typed by commands' Outputs
+        opened: OpenItemByUid.Output
+        parts_list: ListParts.Output
+
+        @property                                         # other values: computed, not copied
+        def uid(self) -> str:
+            return self.opened.item_uid
+
+        @property
+        def parts(self) -> list[str]:
+            return self.parts_list.labels
 
     def item(self, input, find) -> Item:                  # phase 2 reads find's facts
-        if not find.uids:
+        if not find.item_uids:
             return []                                     # skipped, decided when reached
         return [pick("open_item_by_uid", named=input.name),
                 full_list("list_parts")]
@@ -53,8 +62,9 @@ class PlanGenerator:                  # a command generates a response; a planni
 
 **The rules.** (1) Each public method of `PlanGenerator` is a phase (one executor run), in
 the order written. (2) Its parameters name what it reads: `input`, and earlier phases by name
-(their facts; `=None` when that phase may have been skipped). (3) Its return annotation is the
-facts model it fills: each field says its source, `fact_from("command.field")`. (4) It
+(their facts; `=None` when that phase may have been skipped). (3) Its return annotation is what it
+fills: a command's `Output`, or a facts model whose fields are typed with commands' `Output`s or `Input`s;
+any other value is a property or method of it (copies, `fact_from` and `"from"`, are not read). (4) It
 returns its steps, exactly the lines the agent reads. `return []` skips it: decided when the
 phase is reached, on the real facts. A planning command with no `Input` fields may have phases too
 (methods without `input`; every call has the one plan). (5) `__result__` is the one method
@@ -294,7 +304,7 @@ A preview follows the order above:
    verify meanings (a `verify` dict);
 3. the example requests (`plain_utterances`);
 4. for a phased planning command, the phases (output model, when each runs, and how it fans out)
-   and the facts each output model holds, with their `"from"` sources. When some inputs
+   and the facts each output model holds, with the command each one is typed by. When some inputs
    make a call run flat, one line above the table says when it runs as phases, and the
    table is about the phased calls. A phase's condition reads "only when <the tests its
    method made on the facts>" (`find.uids`);
@@ -374,8 +384,7 @@ shown by its source.
 come in declaration order and combinations in a fixed order, so the same files render the
 same bytes. `--check` writes nothing and exits 1 when a preview in `<dir>` differs from a
 fresh render, is missing, or is an extra `.md` file no planning command renders, or when a phase
-output's `"from"` names a command or field the workflow does not have (at load only a
-warning; `command_preview.check_previews`). Run it in a test or in CI to keep committed
+output's facts or ``from_`` fail the load (`command_preview.check_previews`). Run it in a test or in CI to keep committed
 previews current. Both writing and `--check` fail, naming the file and its error, when a
 planning command file does not load (the loader logs and skips it at run time;
 `command_preview.render_previews`). Writing removes a stale preview (an `.md` file

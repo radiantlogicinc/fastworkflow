@@ -143,37 +143,36 @@ them back. The table is additive: a store opened by an earlier build gains it
 on its next open, rows archived before it read exactly as before (with no
 runs), and it is erased and aged with the turn's evidence.
 
-`facts_from_runs(model, runs, *, context=None, context_name=None, signatures=None)`
-(and `facts_from_archive(model, archive, scope, ...)`) fills a pydantic model in
-code from those runs. Each field names its source with
-`json_schema_extra={"from": "<command>.<field>"}`: a field of the command's
-Output, else of its Input. Only successful runs count, only those on the
-`context` record when one is given; a scalar takes the latest run of the
-broadest query holding the field; a list field joins the runs' values in order. Runs are compared on their
-*normalised* Input: a parameter that is `None`, empty/`none`/`null` text, the
-extractor's `NOT_FOUND` sentinel or invalid-number marker, or equal to its
-`Signature.Input` default (when `signatures` is given) is not given, and a paging
-parameter at `0` is the first page. The paging parameters are those a field names
-in `"page_by"` (`{"from": "list_items.item_uids", "page_by": "cursor"}`), else
-`start` (`PAGING_PARAMETERS`); the other given parameters
-form the run's query. A list value joins only the pages of the broadest query
-(fewest given parameters; between equally broad ones, the latest), one per
-paging position, a re-read replacing the earlier read in place: the same page
-read as `start=None` and `start=0` counts once, and a filtered read
-(`filter=...`) is never joined into the full list. A non-list value is appended
-once per distinct normalised Input. A scalar field (from the Output or the Input)
-follows the same broadest-query rule, so a whole-list read followed by a filtered
-read gives the whole list's `total`. Over that query's pages (each distinct page
-once) it comes from the page that carries it: a later page that listed no row
-carries nothing, `None` is not carried, a bool is true when any page says so, and
-any other value is the latest carrying page's. So a count only the first page
-computes survives reading later pages; when every run is one page, the latest run
-wins. A required field with no value raises
-`MissingFactError` naming field and source; a `"from"` that is malformed, or
-names a command or field `signatures` lacks (`check_fact_sources`,
-`workflow_signatures`), raises `FactSourceError`. The command may be qualified
-(`Context/command.field`); a plain name that several contexts define resolves
-against the record's context, and otherwise raises `AmbiguousFactSourceError`.
+Phase facts are filled in code from those runs by `fill_output` in
+`fastworkflow/planning_phases.py`, which types each field by the command whose `Output` or `Input` it
+is (design 3.12). A facts field is typed with a command's `Output` or `Input`, a union of them, or one
+of those `| None = None`. A field typed with an `Output` takes that command's `Output` from its run in
+the phase; a field typed with an `Input` takes the arguments that run was called with. There is no
+copy edge: `fact_from` and a `"from"` key on a facts field are removed (Phase 15), and a field that
+copies fails the load. A value a copy used to rename, filter or join is a property or method of the
+facts model, over the fields typed with the commands' `Output`s.
+
+Only successful runs count, and only those on the phase's record when one is given. Runs are compared
+on their *normalised* Input: a parameter that is `None`, empty/`none`/`null` text, the extractor's
+`NOT_FOUND` sentinel or invalid-number marker, or equal to its `Signature.Input` default is not given,
+and the paging parameter `start` at `0` is the first page. The other given parameters form the run's
+query. A required field with no value raises `MissingFactError`, naming the field and its command.
+
+When a step asks for the full list (it says `full list`, `every page`, `all pages`, `until complete`
+or `page through`, `FULL_LIST_PHRASES`), the pages of that command are joined:
+
+- a list field joins the values of the pages of the broadest query (the fewest given parameters;
+  between equally broad ones, the latest), in page order, one per paging position. A re-read replaces
+  the earlier read in place, so the same page read as `start=None` and `start=0` counts once, and a
+  filtered read (`filter=...`) is never joined into the full list;
+- the joined blob keeps every key any of its pages gave. A key an earlier page carries survives when
+  the last page omits it;
+- a scalar comes from the broadest query's pages, each distinct page once: the value of the last page
+  that gives one. `None` is not given, a bool is true when any page says so, and a later page that
+  listed no row carries nothing. So a count only the first page computes survives reading later pages.
+
+Without such a step, the phase's last matching run is the value.
+
 Facts carry values, never `O<n>` aliases, which restart with each executor run.
 
 A phased skill (`docs/planning_command_phases.md`) fills each phase's output this way after

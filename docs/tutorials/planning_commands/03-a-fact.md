@@ -145,7 +145,7 @@ The planning command's preview: its phases and its facts.
 ```markdown
 | phase | output | runs | fans out |
 |---|---|---|---|
-| `find` | `Found` | always | no |
+| `find` | `find_book`'s `Output` | always | no |
 ```
 
 ## At run time
@@ -186,7 +186,7 @@ Run offline, `find` hands its fact on and `__result__` writes the sentence from 
 Phase find
   1. find_book query=Dune
   code runs: find_book query=Dune
-  facts: Found(total=2)
+  facts: Output(book_uids=['b1', 'b2'], titles=['Dune', 'Dune Messiah'], total=2)
 answer written by __result__:
   2 books match Dune.
 ```

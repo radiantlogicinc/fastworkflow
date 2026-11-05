@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+### Upgrading from copy edges (fact_from, "from" on a facts field) to typed facts (Phase 15)
+
+1. **BREAKING: copy edges are retired (design 2.33, 3.12).** `fact_from` is removed from
+   `fastworkflow.planning` and `fastworkflow.planning_phases`, and a `"from"` key on a facts model's
+   field is no longer read. A facts field typed with anything other than a command's `Output` or
+   `Input` is a load error, and copy fields fail with the message that copies are no longer read.
+   `facts.fact_sources` no longer resolves copies, and `check_phase_sources`, `facts_from_runs`,
+   `facts_from_archive`, `check_fact_sources`, `FactSourceError` and `AmbiguousFactSourceError` are
+   removed. `from_` on a command's `Input` field (a producer edge) is unchanged.
+
+   | Old (copy edges) | New (typed facts) |
+   |---|---|
+   | `class Found(BaseModel): book_uids: list[str] = fact_from("find_book.book_uids")` with `def find(self, input) -> Found` | `def find(self, input) -> FindBook.Output` (`from .find_book import Signature as FindBook`) |
+   | `class Book(BaseModel): name: str = fact_from("show_book.title")` | `class Book(BaseModel): show: ShowBook.Output`, with `@property def name(self) -> str: return self.show.title` |
+   | `total: int = fact_from("list_loans.total", min_length=1)` | the field typed `ListLoans.Output`, its check in a `@model_validator` or the phase method |
+   | a value a copy computed by name (`count: int = Field(json_schema_extra={"from": ...})`) | a property or method of the facts model, over a field typed with the command's `Output` |
+
+   A value a copy renamed, filtered or joined across commands is a property or method of the facts model,
+   over the fields typed with the commands' `Output`s. The previews show each field's origin.
+
+   `over=` may name a property as well as a field: `over="roster.identity_uids"` reads a property of the
+   facts model an earlier phase outputs, and `over="roster.unit.identity_uids"` reads a property of a typed
+   field's model (`unit`). The load checks each name as a field or a property; a property's return
+   annotation types the names after it (a list's items are its element type), and a property without one
+   is read at run time, unchecked past it. A name that is neither a field nor a property still fails the load.
+
+2. **Nested lists and joined pages (Phase 15 follow-ups).** A list a nested Output of a facts model holds is
+   read by the same rule, each nested model its own column scope: a nested list that drops a row fails the
+   check, and a nested complete list passes. A phase's joined pages keep every key an earlier page carries,
+   so a key the last page omits survives; a scalar takes the last page that gives a value.
+
+3. **Plain names in types (Phase 15 follow-up).** Types in previews, load messages and the command-error
+   text are written by plain class name (`Optional[X]` as `X | None`), with no module path or path-derived
+   digest. Two copies of one workflow at two paths give the same previews.
+
+4. **Previews: a fan-out over a property shows its later items.** A `@phase(over="unit.identity_uids")`
+   whose path ends in a property over a typed field now renders the "For each later item" block, as a
+   fan-out over a field does. This changes the preview text only, not the run.
+
 ### Upgrading from Phase 11 (check options, one hook, short forms, plain required fields)
 
 Every BREAKING item below gives the old form and the new one. Each old form is a load error or a call

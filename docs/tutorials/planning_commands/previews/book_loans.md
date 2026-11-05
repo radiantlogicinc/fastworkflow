@@ -26,36 +26,35 @@ Depth: 1 (lower bound; open steps name no command)
 
 | phase | output | runs | fans out |
 |---|---|---|---|
-| `find` | `Found` | always | no |
+| `find` | `find_book`'s `Output` | always | no |
 | `book` | `Book` | only when `find.book_uids` | no |
-| `loans` | `Loans` | always | no |
+| `loans` | `list_loans`'s `Output` | always | no |
 
 ## Facts
 
 What each phase's output holds, filled in code from the commands the phase ran.
 
-### `find` -> `Found`
+### `find` -> `find_book`'s `Output`
 
 | fact | type | from |
 |---|---|---|
-| `book_uids` | `list[str]` | `find_book.book_uids` |
-| `titles` | `list[str]` | `find_book.titles` |
+| `book_uids` | `list[str]` | `find_book`'s `Output` |
+| `titles` | `list[str]` | `find_book`'s `Output` |
+| `total` | `int` | `find_book`'s `Output` |
 
 ### `book` -> `Book`
 
 | fact | type | from |
 |---|---|---|
-| `uid` | `str` | `show_book.book_uid` |
-| `name` | `str` | `show_book.title` |
-| `author` | `str` | `show_book.author` |
-| `copies` | `int` | `show_book.copies` |
+| `show` | `Output` | `show_book`'s `Output` |
 
-### `loans` -> `Loans`
+### `loans` -> `list_loans`'s `Output`
 
 | fact | type | from |
 |---|---|---|
-| `borrowers` | `list[str]` | `list_loans.borrowers` |
-| `total` | `int` | `list_loans.total` |
+| `borrowers` | `list[str]` | `list_loans`'s `Output` |
+| `due_dates` | `list[str]` | `list_loans`'s `Output` |
+| `total` | `int` | `list_loans`'s `Output` |
 
 ## Plan
 
@@ -63,7 +62,7 @@ For the sample inputs; no input changes them.
 
 ### Phase 1: `find`
 
-Reads no earlier facts. Output: `Found`.
+Reads no earlier facts. Output: `Output`.
 
 1. `find_book query=<title>`
 
@@ -79,14 +78,14 @@ _Steps below are rendered with placeholder facts: `<phase.fact>` stands for that
 
 ### Phase 3: `loans`
 
-Reads: `book`. Output: `Loans`.
+Reads: `book`. Output: `Output`.
 
 _Steps below are rendered with placeholder facts: `<phase.fact>` stands for that fact as read at run time, and 999999 (or 999,999) for a number fact the code converted; values computed from facts (counts, comparisons, matches) are not real._
 
-1. `list_loans book_uid=<find.book_uids[0]> (full list)`
+1. `list_loans book_uid=<book.show.book_uid> (full list)`
 
 Pages: step 1 reads up to 20 pages.
 
 ## Answer
 
-Written by `__result__`: \<book.name> is by \<book.author>; the library owns \<book.copies> copies. It is on loan to \<loans.total> borrower (\<loans.borrowers[0]>).
+Written by `__result__`: \<book.show.title> is by \<book.show.author>; the library owns \<book.show.copies> copies. It is on loan to \<loans.total> borrower (\<loans.borrowers[0]>).

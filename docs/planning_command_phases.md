@@ -52,13 +52,12 @@ max_items=None, bind=True, until=None, noun=None, optional=False)`, one per meth
   may be skipped or fail), and one without a default fails the phase. A parameter must
   still name an earlier phase with facts in at least one call the inputs give, so a
   misspelled name fails the load (`check_bindings`).
-- `output`: the method's return annotation (or `@phase(output=lambda input: ...)`), a facts
-  model. Each field names the command field it is copied from,
-  `fact_from("<command>.<field>")` (`Field` keyword arguments pass through:
-  `fact_from("find_book.book_uids", min_length=1)`): a field of that command's
-  `Signature.Output` (returned as `CommandResponse.output`), else of its `Signature.Input`.
-  See "Command outputs and facts" in `observation_search.md`. `None`: the phase passes
-  nothing on.
+- `output`: the method's return annotation (or `@phase(output=lambda input: ...)`): a command's
+  `Signature.Output` (`-> FindBook.Output`, returned as `CommandResponse.output`), a union of them, or a
+  facts model whose every field is typed with a command's `Signature.Output` or `Signature.Input`
+  (`show: ShowBook.Output`). Other values are properties or methods of the facts model. Copy edges
+  (`fact_from`, a `"from"` on a facts field) are not read: they fail the load (design 3.12). See
+  "Command outputs and facts" in `observation_search.md`. `None`: the phase passes nothing on.
 - `when`: the method itself. The runner calls it when it reaches the phase
   (`planning_phases.runs_now`) with the real facts; `return []` skips the phase, otherwise its
   steps are kept and are the phase's plan (the method runs once). A fan-out phase has no
@@ -90,14 +89,13 @@ keep the answer phase unskippable.
 
 The phases are built on the same placeholder inputs the template is rendered from. A method
 without `self`, an annotation that is not a model, a parameter no earlier phase with facts
-provides (and no default) or that names no such phase in any call, a malformed `"from"`, a
-method that fails while its template is built or writes `None` into a step, and a step that
+provides (and no default) or that names no such phase in any call, a facts field typed with anything but
+a command's `Output` or `Input` (a copy included), a method that fails while its template is built or writes `None` into a step, and a step that
 names a command the workflow lacks or a parameter its `Signature.Input` lacks
 (`planning_commands.check_step_commands`) fail the load: the planning command is logged as an error and
 skipped, and `fastworkflow command preview` fails naming it. Each output model is then checked
-against the workflow's command signatures (`check_fact_sources`): a `"from"` naming a
-command or field the workflow does not have is logged as a warning and the planning command still
-loads, so a workflow can add a command's `Output` after the planning command that reads it;
+against the workflow's command signatures (`typed_phase_facts.check_typed_facts_model`): a field typed with a
+class that is not a loaded command's `Output` or `Input` is a load error;
 `fastworkflow command preview --check` fails on it. A plain command name that several
 contexts define passes when some context resolves every field of the model; at run time it
 resolves against the context of the phase's record.
@@ -182,7 +180,7 @@ instead of one executor run on the whole list.
    cap, see "Steps run by code"). Sub-tasks that are not planning command calls keep the hand-off and
    the 25-step cap unchanged.
 5. **Facts.** After the run, the phase's `output` is filled in code
-   (`facts_from_runs`), with no model call, from the command runs archived during **this
+   (`planning_phases.fill_output`, typed by the commands' `Output`s and `Input`s, design 3.12), with no model call, from the command runs archived during **this
    phase** (`runs_for_facts`). Runs of earlier phases never count.
    - The phase's record is the one the workflow is on when the phase's run ends (its
      `"<Context> <label>"` clause, `""` at the root). One exception (`planned_record`):
@@ -439,20 +437,29 @@ item is its own sub-plan: its own executor run (or answer-only call), budget, fi
 check and fill.
 
 ```python
-from fastworkflow.planning import fact_from, phase
+from fastworkflow.planning import phase
 from fastworkflow.planning_phases import facts_text
+
+from .find_item import Signature as FindItem
+from .list_parts import Signature as ListParts
+from .open_item_by_uid import Signature as OpenItemByUid
 
 
 class PlanGenerator:
-    class Found(BaseModel):
-        item_uids: list[str] = fact_from("find_item.item_uids", min_length=1)
-
-    def find(self, input) -> Found:
+    def find(self, input) -> FindItem.Output:
         return ["open_catalog", f"find_item query={input.query}"]
 
     class ItemFacts(BaseModel):
-        uid: str = fact_from("open_item_by_uid.item_uid")
-        part_labels: list[str] = fact_from("list_parts.labels")
+        opened: OpenItemByUid.Output
+        parts_list: ListParts.Output
+
+        @property
+        def uid(self) -> str:
+            return self.opened.item_uid
+
+        @property
+        def part_labels(self) -> list[str]:
+            return self.parts_list.labels
 
     # One sub-plan per uid the search found; `uid` is the item.
     @phase(over="find.item_uids")
@@ -468,10 +475,11 @@ class PlanGenerator:
 ```
 
 - `over`: a list of items (`over=lambda input: [n.strip() for n in input.names.split(",")]`), or
-  `"<earlier phase>.<list field>"`, a list field of an earlier phase's output (of a
-  fan-out phase's outputs: that field of each, joined). Any other string fails the load,
-  as does a reference to a phase that is not earlier or has no output, or to a field its
-  output does not have. Empty values and repeats are dropped, order kept.
+  `"<earlier phase>.<path>"`, a list the path names on an earlier phase's output (of a
+  fan-out phase's outputs: that path of each, joined). Each name in the path is a field or a
+  property of the model before it (`"find.uids"`, `"roster.unit.identity_uids"`). Any other
+  string fails the load, as does a reference to a phase that is not earlier or has no output,
+  or a name that is neither a field nor a property of its model. Empty values and repeats are dropped, order kept.
 - `item`: the method's one parameter that is neither `input` nor an earlier phase.
   Other parameters bind to earlier outputs as usual. In the template
   (`concatenated_steps`), a fan-out over a list gives its steps once per item; one over an

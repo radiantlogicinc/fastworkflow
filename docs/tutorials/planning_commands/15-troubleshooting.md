@@ -526,8 +526,8 @@ PlanningCommandFormatError: _commands/fan_out_param.py: plan(): phase 'item': ov
 
 <!-- broken: fact_source -->
 ```python
-from pydantic import BaseModel
-from fastworkflow.planning import fact_from, run
+from pydantic import BaseModel, Field
+from fastworkflow.planning import run
 
 
 class Signature:
@@ -536,7 +536,7 @@ class Signature:
 
 class PlanGenerator:
     class Found(BaseModel):
-        uid: str = fact_from("list_shelves.uid")
+        uid: str = Field(json_schema_extra={"from": "list_shelves.uid"})
 
     def find(self) -> Found:
         return [run("list_branches")]
@@ -544,7 +544,7 @@ class PlanGenerator:
 
 <!-- check-error -->
 ```text
-_commands/fact_source.py: Found.uid (from 'list_shelves.uid'): no command named 'list_shelves'
+_commands/fact_source.py: Found.uid is str; a facts field is typed with a command's Output or Input. Compute other values in a property or method of Found; copies are no longer read (fact_from and "from" are removed)
 ```
 
 
