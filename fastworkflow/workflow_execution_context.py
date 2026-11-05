@@ -35,7 +35,7 @@ import dspy
 import fastworkflow
 import fastworkflow.turn
 from fastworkflow import active_workflow, metrics, planning_commands, tracing
-from fastworkflow import approval_binding
+from fastworkflow import approval_binding, turn_cache
 from fastworkflow.observation_offloading.state import current_execute_alias
 from fastworkflow.session_state_store import SCHEMA_VERSION, IncompatibleSessionState
 from fastworkflow.state_serialization import validate_state
@@ -165,6 +165,13 @@ def _frame_property(field_name: str) -> property:
     return property(fget, fset)
 
 
+#: The turn's answer when the sub-task review is declined or expires: nothing runs (fix-3rsq.plan-review.2.6).
+SUBTASK_REVIEW_DECLINED = ("You declined the sub-task review, so nothing was run. "
+                           "Send the request again to review it again.")
+SUBTASK_REVIEW_EXPIRED = ("The sub-task review expired before you answered, so nothing was run, and your message "
+                          "was not taken as a reply to it. Send the request again to start a new review.")
+
+
 class WorkflowExecutionContext:
     """
     Owns NLU (cme_workflow), the bound app workflow, and message execution.
@@ -289,6 +296,10 @@ class WorkflowExecutionContext:
         # Unattended turn: nobody is there to answer, so the agent has no
         # ask_user for the whole logical turn. Set when the turn begins.
         self._turn_unattended: bool = False
+        # The sub-task review gate's state for the turn (fix-3rsq.plan-review.2.2/.2.6/.2.8): the marker the turn span
+        # carries, and the plan the gate built (the accepted one after a review; the draft when no one could answer).
+        self._turn_subtask_review: str = "not_applicable"
+        self._turn_subtask_plan = None
         self._turn_agent_result: Any = None
         self._turn_history_baseline: int = 0
         # turn_key of the newest turn that both completed and contributed a
@@ -344,6 +355,7 @@ class WorkflowExecutionContext:
     _origins = _frame_property("origins")
     _subtask_index = _frame_property("subtask_index")
     _subtask_answers = _frame_property("subtask_answers")
+    _subtask_outputs = _frame_property("subtask_outputs")
     # Set when a sub-task hit the step cap with no hand-off left: the turn is then exhausted.
     _subtask_exhausted = _frame_property("subtask_exhausted")
     # Finish check (fix-3xts): the first step each sub-task origin's outputs count from,
@@ -357,6 +369,16 @@ class WorkflowExecutionContext:
     _phased_planning_command_call = _frame_property("phased_planning_command_call")
     # The ReAct agent of the call in progress: the top frame's agent (the turn frame's, for now).
     _workflow_tool_agent = _frame_property("agent")
+
+    @property
+    def _turn_subtask_plan(self):
+        """The turn's sub-task plan (review_proposals.SubTaskProposal): the accepted proposal, or the draft when the
+        turn was not reviewed. It is on the turn frame, so a suspended turn keeps it (fix-3rsq.plan-review.2.9)."""
+        return self._turn_frame().subtask_plan
+
+    @_turn_subtask_plan.setter
+    def _turn_subtask_plan(self, plan) -> None:
+        self._turn_frame().subtask_plan = plan
 
     @property
     def session_key(self) -> Optional[str]:
@@ -657,6 +679,9 @@ class WorkflowExecutionContext:
         self._turn_started_at = datetime.now(timezone.utc)
         self._turn_user_message = user_message
         self._turn_unattended = bool(unattended)
+        self._turn_subtask_review = "not_applicable"
+        self._turn_subtask_plan = None
+        turn_cache.begin_turn()
         self._planning_command_refusal_pending = False
         self._planning_command_refusal_answered = False
         self._turn_refined_message = None
@@ -1100,7 +1125,12 @@ class WorkflowExecutionContext:
             "subtask_origins": list(turn.origins),
             "subtask_index": turn.subtask_index,
             "subtask_answers": list(turn.subtask_answers),
+            "subtask_outputs": list(turn.subtask_outputs),
             "subtask_exhausted": turn.subtask_exhausted,
+            # Additive (fix-3rsq.plan-review.2.7/.2.9): the open sub-task review and the turn's sub-task plan, so an
+            # accept after a restart resumes the review and runs the accepted goals.
+            "subtask_review_open": bool(turn.subtask_review_open),
+            "subtask_plan": None if turn.subtask_plan is None else turn.subtask_plan.model_dump(mode="json"),
             "next_step": self._next_step,
             "skill_phase_run": turn.phase_run,
             "react": react_blob,
@@ -1177,7 +1207,22 @@ class WorkflowExecutionContext:
         turn.origins = list(state.get("subtask_origins") or range(len(turn.subtasks)))
         turn.subtask_index = int(state.get("subtask_index") or 0)
         turn.subtask_answers = list(state.get("subtask_answers") or [])
+        turn.subtask_outputs = list(state.get("subtask_outputs") or [])
         turn.subtask_exhausted = bool(state.get("subtask_exhausted"))
+        # Absent from blobs written before the sub-task review gate: no review open, no plan.
+        turn.subtask_review_open = bool(state.get("subtask_review_open"))
+        # The review's frame flag rides with its open flag: the review is the framework call the turn resumes into.
+        turn.framework_entry = turn.subtask_review_open
+        plan = state.get("subtask_plan")
+        if plan:
+            from fastworkflow.review_proposals import SubTaskProposal
+
+            turn.subtask_plan = SubTaskProposal.model_validate(plan)
+        else:
+            turn.subtask_plan = None
+        if turn.subtask_review_open:
+            # The restored review keeps its free-text reader (set by the gate of the turn that opened it).
+            self._give_review_reader()
         self._next_step = int(state.get("next_step") or 0)
         # Absent before planning command phases: no phased planning command call in progress.
         turn.phase_run = state.get("skill_phase_run") or None
@@ -1452,8 +1497,21 @@ class WorkflowExecutionContext:
             self._open_auto_sink(workflow)
 
     def _on_app_context_change(self) -> None:
-        """Context-change observer: refresh the ReAct agent's available_commands."""
+        """Context-change observer: refresh the ReAct agent's available_commands.
+
+        A plain goal bound to its command keeps its narrowed listing through a context switch (fix-3rsq.plan-review.2.9):
+        the listing is the bound command's, re-read from the workflow now. Only the turn's own agent (the turn frame).
+        """
         from fastworkflow.workflow_agent import _refresh_agent_available_commands
+
+        bound = getattr(self, "_narrow_to", None)
+        if bound is not None and self._app_workflow is not None and len(self._frame_stack()) == 1:
+            from fastworkflow import run_listing
+
+            inputs = getattr(self._workflow_tool_agent, "inputs", None)
+            if isinstance(inputs, dict) and "available_commands" in inputs:
+                inputs["available_commands"] = run_listing.bound_command_listing(self._app_workflow, bound)
+                return
         _refresh_agent_available_commands(self)
 
     def close(self) -> bool:
@@ -1792,6 +1850,7 @@ class WorkflowExecutionContext:
                 "failure_reason": turn_output.failure_reason,
                 "suspended_ms": turn_result.suspended_ms,
                 "context_mutations": self._compute_context_mutations(),
+                "subtask_review": self._turn_subtask_review,
             },
         )
         if not awaiting:
@@ -2003,6 +2062,7 @@ class WorkflowExecutionContext:
         turn.origins = []
         turn.subtask_index = 0
         turn.subtask_answers = []
+        turn.subtask_outputs = []
         turn.subtask_exhausted = False
         self._next_step = 0
         turn.evidence_floors = {}
@@ -2122,7 +2182,19 @@ class WorkflowExecutionContext:
             planner_lm=getattr(self, "_current_planner_lm", None),
             workflow_folderpath=self._app_workflow.folderpath if self._app_workflow else None,
         )
-        if len(subtasks) > 1:
+        if self._app_workflow is not None:
+            # The review gate (fix-3rsq.plan-review.2.6): None when the sub-tasks run now, or the suspended review.
+            asked = self._subtask_gate(subtasks)
+            if asked is not None:
+                return asked
+        return self._run_turn_subtasks(subtasks, refined_user_query, message)
+
+    def _run_turn_subtasks(self, subtasks: list[str], refined_user_query: str, message: str):
+        """Run the turn's sub-tasks: several, one after another; or one, with the step-cap hand-off. A turn with a
+        sub-task plan (accepted, or the draft) runs through _run_subtasks_from, which binds each goal to its means."""
+        plan = self._turn_subtask_plan
+        planned = plan is not None and len(plan.items) == len(subtasks)
+        if len(subtasks) > 1 or planned:
             self._subtasks = subtasks
             self._origins = list(range(len(subtasks)))
             return self._run_subtasks_from(0)
@@ -2138,10 +2210,110 @@ class WorkflowExecutionContext:
         self._hand_off(0)
         return self._run_subtasks_from(1)
 
+    # ------------------------------------------------------------------
+    # The sub-task review gate (fix-3rsq.plan-review.2.2, .2.3, .2.6, .2.8)
+    # ------------------------------------------------------------------
+
+    def _subtask_no_answerer(self) -> bool:
+        """True when nobody can answer a review this turn: an unattended turn (ask_user is off for it), or a host
+        surface (REST, MCP). Owner decision 2. An agent-to-agent turn reaches the framework as an unattended turn."""
+        store = approval_binding.store_for(self._app_workflow)
+        host = store is not None and store.surface.kind == "host"
+        return bool(self._turn_unattended) or host
+
+    def _subtask_gate(self, subtasks: list[str]):
+        """Decide how the turn's sub-tasks run, after split and merge, before any of them runs.
+
+        Fast path (one sub-task, confident head or exact name): no review, today's run. A turn with no one to answer:
+        the draft runs as proposed, recorded as not reviewed. Otherwise the review_subtasks framework command opens with
+        the draft and suspends the turn; returns the suspended prediction (its replies come through
+        _resume_agent_message). Returns None when the sub-tasks run now.
+        """
+        from fastworkflow import review_proposals
+
+        workflow = self._app_workflow
+        if review_proposals.fast_path_for(workflow, subtasks) is not None:
+            # plan-review.6 hook: review_proposals.planning_intent_confirmation is where the one-line confirmation of a
+            # fast-path planning command goes. Round 1 asks nothing here.
+            self._turn_subtask_review = "fast_path"
+            return None
+        draft = review_proposals.draft_round1_proposal(workflow, subtasks)
+        self._turn_subtask_plan = draft
+        if self._subtask_no_answerer():
+            # Owner decision 2: no one can answer, so the draft is recorded as not reviewed and the turn carries on.
+            # The draft runs as proposed: its goals and bound means drive the run (_run_subtasks_from).
+            self._turn_subtask_review = "not_reviewed"
+            logger.info("sub-task review not opened (no one to answer): %d sub-task(s) run as drafted, not reviewed",
+                        len(draft.items))
+            return None
+        self._turn_subtask_review = "open"
+        turn = self._turn_frame()
+        turn.subtask_review_open = True
+        self._give_review_reader()
+        try:
+            with review_proposals.draft_scope(draft):
+                asked = self.run_framework_planning_command(
+                    "review_subtasks", {"subtasks": review_proposals.DRAFT_ITEMS}, "review the sub-tasks",
+                    within_turn=True)
+        except BaseException:
+            turn.subtask_review_open = False
+            raise
+        if getattr(asked, "suspended", None) is not True:
+            turn.subtask_review_open = False
+            raise AssertionError("review_subtasks must suspend the turn on its review")
+        return asked
+
+    def _give_review_reader(self) -> None:
+        """The free-text reader of this turn's sub-task review (fix-3rsq.plan-review.2.7): one model call on the
+        planner's role, with the planner's LM when the turn has one. Set on the session's review store."""
+        from fastworkflow import planning_commands, review_engine, review_proposals
+
+        store = review_engine.store_for(self._app_workflow)
+        if store is None:
+            return
+        names = tuple(sorted(planning_commands.resolve_field_sources(self._app_workflow.folderpath).planning_commands))
+        # The planner's LM is read when a reply comes, not when the review opens: the turn's planner LM is the one in place then.
+        store.edit_reader = review_proposals.model_edit_reader(
+            planner_lm=lambda: getattr(self, "_current_planner_lm", None), planning_names=names)
+
+    def _accept_subtask_review(self, agent_result):
+        """The gate's review was accepted: its frame finishes with the accepted proposal, which is stored for the
+        hand-off (fix-3rsq.plan-review.2.9 reads ``_turn_subtask_plan``), and the turn runs the accepted goals as today.
+        Its inputs and means are not used until 2.9."""
+        from fastworkflow import review_proposals
+
+        turn = self._turn_frame()
+        turn.subtask_review_open = False
+        turn.framework_entry = False
+        self._finish_framework_call(agent_result)
+        accepted = review_proposals.accepted_subtask_proposal(self._app_workflow)
+        if accepted is None:
+            raise RuntimeError("the accepted sub-task review is not on the session")
+        self._turn_subtask_plan = accepted
+        self._turn_subtask_review = "reviewed"
+        subtasks = [item.goal for item in accepted.items]
+        return self._run_turn_subtasks(subtasks, subtasks[0] if len(subtasks) == 1 else self._turn_refined_message,
+                                       self._turn_user_message)
+
+    def _end_subtask_review_unrun(self, state: str):
+        """The gate's review was declined or expired: its frame is dropped, nothing runs, and the turn says so."""
+        from fastworkflow import review_engine
+
+        turn = self._turn_frame()
+        turn.subtask_review_open = False
+        turn.framework_entry = False
+        self._pop_frame(self._top_frame())
+        declined = state == review_engine.DECLINED
+        self._turn_subtask_review = "declined" if declined else "expired"
+        self._turn_subtask_plan = None
+        text = SUBTASK_REVIEW_DECLINED if declined else SUBTASK_REVIEW_EXPIRED
+        return self._settle_agent_result(self._turn_user_message, dspy.Prediction(final_answer=text, exhausted=False))
+
     def _call_agent_for_query(self, query: str, planner_user_query: str, *,
                               first_step: int | None = None,
                               template_text: str | None = None,
-                              evidence_floor: int | None = None):
+                              evidence_floor: int | None = None,
+                              bound_command: str | None = None):
         """Plan one query with the planner, then run the ReAct agent on it.
 
         ``template_text`` picks the planning command template; it defaults to the query itself.
@@ -2149,19 +2321,24 @@ class WorkflowExecutionContext:
         this run's for the finish check (a hand-off continuation counts the runs
         of its sub-task before it); it defaults to ``first_step``.
         """
-        from fastworkflow.workflow_agent import (
-            build_query_with_next_steps, sub_task_commands_text, planner_planning_command_for, planning_scopes)
+        from fastworkflow import review_proposals
+        from fastworkflow.workflow_agent import build_query_with_next_steps, sub_task_commands_text
 
         # One planning command match gives both the template and its parsed form; a hand-off continuation
         # (query differs from its original text) plans from the template only, since the planning command
         # call would plan the whole job again.
         # The match's option distribution (empty without JEV_API_KEY) feeds the listings' gathering (run_listing).
+        # The match is memoised for the turn (review_proposals.planning_match): the gate's draft asked it already.
         planning_distribution: dict[str, float] = {}
-        plan_template, planning_command = (
-            planner_planning_command_for(template_text or query, self._app_workflow.folderpath,
-                              scopes=planning_scopes(self._app_workflow), distribution=planning_distribution)
-            if self._app_workflow is not None else ("", None))
+        plan_template, planning_command = "", None
+        if self._app_workflow is not None:
+            plan_template, planning_command, planning_distribution = review_proposals.planning_match(
+                self._app_workflow, template_text or query)
         if template_text is not None and template_text != query:
+            planning_command = None
+        if bound_command is not None:
+            # The bound means of a plain goal: the plan names its command, so the finish check holds the goal to it.
+            plan_template = f"This sub-task is done with the command {bound_command}."
             planning_command = None
         # Initial turn planning uses every prior turn summary, not the previous
         # turn's full agent trajectory (mid-turn replans still use trajectory).
@@ -2185,7 +2362,12 @@ class WorkflowExecutionContext:
         if phased is not None:
             # A planning command call: its phases run as sub-plans, with no hand-off.
             return self._start_planning_command_phases(query, *phased, first_step=first_step or 0)
-        available_commands = sub_task_commands_text(self, query, planning_probabilities=planning_distribution or None)
+        if bound_command is not None:
+            from fastworkflow import run_listing
+
+            available_commands = run_listing.bound_command_listing(self._app_workflow, bound_command)
+        else:
+            available_commands = sub_task_commands_text(self, query, planning_probabilities=planning_distribution or None)
         step_kwargs = {} if first_step is None else {"first_step": first_step}
         self._attach_finish_check(
             evidence_floor if evidence_floor is not None else (first_step or 0))
@@ -2633,29 +2815,38 @@ class WorkflowExecutionContext:
         """
         return len(self._frame_stack()) > 1 and self._turn_steps_used >= turn_max_steps()
 
-    def run_framework_planning_command(self, qualified_name: str, params: Any, step_text: str):
+    def run_framework_planning_command(self, qualified_name: str, params: Any, step_text: str, *,
+                                       unattended: bool = False, within_turn: bool = False):
         """The framework's own entry point for a framework planning command (fix-3rsq.plan-review.1).
 
         Runs *qualified_name* (review_subtasks, review_plan) as one turn, through the same nested frame
         and executor a planning step uses, without the agent's explicit-name resolution (which refuses
         framework commands). Returns the command's output, or the awaiting output when the review asks the
         user (its replies come as ordinary messages on this session).
+
+        ``within_turn``: the call runs inside a turn already begun (the sub-task gate): that turn's state, its
+        unattended flag and its approval surface are kept, and a suspension returns the suspended prediction for the
+        caller to settle, not the awaiting output (fix-3rsq.plan-review.2.8). Without it the call begins a turn of its
+        own, with *unattended* (attended by default, as the review always was).
         """
         from fastworkflow.utils.react import AskUserSuspend
 
         from fastworkflow.workflow_agent import framework_call_scope
 
         self._ensure_agent_initialized()
-        self._begin_turn(step_text, unattended=False)
+        if not within_turn:
+            self._begin_turn(step_text, unattended=unattended)
+            self._note_approval_inbound(None, None, False)
         # The turn frame has no agent step of its own: when the call finishes, its output is the turn's answer.
         self._turn_frame().framework_entry = True
-        self._note_approval_inbound(None, None, False)
         self.push_active_workflow(self._app_workflow)
         try:
             with framework_call_scope():
                 output = self.run_planning_command(qualified_name, params, step_text)
         except AskUserSuspend as asked:
             self._awaiting_user = True
+            if within_turn:
+                return dspy.Prediction(suspended=True, clarification=asked.clarification_request)
             return self._awaiting_user_output(asked.clarification_request)
         finally:
             self.pop_active_workflow()
@@ -3242,20 +3433,122 @@ class WorkflowExecutionContext:
             if not isinstance(floors, dict):
                 floors = self._evidence_floors = {}
             floors.setdefault(origin, self._next_step)
-            result = self._call_agent_for_query(
-                query, query, first_step=self._next_step,
-                template_text=self._original_text(origin),
-                evidence_floor=floors[origin],
-            )
+            first = k == 0 or self._origins[k - 1] != origin
+            outputs_before = len(self._turn_outputs)
+            result = self._run_entry(k, origin, query, first=first, floor=floors[origin])
             if getattr(result, "suspended", None) is True:
                 return result
-            self._record_subtask_answer(result)
+            self._record_subtask_answer(result, self._typed_output_since(outputs_before))
             if getattr(result, "exhausted", None) is True:
                 self._hand_off(k)
             k += 1
 
         return dspy.Prediction(final_answer=self._combined_answer(),
                                exhausted=self._subtask_exhausted)
+
+    def _bound_item(self, origin: int):
+        """The reviewed sub-task (SubTask: goal, inputs, outcome, means) that origin *origin* runs, or None when the turn
+        has no plan for it (a turn that was not split under a plan, or a fast-path turn)."""
+        plan = self._turn_subtask_plan
+        if plan is None or not 0 <= origin < len(plan.items):
+            return None
+        return plan.items[origin]
+
+    def _answers_by_number(self) -> dict[int, str]:
+        """Each sub-task that has run, by its 1-based number, with the answer its run gave (the last of its runs).
+
+        The hand-off's 'from sub-task N' inputs take these: the run's typed Output (JSON) when it produced one, else the
+        text its run returned (the command's answer for a planning command, the agent's final answer otherwise)."""
+        answers: dict[int, str] = {}
+        typed = list(self._subtask_outputs)
+        typed += [""] * (len(self._subtask_answers) - len(typed))
+        for origin, answer, output in zip(self._origins, self._subtask_answers, typed):
+            answers[origin + 1] = output or answer
+        return answers
+
+    def _typed_output_since(self, start: int) -> str:
+        """The typed Output of the last successful command run since turn output *start*, as JSON; "" when none."""
+        for command_output in reversed(self._turn_outputs[start:]):
+            response = command_output.command_response
+            if response.success and response.output is not None:
+                dump = getattr(response.output, "model_dump_json", None)
+                return dump() if callable(dump) else json.dumps(response.output, default=str)
+        return ""
+
+    def _run_entry(self, k: int, origin: int, query: str, *, first: bool, floor: int):
+        """Run entry *k* of the turn: the bound means of its goal when the turn has a plan, else the agent as today.
+
+        A planning means runs its phases with its inputs (through the phase runner), its first entry only. A plain
+        means and a from-scratch goal run the agent with the goal's text (its inputs and desired outcome in it); a plain
+        means narrows the executor's listing to its command, and the plan of the run names that command, so the
+        finish check holds the goal to it. Nothing here marks a goal complete: the finish check does (arch 19.0 inv. 3).
+        """
+        from fastworkflow import review_proposals
+
+        item = self._bound_item(origin)
+        if item is None:
+            return self._call_agent_for_query(query, query, first_step=self._next_step,
+                                              template_text=self._original_text(origin), evidence_floor=floor)
+        resolved = review_proposals.resolve_inputs(item, self._answers_by_number())
+        if resolved.missing:
+            numbers = ", ".join(str(number) for number in resolved.missing)
+            return dspy.Prediction(final_answer=f"This sub-task needs the output of sub-task {numbers}, which has not run.",
+                                   exhausted=False)
+        if first:
+            query = review_proposals.run_text(item, resolved)
+        else:
+            query = self._continued_text(query, item, resolved)
+        if first and item.means.kind == review_proposals.MEANS_PLANNING:
+            return self._run_planning_means(item, query, origin, floor=floor)
+        bound = item.means.name if item.means.kind == review_proposals.MEANS_PLAIN else None
+        self._narrow_to = bound
+        try:
+            return self._call_agent_for_query(
+                query, query, first_step=self._next_step, template_text=self._original_text(origin),
+                evidence_floor=floor, bound_command=bound)
+        finally:
+            self._narrow_to = None
+
+    @staticmethod
+    def _continued_text(text: str, item, resolved) -> str:
+        """A hand-off continuation's text with the sub-task's inputs and outcome in its first line."""
+        from fastworkflow import review_proposals
+
+        head, separator, tail = text.partition("\n")
+        full = review_proposals.run_text(item, resolved)
+        suffix = full[len(item.goal):]
+        return f"{head}{suffix}{separator}{tail}" if suffix else text
+
+    def _run_planning_means(self, item, query: str, origin: int, *, floor: int):
+        """A sub-task bound to a planning command: its phases run with its inputs (the phase runner, as a planned call's
+        phases do; no model plans them). Its arguments are checked as a planned command's are (check_planned_arguments);
+        a refusal, or no command, falls back to the agent with the refusal as a note and the bound command's listing."""
+        from fastworkflow import planning_commands, review_proposals, run_listing
+
+        folder = self._app_workflow.folderpath
+        name = item.means.name
+        command = planning_commands.planning_command(folder, name)
+        refusal = None
+        if command is None:
+            refusal = f"{name} could not be loaded"
+        else:
+            resolved = review_proposals.resolve_inputs(item, self._answers_by_number())
+            checked = run_listing.check_planned_arguments(command, dict(resolved.named), query,
+                                                          earlier_outputs=list(self._subtask_answers))
+            refusal = checked.refusal
+            if refusal is None:
+                try:
+                    phases = planning_commands.call_phases(command, checked.args)
+                except planning_commands.PlanningCommandCallError as error:
+                    refusal = str(error)
+        if refusal is not None:
+            return self._call_agent_for_query(
+                f"{query}\n\nThe planning command {name} cannot run as planned: {refusal}.",
+                query, first_step=self._next_step, template_text=self._original_text(origin),
+                evidence_floor=floor, bound_command=name)
+        call = planning_commands.PlanningCommandCallPlan(
+            plan="", args=checked.args, notes=list(checked.notes), prediction=None, phases=phases)
+        return self._start_planning_command_phases(query, command, call, first_step=self._next_step)
 
     def _original_text(self, origin: int) -> str:
         """The sub-task text an origin was split out as (its first entry, before any hand-off)."""
@@ -3304,8 +3597,12 @@ class WorkflowExecutionContext:
             for origin, text in joined.items()
         )
 
-    def _record_subtask_answer(self, result) -> None:
+    def _record_subtask_answer(self, result, typed: str = "") -> None:
+        outputs = self._subtask_outputs
+        # Padded first: a blob written before the typed outputs were kept has answers and no outputs.
+        outputs.extend([""] * (len(self._subtask_answers) - len(outputs)))
         self._subtask_answers.append(result.final_answer)
+        outputs.append(typed)
         trajectory = getattr(self._workflow_tool_agent, "trajectory", None) or {}
         steps = [int(key.rsplit("_", 1)[1]) for key in trajectory
                  if key.rsplit("_", 1)[-1].isdigit()]
@@ -3534,6 +3831,9 @@ class WorkflowExecutionContext:
                 return self._awaiting_user_output(resolution.text)
             self._note_agent_resume()
             self.complete_ask_user_entry(user_answer)
+            if resolution.output is None and getattr(self._turn_frame(), "subtask_review_open", False):
+                # Declined or expired: the gate's review ends, and nothing runs (fix-3rsq.plan-review.2.6).
+                return self._end_subtask_review_unrun(awaiting.state)
             if resolution.output is not None:
                 self.append_turn_output(resolution.output)
                 self._hold_resumed_approval_run(resolution.output)
@@ -3557,6 +3857,9 @@ class WorkflowExecutionContext:
         # was called from, which resumes next, until the turn frame is on top again.
         while len(self._frame_stack()) > 1 and getattr(agent_result, "suspended", None) is not True:
             if getattr(self._turn_frame(), "framework_entry", False) and len(self._frame_stack()) == 2:
+                if getattr(self._turn_frame(), "subtask_review_open", False):
+                    # The gate's review was accepted: the turn runs its sub-tasks (fix-3rsq.plan-review.2.6).
+                    return self._settle_agent_result(self._turn_user_message, self._accept_subtask_review(agent_result))
                 return self._finish_framework_call(agent_result)
             observation = self._finish_nested_frame(agent_result)
             agent_result = self._resume_top_frame(observation, completes_step=True)

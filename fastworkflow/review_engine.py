@@ -55,8 +55,12 @@ MODE_ENFORCE = "enforce"
 MODES = (MODE_OFF, MODE_SHADOW, MODE_ENFORCE)
 DEFAULT_MODE = MODE_ENFORCE
 
+#: An approval (action) record's reply cap and wall-clock TTL: two replies, or 15 minutes.
 TTL_TURNS = 2
 TTL_SECONDS = 900
+#: A proposal review (sub_tasks, plan) is a dialog of edits: about 8 replies, or 15 minutes (fix-3rsq.plan-review.2.5).
+PROPOSAL_TTL_TURNS = 8
+PROPOSAL_TTL_SECONDS = 15 * 60
 MAX_HISTORY = 100
 
 # ----------------------------------------------------------------------
@@ -270,6 +274,10 @@ class ReviewStore:
     channel: str = ""
     task: str = ""
     delivery: Optional[dict] = None
+    #: The model-based reader of free-text replies for this session's proposal review (fix-3rsq.plan-review.2.7).
+    #: Set by the sub-task gate for the turn that opens the review; never serialised (a restored review has none
+    #: until the gate of its turn sets it again).
+    edit_reader: Optional[Callable[[str, "Proposal"], list]] = None
 
     def active(self) -> Optional[ReviewRecord]:
         for record in self.records:
@@ -499,10 +507,14 @@ class Proposal(BaseModel):
 
     items: list[Any] = Field(default_factory=list)
 
+    def item_values(self, item: Any) -> dict[str, Any]:
+        """The values one item's line is formatted from: each field as text. A subclass adds or replaces entries."""
+        return {name: _value_text(getattr(item, name)) for name in type(item).model_fields}
+
     def rendering(self) -> str:
         lines = [f"{self.title}:"]
         for index, item in enumerate(self.items, 1):
-            values = {name: _value_text(getattr(item, name)) for name in type(item).model_fields}
+            values = self.item_values(item)
             values["index"] = index
             try:
                 lines.append(string.Formatter().vformat(self.item_template, (), _SafeValues(values)))
@@ -581,6 +593,13 @@ def proposal_of(record: ReviewRecord) -> Proposal:
     return cls.model_validate({"items": record.binding.get("items") or []})
 
 
+def ttl_for_kind(kind: str) -> tuple[int, int]:
+    """The ``(reply cap, seconds)`` a record of *kind* gets: approvals keep TTL_TURNS, proposal reviews their own."""
+    if kind == KIND_ACTION:
+        return TTL_TURNS, TTL_SECONDS
+    return PROPOSAL_TTL_TURNS, PROPOSAL_TTL_SECONDS
+
+
 PROMPT_HINT = ("Reply accept to confirm, no to decline, or edit with 'change N: field=value' or 'drop N' "
                "(N is the number shown; separate several edits with ';').")
 
@@ -618,7 +637,32 @@ class Drop(BaseModel):
     index: int
 
 
-Edit = Union[Change, Drop]
+class Add(BaseModel):
+    """Insert one new item after item ``after`` (0: before the first). ``values`` are the item's fields as text."""
+
+    model_config = ConfigDict(extra="forbid")
+    after: int
+    values: dict[str, str] = Field(default_factory=dict)
+
+
+class Merge(BaseModel):
+    """Join items ``indexes`` (at least two, 1-based) into one at the first's place. The first item's fields are
+    kept, and ``values`` (text) override them."""
+
+    model_config = ConfigDict(extra="forbid")
+    indexes: list[int]
+    values: dict[str, str] = Field(default_factory=dict)
+
+
+class Split(BaseModel):
+    """Replace item ``index`` by one item per entry of ``parts``; each part is the item's full field set as text."""
+
+    model_config = ConfigDict(extra="forbid")
+    index: int
+    parts: list[dict[str, str]]
+
+
+Edit = Union[Change, Drop, Add, Merge, Split]
 
 _CHANGE = re.compile(r"^change\s+(\d+)\s*:?\s*([A-Za-z_]\w*)\s*=\s*(.*)$", re.IGNORECASE | re.DOTALL)
 _DROP = re.compile(r"^drop\s+(\d+)$", re.IGNORECASE)
@@ -654,38 +698,120 @@ def _coerce(model: type[BaseModel], name: str, text: str) -> Any:
     return text
 
 
+def _item_model(proposal: Proposal):
+    """The class of one item of *proposal* (its ``items`` element type), or None when it is not a model."""
+    from typing import get_args
+
+    args = get_args(type(proposal).model_fields["items"].annotation)
+    model = args[0] if args else None
+    return model if isinstance(model, type) and issubclass(model, BaseModel) else None
+
+
+def _built_item(model, values: dict[str, str], base: Optional[BaseModel] = None):
+    """A new item of *model*: *base*'s fields (if any) with *values* (text) set over them. Refused when it does not validate."""
+    data = base.model_dump() if base is not None else {}
+    for name, text in values.items():
+        if name not in model.model_fields:
+            raise EditRefused(f"An item has no field {name!r}. Its fields are: {', '.join(model.model_fields)}.")
+        data[name] = _coerce(model, name, text)
+    try:
+        return model.model_validate(data)
+    except ValidationError as exc:
+        raise EditRefused(f"A new item is not valid: {exc.errors()[0]['msg']}.") from exc
+
+
 def apply_edits(proposal: Proposal, edits: list[Edit]) -> Proposal:
     """The proposal with *edits* applied, validated against the item schema and the proposal's rules.
 
-    Indices refer to the proposal as it is shown (before this reply). Changes apply first, then drops.
+    Every index refers to the proposal as it is shown (before this reply). An item may be changed, or it may be
+    dropped, merged or split, but not two of these in one reply. Adds insert after a shown item (0: before the first).
     Raises :class:`EditRefused` with a message for the user; the original proposal is never modified.
     """
     items = list(proposal.items)
     count = len(items)
+    model = _item_model(proposal)
+
+    def number_ok(number: int, low: int = 1) -> None:
+        if not low <= number <= count:
+            raise EditRefused(f"There is no item {number}; the proposal has {count} item(s).")
+
+    touched: dict[int, str] = {}
+
+    def claim(number: int, kind: str) -> None:
+        if number in touched:
+            raise EditRefused(f"Item {number} is named by more than one edit ({touched[number]} and {kind}).")
+        touched[number] = kind
+
     for edit in edits:
-        if not 1 <= edit.index <= count:
-            raise EditRefused(f"There is no item {edit.index}; the proposal has {count} item(s).")
+        if isinstance(edit, Change):
+            number_ok(edit.index)
+            claim(edit.index, "change")
+        elif isinstance(edit, Drop):
+            number_ok(edit.index)
+            claim(edit.index, "drop")
+        elif isinstance(edit, Merge):
+            if len(edit.indexes) < 2 or len(set(edit.indexes)) != len(edit.indexes):
+                raise EditRefused("A merge joins at least two different items.")
+            for number in edit.indexes:
+                number_ok(number)
+                claim(number, "merge")
+        elif isinstance(edit, Split):
+            number_ok(edit.index)
+            if not edit.parts:
+                raise EditRefused(f"Item {edit.index} cannot be split into no parts.")
+            claim(edit.index, "split")
+        elif isinstance(edit, Add):
+            number_ok(edit.after, low=0)
+            if model is None:
+                raise EditRefused("This proposal takes no added items.")
+
+    changed = list(items)
     for edit in edits:
         if not isinstance(edit, Change):
             continue
         position = edit.index - 1
-        model = type(items[position])
-        if edit.field not in model.model_fields:
+        item_model = type(changed[position])
+        if edit.field not in item_model.model_fields:
             raise EditRefused(f"Item {edit.index} has no field {edit.field!r}. Its fields are: "
-                              f"{', '.join(model.model_fields)}.")
-        data = items[position].model_dump()
-        data[edit.field] = _coerce(model, edit.field, edit.value)
+                              f"{', '.join(item_model.model_fields)}.")
+        data = changed[position].model_dump()
+        data[edit.field] = _coerce(item_model, edit.field, edit.value)
         try:
-            items[position] = model.model_validate(data)
+            changed[position] = item_model.model_validate(data)
         except ValidationError as exc:
             detail = exc.errors()[0]["msg"]
             raise EditRefused(f"{edit.field} of item {edit.index} is not valid: {detail}.") from exc
+
     dropped = {edit.index for edit in edits if isinstance(edit, Drop)}
-    kept = [item for number, item in enumerate(items, 1) if number not in dropped]
-    if len(kept) < type(proposal).min_items:
+    merged: dict[int, Any] = {}
+    for edit in edits:
+        if isinstance(edit, Merge):
+            first = min(edit.indexes)
+            merged[first] = _built_item(type(changed[first - 1]), edit.values, changed[first - 1])
+            dropped.update(number for number in edit.indexes if number != first)
+    split: dict[int, list] = {}
+    for edit in edits:
+        if isinstance(edit, Split):
+            split[edit.index] = [_built_item(type(changed[edit.index - 1]), part) for part in edit.parts]
+    after: dict[int, list] = {}
+    for edit in edits:
+        if isinstance(edit, Add):
+            after.setdefault(edit.after, []).append(_built_item(model, edit.values))
+
+    result: list[Any] = list(after.get(0, []))
+    for number in range(1, count + 1):
+        if number not in dropped:
+            if number in split:
+                result.extend(split[number])
+            elif number in merged:
+                result.append(merged[number])
+            else:
+                result.append(changed[number - 1])
+        result.extend(after.get(number, []))
+    if len(result) < type(proposal).min_items:
         raise EditRefused(f"The proposal needs at least {type(proposal).min_items} item(s).")
     try:
-        return type(proposal).model_validate({"items": kept})
+        return type(proposal).model_validate({"items": result})
     except ValidationError as exc:
         raise EditRefused(f"The edited proposal is not valid: {exc.errors()[0]['msg']}.") from exc
 
@@ -739,8 +865,16 @@ class ActionReplyPolicy:
         return Verdict.REPROMPT
 
 
+#: The reason of a decision whose edits a model read from free text (shown back to the user as read).
+READ_REASON = "edits read from the reply"
+
+
 class ProposalReplyPolicy:
-    """The sub_tasks and plan kinds: accept, no, or typed edits (deterministic first, then the injected reader)."""
+    """The sub_tasks and plan kinds: accept, no, or typed edits (deterministic first, then the reader).
+
+    The reader is the session's (the review store's, set for the turn that opens a review) or the registered one. A
+    reply the reader cannot read as edits asks again (REPROMPT); the record stays open and the reply counts toward its cap.
+    """
 
     def __init__(self, interpreter: Optional[EditInterpreter] = None):
         self._interpreter = interpreter
@@ -762,6 +896,14 @@ class ProposalReplyPolicy:
                 edits = list(reader(text, proposal))
             except EditParseError as inner:
                 return ReplyDecision(Verdict.REPROMPT, "not read as edits", message=f"{inner} {PROMPT_HINT}")
+            if not edits:
+                return ReplyDecision(Verdict.REPROMPT, "not read as edits",
+                                     message=f"I could not read that as an edit. {PROMPT_HINT}")
+            try:
+                apply_edits(proposal, edits)
+            except EditRefused as refused:
+                return ReplyDecision(Verdict.REFUSE, "edits refused", message=str(refused))
+            return ReplyDecision(Verdict.EDIT, READ_REASON, edits=tuple(edits))
         try:
             apply_edits(proposal, edits)           # validate only; the caller applies
         except EditRefused as exc:
@@ -769,12 +911,12 @@ class ProposalReplyPolicy:
         return ReplyDecision(Verdict.EDIT, "typed edits", edits=tuple(edits))
 
 
-def reply_policy(kind: str):
-    """The reply policy for a kind (the policy decision point for replies)."""
+def reply_policy(kind: str, interpreter: Optional[EditInterpreter] = None):
+    """The reply policy for a kind (the policy decision point for replies); *interpreter* is the proposal reader."""
     if kind == KIND_ACTION:
         return ActionReplyPolicy()
     if kind in (KIND_SUB_TASKS, KIND_PLAN):
-        return ProposalReplyPolicy()
+        return ProposalReplyPolicy(interpreter)
     raise ValueError(f"unknown review kind {kind!r}")
 
 
@@ -808,11 +950,12 @@ def open_review(host: Any, store: ReviewStore, proposal: Proposal, *, surface: S
     # same text, so the run the phase archives carries the step's own parameters (the finish check matches them).
     binding = {**proposal.binding(), "channel": store.channel, "task": store.task, "items_text": items_text}
     text = prompt_for(proposal)
+    ttl_turns, ttl_seconds = ttl_for_kind(proposal.kind)
     record = ReviewRecord(
         id=uuid.uuid4().hex, token_hash="", command=proposal.spec, annotation=None, raw_command="",
         binding=binding, fingerprint=fingerprint(binding), rendering=text,
         rendering_hash=rendering_hash(text), required_identity=surface.required_identity,
-        created_turn=store.turn_seq, turns_seen=0, ttl_turns=TTL_TURNS, ttl_seconds=TTL_SECONDS,
+        created_turn=store.turn_seq, turns_seen=0, ttl_turns=ttl_turns, ttl_seconds=ttl_seconds,
         created_at=time.time(), state=AWAITING, origin=origin, suspended_agent=suspend,
         shadow=(switch_mode() == MODE_SHADOW), kind=proposal.kind)
     link(record, list(upstream))
@@ -834,7 +977,7 @@ def reply_to_proposal(host: Any, store: ReviewStore, record: ReviewRecord, messa
     """Resolve one reply on an open proposal record. Callers have already checked TTL and identity."""
     proposal = proposal_of(record)
     surface = store.surface
-    decision = reply_policy(record.kind).decide(proposal, message)
+    decision = reply_policy(record.kind, store.edit_reader).decide(proposal, message)
     if decision.verdict is Verdict.CONFIRM:
         stale = stale_upstream(store, record)
         if stale is not None:
@@ -858,6 +1001,10 @@ def reply_to_proposal(host: Any, store: ReviewStore, record: ReviewRecord, messa
         transition(host, store, record, REVISED, reason=f"revision {record.revision}: {decision.reason}",
                    surface=surface, outcome="revised")
         propagate(host, store, record, surface=surface)
+        if decision.reason == READ_REASON:
+            # Shown back as read, for confirmation: nothing is confirmed until the user accepts it.
+            return ReviewReply(False, "I read your reply as these edits. Accept to confirm them, or reply with more "
+                                      f"edits.\n{record.rendering}")
         return ReviewReply(False, record.rendering)
     # REFUSE or REPROMPT: nothing changes, and the user is asked again.
     return ReviewReply(False, decision.message or PROMPT_HINT)

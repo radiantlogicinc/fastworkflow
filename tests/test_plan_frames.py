@@ -45,6 +45,14 @@ from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures
 )
 
 #: The four session-blob keys Phase 4 adds. Absent from an older blob, they restore as "no nested frames".
+@pytest.fixture(autouse=True)
+def no_review_gate(monkeypatch):
+    """This module tests how sub-tasks and plan frames run. The sub-task review gate (fix-3rsq.plan-review.2.6) runs
+    before them, so each turn here starts with the gate passed (the fast path's run); the gate has its own tests in
+    tests/test_round1_gate.py."""
+    monkeypatch.setattr(WorkflowExecutionContext, "_subtask_gate", lambda self, subtasks: None)
+
+
 NEW_BLOB_KEYS = ("frames", "frame_react", "turn_child_step_ranges", "turn_steps_used")
 #: The turn frame's sub-task fields, the ones the turn frame keeps in the existing top-level keys.
 TURN_SUBTASK_FIELDS = ("subtasks", "origins", "subtask_index", "subtask_answers", "subtask_exhausted")
@@ -112,7 +120,7 @@ def test_a_planning_frame_round_trips_every_serialised_field():
     frame = PlanFrame(
         kind="planning", command_name="Library/find_book", depth=1, alias="/find_book#1",
         subtasks=["find Dune"], origins=[2], subtask_index=1, subtask_answers=["Dune is b1"],
-        subtask_exhausted=True, phase_run={"phase": 2, "runs": [{"command": "find_book"}]},
+        subtask_outputs=['{"title": "Dune"}'], subtask_exhausted=True, phase_run={"phase": 2, "runs": [{"command": "find_book"}]},
         child_step_ranges=[[3, 5]], invoking_step=2, first_step=3,
         ran_in_clause="Library/book_by_title", ran_in_context_name="Library",
         call_args={"title": "Dune"}, command_text="book_by_title title=Dune",
@@ -127,8 +135,8 @@ def test_a_planning_frame_round_trips_every_serialised_field():
     assert state == {
         "kind": "planning", "command_name": "Library/find_book", "depth": 1,
         "alias": "/find_book#1", "subtasks": ["find Dune"], "origins": [2], "subtask_index": 1,
-        "subtask_answers": ["Dune is b1"], "subtask_exhausted": True,
-        "phase_run": {"phase": 2, "runs": [{"command": "find_book"}]},
+        "subtask_answers": ["Dune is b1"], "subtask_outputs": ['{"title": "Dune"}'],
+        "subtask_exhausted": True, "phase_run": {"phase": 2, "runs": [{"command": "find_book"}]},
         "child_step_ranges": [[3, 5]], "invoking_step": 2, "first_step": 3,
         "ran_in_clause": "Library/book_by_title", "ran_in_context_name": "Library",
         "call_args": {"title": "Dune"}, "command_text": "book_by_title title=Dune",

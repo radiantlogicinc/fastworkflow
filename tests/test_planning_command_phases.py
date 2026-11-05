@@ -46,6 +46,7 @@ from fastworkflow.observation_offloading.facts import MissingFactError
 from fastworkflow.turn import TurnStatus
 from fastworkflow.utils.react import fastWorkflowReAct
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures
     _make_agent_ctx,
     _set_agents,

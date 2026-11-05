@@ -35,6 +35,7 @@ from tests.test_planning_command_code_steps import (  # noqa: F401 - the todo fi
 )
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures
     initialized_fastworkflow,
+    no_review_gate,
     todo_workflow_path,
 )
 
@@ -256,7 +257,9 @@ def _json_page(command: str):
     return response.split("\nRows ")[0], built.command_response.output
 
 
-def test_a_full_list_step_on_a_paged_json_command_reads_every_page(paged):
+def test_a_full_list_step_on_a_paged_json_command_reads_every_page(paged, no_review_gate):
+    # no_review_gate: this turn is one sub-task with no head to match it, which the round-1 gate now reviews; the test
+    # is about the paged full-list step, so the review is off here (fix-3rsq.plan-review.2.6).
     paged.toys["list_items"] = ItemsParams
     paged.workflow.scripted["list_items"] = _json_page
     paged.plan = _plan(Phase("report", lambda: [

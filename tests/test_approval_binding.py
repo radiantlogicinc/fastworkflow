@@ -165,6 +165,10 @@ def todo(annotated_library, monkeypatch, tmp_path):
     monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
                         lambda user_query, **kwargs: [user_query])
     monkeypatch.setattr(ctx, "_refine_user_query", lambda message, history: message)
+    # The sub-task review gate (fix-3rsq.plan-review.2.6) is not the subject of these approval tests: their turns run
+    # as the fast path did, with no review, so each test exercises the approval gate and nothing else. The gate has its
+    # own tests (tests/test_round1_gate.py).
+    monkeypatch.setattr(ctx, "_subtask_gate", lambda subtasks: None)
     return SimpleNamespace(ctx=ctx, wf=wf, sink=sink, script=script, library=library,
                            chores=library.books["b1"], other=library.books["b2"],
                            base=list(library.books["b1"].notes), base_other=list(library.books["b2"].notes),

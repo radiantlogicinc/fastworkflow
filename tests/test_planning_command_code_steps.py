@@ -185,6 +185,7 @@ from fastworkflow.planning_phases import Phase  # noqa: E402
 from fastworkflow.turn import TurnStatus  # noqa: E402
 from fastworkflow.utils.react import _step_indexes  # noqa: E402
 from fastworkflow.workflow_agent import initialize_workflow_tool_agent  # noqa: E402
+from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_planning_command_phases import RecordingSink  # noqa: E402
 from tests.test_turn_result_capture import (  # noqa: E402,F401 - shared fixtures
     _make_agent_ctx,

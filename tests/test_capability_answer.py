@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import fastworkflow
+from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from fastworkflow._workflows.command_metadata_extraction._commands.IntentDetection.what_can_i_do import (
     Signature as WhatCanIDo)
 from fastworkflow.capability_answer import is_capability_question, render_capability_answer

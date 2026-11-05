@@ -19,7 +19,8 @@ class Signature:
     plain_utterances = ["review the sub-tasks with me first", "split this request and let me check it"]
 
     class Input(BaseModel):
-        subtasks: str = Field(description="the sub-tasks of the request, separated by semicolons")
+        subtasks: str = Field(description="the sub-tasks of the request, separated by semicolons (or the draft token "
+                                          "the sub-task gate passes, whose draft it holds)")
 
     class Output(BaseModel):
         items: list[SubTask] = Field(description="the sub-tasks the user accepted")

@@ -86,10 +86,13 @@ def test_a_required_str_holding_not_found_is_still_missing():
     assert params.filter is None
 
 
-def test_a_required_str_holding_none_text_is_left_alone():
-    ok, _, _, params = _validate(name="None")
-    assert ok
-    assert params.name == "None"
+def test_a_required_str_holding_none_text_is_not_given():
+    # The text "None" is the extractor's not-given sentinel (validate_parameters, commit
+    # 0ff15b7b): a required str becomes None and is reported missing, not passed on as "None".
+    ok, _, fields, params = _validate(name="None")
+    assert not ok
+    assert fields == ["name"]
+    assert params.name is None
 
 
 def test_non_str_optional_fields_are_left_to_their_own_rules():

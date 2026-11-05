@@ -41,6 +41,7 @@ from fastworkflow.workflow_execution_context import (
     AWAITING_ANSWER_REFUSAL_MESSAGE,
     NESTED_BUDGET_SPENT_MESSAGE,
 )
+from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_plan_frames import no_turn_budget_env, warnings_logged  # noqa: F401 - fixtures
 from tests.test_planning_commands import (  # noqa: F401 - the library_wf module purge
     _clear_library_wf_sys_modules,
@@ -1585,6 +1586,8 @@ with pytest.MonkeyPatch.context() as mp:
     RoutingRegistry.clear_registry()
     mp.setattr(WorkflowExecutionContext, "_agent_dspy_context",
                lambda self: (SimpleNamespace(model="test-model"), None))
+    # The review gate is off for these turns, as in the parent process (test_turn_result_capture.no_review_gate).
+    mp.setattr(WorkflowExecutionContext, "_subtask_gate", lambda self, subtasks: None)
     state = nested._open_find_state(workdir, None, mp)
     try:
         ctx = state.ctx

@@ -23,6 +23,7 @@ from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.observability import store as obs
 from fastworkflow.utils.react import AskUserSuspend, fastWorkflowReAct
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
 

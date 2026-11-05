@@ -1816,7 +1816,7 @@ def planner_listing_text(current_workflow, sub_task: str,
     *planning_probabilities*: the turn's planning-command match distribution (None without JEV_API_KEY)."""
     from fastworkflow import run_listing
 
-    arm = run_listing.effective_listing_arm()
+    arm = run_listing.effective_listing_arm(current_workflow)
     if arm == run_listing.FULL:
         return planner_commands_text(current_workflow)
     return run_listing.run_listing_text(current_workflow, sub_task, arm=arm,
@@ -1831,7 +1831,7 @@ def sub_task_commands_text(chat_session_obj, sub_task: str,
     shortlist. *planning_probabilities*: the turn's planning-command match distribution (None without JEV_API_KEY)."""
     from fastworkflow import run_listing
 
-    arm = run_listing.effective_listing_arm()
+    arm = run_listing.effective_listing_arm(chat_session_obj.get_active_workflow())
     full = _what_can_i_do(chat_session_obj)
     if arm == run_listing.FULL:
         return full

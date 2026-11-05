@@ -52,6 +52,7 @@ from fastworkflow.turn import TurnStatus
 from fastworkflow.utils import python_utils
 from fastworkflow.utils.react import fastWorkflowReAct
 from fastworkflow.workflow_agent import core_command_names, initialize_workflow_tool_agent
+from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_planning_command_code_steps import Model
 from tests.test_planning_command_phases import RecordingSink
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures

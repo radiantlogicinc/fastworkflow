@@ -46,6 +46,7 @@ from fastworkflow.planning_commands import PlanningCommandFormatError
 from fastworkflow.turn import TurnStatus, reset_missing_declared_output_warnings
 from fastworkflow.utils import python_utils
 
+from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_field_sources import _build_workflow
 from tests.test_planning_command_contexts import LIBRARY_PLANNING_COMMAND, ROOT_PLANNING_COMMAND, RULE_CHECK, _with_rule_check
 from tests.test_planning_command_code_steps import Model

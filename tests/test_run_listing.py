@@ -77,6 +77,10 @@ def _ctx_for(app):
     return _CONTEXT_OF[id(app)]
 
 
+def run_list_bound(workflow, name: str) -> str:
+    return run_listing.bound_command_listing(workflow, name)
+
+
 def _lines_after(text: str, header: str) -> list[str]:
     """The lines of the section that starts with *header* (up to the next section)."""
     lines = text.split("\n")
@@ -163,20 +167,72 @@ def test_the_selected_shortlist_arm_routes_both_production_call_sites(copy_of):
         assert sub_task_commands_text(ctx, sub_task) == _what_can_i_do(ctx)
 
 
-def test_the_production_default_is_full_even_above_the_threshold(copy_of, monkeypatch):
-    """The production default stays FULL (the 10.7 gate decides the switch): a listing above the threshold is still
-    the full listing at both call sites unless the experiment selects THRESHOLD or COMMAND_SHORTLIST."""
+def test_the_production_default_is_threshold_and_an_untrained_app_gets_full_above_the_threshold(copy_of, monkeypatch):
+    """The production arm is THRESHOLD (fix-3rsq.plan-review.2.10), guarded: a listing above the threshold is still the
+    full listing when the workflow has no trained heads (the shortlist would have no trained recall)."""
     from fastworkflow.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
 
     library = _library_in(copy_of, name="production_default")
     ctx = _ctx_for(library)
     sub_task = "run list_member_loans for the member"
     monkeypatch.setattr(run_listing, "FULL_LISTING_MAX_CHARS", 3000)
+    assert run_listing.PRODUCTION_LISTING_ARM == THRESHOLD
     assert len(workflow_agent.planner_commands_text(library)) > 3000
+    assert not run_listing.has_trained_heads(library)
     assert run_listing.selected_listing_arm() is None
+    assert run_listing.effective_listing_arm() == THRESHOLD
+    assert run_listing.effective_listing_arm(library) == FULL       # the guard: no trained heads
     assert run_listing_text(library, sub_task) == workflow_agent.planner_commands_text(library)
     assert planner_listing_text(library, sub_task) == workflow_agent.planner_commands_text(library)
     assert sub_task_commands_text(ctx, sub_task) == _what_can_i_do(ctx)
+
+
+def test_the_production_threshold_shortlists_a_workflow_with_trained_heads(copy_of, monkeypatch):
+    """With the trained heads and no experiment arm, production shortlists above the threshold at both call sites."""
+    from fastworkflow.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
+
+    library = _library_in(copy_of, name="production_threshold_heads")
+    ctx = _ctx_for(library)
+    _with_trained_heads(library)
+    sub_task = "who wrote Emma and how many copies do we have"
+    monkeypatch.setattr(run_listing, "FULL_LISTING_MAX_CHARS", 3000)
+    assert run_listing.has_trained_heads(library)
+    shortlist = run_listing_text(library, sub_task, arm=COMMAND_SHORTLIST)
+    assert run_listing.effective_listing_arm(library) == THRESHOLD
+    assert run_listing_text(library, sub_task) == shortlist
+    assert planner_listing_text(library, sub_task) == shortlist
+    assert sub_task_commands_text(ctx, sub_task) == shortlist
+    assert shortlist != workflow_agent.planner_commands_text(library)
+    assert "- book_by_title" in shortlist
+
+
+def test_the_production_guard_does_not_touch_an_experiment_arm(copy_of, monkeypatch):
+    """An untrained workflow: production gives FULL above the threshold (the guard), but an experiment's THRESHOLD
+    still shortlists, as the 10.7 measurement needs it to."""
+    library = _library_in(copy_of, name="guard_experiment_arm")
+    sub_task = "run list_member_loans for the member"
+    monkeypatch.setattr(run_listing, "FULL_LISTING_MAX_CHARS", 3000)
+    full = workflow_agent.planner_commands_text(library)
+    assert run_listing_text(library, sub_task) == full
+    with listing_arm(THRESHOLD):
+        assert run_listing_text(library, sub_task) != full
+        assert run_listing_text(library, sub_task) == run_listing_text(
+            library, sub_task, arm=COMMAND_SHORTLIST)
+
+
+def test_has_trained_heads_needs_a_complete_head_folder(copy_of):
+    """The guard's test: no ___command_info is no head; a context folder missing its model files is no head; the
+    library's linked heads are heads."""
+    import os
+
+    library = _library_in(copy_of, name="has_trained_heads")
+    assert not run_listing.has_trained_heads(library)
+    partial = Path(library.folderpath) / "___command_info" / "partial_context"
+    partial.mkdir(parents=True)
+    (partial / "tinymodel.pth").write_text("x")
+    assert not run_listing.has_trained_heads(library)
+    root = _with_trained_heads(library)
+    assert os.path.isdir(root) and run_listing.has_trained_heads(library)
 
 
 def test_the_threshold_arm_shortlists_above_the_threshold_at_both_call_sites(copy_of, monkeypatch):
@@ -233,6 +289,25 @@ def test_a_natural_sub_task_gets_its_command_from_the_trained_heads_alone(copy_o
         text = run_listing_text(library, sub_task)
     assert "\n- book_by_title\n" in text or text.startswith("- book_by_title\n")
     assert len(text) < len(workflow_agent.planner_commands_text(library))
+
+
+def test_head_candidates_keep_the_execution_top_k_as_well_as_the_planning_top_k(copy_of):
+    """Round 1's candidates (fix-3rsq.plan-review.2.1): the heads' top-k execution commands are kept, not only the
+    planning ones. Real trained heads (the library's, linked in); the split is by kind and never holds a non-command."""
+    from fastworkflow.run_listing import NON_COMMAND_LABELS, head_candidates
+
+    library = _library_in(copy_of, name="head_candidates_execution")
+    _with_trained_heads(library)
+    sub_task = "run list_member_loans for the member"
+    candidates = head_candidates(library, sub_task)
+    labels, planning = run_listing.head_seeds(library, sub_task)
+    # head_seeds is unchanged for its callers: the same labels and the same planning scores
+    assert labels == candidates.labels and planning == candidates.planning_scores
+    assert candidates.execution_scores, "the heads' execution top-k must be kept"
+    assert "Library/list_member_loans" in candidates.execution_scores or "list_member_loans" in {
+        label.split("/")[-1] for label in candidates.execution_scores}
+    assert not set(candidates.execution_scores) & set(candidates.planning_scores)
+    assert not set(candidates.execution_scores) & set(NON_COMMAND_LABELS)
 
 
 def test_without_trained_heads_the_live_gather_is_the_name_gather(copy_of):
@@ -333,6 +408,30 @@ def test_producers_navigating_commands_and_callees_are_added(copy_of):
     assert "Library/member_report" in report
     assert {"Library/find_member", "Library/open_member", "Member/list_member_loans",
             "Record/show_notes"} <= report
+
+
+def test_a_bound_command_listing_shows_the_producer_its_input_comes_from(copy_of):
+    """open_book takes its uid from find_book (a producer in the active context): a plain sub-task bound to open_book
+    gets find_book in its listing, so the agent can produce the input first (fix-3rsq.plan-review.2.11)."""
+    library = _library_in(copy_of, name="library_bound_producer")
+    names = _command_names(run_list_bound(library, "Library/open_book"))
+    assert {"open_book", "find_book"} <= names
+
+
+def test_a_bound_command_in_a_context_not_yet_entered_shows_the_entry_command(copy_of):
+    """list_member_loans is in the Member context, not yet entered: its listing names the navigation to Member (the enter
+    command open_member, with its uid producer find_member), as a bound sub-task needs it to reach the command."""
+    library = _library_in(copy_of, name="library_bound_nav")
+    text = run_list_bound(library, "Member/list_member_loans")
+    assert {"list_member_loans", "open_member", "find_member"} <= _command_names(text)
+    assert ("Before executing list_member_loans, navigate to Member as follows: "
+            "open_member <member_uid> (needs member_uid)") in text
+
+
+def test_a_bound_command_listing_leaves_out_commands_it_does_not_depend_on(copy_of):
+    library = _library_in(copy_of, name="library_bound_lean")
+    names = _command_names(run_list_bound(library, "Library/open_book"))
+    assert "loan_report" not in names and "count_books" not in names
 
 
 def test_core_commands_of_the_active_context_are_always_shortlisted(copy_of):
@@ -546,13 +645,14 @@ def test_the_planning_distribution_gathers_the_planning_command_into_the_thresho
     assert with_it != _what_can_i_do(ctx)
 
 
-def test_the_production_arm_is_full_and_one_constant_switches_it():
-    """PRODUCTION_LISTING_ARM is the one line that changes production; it is FULL, and the effective arm follows it."""
-    assert run_listing.PRODUCTION_LISTING_ARM == FULL
-    assert run_listing.effective_listing_arm() == FULL
+def test_the_production_arm_is_threshold_and_one_constant_switches_it():
+    """PRODUCTION_LISTING_ARM is the one line that changes production; it is THRESHOLD (guarded), and the effective
+    arm follows it when no experiment selects one."""
+    assert run_listing.PRODUCTION_LISTING_ARM == THRESHOLD
+    assert run_listing.effective_listing_arm() == THRESHOLD
     with listing_arm(COMMAND_SHORTLIST):
         assert run_listing.effective_listing_arm() == COMMAND_SHORTLIST
-    assert run_listing.effective_listing_arm() == FULL
+    assert run_listing.effective_listing_arm() == THRESHOLD
 
 
 # ---------------------------------------------------------------------------

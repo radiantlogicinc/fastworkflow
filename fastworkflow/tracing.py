@@ -343,7 +343,13 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # by owner decision 2026-10-30. `experiment_arm`, `fast_path` and `recipe_choice` (the v25 keys of the
 # planner span) and `fast_path_refusal_asked` (the v28 key of the executor span) are no longer declared
 # or written. A span recorded before this carries them as it wrote them; nothing reads them as a live path.
-SPAN_CONTRACT_VERSION = 34
+#
+# v35: fw.turn v3 (fix-3rsq.plan-review.2.8) -- `subtask_review`: how the turn's sub-tasks were reviewed before they
+# ran: "fast_path" (one sub-task, a confident head or an exact name: no review), "open" (the review was asked and
+# the turn was still awaiting it), "reviewed" (accepted), "declined", "expired", "not_reviewed" (no one could answer:
+# the draft ran as proposed), or "not_applicable" (the turn never reached the gate). A span recorded before this
+# carries no such key.
+SPAN_CONTRACT_VERSION = 35
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -477,8 +483,9 @@ class SpanContract:
 
 SPAN_CONTRACTS: dict[str, SpanContract] = {
     # v2: `unattended` (the turn ran with no ask_user tool).
+    # v3: `subtask_review` (SPAN_CONTRACT_VERSION v35): the sub-task review gate's outcome for the turn.
     SPAN_TURN: SpanContract(
-        version=2,
+        version=3,
         attributes=frozenset(
             {
                 "turn_key",
@@ -491,6 +498,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "failure_reason",
                 "suspended_ms",
                 "context_mutations",
+                "subtask_review",
             }
         ),
     ),

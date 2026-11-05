@@ -8,6 +8,7 @@ at the NLU/agent boundary).
 
 from __future__ import annotations
 
+from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.benchmark_pins import STORE_PIN
 import json
 import os

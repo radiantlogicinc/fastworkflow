@@ -19,6 +19,7 @@ from fastworkflow.plan_frame import TURN_MAX_STEPS_ENV
 from fastworkflow.planning_commands import PlanningCommandInputError
 from fastworkflow.turn import TurnStatus
 from fastworkflow.utils.signatures import InputForParamExtraction
+from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_planning_commands import _clear_library_wf_sys_modules  # noqa: F401 - the library_wf purge
 from tests.test_text_planner_and_split import (  # noqa: F401 - workflow_env is a fixture
     RecordingTraceSink, _prompt, _session, workflow_env)

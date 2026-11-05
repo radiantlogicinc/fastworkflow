@@ -39,7 +39,9 @@ class ResponseGenerator:
         accepted = review_engine.approved_review_proposal(workflow, cls.spec)
         if accepted is not None:
             return Signature.Output(round=command_parameters.round, accepted=accepted.model_dump_json())
-        proposal = cls.from_text(command_parameters.items)
+        from fastworkflow import review_proposals
+
+        proposal = review_proposals.draft_for(command_parameters.items) or cls.from_text(command_parameters.items)
         review_engine.open_for_workflow(workflow, proposal,
                                         items_text=command_parameters.items)   # raises AskUserSuspend
         raise AssertionError("open_for_workflow must suspend")

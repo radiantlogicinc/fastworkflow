@@ -8,12 +8,21 @@ from fastworkflow.turn import TurnStatus
 from fastworkflow.utils.react import fastWorkflowReAct
 from fastworkflow.workflow_execution_context import MAX_HANDOFFS
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+import pytest
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures
     _make_agent_ctx,
     _set_agents,
     initialized_fastworkflow,
     todo_workflow_path,
 )
+
+
+@pytest.fixture(autouse=True)
+def no_review_gate(monkeypatch):
+    """This module tests how sub-tasks and plan frames run. The sub-task review gate (fix-3rsq.plan-review.2.6) runs
+    before them, so each turn here starts with the gate passed (the fast path's run); the gate has its own tests in
+    tests/test_round1_gate.py."""
+    monkeypatch.setattr(WorkflowExecutionContext, "_subtask_gate", lambda self, subtasks: None)
 
 
 def _agent_with_steps(answers, suspend_on=None, exhaust=lambda n: False, observations=("o",)):
@@ -204,7 +213,8 @@ def test_exhausted_subtask_hands_off_to_a_continuation_matched_on_its_original_t
     assert "DONE SUMMARY" in continuation
     # the fresh run continues numbering where the exhausted run stopped
     assert agent.calls[1]["first_step"] == 2
-    assert templates == ["find X", "find X", "find Y"]
+    # The continuation of X asks the planning match nothing new: it is memoised for the turn (fix-3rsq.plan-review.2.9 b).
+    assert templates == ["find X", "find Y"]
     assert agent.calls[2]["user_query"] == "find Y"
 
 

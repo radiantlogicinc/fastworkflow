@@ -27,6 +27,14 @@ from fastworkflow.observation_offloading.state import (
 from fastworkflow.session_state_store import DiskSessionStateStore
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
+@pytest.fixture(autouse=True)
+def no_review_gate(monkeypatch):
+    """This module tests how sub-tasks and plan frames run. The sub-task review gate (fix-3rsq.plan-review.2.6) runs
+    before them, so each turn here starts with the gate passed (the fast path's run); the gate has its own tests in
+    tests/test_round1_gate.py."""
+    monkeypatch.setattr(WorkflowExecutionContext, "_subtask_gate", lambda self, subtasks: None)
+
+
 TESTS = Path(__file__).parent
 HELLO_WORKFLOW = str(TESTS.joinpath("hello_world_workflow").resolve())
 EXAMPLE_ENV = TESTS.parent / "fastworkflow" / "examples" / "fastworkflow.env"

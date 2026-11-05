@@ -46,6 +46,13 @@ TURN_KEY_RE = re.compile(r"^\d{8}T\d{6}\.\d{6}Z-[0-9a-f]{12}$")
 # ----------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def no_review_gate(monkeypatch):
+    """A turn that tests something other than the sub-task review gate runs as the fast path did: no review opens.
+    Only modules that import this fixture by name get it (test_round1_gate.py tests the gate and does not)."""
+    monkeypatch.setattr(WorkflowExecutionContext, "_subtask_gate", lambda self, subtasks: None)
+
+
 @pytest.fixture
 def todo_workflow_path() -> str:
     return str(

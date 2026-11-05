@@ -64,6 +64,8 @@ class PlanFrame:
     origins: list[int] = field(default_factory=list)
     subtask_index: int = 0
     subtask_answers: list[str] = field(default_factory=list)
+    # Parallel to subtask_answers: each run's typed Output as JSON, "" when the run produced none (fix-3rsq.plan-review.2.11).
+    subtask_outputs: list[str] = field(default_factory=list)
     subtask_exhausted: bool = False
     evidence_floors: dict[int, int] = field(default_factory=dict)   # not serialised (as today)
     initial_plan_text: str = ""          # not serialised (as today); stays: the planner writes the run's plan (Phase 6 decision 2026-10-30)
@@ -90,6 +92,12 @@ class PlanFrame:
     #: frame counts from its restore; alias numbers are for tracing, and step indexes
     #: stay unique regardless.
     child_counts: dict[str, int] = field(default_factory=dict)
+    #: The turn frame's sub-task review gate (fix-3rsq.plan-review.2.6/.2.9): the review is open (the turn is awaiting
+    #: it), and the turn's sub-task plan (review_proposals.SubTaskProposal: the accepted proposal, or the draft). Only the
+    #: turn frame uses them; the serialised turn state carries them as top-level keys.
+    subtask_review_open: bool = False
+    framework_entry: bool = False
+    subtask_plan: Any = None
 
     @classmethod
     def turn(cls) -> "PlanFrame":
@@ -111,6 +119,7 @@ class PlanFrame:
             "origins": list(self.origins),
             "subtask_index": self.subtask_index,
             "subtask_answers": list(self.subtask_answers),
+            "subtask_outputs": list(self.subtask_outputs),
             "subtask_exhausted": self.subtask_exhausted,
             "phase_run": copy.deepcopy(self.phase_run),
             "child_step_ranges": [list(step_range) for step_range in self.child_step_ranges],
@@ -137,6 +146,7 @@ class PlanFrame:
             origins=list(d.get("origins") or range(len(subtasks))),
             subtask_index=int(d.get("subtask_index") or 0),
             subtask_answers=list(d.get("subtask_answers") or []),
+            subtask_outputs=list(d.get("subtask_outputs") or []),
             subtask_exhausted=bool(d.get("subtask_exhausted")),
             phase_run=copy.deepcopy(d.get("phase_run") or None),
             child_step_ranges=[list(step_range) for step_range in d.get("child_step_ranges") or []],

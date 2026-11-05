@@ -16,11 +16,11 @@ import pytest
 import fastworkflow
 from fastworkflow.command_directory import CommandDirectory
 from fastworkflow import planning_commands as pc
-from fastworkflow.review_engine import AWAITING, CONFIRMED, REVISED
+from fastworkflow.review_engine import AWAITING, CONFIRMED, EXPIRED, REVISED
 from fastworkflow.review_proposals import (Candidate, PlanProposal, SubTaskProposal, build_round1_proposal)
 from fastworkflow.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the library copy, and the guards
-    _ask, _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
+    _added, _ask, _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
@@ -122,3 +122,149 @@ def test_review_plan_runs_end_to_end_with_scripted_replies_and_returns_the_accep
     done = todo.ctx.process_turn("accept")
     assert record.state == CONFIRMED and done.status is TurnStatus.COMPLETED
     assert any("notify Ann" in (o.command_response.response or "") for o in done.command_outputs)
+
+
+# ----------------------------------------------------------------------
+# The sub-task model (fix-3rsq.plan-review.2.4): goal, outcome, inputs, means; the JSON round trip
+# ----------------------------------------------------------------------
+
+
+def _sample_proposal():
+    from fastworkflow.review_proposals import SubTask, SubTaskInput, Means
+
+    return SubTaskProposal(items=[
+        SubTask(goal="book a loan for Ann", outcome="Ann holds a loan on Dune",
+                inputs=[SubTaskInput(name="title", value="Dune")],
+                means=Means(kind="planning", name="Library/book_loans")),
+        SubTask(goal="tell Ann", outcome="Ann has been told",
+                inputs=[SubTaskInput(from_subtask=1)],
+                means=Means(kind="plain", name="Library/notify")),
+        SubTask(goal="summarise the week", outcome="a summary exists"),
+    ])
+
+
+def test_a_sub_task_round_trips_through_json_with_its_goal_outcome_inputs_and_means():
+    """The review's accepted proposal is JSON (review_proposal.Output.accepted) and review_subtasks rebuilds each
+    item with SubTask(**item): the round trip keeps every field, and the fingerprint does not move."""
+    import json
+
+    from fastworkflow.review_proposals import SubTask
+
+    proposal = _sample_proposal()
+    rebuilt = SubTaskProposal.model_validate_json(proposal.model_dump_json())
+    assert rebuilt == proposal
+    assert rebuilt.fingerprint() == proposal.fingerprint()
+    assert SubTaskProposal.model_validate({"items": proposal.binding()["items"]}) == proposal
+    accepted = json.loads(proposal.model_dump_json())["items"]
+    assert [SubTask(**item) for item in accepted] == list(proposal.items)
+    first = rebuilt.items[0]
+    assert (first.goal, first.outcome) == ("book a loan for Ann", "Ann holds a loan on Dune")
+    assert first.inputs[0].value == "Dune" and first.means.kind == "planning"
+    assert rebuilt.items[1].inputs[0].from_subtask == 1
+    assert rebuilt.items[2].means.kind == "from_scratch"
+
+
+def test_the_rendering_shows_each_sub_task_its_inputs_means_and_outcome():
+    text = _sample_proposal().rendering()
+    assert "1. book a loan for Ann (inputs: title=Dune; means: planning:Library/book_loans); " \
+           "desired outcome: Ann holds a loan on Dune" in text
+    assert "2. tell Ann (inputs: from sub-task 1; means: plain:Library/notify)" in text
+    assert "3. summarise the week (inputs: none; means: from_scratch); desired outcome: a summary exists" in text
+
+
+def test_the_text_forms_of_means_and_inputs_are_read_and_bad_ones_refused():
+    from pydantic import ValidationError
+
+    from fastworkflow.review_proposals import Means, SubTaskInput
+
+    assert Means.from_text("from_scratch") == Means()
+    assert Means.from_text("planning:Library/book_loans") == Means(kind="planning", name="Library/book_loans")
+    assert Means.from_text(" plain:notify ") == Means(kind="plain", name="notify")
+    for bad in ("book_loans", "planning:", "execute:x", ""):
+        with pytest.raises(ValueError):
+            Means.from_text(bad)
+    with pytest.raises(ValidationError):
+        Means(kind="plain")                       # a command kind names its command
+    with pytest.raises(ValidationError):
+        Means(kind="from_scratch", name="x")      # from_scratch names none
+    assert SubTaskInput.from_text("title=Dune") == SubTaskInput(name="title", value="Dune")
+    assert SubTaskInput.from_text("from sub-task 2") == SubTaskInput(from_subtask=2)
+    assert SubTaskInput.from_text("who=from sub-task 3") == SubTaskInput(name="who", from_subtask=3)
+    assert SubTaskInput.from_text("Ann Lee") == SubTaskInput(value="Ann Lee")
+    with pytest.raises(ValidationError):
+        SubTaskInput(value="x", from_subtask=1)   # a value or 'from sub-task N', not both
+    with pytest.raises(ValidationError):
+        SubTaskInput()                            # and not neither
+    with pytest.raises(ValidationError):
+        SubTaskInput(from_subtask=0)
+
+
+def test_a_sub_task_has_no_completion_field_because_completion_comes_only_from_the_finish_check():
+    """Arch 19.0 invariant 3: a goal is never completed by its command's success. The model carries no status that a
+    command result could set; the finish check is the only completion (documented on SubTask)."""
+    from fastworkflow.review_proposals import SubTask
+
+    assert not {"done", "completed", "complete", "success", "status"} & set(SubTask.model_fields)
+    assert "finish check" in (SubTask.__doc__ or "")
+    assert "CommandOutput.success" in (SubTask.__doc__ or "")
+
+
+def test_the_round_one_builder_prefers_a_planning_command_then_a_plain_one_then_from_scratch():
+    from fastworkflow.review_proposals import Means, SubTaskInput
+
+    candidates = {
+        1: [Candidate("Library/send", is_planning=False, score=0.9),
+            Candidate("Library/book_loans", is_planning=True, score=0.4)],   # a planning command in top-k wins
+        2: [Candidate("Library/notify", is_planning=False, score=0.6)],       # the best plain command
+        # sub-task 3 has no candidate: from scratch
+    }
+    proposal = build_round1_proposal(
+        ["lend Dune to Ann", "tell Ann", "summarise"], candidates,
+        inputs={2: [SubTaskInput(from_subtask=1)]}, outcomes={1: "Ann holds a loan on Dune"})
+    assert proposal.items[0].means == Means(kind="planning", name="Library/book_loans")
+    assert proposal.items[0].outcome == "Ann holds a loan on Dune"
+    assert proposal.items[1].means == Means(kind="plain", name="Library/notify")
+    assert proposal.items[1].inputs[0].from_subtask == 1
+    assert proposal.items[2].means == Means() and proposal.items[2].outcome == ""
+
+
+def test_a_proposal_review_accepts_more_than_two_replies_and_expires_at_its_cap(todo):
+    """fix-3rsq.plan-review.2.5: a proposal review takes its edits as replies (the cap is 8, not the approval's 2).
+    Eight edits keep it open and the ninth reply, even an accept, finds it expired (nothing is confirmed)."""
+    todo.wf.current_command_context = todo.library
+    todo.ctx.run_framework_planning_command("review_subtasks", {"subtasks": "book a flight; tell Ann"},
+                                            "review the sub-tasks")
+    record = todo.store.active()
+    assert record is not None and record.ttl_turns == 8
+    for number in range(8):
+        todo.ctx.process_turn(f"change 2: inputs=Ann {number}")
+    assert record.turns_seen == 8 and record.state == REVISED
+    todo.script.steps = _finish()                    # the agent is told the review expired, and finishes
+    todo.ctx.process_turn("accept")                  # the ninth reply: over the cap
+    assert record.state == EXPIRED
+    assert not [r for r in todo.store.records if r.state == CONFIRMED]
+
+
+def test_a_proposal_review_with_three_replies_is_still_open_and_accepts(todo):
+    todo.wf.current_command_context = todo.library
+    todo.ctx.run_framework_planning_command("review_subtasks", {"subtasks": "book a flight; tell Ann"},
+                                            "review the sub-tasks")
+    record = todo.store.active()
+    for text in ("change 2: inputs=Ann Lee", "change 1: inputs=Dune", "change 2: inputs=Ann Lee, Dune"):
+        todo.ctx.process_turn(text)
+    assert record.turns_seen == 3 and record.state == REVISED
+    todo.script.steps = _finish()
+    todo.ctx.process_turn("accept")
+    assert record.state == CONFIRMED
+
+
+def test_an_approval_still_expires_after_two_replies(todo, annotated_library):
+    """The approval kind keeps its cap of two replies (TTL_TURNS): two other replies expire it, and nothing runs."""
+    _ask(todo, "add_note <text>Ann</text>", steps=_finish())
+    approval = todo.store.active()
+    assert approval is not None and approval.ttl_turns == 2
+    todo.ctx.process_turn("maybe later")
+    todo.ctx.process_turn("sure")
+    todo.ctx.process_turn("yes")
+    assert approval.state == "expired"
+    assert _added(todo.chores, todo.base) == []

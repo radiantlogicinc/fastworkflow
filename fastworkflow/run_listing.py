@@ -1,9 +1,8 @@
 """What a sub-task's run is shown: the full listing, or the command shortlist above a size (design 3.10, 10.15).
 
-Production default: FULL, byte for byte as it is today. The shortlist is NOT the production default: the 10.7 gate
-(the owner's choice) decides when the threshold rule becomes the default. The rule itself (``THRESHOLD`` arm, selected
-by ``listing_arm``): a listing whose full text is at most ``FULL_LISTING_MAX_CHARS`` is the full listing; a larger one
-is the COMMAND shortlist:
+Production default: THRESHOLD (``PRODUCTION_LISTING_ARM``, fix-3rsq.plan-review.2.10), with a guard: a workflow with
+no trained heads gets FULL. The rule (``THRESHOLD`` arm, selected by ``listing_arm`` or production): a listing whose
+full text is at most ``FULL_LISTING_MAX_CHARS`` is the full listing; a larger one is the COMMAND shortlist:
 
 - the commands gathered for the sub-task, expanded with their producers, the commands that navigate to their
   context, and a planning command's callees, listed in full;
@@ -17,7 +16,7 @@ planning labels among the heads' top-k (the unsure candidates, 3.9), and a plann
 the caller has one (``planning_probabilities``). Without trained heads a context contributes nothing from them.
 
 Selection (EXPERIMENT-ONLY): ``listing_arm`` selects ``FULL`` (always the full listing), ``COMMAND_SHORTLIST`` (always the
-shortlist) or ``THRESHOLD`` (the rule above) for a ``with`` block. Its default, ``None``, is ``FULL``.
+shortlist) or ``THRESHOLD`` (the rule above) for a ``with`` block. Its default, ``None``, is the production arm (THRESHOLD, guarded).
 """
 from __future__ import annotations
 
@@ -31,7 +30,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Sequence
 
 import fastworkflow
-from fastworkflow import planning_commands
+from fastworkflow import planning_commands, turn_cache
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.context_navigation import (
     collect_descend_edges, display_context_name, exact_name_scopes, live_context_chain,
@@ -58,12 +57,13 @@ COMMAND_SHORTLIST = "command_shortlist"
 THRESHOLD = "threshold"
 ARMS = (FULL, COMMAND_SHORTLIST, THRESHOLD)
 
-#: THE PRODUCTION LISTING ARM: the one line that changes production. FULL until the owner approves the threshold rule
-#: after the live run (fix-3rsq.10.7 gate); set it to THRESHOLD to turn the size rule on (full up to
-#: FULL_LISTING_MAX_CHARS, the trained-head shortlist above it). Both call sites and run_listing_text read it.
-PRODUCTION_LISTING_ARM = FULL
+#: THE PRODUCTION LISTING ARM: the one line that changes production. THRESHOLD (fix-3rsq.plan-review.2.10, shipped with
+#: round 1): full up to FULL_LISTING_MAX_CHARS, the trained-head shortlist above it. A workflow with no trained heads
+#: falls back to FULL (``has_trained_heads``): without heads the shortlist recalls only the names the sub-task writes.
+#: Both call sites and run_listing_text read it.
+PRODUCTION_LISTING_ARM = THRESHOLD
 
-#: EXPERIMENT-ONLY. The arm the run's listing uses inside a ``listing_arm`` block; None is the production default (FULL).
+#: EXPERIMENT-ONLY. The arm the run's listing uses inside a ``listing_arm`` block; None is the production default (THRESHOLD, guarded).
 _EXPERIMENT_LISTING_ARM: str | None = None
 
 
@@ -91,9 +91,17 @@ def selected_listing_arm() -> str | None:
     return _EXPERIMENT_LISTING_ARM
 
 
-def effective_listing_arm() -> str:
-    """The arm the run uses: the experiment's when one is selected, else ``PRODUCTION_LISTING_ARM``."""
-    return _EXPERIMENT_LISTING_ARM or PRODUCTION_LISTING_ARM
+def effective_listing_arm(workflow=None) -> str:
+    """The arm the run uses: the experiment's when one is selected, else ``PRODUCTION_LISTING_ARM``.
+
+    Guard (fix-3rsq.plan-review.2.10): given *workflow*, the production THRESHOLD arm is FULL for a workflow with no
+    trained heads (``has_trained_heads``). Without the workflow (or with an experiment's arm) no guard applies.
+    """
+    if _EXPERIMENT_LISTING_ARM:
+        return _EXPERIMENT_LISTING_ARM
+    if PRODUCTION_LISTING_ARM == THRESHOLD and workflow is not None and not has_trained_heads(workflow):
+        return FULL
+    return PRODUCTION_LISTING_ARM
 
 
 # ---------------------------------------------------------------------------
@@ -280,24 +288,92 @@ def head_answers(workflow, sub_task: str, command_info_root: str | None = None) 
         labels, details = CommandRouter(folder).predict_with_details(sub_task)
         answers[context] = {
             "labels": [str(label) for label in labels],
+            "confident": bool(details["confident"]),
             "topk_labels": [str(label) for label in details["topk_labels"]],
             "topk_scores": [float(score) for score in details["topk_scores"]],
         }
     return answers
 
 
-def head_seeds(workflow, sub_task: str, command_info_root: str | None = None) -> tuple[frozenset[str], dict[str, float]]:
-    """The commands the heads answer for *sub_task* (their labels, not ``parameter_value``/``wildcard``), and the
-    planning commands among their top-k with the best score each got (the unsure candidates, 3.9)."""
+@dataclass(frozen=True)
+class HeadCandidates:
+    """What the trained heads offer one sub-task (3.9): the command labels they answer, the planning commands among
+    their top-k, and the execution commands among their top-k, each with the best score the label got."""
+    labels: frozenset[str]
+    planning_scores: dict[str, float] = field(default_factory=dict)
+    execution_scores: dict[str, float] = field(default_factory=dict)
+    #: The labels a head routed alone on: its classifier was confident, so intent detection took the one label
+    #: without asking (the fast-path predicate of round 1, fix-3rsq.plan-review.2.2). A subset of ``labels``.
+    confident_labels: frozenset[str] = frozenset()
+
+
+def head_candidates(workflow, sub_task: str, command_info_root: str | None = None) -> HeadCandidates:
+    """The heads' answers for *sub_task*, memoised for the turn (``turn_cache``; fix-3rsq.plan-review.2.9 note b).
+
+    See ``_head_candidates``: the same answer, computed once per turn per sub-task.
+    """
+    key = ("head_candidates", workflow.folderpath, sub_task, command_info_root)
+    return turn_cache.memo(key, lambda: _head_candidates(workflow, sub_task, command_info_root))
+
+
+def _head_candidates(workflow, sub_task: str, command_info_root: str | None = None) -> HeadCandidates:
+    """The heads' answers for *sub_task*, planning and execution top-k both (round 1's candidates, fix-3rsq.plan-review.2).
+
+    ``labels`` are the answered command labels (not ``parameter_value``/``wildcard``). ``planning_scores`` and
+    ``execution_scores`` are the top-k labels of each kind with the best score each got; a label's kind is decided by
+    the workflow's planning commands. Read-only: no LLM call.
+    """
     planning = frozenset(planning_commands.resolve_field_sources(workflow.folderpath).planning_commands)
     labels: set[str] = set()
-    scores: dict[str, float] = {}
+    confident: set[str] = set()
+    planning_scores: dict[str, float] = {}
+    execution_scores: dict[str, float] = {}
     for answer in head_answers(workflow, sub_task, command_info_root).values():
         labels.update(label for label in answer["labels"] if label not in NON_COMMAND_LABELS)
+        if answer.get("confident"):
+            confident.update(label for label in answer["labels"] if label not in NON_COMMAND_LABELS)
         for label, score in zip(answer["topk_labels"], answer["topk_scores"]):
-            if label in planning:
-                scores[label] = max(scores.get(label, 0.0), score)
-    return frozenset(labels), scores
+            if label in NON_COMMAND_LABELS:
+                continue
+            bucket = planning_scores if label in planning else execution_scores
+            bucket[label] = max(bucket.get(label, 0.0), score)
+    return HeadCandidates(frozenset(labels), planning_scores, execution_scores, frozenset(confident))
+
+
+def exact_command_name(workflow, sub_task: str) -> str | None:
+    """The command a sub-task names exactly, or None (the fast-path predicate's first signal, fix-3rsq.plan-review.2.2).
+
+    The same reading as intent detection's exact-prefix match: the sub-task's first token, up to whitespace or a
+    '(', compared case-insensitively with the leaf name of a command on the exact-name lookup path (execution or
+    planning). A command elsewhere in the workflow is not an exact name here: intent detection routes it by hint.
+    Framework planning commands are not app commands and never match. No model is read.
+    """
+    from fastworkflow.planning_commands import is_framework_planning_command, planning_command
+
+    text = sub_task.strip()
+    token = text.split(None, 1)[0].split("(", 1)[0].lower() if text else ""
+    if not token:
+        return None
+    from fastworkflow.context_navigation import exact_name_scopes
+
+    crd = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
+    for scope in exact_name_scopes(workflow):    # the lookup path intent detection reads, nearest first
+        for qualified in _context_names(crd, scope.context_name):
+            if qualified.split("/")[-1].lower() != token:
+                continue
+            command = planning_command(workflow.folderpath, qualified)
+            if command is not None and is_framework_planning_command(command):
+                continue
+            return qualified
+    return None
+
+
+def head_seeds(workflow, sub_task: str, command_info_root: str | None = None) -> tuple[frozenset[str], dict[str, float]]:
+    """The commands the heads answer for *sub_task* (their labels, not ``parameter_value``/``wildcard``), and the
+    planning commands among their top-k with the best score each got (the unsure candidates, 3.9). The execution
+    top-k is ``head_candidates(...).execution_scores``."""
+    candidates = head_candidates(workflow, sub_task, command_info_root)
+    return candidates.labels, candidates.planning_scores
 
 
 def live_gather(workflow, sub_task: str, planning_probabilities: Mapping[str, float] | None = None,
@@ -427,6 +503,38 @@ def _on_path(workflow) -> set[str]:
     return {scope.context_name for scope in exact_name_scopes(workflow)}
 
 
+def bound_command_names(workflow, name: str) -> frozenset[str]:
+    """The commands a sub-task bound to command *name* needs in its listing (fix-3rsq.plan-review.2.11): the command, the
+    producers its Input fields take their values from (``from_`` edges), and the navigation to its context (enter/open
+    commands and descends_to declarations). Producers and navigation are followed transitively, as expansion follows them."""
+    folder = workflow.folderpath
+    active = workflow.current_command_context_name
+    crd = fastworkflow.RoutingRegistry.get_definition(folder)
+    resolution = planning_commands.resolve_field_sources(folder)
+    known: set[str] = set()
+    for context in crd.contexts:
+        known.update(_context_names(crd, context))
+    edges = collect_descend_edges(folder)
+    names = {name}
+    pending = deque([name])
+    while pending:
+        current = pending.popleft()
+        owner = _owner(current, crd, active)
+        added = _producers(resolution, current, known) | _navigating(workflow, owner, active, edges)
+        for each in added:
+            if each not in names and each in known:
+                names.add(each)
+                pending.append(each)
+    return frozenset(names)
+
+
+def bound_command_listing(workflow, name: str) -> str:
+    """The listing an executor sees for a sub-task bound to command *name* (fix-3rsq.plan-review.2.9): that command in
+    full, with its context's section, and every other context as one line. The command's own parameters are in it, so
+    the executor has what the command needs to run; its producers and navigation are in it too (2.11)."""
+    return command_shortlist_text(workflow, bound_command_names(workflow, name))
+
+
 def command_shortlist_text(workflow, names: Iterable[str]) -> str:
     """The COMMAND_SHORTLIST listing: the shortlisted commands in full, a context with one of them as its section,
     every other context as one line."""
@@ -457,19 +565,34 @@ def command_shortlist_text(workflow, names: Iterable[str]) -> str:
     return "\n\n".join(sections)
 
 
+def has_trained_heads(workflow) -> bool:
+    """True when the workflow has at least one trained head (a context folder of ``___command_info`` with the head's
+    model files). The production THRESHOLD arm needs them to gather a shortlist; without them it gives FULL."""
+    from fastworkflow.train.score_lookup import HEAD_MARKERS
+
+    root = command_info_root_of(workflow)
+    if not os.path.isdir(root):
+        return False
+    return any(os.path.isdir(folder) and all(os.path.exists(os.path.join(folder, marker)) for marker in HEAD_MARKERS)
+               for folder in (os.path.join(root, name) for name in os.listdir(root)))
+
+
 def run_listing_text(workflow, sub_task: str, *, arm: str | None = None,
                      planning_probabilities: Mapping[str, float] | None = None, full: str | None = None,
                      command_info_root: str | None = None) -> str:
     """The run's listing for *sub_task* (3.10, Listing).
 
-    ``arm`` None is the selected arm, and FULL when none is selected (production). ``FULL`` gives *full* (the full
+    ``arm`` None is the selected arm (the production arm when no experiment selects one). ``FULL`` gives *full* (the full
     listing the caller shows today; default ``planner_commands_text``). ``THRESHOLD`` gives *full* while it is at most
     ``FULL_LISTING_MAX_CHARS``, else the shortlist. ``COMMAND_SHORTLIST`` always gives the shortlist. The shortlist is
     gathered with the trained heads (``shortlist_live``).
+
+    With ``arm`` None the production guard applies (``effective_listing_arm(workflow)``: FULL for a workflow with no
+    trained heads). An explicit ``arm`` is used as given.
     """
     from fastworkflow.workflow_agent import planner_commands_text
 
-    arm = arm if arm is not None else effective_listing_arm()
+    arm = arm if arm is not None else effective_listing_arm(workflow)
     if arm not in ARMS:
         raise ValueError(f"unknown listing arm {arm!r}")
     if arm == COMMAND_SHORTLIST:
@@ -511,6 +634,6 @@ def check_planned_arguments(command, raw: Mapping, sub_task: str,
     request = "\n\n".join([sub_task, *earlier_outputs])
     try:
         args, notes = planning_commands.check_arguments(command, dict(raw), request)
-    except planning_commands.PlanningCommandInputError as refused:
+    except planning_commands.PlanningCommandCallError as refused:   # a refused input, or a sure check that fails the call
         return ArgumentCheck(refusal=str(refused))
     return ArgumentCheck(args=args, notes=tuple(notes))
