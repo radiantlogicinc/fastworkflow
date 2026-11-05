@@ -186,7 +186,8 @@ def test_llm_leaving_plain_required_fields_out_asks_for_them(llm_answers):
 
 
 def test_llm_answering_every_plain_required_field_is_valid(llm_answers):
-    output, _ = llm_answers(RECORD, dict(ALL_VALUES), f"{RECORD} with all values")
+    # The request writes the str value: the argument checks (fix-qjf4) refuse one it does not write.
+    output, _ = llm_answers(RECORD, dict(ALL_VALUES), f"{RECORD} for Bob with all values")
 
     assert output.parameters_are_valid is True
     assert output.cmd_parameters.count == 3

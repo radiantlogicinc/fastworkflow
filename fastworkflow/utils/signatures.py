@@ -1,5 +1,6 @@
 import sys
 import ast
+import html
 import inspect
 import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
@@ -119,6 +120,23 @@ def parameters_with_unfilled(model_class: Type[BaseModel], values: Dict[str, Any
 # with brackets inside it, or text outside them, is left alone.
 _BRACKETED_VALUE = re.compile(r"^\s*<+\s*([^<>]*?)\s*>+\s*$")
 
+# How many rounds of HTML entity decoding a value gets before it is matched. A model that answers
+# through a forced tool call sometimes writes the brackets escaped (``&lt;UNKNOWN&gt;``), and once
+# more for a doubly escaped reply (``&amp;lt;UNKNOWN&amp;gt;``) (fix-3koe).
+_ENTITY_DECODE_ROUNDS = 3
+
+
+def decode_entities(text: str) -> str:
+    """*text* with HTML entities decoded, repeated until it no longer changes (at most
+    ``_ENTITY_DECODE_ROUNDS`` rounds). Used only to match the bracket shapes below: a value with
+    no bracketed shape keeps its own text (``AT&amp;T`` is not rewritten)."""
+    for _ in range(_ENTITY_DECODE_ROUNDS):
+        decoded = html.unescape(text)
+        if decoded == text:
+            break
+        text = decoded
+    return text
+
 # Lowercase words joined by ``_`` or ``-``, no digits: the shape of a variable
 # name, which is what a usage-text placeholder is.
 _IDENTIFIER_SHAPE = re.compile(r"[a-z]+(?:[_\-][a-z]+)*")
@@ -177,7 +195,8 @@ def classify_bracketed_value(value: Any, field_name: str) -> Tuple[str, Any]:
         return ("unwrapped", items) if changed else ("unchanged", value)
     if not isinstance(value, str) or isinstance(value, Enum):
         return "unchanged", value
-    match = _BRACKETED_VALUE.match(value)
+    # Escaped brackets (``&lt;item_uid&gt;``) are brackets: matched on the decoded text (fix-3koe).
+    match = _BRACKETED_VALUE.match(decode_entities(value))
     if not match:
         return "unchanged", value
     inner = match[1]
@@ -1065,13 +1084,16 @@ def reset_to_not_given(model_class: Type[BaseModel], values: dict, fields) -> No
 
 
 # The not-given marker some models write in angle brackets for an argument the request does not give
-# (``<UNKNOWN>``). It is never a value: at the extraction boundary it becomes the field's not-given value.
+# (``<UNKNOWN>``, or HTML-escaped ``&lt;UNKNOWN&gt;`` through a forced tool call). It is never a value:
+# at the extraction boundary it becomes the field's not-given value.
 _UNKNOWN_MARKER = re.compile(r"^\s*<+\s*unknown\s*>+\s*$", re.IGNORECASE)
 
 
 def is_unknown_marker(value: Any) -> bool:
-    """Whether *value* is the bracketed ``<UNKNOWN>`` marker (a string, not a value)."""
-    return isinstance(value, str) and _UNKNOWN_MARKER.match(value) is not None
+    """Whether *value* is the bracketed ``<UNKNOWN>`` marker (a string, not a value), also written
+    with its brackets HTML-escaped once or more (``&lt;UNKNOWN&gt;``, ``&amp;lt;UNKNOWN&amp;gt;``:
+    fix-3koe)."""
+    return isinstance(value, str) and _UNKNOWN_MARKER.match(decode_entities(value)) is not None
 
 
 def drop_unknown_markers(value: Any, not_given: Any) -> Any:
@@ -1082,6 +1104,36 @@ def drop_unknown_markers(value: Any, not_given: Any) -> Any:
     if isinstance(value, list):
         return [item for item in value if not is_unknown_marker(item)]
     return value
+
+
+def planning_verbatim_sentences(model_class: Type[BaseModel], command_name: Optional[str],
+                                workflow_folderpath: Optional[str],
+                                sentences: Dict[str, Tuple[str, ...]]) -> Dict[str, Tuple[str, ...]]:
+    """*sentences*, with the copy-it-exactly sentence added to each ``str`` field of a planning command's ``Input``
+    that does not already carry one (fix-48np).
+
+    The typed planning call told its model that every ``str`` argument is "Copied verbatim from the request"
+    (``planning_commands._field_desc``); the extractor told it only for an ``in_request`` field, and paraphrased a
+    free-text argument (a note) that no check reads. A planning command's ``str`` fields now get
+    ``planning_commands.IN_REQUEST_STR_SENTENCE`` here. An execution command's fields are unchanged: *model_class*
+    is a planning command's ``Input`` only when *command_name* names a planning command of the workflow at
+    *workflow_folderpath* with the same fields.
+    """
+    if not command_name or not workflow_folderpath:
+        return sentences
+    try:
+        command = planning_commands.planning_command(workflow_folderpath, command_name)
+    except Exception:  # noqa: BLE001 - no planning command, no sentence: the extraction is as before
+        return sentences
+    if command is None or {p.name for p in command.params} != set(model_class.model_fields):
+        return sentences
+    out = dict(sentences)
+    for param in command.params:
+        if param.type == "str" and param.name in model_class.model_fields:
+            have = out.get(param.name, ())
+            if planning_commands.IN_REQUEST_STR_SENTENCE not in have and planning_commands.SUBJECT_SENTENCE not in have:
+                out[param.name] = (*have, planning_commands.IN_REQUEST_STR_SENTENCE)
+    return out
 
 
 class InputForParamExtraction(BaseModel):
@@ -1196,6 +1248,11 @@ Today's date is {today}.
             if isinstance(attribute_type, type) and issubclass(attribute_type, Enum):
                 possible_values = [f"'{option.value}'" for option in attribute_type]
                 info_text += f". Valid values: {', '.join(possible_values)}"
+            elif isinstance(extra := attribute_metadata.json_schema_extra, dict) and \
+                    isinstance(declared := extra.get("enum"), (list, tuple)) and declared:
+                # allowed values declared outside the type (JSON Schema ``enum``): the model is told
+                # them, and argument_checks refuses any other value (fix-1pfu.enum-in-extra, fix-qjf4)
+                info_text += f". Valid values: {', '.join(repr(str(v)) for v in declared)}"
 
             if attribute_metadata.examples:
                 sample_values = ", ".join([f"'{sample}'" for sample in attribute_metadata.examples])
@@ -1247,7 +1304,8 @@ Today's date is {today}.
         
         params_signature = self.create_signature_from_pydantic_model(
             model_class,
-            planning_commands.option_sentences(model_class),
+            planning_verbatim_sentences(model_class, subject_command_name, workflow_folderpath,
+                                        planning_commands.option_sentences(model_class)),
             planning_commands.classifier_alone_fields(model_class))
         
         class ParamExtractor(dspy.Module):

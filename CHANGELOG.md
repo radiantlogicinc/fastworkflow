@@ -927,6 +927,29 @@ error that names the new form; there is no legacy support, except where an item 
 
 ### Changed
 
+- **The sub-task review's draft shows each sub-task's arguments, from the shared parameter extractor** (fix-48np,
+  stage 1: display only). `draft_round1_proposal` fills each sub-task's inputs with the values the shared extractor
+  gives on the sub-task's text (`parameter_extraction.extract_arguments`: the LLM extractor execution commands use,
+  with their checks, and for a planning command `check_arguments`, its hook and its `Input`'s rules, as
+  `typed_planning_call` checks them; a refused or missing planning value is read once more with the refusal after the
+  text). A field whose declared producer (`from_`) an earlier sub-task runs, as its command or as a step of its
+  planning command, is shown as `from sub-task N` instead of being extracted. A refusal is shown on the line as
+  before. The drafted inputs (`SubTaskInput.drafted`) are shown and not run: `resolve_inputs` skips them, so the
+  sub-tasks run as they did. **Off by default**: `FW_DRAFT_ARGUMENTS=on` turns it on. While `typed_planning_call`
+  still produces the values that run, the two disagree on about 1 argument in 20, so the review could show a value
+  other than the one that runs; stage 2 (the typed call takes the drafted values) is not landed. An extraction that
+  fails leaves the inputs empty and logs a warning. Measured (gate 1b, Haiku 5.5 on Bedrock for both arms, no Jev, 149 planning requests
+  from the tutorial and library test sets, two runs, hand-judged references): the shared extractor agreed with the
+  reference on 403 of 410 scored arguments, `typed_planning_call` on 389 (discordant 19 vs 5; exact McNemar
+  p=0.146 and 0.039 per run). The typed call accepted deictic values ("this book", "the books") that the
+  extractor leaves missing; the extractor missed a bare surname twice and paraphrased a free-text note three times
+  (the typed call tells the model every `str` is copied verbatim; the extractor said so only for `in_request`).
+  The extractor now tells the model that each `str` field of a planning command's `Input` is copied exactly as the
+  request writes it (`signatures.planning_verbatim_sentences`, the `IN_REQUEST_STR_SENTENCE`), as the typed call
+  did; an execution command's fields are unchanged. Re-measured the same way: 405 of 410 against 392 (discordant
+  16 vs 3; per run p=0.109 and 0.039); the paraphrased notes are gone, and the extractor still misses "Austen" in
+  "list every Austen book we own" (answers it not given about one time in three).
+
 - **Production listing is the shortlist above 7000 characters** (fix-3rsq.plan-review.2.10). The agent's listing
   uses the threshold arm: the full list up to 7000 characters, and the shortlist of the matching commands with their
   producers and navigation above it. A workflow with no trained heads falls back to the full list at every size.
@@ -1168,6 +1191,10 @@ error that names the new form; there is no legacy support, except where an item 
 ### Fixed
 
 - **A new conversation no longer answers a previous conversation's paused question or approval** (fix-newconv-pending). Questions and reviews are parked with their conversation and come back when it is active again; approvals are cancelled.
+
+- **An execution command's extracted values are checked against the request, as a planning command's arguments are** (fix-qjf4, `fastworkflow/utils/argument_checks.py`). When the LLM extractor fills an execution command's parameters, each value it gives is checked against the command text it read (the user's message in assistant mode, the agent's command in agent mode; earlier user messages are not counted, since the extractor never sees them): a `str` must be written there, ignoring case and Unicode dashes, and takes the request's spelling; punctuation alone, a template token (`{name}`, `NAME_1`, "unspecified"), an invented example value ("John Doe" the request does not write) or a copied description example is refused; a `str` whose allowed values live in `json_schema_extra={"enum": [...]}` or in a `One of: a, b` description must be one of them (the declared spelling is taken, and a `json_schema_extra` enum is now listed to the model as its valid values: fix-1pfu.enum-in-extra); an `int` must be a number the request writes, when it writes any. A refused value sends the extraction back once with the refusal appended (as `typed_planning_call` does with `REFUSED_CALL_NOTE`); a value still refused is treated as not given, so a required field is asked for and an optional one takes its default. A value that is not given (including an absent `Optional[int] = None`, which the planning rule refused when the request wrote two numbers) or equal to its default is not checked, and an `int` is refused, never replaced by the one number the request writes. Exempt from the request check: types other than `str` and `int` (dates, floats, lists), a field with a `pattern`, and a field marked `json_schema_extra={"in_request": False}` for a value converted on purpose (a date from "next Monday"). Planning commands keep `check_arguments`; `FW_EXTRACTION_ARGUMENT_CHECKS=off` turns the checks off. Span contract v36: `fw.nlu.param_extraction` v10 records `argument_check_refusals`, `argument_check_retry`, `argument_check_refusals_final` and `argument_check_respelled`. Measured offline on the app's extraction replay: 0 of 1,189 values refused in passing Haiku runs (0 of 974 calls would retry); on 468 Nemotron cases, 32 of 107 wrong values caught with 0 correct values refused; retries on 101 of 738 Nemotron calls.
+
+- **An HTML-escaped `&lt;UNKNOWN&gt;` from the extractor is the not-given marker too** (fix-3koe). Claude on Bedrock sometimes writes the fix-1pfu marker with its brackets escaped; the value is now HTML-decoded (repeatedly, at most three rounds, so `&amp;lt;UNKNOWN&amp;gt;` counts) before it is matched as the marker or as a bracketed placeholder, for a string and for list items. A value with entities but no bracket shape (`AT&amp;T`) keeps its text.
 
 - **Two workflows in one process no longer share command classes or modules** (fix-3rsq.phase10-routing-class-cache). The command-class cache is keyed by workflow folder and command, and each folder's command modules load under a namespace from its resolved path, so two same-named folders no longer share modules or relative imports. Persisted parameter-example cache keys are unchanged.
 

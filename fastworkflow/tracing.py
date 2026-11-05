@@ -349,7 +349,14 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # the turn was still awaiting it), "reviewed" (accepted), "declined", "expired", "not_reviewed" (no one could answer:
 # the draft ran as proposed), or "not_applicable" (the turn never reached the gate). A span recorded before this
 # carries no such key.
-SPAN_CONTRACT_VERSION = 35
+#
+# v36: fw.nlu.param_extraction v10 (fix-qjf4) -- the argument checks of an LLM extraction
+# (``fastworkflow.utils.argument_checks``): `argument_check_refusals` (the values the first extraction
+# gave that were refused), `argument_check_retry` (the extractor was asked once more with the refusal),
+# `argument_check_refusals_final` (the values still refused after it, treated as not given) and
+# `argument_check_respelled` ({field: value}: the request's or the declared spelling taken). A span
+# recorded before this carries none of them.
+SPAN_CONTRACT_VERSION = 36
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -841,7 +848,13 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         # v9 (fix-jd9o.3): `fields_reset_not_given` ({field: probability}) records the fields an LLM
         # extraction filled that Jev judged the request does not give, reset to their not-given
         # value. Absent on earlier versions.
-        version=9,
+        # v10 (fix-qjf4): `argument_check_refusals`, `argument_check_retry`,
+        # `argument_check_refusals_final` and `argument_check_respelled` record the argument checks of
+        # an LLM extraction (fastworkflow.utils.argument_checks): the refused values ("name='value'
+        # why"), the one retry with the refusal appended, what was still refused after it (treated as
+        # not given), and {field: value} for a value that took the request's or the declared spelling.
+        # Absent on earlier versions.
+        version=10,
         attributes=frozenset(
             {
                 "command_name",
@@ -863,6 +876,10 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "command_name_values",
                 "word_screen_values",
                 "fields_reset_not_given",
+                "argument_check_refusals",
+                "argument_check_retry",
+                "argument_check_refusals_final",
+                "argument_check_respelled",
             }
         ),
     ),

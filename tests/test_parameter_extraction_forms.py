@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import BaseModel, Field
 
+import fastworkflow
 from fastworkflow import NLUPipelineStage
 from fastworkflow._workflows.command_metadata_extraction import parameter_extraction as pe_module
 from fastworkflow._workflows.command_metadata_extraction._commands import wildcard
@@ -142,7 +143,9 @@ def test_xml_records_no_deterministic_form(harness):
     assert "deterministic_form" not in diagnostics
 
 
-def test_assistant_mode_does_not_parse_in_code(harness):
+def test_assistant_mode_does_not_parse_in_code(harness, monkeypatch):
+    # Which path runs, not the argument checks (fix-qjf4, which would refuse the made-up answer).
+    monkeypatch.setitem(fastworkflow._env_vars, "FW_EXTRACTION_ARGUMENT_CHECKS", "off")
     output, diagnostics, _ = harness(
         _FindParams, f"{FIND}: find_book query=Ann", agent=False,
         llm_result=lambda cls: cls(query="from llm"))
@@ -356,7 +359,10 @@ def test_a_bare_command_binds_its_defaults_without_the_llm(harness, text):
     assert diagnostics["deterministic_form"] == "bare"
 
 
-def test_a_bare_command_with_a_required_field_takes_the_existing_path(harness):
+def test_a_bare_command_with_a_required_field_takes_the_existing_path(harness, monkeypatch):
+    # Which path runs, not the argument checks (fix-qjf4 refuses the made-up answer:
+    # tests/test_extraction_argument_checks.py).
+    monkeypatch.setitem(fastworkflow._env_vars, "FW_EXTRACTION_ARGUMENT_CHECKS", "off")
     output, diagnostics, _ = harness(
         _OpenParams, f"{OPEN}: open_book", command_name=OPEN,
         llm_result=lambda cls: cls.model_construct(book_uid="from llm"))
