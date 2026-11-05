@@ -9,6 +9,7 @@ from dspy.utils import DummyLM
 from fastworkflow import planning_commands as sc
 from fastworkflow import workflow_agent
 from fastworkflow.planning_commands import PlanningCommandCallError
+from tests.scripted_extractor import script_extractor
 from tests.test_planning_command_files import _load_error
 from tests.test_text_planner_and_split import (  # noqa: F401 - workflow_env is a fixture
     RecordingTraceSink, _fake_matcher, _plan, _prompt, _session, _text_answer, workflow_env)
@@ -384,6 +385,12 @@ def _typed_answer(**fields):
     return answer
 
 
+def _arguments(answer: dict) -> dict:
+    """The arguments of a scripted answer, as the shared extractor gives them (fix-48np: the typed call's
+    arguments come from the extractor; the planner proposes only the steps before and after)."""
+    return {k: v for k, v in answer.items() if k not in ("reasoning", "steps_before", "steps_after")}
+
+
 REQUEST = "Who is in Payroll, and how risky is it?"
 
 
@@ -399,18 +406,22 @@ def _plan_span(sink):
     return sink.named("fw.planner.plan")[-1]
 
 
-def test_a_matched_planning_command_with_params_is_planned_as_a_call_and_expanded(tmp_path, workflow_env):
+def test_a_matched_planning_command_with_params_is_planned_as_a_call_and_expanded(tmp_path, workflow_env,
+                                                                                    monkeypatch):
     workflow_env()
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
     ctx._begin_turn(REQUEST)
+    extractor = script_extractor(monkeypatch, _arguments(_typed_answer(include_risk=True)))
     lm = DummyLM([_typed_answer(include_risk=True, steps_after=["open_directory", "say which is riskier"])])
     command = _command(tmp_path)
 
     result = _plan_request(ctx, wf, lm, plan_template="TEMPLATE", planning_command=command)
 
-    assert len(lm.history) == 1
+    assert len(lm.history) == 1                     # the planner: the steps before and after only
+    assert len(extractor.prompts) == 1 and REQUEST in extractor.prompts[0]   # the arguments: the extractor
     assert "Skill command:" in _prompt(lm, 0) and "lookup(name: str, kind: group|feed" in _prompt(lm, 0)
+    assert "lookup(name=\"Payroll\"" in _prompt(lm, 0)   # the planner is shown the filled call
     span = _plan_span(sink)
     assert span.attributes["plan_source"] == "skill_call"
     assert span.attributes["skill"] == "lookup"
@@ -423,19 +434,23 @@ def test_a_matched_planning_command_with_params_is_planned_as_a_call_and_expande
     assert result.startswith(REQUEST + "\n\nExecute these next steps:\n1. open_directory 2. find_group")
 
 
-def test_a_failed_planning_command_call_falls_back_to_the_template_path(tmp_path, workflow_env):
+def test_a_failed_planning_command_call_falls_back_to_the_template_path(tmp_path, workflow_env, monkeypatch):
     workflow_env()
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
     # An unattended turn has no one to ask, so a refusal falls back as it always did.
     ctx._begin_turn("show my todo items", unattended=True)
-    # "Billing" is not in the request: the guard refuses the call twice, the text planner plans
-    lm = DummyLM([_typed_answer(name="Billing"), _typed_answer(name="Billing"), _text_answer()])
+    # "Billing" is not in the request: the guard refuses the extractor's value twice, the planner's typed fill
+    # (the fallback for a required argument) gives it too and is refused, and the text planner plans
+    extractor = script_extractor(monkeypatch, *[_arguments(_typed_answer(name="Billing"))] * 2)
+    lm = DummyLM([_typed_answer(name="Billing"), _text_answer()])
 
     _plan(ctx, wf, lm, plan_template="TEMPLATE TEXT", planning_command=_command(tmp_path))
 
-    assert len(lm.history) == 3
-    assert "TEMPLATE TEXT" in _prompt(lm, 2)
+    assert len(extractor.prompts) == 2
+    assert len(lm.history) == 2
+    assert "Fill the skill's parameters from the request" in _prompt(lm, 0)   # the typed fill fallback
+    assert "TEMPLATE TEXT" in _prompt(lm, 1)
     span = _plan_span(sink)
     assert span.attributes["plan_source"] == "text"
     assert span.attributes["plan"] == "1. Show all todo items"
@@ -684,6 +699,7 @@ def test_the_planner_path_checks_verified_params_with_jev(tmp_path, workflow_env
 
     monkeypatch.setattr(workflow_agent, "_jev_lm", lambda: jev)
     monkeypatch.setattr(sc, "check_verdicts", fake_verdicts)
+    script_extractor(monkeypatch, _arguments(_typed_answer(include_risk=False)))
     lm = DummyLM([_typed_answer(include_risk=False)])
     _plan_request(ctx, wf, lm, plan_template="TEMPLATE", planning_command=_command(tmp_path, CHECKED))
     assert calls == [(jev, "lookup", REQUEST)]
@@ -987,11 +1003,12 @@ def test_a_planning_command_file_with_plan_loads_and_keeps_its_flat_steps(tmp_pa
     assert command.template == _command(tmp_path / "flat", LOOKUP).template
 
 
-def test_a_phased_planning_command_call_hands_its_phases_to_the_runner(tmp_path, workflow_env):
+def test_a_phased_planning_command_call_hands_its_phases_to_the_runner(tmp_path, workflow_env, monkeypatch):
     workflow_env()
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
     ctx._begin_turn(REQUEST)
+    script_extractor(monkeypatch, _arguments(_typed_answer(include_risk=True)))
     lm = DummyLM([_typed_answer(include_risk=True)])
     command = _command(tmp_path, PHASED_LOOKUP)
 
@@ -1005,11 +1022,13 @@ def test_a_phased_planning_command_call_hands_its_phases_to_the_runner(tmp_path,
     assert call.steps_before == [] and call.steps_after == []
 
 
-def test_an_unphased_planning_command_call_runs_as_one_phase_named_after_the_planning_command(tmp_path, workflow_env):
+def test_an_unphased_planning_command_call_runs_as_one_phase_named_after_the_planning_command(tmp_path, workflow_env,
+                                                                                               monkeypatch):
     workflow_env()
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
     ctx._begin_turn(REQUEST)
+    script_extractor(monkeypatch, _arguments(_typed_answer(include_risk=True)))
     lm = DummyLM([_typed_answer(include_risk=True)])
     command = _command(tmp_path)
     _plan_request(ctx, wf, lm, plan_template="TEMPLATE", planning_command=command)
@@ -1118,75 +1137,107 @@ def _plan_pair(ctx, wf, lm, command):
         ctx.pop_active_workflow()
 
 
-def test_a_refused_planning_command_call_is_planned_again_with_the_refusal(tmp_path, workflow_env):
+def test_a_refused_planning_command_call_is_planned_again_with_the_refusal(tmp_path, workflow_env, monkeypatch):
     workflow_env()
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
     ctx._begin_turn(PAIR_REQUEST)
-    lm = DummyLM([_pair_answer(second="Payroll"), _pair_answer()])
+    extractor = script_extractor(monkeypatch, _arguments(_pair_answer(second="Payroll")), _arguments(_pair_answer()))
+    lm = DummyLM([_pair_answer()])
 
     _plan_pair(ctx, wf, lm, _command(tmp_path, PAIR, "pair"))
 
-    assert len(lm.history) == 2
-    assert "was refused" not in _prompt(lm, 0)
-    assert "A first call of this skill was refused" in _prompt(lm, 1) and "second is the other record" in _prompt(lm, 1)
+    assert len(extractor.prompts) == 2 and len(lm.history) == 1
+    assert "was refused" not in extractor.prompts[0]
+    assert "A first extraction from this command was refused" in extractor.prompts[1]
+    assert "second is the other record" in extractor.prompts[1]
     span = _plan_span(sink)
     assert span.attributes["plan_source"] == "skill_call"
     assert span.attributes["skill_args"] == {"first": "Payroll", "second": "Billing", "kind": "group"}
 
 
-def test_a_second_refusal_falls_back_to_the_template_path(tmp_path, workflow_env):
+def test_a_required_argument_the_extractor_leaves_missing_is_taken_from_the_typed_fill(tmp_path, workflow_env,
+                                                                                       monkeypatch):
+    """fix-48np: the extractor misses "Payroll" twice; the planner's typed fill gives it, the same checks pass it, and
+    the plan span's notes say so."""
+    workflow_env()
+    sink = RecordingTraceSink()
+    ctx, wf = _session(sink)
+    ctx._begin_turn(PAIR_REQUEST)
+    extractor = script_extractor(monkeypatch, *[_arguments(_pair_answer(first="NOT_FOUND"))] * 2)
+    lm = DummyLM([_pair_answer(), _pair_answer()])     # the typed fill, then the steps before and after
+
+    _plan_pair(ctx, wf, lm, _command(tmp_path, PAIR, "pair"))
+
+    assert len(extractor.prompts) == 2 and len(lm.history) == 2
+    span = _plan_span(sink)
+    assert span.attributes["plan_source"] == "skill_call"
+    assert span.attributes["skill_args"] == {"first": "Payroll", "second": "Billing", "kind": "group"}
+    assert any(note.startswith("typed fill fallback for first: missing required argument first")
+               for note in span.attributes["skill_notes"])
+
+
+def test_a_second_refusal_falls_back_to_the_template_path(tmp_path, workflow_env, monkeypatch):
     workflow_env()
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
     ctx._begin_turn(PAIR_REQUEST, unattended=True)  # attended, this refusal is put to the user
-    lm = DummyLM([_pair_answer(second="Payroll"), _pair_answer(first="Billing"), _text_answer()])
+    extractor = script_extractor(monkeypatch, _arguments(_pair_answer(second="Payroll")),
+                                 _arguments(_pair_answer(first="Billing")))
+    lm = DummyLM([_text_answer()])
 
     _plan_pair(ctx, wf, lm, _command(tmp_path, PAIR, "pair"))
 
-    assert len(lm.history) == 3
+    # a rule of the Input refuses the pair, not one missing argument: no typed fill fallback, the text planner plans
+    assert len(extractor.prompts) == 2 and len(lm.history) == 1
     span = _plan_span(sink)
     assert span.attributes["plan_source"] == "text"
     assert "break a rule of pair" in span.attributes["skill_fallback"]
 
 
-def test_a_guard_refusal_is_planned_again_with_the_refusal(tmp_path, workflow_env):
+def test_a_guard_refusal_is_planned_again_with_the_refusal(tmp_path, workflow_env, monkeypatch):
     workflow_env()
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
     ctx._begin_turn(PAIR_REQUEST)
-    # a name the request does not write: planned again as a skill call, not the text plan
-    lm = DummyLM([_pair_answer(second="Finance"), _pair_answer()])
+    # a name the request does not write: extracted again as a skill call, not the text plan
+    extractor = script_extractor(monkeypatch, _arguments(_pair_answer(second="Finance")), _arguments(_pair_answer()))
+    lm = DummyLM([_pair_answer()])
 
     _plan_pair(ctx, wf, lm, _command(tmp_path, PAIR, "pair"))
 
-    assert len(lm.history) == 2   # the typed call, then the typed call again
-    assert "A first call of this skill was refused" in _prompt(lm, 1) and "'Finance' is not written" in _prompt(lm, 1)
+    assert len(extractor.prompts) == 2   # the extraction, then the extraction again
+    assert len(lm.history) == 1          # the planner: the steps before and after
+    assert "A first extraction from this command was refused" in extractor.prompts[1]
+    assert "'Finance' is not written" in extractor.prompts[1]
     span = _plan_span(sink)
     assert span.attributes["plan_source"] == "skill_call"
     assert span.attributes["skill_fallback"] is None
     assert span.attributes["skill_args"] == {"first": "Payroll", "second": "Billing", "kind": "group"}
 
 
-def test_a_second_guard_refusal_falls_back_to_the_template_path(tmp_path, workflow_env):
+def test_a_second_guard_refusal_falls_back_to_the_template_path(tmp_path, workflow_env, monkeypatch):
     workflow_env()
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
     ctx._begin_turn(PAIR_REQUEST, unattended=True)  # attended, this refusal is put to the user
-    lm = DummyLM([_pair_answer(second="Finance"), _pair_answer(second="Finance"), _text_answer()])
+    extractor = script_extractor(monkeypatch, *[_arguments(_pair_answer(second="Finance"))] * 2)
+    lm = DummyLM([_pair_answer(second="Finance"), _text_answer()])
 
     _plan_pair(ctx, wf, lm, _command(tmp_path, PAIR, "pair"))
 
-    assert len(lm.history) == 3   # two typed calls, then the text planner
+    assert len(extractor.prompts) == 2   # two extractions
+    assert len(lm.history) == 2          # the typed fill fallback (refused as well), then the text planner
     assert "not written in the request" in _plan_span(sink).attributes["skill_fallback"]
 
 
-def test_a_one_element_list_argument_stands_for_its_element(tmp_path, workflow_env):
+def test_a_one_element_list_argument_stands_for_its_element(tmp_path, workflow_env, monkeypatch):
     workflow_env()
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
     ctx._begin_turn(PAIR_REQUEST)
-    lm = DummyLM([_pair_answer(second='["Billing"]')])
+    script_extractor(monkeypatch, _arguments(_pair_answer(second='["Billing"]')))
+    lm = DummyLM([_pair_answer()])
 
     _plan_pair(ctx, wf, lm, _command(tmp_path, PAIR, "pair"))
 

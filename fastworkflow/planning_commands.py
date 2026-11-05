@@ -3770,48 +3770,148 @@ def no_argument_call(command: PlanningCommandCommand) -> PlanningCommandCallPlan
                          phases=call_phases(command, {}))
 
 
+def extracted_arguments(command: PlanningCommandCommand, query: str, workflow=None) -> dict:
+    """The planning command's arguments as the shared parameter extractor gives them for *query*, unchecked
+    (fix-48np): ``InputForParamExtraction.extract_parameters`` on the planning command's ``Input``, on
+    LLM_PARAM_EXTRACTION, the extractor an execution command's parameters get. ``typed_planning_call``
+    checks them."""
+    from fastworkflow.utils.signatures import InputForParamExtraction
+
+    if command.input_model is None:
+        raise PlanningCommandCallError(f"{command.name} has no Input to extract its arguments into")
+    folder = getattr(workflow, "folderpath", None)
+    params = InputForParamExtraction(command=query).extract_parameters(command.input_model, command.name, folder)
+    return {p.name: _given_or_none(getattr(params, p.name, None)) for p in command.params}
+
+
+def _given_or_none(value):
+    """*value*, or None for the extractor's "not given" text (``NOT_FOUND``, ``<UNKNOWN>``): no value, so the
+    guards take the default or refuse a required argument."""
+    from fastworkflow.utils.signatures import NOT_FOUND, is_unknown_marker
+
+    if isinstance(value, str) and (value.strip() == NOT_FOUND or is_unknown_marker(value)):
+        return None
+    return value
+
+
+def _call_text(command: PlanningCommandCommand, args: dict, steps: list[str]) -> str:
+    """The filled call as the step proposal reads it: the call with its arguments, and its expansion."""
+    shown = ", ".join(f"{name}={json.dumps(value, default=str)}" for name, value in args.items())
+    return f"{command.name}({shown})\nIt runs these steps:\n" + "\n".join(f"- {step}" for step in steps)
+
+
+def step_signature(command: PlanningCommandCommand):
+    """The step proposal's dspy signature (fix-48np): the request and the filled planning command call (its
+    arguments fixed, and the steps code expands it into) in; steps_before / steps_after out."""
+    import dspy
+
+    fields: dict = {
+        "user_query": (str, dspy.InputField()),
+        "skill_call": (str, dspy.InputField(
+            desc="the skill command call planned for the request, its arguments already filled, and the "
+                 "command steps code expands it into")),
+        "steps_before": (list[str], dspy.OutputField(
+            desc="plain command steps to run before the skill, only for parts of the request it does not cover; "
+                 "only values the request writes, never a <placeholder> or an id; usually []")),
+        "steps_after": (list[str], dspy.OutputField(
+            desc="plain command steps to run after the skill, only for parts of the request it does not cover; "
+                 "only values the request writes, never a <placeholder> or an id; usually []")),
+    }
+    instructions = (
+        "The user_query is planned as one skill command call, already filled; code expands it into its "
+        "command steps (skill_call). steps_before / steps_after are only for parts of the request the "
+        "expansion does not cover, each a short sentence naming one available command; never repeat a "
+        "command the expansion already runs; usually both are empty.\n\n"
+        f"Skill command:\n{command.signature_text()}")
+    return dspy.make_signature(fields, instructions)
+
+
+def _typed_fallback(command: PlanningCommandCommand, request: str, available_commands: str, raw: dict,
+                    refusal: PlanningCommandInputError, checked) -> tuple[dict, list[str]]:
+    """The arguments when the shared extractor, after its retry, still leaves a required argument missing or
+    refused (fix-48np): the planner's typed fill (``typed_signature``, the call that filled them before) gives
+    those arguments only; every value the extractor gave that the checks did not refuse is kept, and the result
+    goes through the same checks (``checked``: ``check_arguments``, the hook, ``check_input``), so a value they
+    refuse is still refused. Raises *refusal* when no required argument is missing or refused, or the typed
+    fill gives none of them."""
+    import dspy
+    from fastworkflow.utils.logging import logger
+
+    text = str(refusal)
+    gaps = [p.name for p in command.params if p.required and not p.alone
+            and (_empty(raw.get(p.name)) or text.startswith(f"{p.name}=")
+                 or text == f"missing required argument {p.name}")]
+    if not gaps:
+        raise refusal
+    from dspy.utils.exceptions import AdapterParseError
+
+    try:
+        prediction = dspy.ChainOfThought(typed_signature(command))(
+            user_query=request, available_commands=available_commands)
+    except AdapterParseError as exc:
+        # an answer the typed fill's own types refuse (a value outside an enum): the refusal stands, and may be
+        # asked. Any other failure (an unreachable model) is not a refusal and is raised as it is.
+        logger.info(f"planning command call {command.name}: the typed fill fallback gave no usable answer")
+        raise refusal from exc
+    filled ={name: _given_or_none(getattr(prediction, name, None)) for name in gaps}
+    filled = {name: value for name, value in filled.items() if not _empty(value)}
+    if not filled:
+        raise refusal
+    args, notes = checked({**raw, **filled})
+    logger.info(f"planning command call {command.name}: {', '.join(sorted(filled))} from the typed fill "
+                f"(the extractor left it: {text})")
+    notes.insert(0, f"typed fill fallback for {', '.join(sorted(filled))}: {text}")
+    return args, notes
+
+
 def typed_planning_call(command: PlanningCommandCommand, request: str, available_commands: str,
                     check_lm=None, workflow=None) -> PlanningCommandCallPlan:
-    """Plan ``request`` as a call of ``command``: the typed call, the guards, the expansion.
+    """Plan ``request`` as a call of ``command``: its arguments, the guards, the expansion, the extra steps.
 
     A planning command with no parameters is not planned with a model call (``no_argument_call``).
 
-    Runs under the caller's dspy context (the planner LM and adapter); ``available_commands``
-    reaches the adapter as extra input, as for the text planner. With ``check_lm`` (a
-    classifier LM) the planning command's ``verify`` parameters are decided again from the request,
-    alongside the typed call (``check_verdicts``). A planning command file's
-    ``validate_extracted_parameters`` then sees the checked arguments (``_validate_arguments``;
-    ``workflow`` is passed to it), and the ``Input``'s rules (``check_input``). When the planning command's
-    rules or the argument guards refuse the arguments (PlanningCommandInputError: a made-up name, a
-    missing or invalid value), the planner fills the call once more, with the
-    refusal after the request (``REFUSED_CALL_NOTE``); the guards still read the request alone.
-    Raises on any other failure, or a second refusal (the caller falls back to the template
-    path).
+    The arguments come from the shared parameter extractor (``extracted_arguments``, fix-48np: the extractor
+    execution commands use, on LLM_PARAM_EXTRACTION), and are checked as before: with ``check_lm`` (a
+    classifier LM) the planning command's ``verify`` parameters are decided again from the request, alongside
+    the extraction (``check_verdicts``); ``check_arguments`` guards them; a planning command file's
+    ``validate_extracted_parameters`` then sees the checked arguments (``_validate_arguments``; ``workflow``
+    is passed to it), and the ``Input``'s rules (``check_input``). When those rules or the guards refuse
+    the arguments (PlanningCommandInputError: a made-up name, a missing or invalid value), the extractor
+    reads the request once more, with the refusal after it (``argument_checks.REFUSED_EXTRACTION_NOTE``);
+    the guards still read the request alone. When a required argument is still missing or refused after that,
+    the planner's typed fill gives that argument only (``_typed_fallback``), and the same checks run on it.
+    Raises on any other failure, or when the checks still refuse (the caller falls back to the template path).
+
+    The planner (the caller's dspy context: the planner LM and adapter; ``available_commands`` reaches the
+    adapter as extra input, as for the text planner) then only proposes the steps before and after the
+    call, given the filled call and its expansion (``step_signature``).
     """
     if not command.params:
         return no_argument_call(command)
     import dspy
+    from fastworkflow.utils.argument_checks import REFUSED_EXTRACTION_NOTE
 
-    def typed_call(query: str):
-        return dspy.ChainOfThought(typed_signature(command))(
-            user_query=query, available_commands=available_commands)
-
-    def checked(prediction) -> tuple[dict, list[str]]:
-        raw = {p.name: getattr(prediction, p.name, None) for p in command.params}
+    def checked(raw: dict) -> tuple[dict, list[str]]:
         args, notes = check_arguments(command, raw, request, verdicts)
         return _validate_arguments(command, args, request, workflow, notes), notes
 
     with ThreadPoolExecutor(1) as pool:
         checks = pool.submit(check_verdicts, check_lm, command, request)
-        prediction = typed_call(request)
+        raw = extracted_arguments(command, request, workflow)
         verdicts = checks.result()
     try:
-        args, notes = checked(prediction)
+        args, notes = checked(raw)
     except PlanningCommandInputError as refused:
-        prediction = typed_call(f"{request}\n\n{REFUSED_CALL_NOTE.format(refusal=refused)}")
-        args, notes = checked(prediction)
+        raw = extracted_arguments(command, f"{request}\n\n{REFUSED_EXTRACTION_NOTE.format(refusal=refused)}",
+                                  workflow)
+        try:
+            args, notes = checked(raw)
+        except PlanningCommandInputError as refused_again:
+            args, notes = _typed_fallback(command, request, available_commands, raw, refused_again, checked)
         notes.insert(0, f"first call refused, planned again: {refused}")
     steps = expand(command, args)
+    prediction = dspy.ChainOfThought(step_signature(command))(
+        user_query=request, skill_call=_call_text(command, args, steps), available_commands=available_commands)
     names = command_names(available_commands)
     texts = command_texts(available_commands, getattr(workflow, "folderpath", None))
     before, dropped_before = filter_extra_steps(getattr(prediction, "steps_before", None), steps, names,
