@@ -26,6 +26,14 @@ from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F40
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
 
+
+@pytest.fixture(autouse=True)
+def no_draft_extraction(monkeypatch):
+    """The draft's argument extraction is a model call (fix-48np): off here, so these tests keep asserting that the
+    review, the gate and the hand-off make no parameter-extraction model call (the guard fixture raises if one is
+    made). Drafting with extraction on is covered by tests/test_drafted_subtask_inputs.py."""
+    monkeypatch.setenv("FW_DRAFT_ARGUMENTS", "off")
+
 LIBRARY = Path(fastworkflow.__file__).resolve().parent / "examples" / "library"
 EMMA = "who wrote Emma and how many copies do we have"    # heads: a planning command in the top-k (book_by_title)
 JOKE = "tell Ann a joke about cats"                        # heads: unsure, no command fits

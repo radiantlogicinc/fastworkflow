@@ -1106,6 +1106,36 @@ def drop_unknown_markers(value: Any, not_given: Any) -> Any:
     return value
 
 
+def planning_verbatim_sentences(model_class: Type[BaseModel], command_name: Optional[str],
+                                workflow_folderpath: Optional[str],
+                                sentences: Dict[str, Tuple[str, ...]]) -> Dict[str, Tuple[str, ...]]:
+    """*sentences*, with the copy-it-exactly sentence added to each ``str`` field of a planning command's ``Input``
+    that does not already carry one (fix-48np).
+
+    The typed planning call told its model that every ``str`` argument is "Copied verbatim from the request"
+    (``planning_commands._field_desc``); the extractor told it only for an ``in_request`` field, and paraphrased a
+    free-text argument (a note) that no check reads. A planning command's ``str`` fields now get
+    ``planning_commands.IN_REQUEST_STR_SENTENCE`` here. An execution command's fields are unchanged: *model_class*
+    is a planning command's ``Input`` only when *command_name* names a planning command of the workflow at
+    *workflow_folderpath* with the same fields.
+    """
+    if not command_name or not workflow_folderpath:
+        return sentences
+    try:
+        command = planning_commands.planning_command(workflow_folderpath, command_name)
+    except Exception:  # noqa: BLE001 - no planning command, no sentence: the extraction is as before
+        return sentences
+    if command is None or {p.name for p in command.params} != set(model_class.model_fields):
+        return sentences
+    out = dict(sentences)
+    for param in command.params:
+        if param.type == "str" and param.name in model_class.model_fields:
+            have = out.get(param.name, ())
+            if planning_commands.IN_REQUEST_STR_SENTENCE not in have and planning_commands.SUBJECT_SENTENCE not in have:
+                out[param.name] = (*have, planning_commands.IN_REQUEST_STR_SENTENCE)
+    return out
+
+
 class InputForParamExtraction(BaseModel):
     """Extract parameters from a user query using step-by-step reasoning.
 Today's date is {today}.
@@ -1274,7 +1304,8 @@ Today's date is {today}.
         
         params_signature = self.create_signature_from_pydantic_model(
             model_class,
-            planning_commands.option_sentences(model_class),
+            planning_verbatim_sentences(model_class, subject_command_name, workflow_folderpath,
+                                        planning_commands.option_sentences(model_class)),
             planning_commands.classifier_alone_fields(model_class))
         
         class ParamExtractor(dspy.Module):

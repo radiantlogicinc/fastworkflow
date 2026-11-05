@@ -888,6 +888,29 @@ error that names the new form; there is no legacy support, except where an item 
 
 ### Changed
 
+- **The sub-task review's draft shows each sub-task's arguments, from the shared parameter extractor** (fix-48np,
+  stage 1: display only). `draft_round1_proposal` fills each sub-task's inputs with the values the shared extractor
+  gives on the sub-task's text (`parameter_extraction.extract_arguments`: the LLM extractor execution commands use,
+  with their checks, and for a planning command `check_arguments`, its hook and its `Input`'s rules, as
+  `typed_planning_call` checks them; a refused or missing planning value is read once more with the refusal after the
+  text). A field whose declared producer (`from_`) an earlier sub-task runs, as its command or as a step of its
+  planning command, is shown as `from sub-task N` instead of being extracted. A refusal is shown on the line as
+  before. The drafted inputs (`SubTaskInput.drafted`) are shown and not run: `resolve_inputs` skips them, so the
+  sub-tasks run as they did. **Off by default**: `FW_DRAFT_ARGUMENTS=on` turns it on. While `typed_planning_call`
+  still produces the values that run, the two disagree on about 1 argument in 20, so the review could show a value
+  other than the one that runs; stage 2 (the typed call takes the drafted values) is not landed. An extraction that
+  fails leaves the inputs empty and logs a warning. Measured (gate 1b, Haiku 5.5 on Bedrock for both arms, no Jev, 149 planning requests
+  from the tutorial and library test sets, two runs, hand-judged references): the shared extractor agreed with the
+  reference on 403 of 410 scored arguments, `typed_planning_call` on 389 (discordant 19 vs 5; exact McNemar
+  p=0.146 and 0.039 per run). The typed call accepted deictic values ("this book", "the books") that the
+  extractor leaves missing; the extractor missed a bare surname twice and paraphrased a free-text note three times
+  (the typed call tells the model every `str` is copied verbatim; the extractor said so only for `in_request`).
+  The extractor now tells the model that each `str` field of a planning command's `Input` is copied exactly as the
+  request writes it (`signatures.planning_verbatim_sentences`, the `IN_REQUEST_STR_SENTENCE`), as the typed call
+  did; an execution command's fields are unchanged. Re-measured the same way: 405 of 410 against 392 (discordant
+  16 vs 3; per run p=0.109 and 0.039); the paraphrased notes are gone, and the extractor still misses "Austen" in
+  "list every Austen book we own" (answers it not given about one time in three).
+
 - **Production listing is the shortlist above 7000 characters** (fix-3rsq.plan-review.2.10). The agent's listing
   uses the threshold arm: the full list up to 7000 characters, and the shortlist of the matching commands with their
   producers and navigation above it. A workflow with no trained heads falls back to the full list at every size.

@@ -1241,3 +1241,67 @@ def classify_missing_value_reply(question: str, reply: str) -> str:
         logger.warning("could not classify the missing-value reply; treating it as an answer",
                        exc_info=True)
         return "answer"
+
+
+class ExtractedArguments(BaseModel):
+    """What ``extract_arguments`` found: the checked values (``params``, None when the command takes none),
+    whether they are valid, and why not (``refusal``: a refused value, or the missing required fields)."""
+
+    params: Optional[BaseModel] = None
+    valid: bool = True
+    refusal: Optional[str] = None
+    missing: List[str] = []
+    retried: bool = False
+
+
+def extract_arguments(app_workflow: fastworkflow.Workflow, command_name: str, text: str,
+                      diagnostics: Optional[dict] = None) -> ExtractedArguments:
+    """The shared extractor's arguments for *command_name* on *text*, outside the CME workflow (fix-48np).
+
+    The extraction a command's parameters get on the LLM path (``ParameterExtraction._llm_extract``: the
+    DSPy extractor on LLM_PARAM_EXTRACTION, and for an execution command ``argument_checks`` with its one
+    retry) and the validation they then get (``InputForParamExtraction.validate_parameters``: the screen,
+    and for a planning command ``check_arguments``, its hook and its ``Input``'s rules, the checks
+    ``typed_planning_call`` runs). Nothing is read from or written to a CME workflow: no stored parameters,
+    no NLU stage, no xml/key=value parsing (that is for the agent's own command text). The app workflow's
+    context is read as validation reads it (``raw_user_message``, ``run_as_agent``) and is not written.
+
+    A planning command whose values are refused, or miss a required one, is extracted once more with the
+    refusal after the text (``argument_checks.REFUSED_EXTRACTION_NOTE``, as ``typed_planning_call`` fills
+    its call once more); the second answer is checked against *text* alone.
+    """
+    diagnostics = {} if diagnostics is None else diagnostics
+    folder = app_workflow.folderpath
+    params_class = fastworkflow.RoutingRegistry.get_definition(folder).get_command_class(
+        command_name, ModuleType.COMMAND_PARAMETERS_CLASS)
+    if not params_class:
+        return ExtractedArguments()
+    extraction = ParameterExtraction(None, app_workflow, command_name, text)
+    extractor = InputForParamExtraction.create(app_workflow, command_name, text)
+
+    def validated(params: BaseModel) -> ExtractedArguments:
+        valid, message, _, fields = extractor.validate_parameters(
+            app_workflow, command_name, params, diagnostics)
+        missing = list(diagnostics.get("missing_fields") or []) if not valid else []
+        refusal = None
+        if not valid:
+            refusal = ("missing required argument " + ", ".join(missing)) if missing and not \
+                diagnostics.get("invalid_fields") else (message or "").strip()
+        return ExtractedArguments(params=params, valid=valid, refusal=refusal, missing=missing)
+
+    result = validated(extraction._llm_extract(extractor, params_class, folder, diagnostics))
+    if result.valid or _planning_command_of(app_workflow, command_name) is None:
+        return result
+    extractor.command = f"{text}\n\n{argument_checks.REFUSED_EXTRACTION_NOTE.format(refusal=result.refusal)}"
+    try:
+        params = extractor.extract_parameters(params_class, command_name, folder)
+    except Exception as exc:  # noqa: BLE001 - the retry is an extra: the first answer stands
+        logger.warning(f"argument extraction retry failed: {exc!r}")
+        return result
+    finally:
+        extractor.command = text      # validation reads the request from here
+    diagnostics.pop("missing_fields", None)
+    diagnostics.pop("invalid_fields", None)
+    second = validated(params)
+    second.retried = True
+    return second

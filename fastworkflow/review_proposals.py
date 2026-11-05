@@ -91,6 +91,9 @@ class SubTaskInput(BaseModel):
     name: str = ""
     value: Optional[str] = None
     from_subtask: Optional[int] = Field(default=None, ge=1)
+    #: The framework drafted it (``draft_inputs``: the shared extractor on the sub-task's text, or a declared
+    #: producer that an earlier sub-task runs), not the user. Shown like any input; see ``resolve_inputs``.
+    drafted: bool = False
 
     @model_validator(mode="after")
     def _exactly_one_source(self):
@@ -333,7 +336,9 @@ def draft_round1_proposal(workflow, subtasks: list[str]) -> SubTaskProposal:
     ``JEV_API_KEY`` is set, Jev's planning-command distribution), and Jev's confident or unsure planning commands. Jev is
     the existing matcher (``workflow_agent.match_planning_command``): it runs no model without the key and then leaves the
     distribution empty. ``build_round1_proposal`` picks each sub-task's means (a planning command in the top-k first).
-    A planning pick gets ``check_planned_arguments``; a refusal is shown on its line.
+    Each sub-task with a command for its means gets its inputs drafted from its text (``draft_inputs``, fix-48np:
+    the shared parameter extractor; shown, not run). A planning pick's refusal is shown on its line: the drafted
+    values' refusal, or, with no draft, ``check_planned_arguments`` of no arguments.
     """
     from fastworkflow import planning_commands, run_listing
     from fastworkflow.workflow_agent import core_command_names
@@ -362,13 +367,128 @@ def draft_round1_proposal(workflow, subtasks: list[str]) -> SubTaskProposal:
     items: list[SubTask] = []
     for item, sub_task in zip(proposal.items, subtasks):
         check = ""
+        inputs: list[SubTaskInput] = []
+        drafted = draft_inputs(workflow, item, sub_task, items) if item.means.kind != MEANS_FROM_SCRATCH else None
+        if drafted is not None:
+            inputs = list(drafted.inputs)
         if item.means.kind == MEANS_PLANNING:
             command = planning_commands.planning_command(folder, item.means.name)
-            if command is not None:
+            if drafted is not None:
+                check = drafted.refusal or ""
+            elif command is not None:
                 refusal = run_listing.check_planned_arguments(command, {}, sub_task).refusal
                 check = refusal or ""
-        items.append(item.model_copy(update={"check": check}))
+        items.append(item.model_copy(update={"check": check, "inputs": inputs}))
     return SubTaskProposal(items=items)
+
+
+#: ``FW_DRAFT_ARGUMENTS=on`` (or 1, true) fills a draft's inputs from the shared extractor. Off by default: the drafted
+#: values are shown but the typed planning call still produces the values that run, and the two disagree on about 1
+#: argument in 20 (fix-48np gate 1b), so the review could show a value other than the one that runs. Off leaves the
+#: inputs empty, as before fix-48np.
+DRAFT_ARGUMENTS_ENV_VAR = "FW_DRAFT_ARGUMENTS"
+
+
+@dataclass(frozen=True)
+class DraftedInputs:
+    """A sub-task's drafted inputs (each ``drafted``), and why its values do not stand (None when they do)."""
+
+    inputs: tuple[SubTaskInput, ...] = ()
+    refusal: Optional[str] = None
+
+
+def _input_text(value: Any) -> str:
+    """An argument as an input's text, in the form ``check_arguments`` reads back (a bool true/false, a list as JSON)."""
+    from enum import Enum
+
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, Enum):
+        return str(value.value)
+    if isinstance(value, (list, tuple)):
+        return json.dumps([str(v) for v in value])
+    return str(value)
+
+
+def _producers(workflow, means: Means, earlier: list[SubTask]) -> dict[str, int]:
+    """``{field: N}``: the fields of *means*'s ``Input`` whose declared producer (``from_``, resolved as
+    ``available_from``) an earlier sub-task N runs, as its command or as a step of its planning command; the latest N."""
+    from fastworkflow import ModuleType, RoutingRegistry, planning_commands
+
+    folder = workflow.folderpath
+    params_class = RoutingRegistry.get_definition(folder).get_command_class(
+        means.name, ModuleType.COMMAND_PARAMETERS_CLASS)
+    if params_class is None:
+        return {}
+    callees = planning_commands.resolve_field_sources(folder).callees
+
+    def runs(item: SubTask) -> set[str]:
+        if item.means.kind == MEANS_FROM_SCRATCH:
+            return set()
+        names = {item.means.name, *callees.get(item.means.name, ())}
+        return names | {name.rpartition("/")[2] for name in names}
+
+    out: dict[str, int] = {}
+    for name, info in params_class.model_fields.items():
+        extra = info.json_schema_extra if isinstance(info.json_schema_extra, dict) else {}
+        producers = {str(ref).rpartition(".")[0] for ref in extra.get("available_from") or ()}
+        producers |= {p.rpartition("/")[2] for p in producers}
+        for number, item in enumerate(earlier, 1):
+            if producers & runs(item):
+                out[name] = number
+    return out
+
+
+def _given(info: Any, value: Any) -> bool:
+    from pydantic_core import PydanticUndefined
+
+    from fastworkflow.utils.signatures import NOT_FOUND
+
+    if value is None or (isinstance(value, str) and value.strip() in ("", NOT_FOUND, "None")):
+        return False
+    if isinstance(value, (list, tuple)) and not value:
+        return False
+    default = info.default
+    return default is PydanticUndefined or default is None or value != default
+
+
+def draft_inputs(workflow, item: SubTask, sub_task: str, earlier: list[SubTask]) -> Optional[DraftedInputs]:
+    """The inputs of *item*'s means drafted from *sub_task* (fix-48np, stage 1), or None when no draft was made.
+
+    A field whose declared producer (``from_``) an earlier sub-task runs is ``from sub-task N``, not extracted. The
+    other values are the shared extractor's (``parameter_extraction.extract_arguments``: the extractor execution
+    commands use, with its checks, and for a planning command ``check_arguments``, the checks the typed planning call
+    runs), each one the extractor gave and the checks kept that is not the field's default. Values that are refused,
+    or a required value that is missing, give the refusal and no values. None when the switch is off
+    (``FW_DRAFT_ARGUMENTS``, off by default) or the extraction fails: the draft is advisory and never fails the turn.
+    """
+    import fastworkflow
+    from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import extract_arguments
+
+    if str(fastworkflow.get_env_var(DRAFT_ARGUMENTS_ENV_VAR, default="off")).strip().lower() not in ("on", "1", "true"):
+        return None
+    try:
+        from_earlier = _producers(workflow, item.means, earlier)
+        result = extract_arguments(workflow, item.means.name, sub_task)
+    except Exception as exc:  # noqa: BLE001 - the draft is advisory: no inputs, as before
+        # A warning, not a silent pass: a failure here (a provider error, a test's no-model guard) stays visible.
+        logger.warning("could not draft the inputs of %s (%s: %s); the draft shows none",
+                       item.means.name, type(exc).__name__, exc)
+        return None
+    inputs = [SubTaskInput(name=name, from_subtask=number, drafted=True) for name, number in from_earlier.items()]
+    if result.params is None:
+        return DraftedInputs(inputs=tuple(inputs))
+    covered = result.missing and set(result.missing) <= set(from_earlier) and result.refusal is not None \
+        and result.refusal.startswith("missing required argument")
+    if not result.valid and not covered:
+        return DraftedInputs(inputs=tuple(inputs), refusal=result.refusal)
+    fields = type(result.params).model_fields
+    for name, info in fields.items():
+        value = getattr(result.params, name, None)
+        if name in from_earlier or not _given(info, value):
+            continue
+        inputs.append(SubTaskInput(name=name, value=_input_text(value), drafted=True))
+    return DraftedInputs(inputs=tuple(inputs))
 
 
 def accepted_subtask_proposal(workflow) -> Optional[SubTaskProposal]:
@@ -523,6 +643,9 @@ def resolve_inputs(item: SubTask, answers: Mapping[int, str]) -> ResolvedInputs:
     unnamed: list[str] = []
     missing: list[int] = []
     for each in item.inputs:
+        if each.drafted:
+            # fix-48np stage 1: a drafted input is shown in the review, not yet run
+            continue
         if each.from_subtask is not None:
             if each.from_subtask not in answers:
                 missing.append(each.from_subtask)
