@@ -1270,7 +1270,8 @@ def extract_arguments(app_workflow: fastworkflow.Workflow, command_name: str, te
     refusal after the text (``argument_checks.REFUSED_EXTRACTION_NOTE``, as ``typed_planning_call`` fills
     its call once more); the second answer is checked against *text* alone.
     """
-    diagnostics = {} if diagnostics is None else diagnostics
+    if diagnostics is None:    # a plain assignment, so the span-contract scan can follow the bag
+        diagnostics = {}
     folder = app_workflow.folderpath
     params_class = fastworkflow.RoutingRegistry.get_definition(folder).get_command_class(
         command_name, ModuleType.COMMAND_PARAMETERS_CLASS)
