@@ -171,6 +171,41 @@ SUBTASK_REVIEW_DECLINED = ("You declined the sub-task review, so nothing was run
 SUBTASK_REVIEW_EXPIRED = ("The sub-task review expired before you answered, so nothing was run, and your message "
                           "was not taken as a reply to it. Send the request again to start a new review.")
 
+#: Owner of pending state saved before pending state was tagged with its conversation (fix-newconv-pending). Such
+#: state is parked, never applied to a conversation automatically.
+UNOWNED_PENDING = "unowned"
+#: "No owner set": the live pending state belongs to the conversation the context is bound to.
+_OWNER_UNSET = object()
+#: The serialized keys of a parked pending snapshot: the suspended turn and what it waits on, without the history,
+#: the approvals (cancelled, never parked) or the experiment labels (per context, not per conversation).
+_PARKED_PENDING_KEYS = (
+    "awaiting_user", "suspended_user_message", "pending_clarification_request", "skill_refusal_pending",
+    "skill_refusal_answered", "subtasks", "subtask_origins", "subtask_index", "subtask_answers",
+    "subtask_outputs", "subtask_exhausted", "subtask_review_open", "subtask_plan", "next_step",
+    "skill_phase_run", "react", "frames", "frame_react", "turn_child_step_ranges", "turn_steps_used", "nlu_stage",
+    "turn", "cme",
+)
+
+
+def _owner_key(owner) -> str:
+    """The key a parked snapshot is filed under: the conversation id, "none" or the unowned marker."""
+    return "none" if owner is None else str(owner)
+
+
+def _owner_encoded(owner):
+    """The owner as the serialized blob carries it: a conversation id, None, or the unowned marker."""
+    return owner if owner is None or owner == UNOWNED_PENDING else int(owner)
+
+
+def _owner_from_state(state: dict[str, Any]):
+    """The conversation a serialized pending state belongs to. A blob with no conversation_id key is unowned."""
+    if "conversation_id" not in state:
+        return UNOWNED_PENDING
+    value = state["conversation_id"]
+    if value is None or value == UNOWNED_PENDING:
+        return value
+    return int(value)
+
 
 class WorkflowExecutionContext:
     """
@@ -262,6 +297,10 @@ class WorkflowExecutionContext:
         self._metrics_sink: metrics.MetricsSink = metrics.NoOpMetricsSink()
         self._channel_id: Optional[str] = None
         self._conversation_id: Optional[int] = None
+        # fix-newconv-pending: the conversation the live pending state belongs to, when it is not the bound one (set
+        # by apply_serialized_state from the saved blob), and the pending state parked per conversation.
+        self._pending_owner_override = _OWNER_UNSET
+        self._parked_pending: dict[str, list[dict[str, Any]]] = {}
         self._embedder_owns_conversations: bool = False
         # The experiment container's labels, bound beside channel/conversation
         # identity and stamped onto every TurnResult this context produces
@@ -476,8 +515,12 @@ class WorkflowExecutionContext:
             self._bind_experiment_labels(experiment_id, task_id, attempt)
         if channel_id is not None:
             self._channel_id = channel_id
-        if conversation_id is not None:
+        if conversation_id is not None and conversation_id != self._conversation_id:
+            # fix-newconv-pending: the live pending state settles before the conversation changes, and the new
+            # conversation's parked pending state (if any) comes back.
+            self._settle_pending_for_conversation(conversation_id)
             self._conversation_id = conversation_id
+            self._restore_parked_pending(conversation_id)
         if embedder_owns_conversations is not None:
             self._embedder_owns_conversations = embedder_owns_conversations
 
@@ -1079,6 +1122,162 @@ class WorkflowExecutionContext:
         """
         return self._serialize_cme_continuation() is not None
 
+    # ------------------------------------------------------------------
+    # Pending state and conversations (fix-newconv-pending)
+    # ------------------------------------------------------------------
+    #
+    # Live pending state belongs to the conversation that created it: a paused ask_user question, a planning
+    # refusal question, an open review, a CME continuation (parked) and a pending approval (cancelled). When the
+    # context moves to another conversation, the live state is settled before anything else runs: approvals are
+    # cancelled (they would run side effects on a bare "yes"), the rest is parked under its owner and comes back
+    # when that conversation is bound again. stop_asking's tool removal is scoped the same way.
+
+    def _live_pending_owner(self):
+        """The conversation the live pending state belongs to (see _OWNER_UNSET)."""
+        if self._pending_owner_override is not _OWNER_UNSET:
+            return self._pending_owner_override
+        return self._conversation_id
+
+    def _has_parkable_pending(self) -> bool:
+        """Live pending state that is parked on a conversation change: a question, a refusal, a review or a CME run."""
+        if self._awaiting_user or self._planning_command_refusal_pending or self.has_open_command():
+            return True
+        if getattr(self._turn_frame(), "subtask_review_open", False):
+            return True
+        return bool(approval_binding.active_reviews(self._app_workflow))
+
+    def _has_live_pending(self) -> bool:
+        """True when anything pending is live: a parkable question or review, or a pending approval."""
+        return self._has_parkable_pending() or bool(approval_binding.active_approvals(self._app_workflow))
+
+    def has_pending_state(self) -> bool:
+        """Public form of _has_live_pending, for the embedder's New conversation."""
+        return self._has_live_pending()
+
+    def has_parked_pending(self) -> bool:
+        """True when some conversation's pending state is parked (it must be saved with the rest of the state)."""
+        return bool(self._parked_pending)
+
+    def _cancel_live_approvals(self, reason: str) -> int:
+        """Cancel the pending approvals (an approval runs its side effect on a bare reply, so it never outlives its
+        conversation). A suspended approval also abandons the agent's suspended call."""
+        if self._app_workflow is None:
+            return 0
+        awaiting = approval_binding.active_record(self._app_workflow)
+        cancelled = approval_binding.cancel_conversation_approvals(self, self._app_workflow, reason=reason)
+        if (cancelled and awaiting is not None and awaiting.suspended_agent
+                and awaiting.kind == approval_binding.KIND_ACTION and self._awaiting_user):
+            self._reset_agent_suspension()
+        return cancelled
+
+    def _clear_cme_continuation(self) -> None:
+        """Drop the CME command in flight, as end_command_processing does (its command_name is kept there, not here)."""
+        context = self._cme_workflow.context
+        context.pop("command", None)
+        context.pop("command_name", None)
+        context.pop("stored_parameters", None)
+        context["NLU_Pipeline_Stage"] = fastworkflow.NLUPipelineStage.INTENT_DETECTION
+
+    def _clear_live_pending(self) -> None:
+        """Clear the live pending state (the suspended turn, its review, its CME run) without touching history."""
+        self._reset_agent_suspension()
+        turn = self._turn_frame()
+        turn.subtask_review_open = False
+        turn.framework_entry = False
+        turn.subtask_plan = None
+        self._planning_command_refusal_answered = False
+        self._suspend_began_at = None
+        self._turn_suspended_ms = 0
+        if self.has_open_command():
+            self._clear_cme_continuation()
+
+    def _pending_snapshot(self, owner) -> dict[str, Any]:
+        """The live pending state as a parked snapshot, tagged with its owner."""
+        payload = self.serialize_state(channel_id=str(self._channel_id or ""))
+        snapshot: dict[str, Any] = {key: payload.get(key) for key in _PARKED_PENDING_KEYS}
+        snapshot["conversation_id"] = owner
+        snapshot["schema_version"] = SCHEMA_VERSION
+        return snapshot
+
+    def _park_and_clear_live_pending(self, owner) -> None:
+        """Park the questions and reviews under their owner (never cancelled), then clear them from the live context.
+
+        A snapshot that cannot be encoded is dropped with an error rather than applied to another conversation.
+        """
+        if self._has_parkable_pending():
+            try:
+                snapshot = self._pending_snapshot(owner)
+            except Exception:  # noqa: BLE001 - losing one parked question must not route it to another conversation
+                logger.error("pending state of conversation %s could not be parked; it is dropped", owner,
+                             exc_info=True)
+                snapshot = None
+            if snapshot is not None:
+                snapshot["reviews"] = approval_binding.park_reviews(self._app_workflow)
+                self._parked_pending.setdefault(_owner_key(owner), []).append(snapshot)
+                logger.info("parked pending state of conversation %s", owner)
+        self._clear_live_pending()
+
+    def _settle_pending_for_conversation(self, new_conversation_id) -> None:
+        """Settle the live pending state for a context that is moving to *new_conversation_id*.
+
+        Nothing happens when the state already belongs to that conversation. Otherwise approvals are cancelled,
+        questions and reviews are parked under their owner, and stop_asking's tool removal ends with its conversation.
+        """
+        owner = self._live_pending_owner()
+        # Unowned state is parked whatever the conversation is. Any other state is adopted, not parked, by a context
+        # that has no conversation bound yet: a bare embedder's turn mints its id after this check, as it did before
+        # pending state was tagged.
+        if owner != UNOWNED_PENDING and (owner == new_conversation_id or new_conversation_id is None):
+            self._pending_owner_override = _OWNER_UNSET
+            return
+        self._pending_owner_override = _OWNER_UNSET
+        if self._app_workflow is not None:
+            self._cancel_live_approvals(reason="conversation changed")
+        if self._has_parkable_pending():
+            self._park_and_clear_live_pending(owner)
+        self._enable_all_tools()
+
+    def park_pending_for_new_conversation(self) -> None:
+        """New conversation (the button): settle the live pending state at once, not at the next message.
+
+        Approvals are cancelled and questions and reviews are parked under the current conversation. The conversation
+        id itself is changed by the embedder (reserve_conversation_id), which parks the state through bind.
+        """
+        owner = self._live_pending_owner()
+        self._pending_owner_override = _OWNER_UNSET
+        if self._app_workflow is not None:
+            self._cancel_live_approvals(reason="new conversation")
+        self._park_and_clear_live_pending(owner)
+        self._enable_all_tools()
+
+    def _restore_parked_pending(self, conversation_id) -> None:
+        """Bring back the pending state parked for *conversation_id*, the oldest one first.
+
+        Unowned state is never restored here. A snapshot that cannot be applied stays parked.
+        """
+        key = _owner_key(conversation_id)
+        items = self._parked_pending.get(key)
+        if not items:
+            return
+        snapshot = items.pop(0)
+        if not items:
+            del self._parked_pending[key]
+        if snapshot.get("schema_version") != SCHEMA_VERSION:
+            self._parked_pending.setdefault(key, []).insert(0, snapshot)
+            logger.error("parked pending state of conversation %s is from another schema; it stays parked", key)
+            return
+        approval_binding.unpark_reviews(self._app_workflow, snapshot.get("reviews") or [])
+        state = {
+            **snapshot,
+            "approval": None,
+            "conversation_history_turns": [],
+            "action_log": list(self._action_log),
+            "last_completed_turn_key": self._last_completed_turn_key,
+        }
+        self.apply_serialized_state(state)
+        self._pending_owner_override = _OWNER_UNSET
+        logger.info("restored parked pending state of conversation %s", key)
+
     def serialize_state(self, *, channel_id: str) -> dict[str, Any]:
         """
         Export durable Topology-B state for cross-process resume.
@@ -1161,6 +1360,10 @@ class WorkflowExecutionContext:
             "attempt": self._attempt,
             "claim_epoch": self._claim_epoch,
             "server_incarnation": self._server_incarnation,
+            # Additive (fix-newconv-pending): the conversation the live pending state belongs to, and the pending
+            # state parked for the other conversations. Absent from older blobs (read as unowned, see apply).
+            "conversation_id": _owner_encoded(self._live_pending_owner()),
+            "parked_pending": {key: list(items) for key, items in self._parked_pending.items()},
         }
         # No default=str round-trip. This is the first serializer, so coercing
         # here is what made every downstream strictness check vacuous: an
@@ -1190,6 +1393,12 @@ class WorkflowExecutionContext:
                 raise IncompatibleSessionState(found)
 
         self._awaiting_user = bool(state.get("awaiting_user"))
+        # Additive (fix-newconv-pending): what was parked, kept whole until its conversation is bound again.
+        if "parked_pending" in state:
+            self._parked_pending = {
+                str(key): [dict(item) for item in items or []]
+                for key, items in (state.get("parked_pending") or {}).items()
+            }
         # Absent from blobs written before approval binding: no records.
         if state.get("approval") and self._app_workflow is not None:
             approval_binding.store_for(self._app_workflow).load_state(state["approval"])
@@ -1255,6 +1464,12 @@ class WorkflowExecutionContext:
             from fastworkflow.conversation_history_io import restore_history_from_turns
 
             self._conversation_history = restore_history_from_turns(turns)
+
+        # The live pending state belongs to the conversation the blob names (unowned when it names none). The binding
+        # that follows settles it against the conversation the context is bound to (fix-newconv-pending).
+        self._pending_owner_override = (
+            _owner_from_state(state) if self._has_live_pending() else _OWNER_UNSET
+        )
 
         nlu_stage = state.get("nlu_stage")
         if nlu_stage is not None:
@@ -1602,6 +1817,10 @@ class WorkflowExecutionContext:
             raise RuntimeError(
                 "No app workflow bound; call bind_app_workflow() before executing a message"
             )
+
+        # fix-newconv-pending: a message never answers pending state that belongs to another conversation. The live
+        # state is parked (or its approvals cancelled) first, so this message begins a new turn.
+        self._settle_pending_for_conversation(self._conversation_id)
 
         if not self._awaiting_user:
             # A message during suspension is the resume answer — never a reset.

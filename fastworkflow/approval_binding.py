@@ -586,6 +586,63 @@ def cancel_all(chat_session: Any, workflow: Any, *, reason: str = "session ended
     return cancelled
 
 
+def active_approvals(workflow: Any) -> list:
+    """The active approval records (action kind, queued or not) on the session; [] without a workflow."""
+    store = store_for(workflow)
+    if store is None:
+        return []
+    return [r for r in store.records if r.state in ACTIVE_STATES and r.kind == KIND_ACTION]
+
+
+def active_reviews(workflow: Any) -> list:
+    """The active review records (sub-task or plan proposals) on the session; [] without a workflow."""
+    store = store_for(workflow)
+    if store is None:
+        return []
+    return [r for r in store.records if r.state in ACTIVE_STATES and r.kind != KIND_ACTION]
+
+
+def cancel_conversation_approvals(chat_session: Any, workflow: Any, *, reason: str) -> int:
+    """Cancel the active approvals of a conversation that is no longer the active one (fix-newconv-pending).
+
+    Recorded the way cancel_all records a cancellation: a transition to invalidated with outcome "cancelled". Reviews
+    are not touched; they are parked with their conversation. Returns how many approvals were cancelled.
+    """
+    store = store_for(workflow)
+    if store is None:
+        return 0
+    cancelled = 0
+    for record in active_approvals(workflow):
+        _transition(chat_session, store, record, INVALIDATED, reason=reason,
+                    surface=store.surface, outcome="cancelled")
+        propagate(chat_session, store, record, surface=store.surface)
+        cancelled += 1
+    if cancelled:
+        store.delivery = None
+        store.inbound_token = None
+    return cancelled
+
+
+def park_reviews(workflow: Any) -> list[dict]:
+    """Remove the active reviews from the session's store and return them, to be parked with their conversation."""
+    store = store_for(workflow)
+    if store is None:
+        return []
+    parked = active_reviews(workflow)
+    parked_ids = {id(r) for r in parked}
+    store.records = [r for r in store.records if id(r) not in parked_ids]
+    return [r.to_dict() for r in parked]
+
+
+def unpark_reviews(workflow: Any, records: list[dict]) -> None:
+    """Put parked reviews back on the session's store (the conversation they belong to is active again)."""
+    store = store_for(workflow)
+    if store is None:
+        return
+    for data in records:
+        store.records.append(PendingAction.from_dict(data))
+
+
 def take_host_delivery(workflow: Any) -> dict:
     """The live-response fields for a host: ``{"approval": {record_id, token}}``, or {} when no token is
     pending. Taken once; the caller attaches it to the response of the request that produced it."""

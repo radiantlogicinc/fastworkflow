@@ -540,7 +540,8 @@ def _persist_after_turn(
     # moment it is evicted between turns.
     # A pending approval (ADR-EXP-025) is durable suspended state: it survives eviction and restart.
     pending_approval = approval_binding.active_record(ctx.app_workflow) is not None
-    if awaiting or ctx.has_open_command() or pending_approval:
+    # Parked state (fix-newconv-pending) is saved too: it is kept for its conversation until that one is active again.
+    if awaiting or ctx.has_open_command() or pending_approval or ctx.has_parked_pending():
         try:
             state = ctx.serialize_state(channel_id=runtime.channel_id)
         except StateEncodingError as exc:

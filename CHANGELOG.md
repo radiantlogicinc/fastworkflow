@@ -1128,6 +1128,8 @@ error that names the new form; there is no legacy support, except where an item 
 
 ### Fixed
 
+- **A new conversation no longer answers a previous conversation's paused question or approval** (fix-newconv-pending). Questions and reviews are parked with their conversation and come back when it is active again; approvals are cancelled.
+
 - **Two workflows in one process no longer share command classes or modules** (fix-3rsq.phase10-routing-class-cache). The command-class cache is keyed by workflow folder and command, and each folder's command modules load under a namespace from its resolved path, so two same-named folders no longer share modules or relative imports. Persisted parameter-example cache keys are unchanged.
 
 - **Parameter extraction maps `<UNKNOWN>` to "not given", so unstated arguments are asked for** (fix-1pfu). A `<UNKNOWN>` (or bracketed unknown variant) from the model now becomes "not given" (`NOT_FOUND`, or `[]` for a list), instead of running as the value `UNKNOWN`. The JSON schema is kept for its type checks. Measured on Bedrock: retail 96.6% exact cases vs 71-76% before; airline 96-97%.

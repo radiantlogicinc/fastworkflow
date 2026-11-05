@@ -70,6 +70,7 @@ from .utils import (
     ChannelSessionManager,
     MAX_CONVERSATION_TURNS_IN_MEMORY,
     ensure_topic_and_summary,
+    persist_pending_after_turn,
     reserve_conversation_id,
     record_turn_feedback,
     assert_channel_owns_turn,
@@ -2164,6 +2165,18 @@ async def cancel_pending(
         return {"status": "ok", "cleared": cleared}
 
 
+def _settle_pending_for_new_conversation(runtime, session_manager) -> None:
+    """New conversation settles the pending state at the moment the button is pressed (fix-newconv-pending).
+
+    Approvals are cancelled; a paused question or review is parked with the conversation it belongs to, and comes back
+    when that conversation is activated. The conversation's history is cleared as before, and the saved state is
+    rewritten so a restart sees the same thing.
+    """
+    runtime.execution_context.park_pending_for_new_conversation()
+    runtime.execution_context.clear_conversation_history()
+    persist_pending_after_turn(session_manager, runtime, None)
+
+
 @app.post(
     "/new_conversation",
     operation_id="new_conversation",
@@ -2275,13 +2288,17 @@ async def new_conversation(
                     # Reserve next conversation ID for the next conversation
                     # (one minting chokepoint [R1]; binds the id onto the WEC)
                     runtime.active_conversation_id = reserve_conversation_id(runtime)
-                    runtime.execution_context.clear_conversation_history()
+                    _settle_pending_for_new_conversation(runtime, session_manager)
 
                     logger.info(f"Ready for new conversation {runtime.active_conversation_id} for session {channel_id}")
                     return {"status": "ok"}
                 else:
-                    # No turns to save, just clear history and start fresh
-                    runtime.execution_context.clear_conversation_history()
+                    # No turns to save, just clear history and start fresh. A paused question or review belongs to a
+                    # turn that has no completed record yet, so it still needs its conversation rotated away from.
+                    if runtime.execution_context.has_pending_state():
+                        if conv_id := reserve_conversation_id(runtime):
+                            runtime.active_conversation_id = conv_id
+                    _settle_pending_for_new_conversation(runtime, session_manager)
                     logger.info(f"No turns to save for session {channel_id}, cleared history")
                     return {"status": "ok", "message": "No turns to save"}
 
@@ -2621,6 +2638,8 @@ async def activate_conversation(
                         runtime.channel_id, request.conversation_id
                     )
                 )
+                # The pending state parked for this conversation (if any) is live again: save it as such.
+                persist_pending_after_turn(session_manager, runtime, None)
                 logger.info(f"Activated conversation {request.conversation_id} for session {channel_id}")
 
                 # After the activation, so the helper labels the conversation the
