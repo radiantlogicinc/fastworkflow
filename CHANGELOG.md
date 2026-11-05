@@ -888,6 +888,22 @@ error that names the new form; there is no legacy support, except where an item 
 
 ### Changed
 
+- **A planning command's arguments come from the shared parameter extractor, not the planner's typed call** (fix-48np,
+  stage 2). `typed_planning_call` now fills a planning command's arguments with `extracted_arguments` (the extractor
+  execution commands use, on `LLM_PARAM_EXTRACTION`, with the copy-verbatim sentence for `str` fields) and runs them
+  through the same `check_arguments`, `validate_extracted_parameters` hook and `Input` rules as before; a refusal is
+  extracted once more with the refusal appended. The planner call now only proposes `steps_before` / `steps_after`
+  for the filled call, and `check_verdicts` is unchanged. When a REQUIRED argument is still missing or refused after
+  that retry, its value is taken from the planner's typed fill (`_typed_fallback`) and checked the same way; the
+  fallback never overrides a value the extractor gave, never adds a value the checks refuse, and records a
+  "typed fill fallback" note in the plan span's `skill_notes`. Measured (pre-registered noise-aware gate, Haiku 5.5
+  on Bedrock, 149 planning requests, two fresh runs per arm, hand-judged references): arguments right 199 and 198 of
+  205 against 192 and 196 for the typed call; right->wrong changes 0 and 2, within the typed call's own run-to-run
+  noise (6), and in a class the typed call produces itself (a value where the request gives none); no bare surname
+  dropped (14 per run); nothing the planning checks refused is accepted (38-case strictness corpus). The fallback
+  fired on 6 of 149 requests per run. Tests that script the planner's typed answer now script the extractor too
+  (`tests/scripted_extractor.py`).
+
 - **The sub-task review's draft shows each sub-task's arguments, from the shared parameter extractor** (fix-48np,
   stage 1: display only). `draft_round1_proposal` fills each sub-task's inputs with the values the shared extractor
   gives on the sub-task's text (`parameter_extraction.extract_arguments`: the LLM extractor execution commands use,

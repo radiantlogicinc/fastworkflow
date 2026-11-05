@@ -21,6 +21,7 @@ from fastworkflow import workflow_agent
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from tests.llm_credentials import syndata_llm_available
+from tests.scripted_extractor import script_extractor
 from tests.test_text_planner_and_split import RecordingTraceSink, _session, workflow_env  # noqa: F401 - workflow_env is a fixture
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -240,7 +241,7 @@ def test_a_save_from_before_the_refusal_flags_restores_them_as_unset(workflow_en
     assert restored._planning_command_refusal_answered is False
 
 
-def test_a_failure_that_is_not_a_refusal_is_never_put_to_the_user(workflow_env):
+def test_a_failure_that_is_not_a_refusal_is_never_put_to_the_user(workflow_env, monkeypatch):
     workflow_env()
     sink = RecordingTraceSink()
     ctx, wf = _session(sink, folder=PLANNING_COMMANDS)
@@ -249,6 +250,9 @@ def test_a_failure_that_is_not_a_refusal_is_never_put_to_the_user(workflow_env):
     # not a refusal of the arguments. The text planner uses the same model, so the turn raises.
     unreachable = dspy.LM("openai/unreachable-planner", api_base="http://127.0.0.1:9/v1",
                           api_key="unused", num_retries=0)
+    # The extractor (fix-48np) finds no member in the request, twice: the typed fill fallback then asks the
+    # planner's model, which is unreachable. That connection error is not turned into a refusal either.
+    script_extractor(monkeypatch, {"member": "NOT_FOUND"}, {"member": "NOT_FOUND"})
     ctx.push_active_workflow(wf)
     try:
         with pytest.raises(LMTransportError):

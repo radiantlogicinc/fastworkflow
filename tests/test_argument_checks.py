@@ -19,6 +19,7 @@ from fastworkflow.plan_frame import TURN_MAX_STEPS_ENV
 from fastworkflow.planning_commands import PlanningCommandInputError
 from fastworkflow.turn import TurnStatus
 from fastworkflow.utils.signatures import InputForParamExtraction
+from tests.scripted_extractor import script_extractor
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_text_planner_and_split import (  # noqa: F401 - workflow_env is a fixture
     RecordingTraceSink, _prompt, _session, workflow_env)
@@ -233,7 +234,7 @@ def test_the_extractors_not_given_float_marker_is_missing_or_the_default(tmp_pat
 
 # ---------------------------------------------------------------- the planner's typed call (step 1)
 
-def test_the_typed_call_fills_a_list_and_a_float_and_the_turn_frame_expands_them(tmp_path, workflow_env):
+def test_the_typed_call_fills_a_list_and_a_float_and_the_turn_frame_expands_them(tmp_path, workflow_env, monkeypatch):
     workflow_env()
     command = _command(tmp_path, STOCK_LIST.replace("stock_list", ROUTE))
     request = "Check the copies of Dune and Emma, all of them"
@@ -241,6 +242,8 @@ def test_the_typed_call_fills_a_list_and_a_float_and_the_turn_frame_expands_them
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
     ctx._begin_turn(request)
+    # the arguments come from the shared extractor (fix-48np); the planner proposes the steps before and after
+    script_extractor(monkeypatch, {"titles": ["Dune", "Emma"], "ratio": 1.0, "checked": True, "tags": []})
     lm = DummyLM([{"reasoning": "r", "titles": ["Dune", "Emma"], "ratio": 1.0, "checked": True, "tags": [],
                    "steps_before": [], "steps_after": []}])
     result = _plan_planning_command(ctx, wf, lm, request, command)

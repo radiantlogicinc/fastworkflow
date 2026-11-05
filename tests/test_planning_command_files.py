@@ -13,6 +13,7 @@ from dspy.utils import DummyLM
 from fastworkflow import planning_commands as sc
 from fastworkflow import command_preview, workflow_agent
 from fastworkflow.planning_commands import PlanningCommandCallError
+from tests.scripted_extractor import script_extractor
 from tests.test_text_planner_and_split import (  # noqa: F401 - workflow_env is a fixture
     RecordingTraceSink, _prompt, _session, _text_answer, workflow_env)
 
@@ -522,6 +523,11 @@ def _typed(**fields):
     return answer
 
 
+def _arguments(answer: dict) -> dict:
+    """A scripted answer's arguments, as the shared extractor gives them (fix-48np)."""
+    return {k: v for k, v in answer.items() if k not in ("reasoning", "steps_before", "steps_after")}
+
+
 def _plan_planning_command(ctx, wf, lm, request, command):
     ctx.push_active_workflow(wf)
     try:
@@ -531,7 +537,8 @@ def _plan_planning_command(ctx, wf, lm, request, command):
         ctx.pop_active_workflow()
 
 
-def test_a_planning_command_file_is_planned_as_a_call_and_its_hook_refusal_falls_back(tmp_path, workflow_env):
+def test_a_planning_command_file_is_planned_as_a_call_and_its_hook_refusal_falls_back(tmp_path, workflow_env,
+                                                                                       monkeypatch):
     workflow_env()
     command = _example(tmp_path)
     request = "Who is in Payroll? Is Ann Lee one of them?"
@@ -539,6 +546,7 @@ def test_a_planning_command_file_is_planned_as_a_call_and_its_hook_refusal_falls
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
     ctx._begin_turn(request)
+    script_extractor(monkeypatch, _arguments(_typed(person="Ann Lee")))
     lm = DummyLM([_typed(person="Ann Lee")])
     result = _plan_planning_command(ctx, wf, lm, request, command)
     span = sink.named("fw.planner.plan")[-1]
@@ -553,15 +561,16 @@ def test_a_planning_command_file_is_planned_as_a_call_and_its_hook_refusal_falls
     # Unattended: an attended turn would put a refusal to the user (Topology B) instead of falling
     # back, and this test pins the fallback to the text planner.
     ctx._begin_turn(request, unattended=True)
-    # the hook's refusal is shown to the planner once; refused again, the text planner plans
-    lm = DummyLM([_typed(person="Ann Lee", include_risk=True), _typed(person="Ann Lee", include_risk=True),
-                  _text_answer()])
+    # the hook's refusal is shown to the extractor once; refused again (a rule, not a missing argument: no typed
+    # fill fallback), the text planner plans
+    extractor = script_extractor(monkeypatch, *[_arguments(_typed(person="Ann Lee", include_risk=True))] * 2)
+    lm = DummyLM([_text_answer()])
     _plan_planning_command(ctx, wf, lm, request, command)
     span = sink.named("fw.planner.plan")[-1]
     assert span.attributes["plan_source"] == "text"
     assert "the risk is assessed for the whole record" in span.attributes["skill_fallback"]
-    assert "was refused: validate_extracted_parameters: the risk is assessed" in _prompt(lm, 1)
-    assert "TEMPLATE TEXT" in _prompt(lm, 2)
+    assert "was refused: validate_extracted_parameters: the risk is assessed" in extractor.prompts[1]
+    assert "TEMPLATE TEXT" in _prompt(lm, 0)
 
 
 def test_warm_planning_commands_fills_the_caches_the_first_turn_reads(tmp_path, monkeypatch):
