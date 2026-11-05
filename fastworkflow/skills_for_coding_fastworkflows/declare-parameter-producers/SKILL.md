@@ -43,7 +43,7 @@ edge (`planning_phases.py` `from_`). The source takes three forms:
 - a list of those, when several commands can supply the handle: `from_(["A/x.id", "B/y.id"])`.
 
 `from_` is for an `Input` field. An `Output` field cannot declare it (build the value in
-`__result__`, for a planning command), and a facts model field uses `fact_from`, not `from_`.
+`__result__`, for a planning command), and a facts model field is typed with a command's `Output` or `Input`, not `from_` (and not a copy: `fact_from` is removed).
 
 `available_from` is no longer written by hand. A hand-written `json_schema_extra={"available_from":
 ...}` is an error that `command preview --check` reports ("available_from is written by from_"):

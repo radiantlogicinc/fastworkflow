@@ -115,7 +115,7 @@ How the runner (``WorkflowExecutionContext``) runs a phased planning command cal
    list the steps give only as background is cut short in its prompt (``capped_steps``).
 7. FAN-OUT phases (``Phase(..., over=...)``): the phase runs once per item, each item its
    own sub-plan (its own executor run, finish check and fill). ``over`` is a list of items
-   or ``"<earlier phase>.<list field>"``; ``fan_out_items`` drops empty values and repeats
+   or ``"<earlier phase>.<path>"`` (a field or property per name); ``fan_out_items`` drops empty values and repeats
    and keeps at most ``fan_out_cap`` (``max_items``, else ``FANOUT_MAX_ITEMS``, 10);
    a capped fan-out adds ``cap_note`` to the answer. With ``bind`` (default)
    each item is bound to the record that names it (``item_record``): its output is filled
@@ -162,6 +162,7 @@ import json
 import re
 import types
 from dataclasses import dataclass
+import typing
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, Union, get_args, get_origin
 
 from pydantic import BaseModel
@@ -169,6 +170,7 @@ from pydantic import BaseModel
 from fastworkflow.observation_offloading import finish_check
 from fastworkflow.observation_offloading.facts import facts_text
 from fastworkflow.observation_offloading.labels import context_clause
+from fastworkflow.utils.python_utils import type_text
 
 #: The executor step budget of one phase. A module constant: the tests monkeypatch it.
 PHASE_MAX_STEPS = 15
@@ -181,18 +183,21 @@ class PhaseError(ValueError):
 #: The most items one fan-out phase runs, unless its ``max_items`` says otherwise.
 FANOUT_MAX_ITEMS = 10
 
-_REFERENCE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$")
+# ``"<earlier phase>.<path>"``: the path is one or more names, each a declared field or a property
+# of the model before it (``find.uids``, ``unit.identity_uids``, ``roster.unit.identity_uids``).
+_REFERENCE_RE = re.compile(
+    r"^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)$")
 
 
 class _FromStr(str):
     """A ``from_`` source string: behaves identically to ``str``, while allowing
-    load-time resolution to distinguish ``from_(...)`` from ``fact_from(...)`` or
-    a hand-written ``json_schema_extra={"from": ...}`` on a facts model."""
+    load-time resolution to distinguish ``from_(...)`` from a hand-written
+    ``json_schema_extra={"from": ...}`` on a facts model (a load error since Phase 15)."""
 
 
 class _FromList(list):
     """A ``from_`` source list: behaves identically to ``list[str]``, while allowing
-    load-time resolution to distinguish ``from_(...)`` from ``fact_from(...)``."""
+    load-time resolution to distinguish ``from_(...)`` from a copy written by hand."""
 
 
 def is_from_source(value: Any) -> bool:
@@ -223,14 +228,125 @@ def output_members(annotation: Any) -> tuple[type[BaseModel], ...]:
 
 def placeholder_member(annotation: Any, field: Optional[str] = None) -> Any:
     """The model a phase's placeholder output is built from. A union's: the first member that
-    has *field* (a field a later phase reads), else the first member; which member a run gives
-    is decided when it runs. Any other annotation is returned as it is."""
+    *field* (a dotted ``over=`` path a later phase reads, see ``over_path_problem``) resolves on,
+    else the first member; which member a run gives is decided when it runs. Any other annotation
+    is returned as it is."""
     members = output_members(annotation)
     if not members:
         return annotation
     if field is not None:
-        return next((m for m in members if field in m.model_fields), members[0])
+        path = field.split(".")
+        return next((m for m in members if over_path_problem(m, path) is None), members[0])
     return members[0]
+
+
+_UNKNOWN = object()
+
+
+def over_path_has_name(cls: Any, name: str) -> bool:
+    """Whether an ``over=`` path can read *name* on *cls*: a declared field, or a property."""
+    return name in (getattr(cls, "model_fields", None) or {}) or isinstance(getattr(cls, name, None), property)
+
+
+def _model_of(annotation: Any) -> Any:
+    """What a path name reads on, for a value of *annotation*: the model class (a list's items are
+    read as their model), None for a scalar (``str``, ``list[str]``, ``int``), or ``_UNKNOWN`` for a
+    union of models, ``Any`` or a string annotation that cannot be read."""
+    while get_origin(annotation) is typing.Annotated:
+        annotation = get_args(annotation)[0]
+    if annotation is Any or isinstance(annotation, str):
+        return _UNKNOWN
+    if get_origin(annotation) in (Union, types.UnionType):
+        members = [arg for arg in get_args(annotation) if arg is not type(None)]
+        if len(members) != 1:
+            return _UNKNOWN
+        annotation = members[0]
+    if get_origin(annotation) in (list, tuple, set, frozenset):
+        args = [arg for arg in get_args(annotation) if arg is not Ellipsis]
+        return _model_of(args[0]) if args else None
+    if inspect.isclass(annotation) and issubclass(annotation, BaseModel):
+        return annotation
+    return None
+
+
+def over_path_problem(cls: Any, path: Sequence[str]) -> Optional[str]:
+    """Why an ``over=`` path (the names after the earlier phase, e.g. ``["unit", "identity_uids"]``)
+    does not read on the facts model *cls*, or None when it does.
+
+    Each name is a declared field or a property of the model before it. A field's annotation, and a
+    property's RETURN annotation, types the names after it (a list's items are read as the list's
+    element type), so ``over="unit.identity_uids.x"`` fails the load when ``identity_uids`` is
+    ``list[str]``. A property with no return annotation (or one that cannot be read) is accepted,
+    and the names after it are NOT type-checked: its value is only known when the phase runs.
+    """
+    model: Any = cls
+    where, label = "", ""
+    for depth, name in enumerate(path):
+        if model is _UNKNOWN:
+            # past a union of models or an untyped property: checked when the phase runs
+            return None
+        if model is None:
+            return f"has no field {name!r} on {where} ({label})"
+        if not over_path_has_name(model, name):
+            return (f"has no field {name!r}" if depth == 0
+                    else f"has no field {name!r} on {where} ({label})")
+        if name in model.model_fields:
+            annotation = model.model_fields[name].annotation
+        else:
+            annotation = _property_return_annotation(model, name)
+            if annotation is None:
+                return None
+        where = ".".join(path[:depth + 1])
+        label = type_text(annotation)
+        model = _model_of(annotation)
+    return None
+
+
+def _property_return_annotation(cls: type, name: str) -> Any:
+    """The return annotation of the property *name* of *cls*, or None when it has none (or the
+    annotation cannot be resolved: a string that names nothing importable)."""
+    fget = getattr(getattr(cls, name, None), "fget", None)
+    if fget is None:
+        return None
+    try:
+        return typing.get_type_hints(fget).get("return")
+    except Exception:  # noqa: BLE001 - an annotation that does not resolve is not type-checked
+        return None
+
+
+def over_path_reads_property(cls: Any, path: Sequence[str]) -> bool:
+    """Whether an ``over=`` path reads a property at any of its names (the value is computed)."""
+    model: Any = cls
+    for name in path:
+        if not (inspect.isclass(model) and issubclass(model, BaseModel)):
+            return False
+        if name not in model.model_fields:
+            return isinstance(getattr(model, name, None), property)
+        model = _model_of(model.model_fields[name].annotation)
+    return False
+
+
+def over_values(phase: "Phase", models: Sequence[Any], path: Sequence[str]) -> list[Any]:
+    """The values *path* reads on each of *models* (an earlier phase's output, or a list of them),
+    flattened: a list along the way is walked item by item. A ``None`` along the way is skipped.
+    Each name is read with ``getattr``, so a property runs here. Raises PhaseError for a name that is
+    neither a field nor a property of the model it reads on."""
+    values: list[Any] = []
+    for model in models:
+        current = [model]
+        for name in path:
+            found: list[Any] = []
+            for obj in current:
+                if obj is None:
+                    continue
+                if not over_path_has_name(type(obj), name):
+                    raise PhaseError(f"phase {phase.name!r}: over={phase.over!r}: "
+                                     f"{type(obj).__name__} has no field {name!r}")
+                value = getattr(obj, name)
+                found.extend(value if isinstance(value, (list, tuple)) else [value])
+            current = found
+        values.extend(current)
+    return values
 
 
 def from_(source: str | Sequence[str], **field_kwargs: Any) -> Any:
@@ -252,27 +368,14 @@ def from_(source: str | Sequence[str], **field_kwargs: Any) -> Any:
     return Field(json_schema_extra=extra, **field_kwargs)
 
 
-def fact_from(source: str | Sequence[str], **kwargs: Any) -> Any:
-    """A facts-model field copied from ``"<command>.<field>"``: ``Field(**kwargs)`` with
-    ``json_schema_extra={"from": source}`` (merged into any ``json_schema_extra`` given,
-    e.g. ``{"page_by": "cursor"}``). *source* may also be a list of such names.
-
-    ``uid: str = fact_from("open_book_by_uid.book_uid")``
-    """
-    from pydantic import Field
-
-    extra = {**(kwargs.pop("json_schema_extra", None) or {}), "from": source}
-    return Field(json_schema_extra=extra, **kwargs)
-
-
 @dataclass(frozen=True)
 class Phase:
     """One phase of a planning command's ``plan()``: a bounded sub-plan with a typed output.
 
     With ``over`` the phase is a FAN-OUT: it runs once per item, each item its own
     sub-plan. ``over`` is either the items themselves (a list, e.g. names taken from
-    the input) or ``"<earlier phase>.<list field>"``, a list field of an earlier
-    phase's output (e.g. the uids a search found). ``steps_fn`` gets the item as its
+    the input) or ``"<earlier phase>.<path>"``: a list the path names on an earlier
+    phase's output (e.g. the uids a search found; a property is read like a field). ``steps_fn`` gets the item as its
     parameter named ``item`` (default ``"item"``). ``max_items`` caps the items run
     (default ``FANOUT_MAX_ITEMS``, 10). ``bind``: each item is bound to the
     record whose ``"<Context> <label>"`` clause names it (see ``item_record``).
@@ -319,7 +422,8 @@ class Phase:
 
     @property
     def over_reference(self) -> Optional[tuple[str, str]]:
-        """``(phase, field)`` when ``over`` names an earlier phase's list field."""
+        """``(phase, path)`` when ``over`` names an earlier phase's list: the path is the dotted
+        names after the phase (``"uids"``, ``"unit.identity_uids"``), each a field or property."""
         if isinstance(self.over, str):
             match = _REFERENCE_RE.match(self.over.strip())
             if match:
@@ -732,8 +836,8 @@ def _distinct(values: Iterable[Any]) -> list[Any]:
 def fan_out_items(phase: Phase, outputs: Mapping[str, Any]) -> tuple[list[Any], int]:
     """``(items, total)``: the items a fan-out phase runs, capped, and how many there were.
 
-    The items are ``phase.over`` itself (a list) or the list field it names of an earlier
-    phase's output (a fan-out phase's outputs: that field of each, joined). Empty values
+    The items are ``phase.over`` itself (a list) or the list its path names of an earlier
+    phase's output (a field or property; a fan-out phase's outputs: that path of each, joined). Empty values
     and repeats are dropped, order kept. At most ``fan_out_cap(phase)`` are kept.
     Raises PhaseError when the named phase did not run with an output or its field is
     not there.
@@ -742,18 +846,12 @@ def fan_out_items(phase: Phase, outputs: Mapping[str, Any]) -> tuple[list[Any], 
     if reference is None:
         values: list[Any] = list(phase.over or ())
     else:
-        source, field_name = reference
+        source, path = reference
         if source not in outputs:
             raise PhaseError(f"phase {phase.name!r}: over={phase.over!r}, but phase {source!r} "
                              "did not run with an output")
         found = outputs[source]
-        values = []
-        for model in (found if isinstance(found, list) else [found]):
-            if field_name not in type(model).model_fields:
-                raise PhaseError(f"phase {phase.name!r}: over={phase.over!r}: "
-                                 f"{type(model).__name__} has no field {field_name!r}")
-            value = getattr(model, field_name)
-            values.extend(value if isinstance(value, (list, tuple)) else [value])
+        values = over_values(phase, found if isinstance(found, list) else [found], path.split("."))
     items = _distinct(values)
     return items[:fan_out_cap(phase)], len(items)
 
@@ -915,17 +1013,19 @@ def check_bindings(phases: Sequence[Phase], where: str = "plan()") -> dict[tuple
     for phase in phases:
         reference = phase.over_reference
         if reference is not None:
-            source, field_name = reference
+            source, path = reference
             if source not in with_output:
                 raise PhaseError(f"{where}: phase {phase.name!r}: over={phase.over!r} names "
                                  f"{source!r}, which is not an earlier phase with an output")
             members = with_output[source]
-            if not any(field_name in member.model_fields for member in members):
+            problems = [over_path_problem(member, path.split(".")) for member in members]
+            if not members or all(problem is not None for problem in problems):
                 # a member's module is its command's file: find_book.Output, not Output
                 names = " | ".join(f"{member.__module__.rsplit('.', 1)[-1]}.{member.__name__}"
                                    for member in members) or "no model"
+                problem = problems[0] if problems else f"has no field {path!r}"
                 raise PhaseError(f"{where}: phase {phase.name!r}: over={phase.over!r}: "
-                                 f"{names} has no field {field_name!r}")
+                                 f"{names} {problem}")
         if phase.fans_out and phase.item in with_output:
             raise PhaseError(f"{where}: phase {phase.name!r}: its item parameter {phase.item!r} "
                              "is also an earlier phase's name; give item= another name")
@@ -1510,8 +1610,7 @@ def fill_output(model: type[BaseModel], runs: Sequence[Mapping[str, Any]], *,
     bound to its record, ``item_record``, that moved on afterwards). The last run then
     entered *ended_on*, not *record*.
     """
-    from fastworkflow.observation_offloading.facts import (
-        MissingFactError, fact_sources, facts_from_runs)
+    from fastworkflow.observation_offloading.facts import MissingFactError, fact_sources
 
     if ended_on is not None and ended_on != record:
         # A run that never succeeded, on the clause the run ended on: the real last run
@@ -1552,7 +1651,7 @@ def fill_output(model: type[BaseModel], runs: Sequence[Mapping[str, Any]], *,
                 model, kept, context=record, plan_text=plan_text,
             )
             return validate_phase_output_value(model, filled)
-        return facts_from_runs(model, kept, context=record, context_name=record_context or None)
+        raise PhaseError(f"{model!r}: a phase's output is not a command's Output or a typed facts model")
     except MissingFactError as error:
         source = getattr(error, "source", None)
         group = steps.get(_plain(source.command)) if source is not None else None
@@ -2641,6 +2740,10 @@ def _list_rows(model: Any, plan_text: str) -> list[tuple[str, ...]]:
     list is a match or a scope the answer names in its own words; a list given only as
     background (in a step that names nothing) is not checked. List fields of one length are read
     as columns of one table (uids and their labels): row *i* holds item *i* of each.
+
+    The rule applies at any depth: a nested model (a command's Output held by a facts model)
+    is a scope of its own, read by the same rule, so its lists pair up only with each other,
+    never with a list of the enclosing model.
     """
     if isinstance(model, BaseModel):
         fields = {name: getattr(model, name) for name in type(model).model_fields}
@@ -2649,14 +2752,17 @@ def _list_rows(model: Any, plan_text: str) -> list[tuple[str, ...]]:
     else:
         return []
     columns: dict[int, list[list[str]]] = {}
+    rows: list[tuple[str, ...]] = []
     for value in fields.values():
+        if isinstance(value, (BaseModel, Mapping)):
+            rows.extend(_list_rows(value, plan_text))
+            continue
         if not isinstance(value, (list, tuple)) or len(value) < 2:
             continue
         if not all(isinstance(item, str) and item.strip() for item in value):
             continue
         if _names_list_in_full(value, plan_text):
             columns.setdefault(len(value), []).append(list(value))
-    rows: list[tuple[str, ...]] = []
     for length, fields in columns.items():
         rows.extend(tuple(field[i] for field in fields) for i in range(length))
     return rows
@@ -3205,7 +3311,7 @@ def run_call_result(plan_cls: type, input: Any, outputs: Mapping[str, Any], *,
 
 
 #: The author-facing API: what a planning command file writes (``Phase``, ``concatenated_steps``,
-#: ``fact_from``, ``facts_text``) and what a workflow's tests read to check its planning commands
+#: ``facts_text``) and what a workflow's tests read to check its planning commands
 #: without a model. The other names serve the framework (runner, loader, preview).
 __all__ = [
     "Phase",
@@ -3223,7 +3329,6 @@ __all__ = [
     "check_bindings",
     "code_step_pages",
     "concatenated_steps",
-    "fact_from",
     "facts_text",
     "fan_out_items",
     "fan_out_note",

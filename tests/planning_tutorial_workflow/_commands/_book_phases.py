@@ -6,22 +6,34 @@ command that subclasses BookPhases keeps these phases and adds its own (book_loa
 """
 from pydantic import BaseModel
 
-from fastworkflow.planning import fact_from, pick, run
+from fastworkflow.planning import pick, run
+
+from .find_book import Signature as FindBook
+from .show_book import Signature as ShowBook
 
 
 class BookPhases:
-    class Found(BaseModel):
-        book_uids: list[str] = fact_from("find_book.book_uids")
-        titles: list[str] = fact_from("find_book.titles")
-
-    def find(self, input) -> Found:
+    def find(self, input) -> FindBook.Output:
         return [run("find_book", query=input.title)]
 
     class Book(BaseModel):
-        uid: str = fact_from("show_book.book_uid")
-        name: str = fact_from("show_book.title")
-        author: str = fact_from("show_book.author")
-        copies: int = fact_from("show_book.copies")
+        show: ShowBook.Output
+
+        @property
+        def uid(self) -> str:
+            return self.show.book_uid
+
+        @property
+        def name(self) -> str:
+            return self.show.title
+
+        @property
+        def author(self) -> str:
+            return self.show.author
+
+        @property
+        def copies(self) -> int:
+            return self.show.copies
 
     def book(self, input, find) -> Book:
         if not find.book_uids:

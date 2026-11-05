@@ -7,7 +7,10 @@ __result__ names the books.
 import fastworkflow
 from pydantic import BaseModel, Field
 
-from fastworkflow.planning import fact_from, listed, pick, run
+from fastworkflow.planning import listed, pick, run
+
+from .find_member import Signature as FindMember
+from .list_member_loans import Signature as ListMemberLoans
 
 
 class Signature:
@@ -28,18 +31,10 @@ class Signature:
 
 
 class PlanGenerator:
-    class Found(BaseModel):
-        member_uids: list[str] = fact_from("find_member.member_uids")
-        names: list[str] = fact_from("find_member.names")
-
-    def find(self, input) -> Found:
+    def find(self, input) -> FindMember.Output:
         return [run("find_member", query=input.member)]
 
-    class Loans(BaseModel):
-        titles: list[str] = fact_from("list_member_loans.titles")
-        total: int = fact_from("list_member_loans.total")
-
-    def member(self, input, find) -> Loans:
+    def member(self, input, find) -> ListMemberLoans.Output:
         if not find.member_uids:
             return []
         return [pick("list_member_loans", named=input.member)]

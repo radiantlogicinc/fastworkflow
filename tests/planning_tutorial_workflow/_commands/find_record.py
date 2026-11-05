@@ -8,7 +8,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from fastworkflow.planning import fact_from, listed, phase, run
+from fastworkflow.planning import listed, phase, run
+
+from .find_book import Signature as FindBook
+from .find_member import Signature as FindMember
 
 
 class Signature:
@@ -24,13 +27,27 @@ class Signature:
 
 
 class BookMatch(BaseModel):
-    labels: list[str] = fact_from("find_book.titles")
-    total: int = fact_from("find_book.total")
+    find: FindBook.Output
+
+    @property
+    def labels(self) -> list[str]:
+        return self.find.titles
+
+    @property
+    def total(self) -> int:
+        return self.find.total
 
 
 class MemberMatch(BaseModel):
-    labels: list[str] = fact_from("find_member.names")
-    total: int = fact_from("find_member.total")
+    find: FindMember.Output
+
+    @property
+    def labels(self) -> list[str]:
+        return self.find.names
+
+    @property
+    def total(self) -> int:
+        return self.find.total
 
 
 class PlanGenerator:

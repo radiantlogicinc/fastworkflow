@@ -12,6 +12,7 @@ from fastworkflow.context_navigation import declared_descends_to
 from fastworkflow import Action, CommandOutput, ChatSession
 from fastworkflow.observability.execution_recorder import record_execution, recorder_for
 from fastworkflow import ModuleType
+from fastworkflow.utils.python_utils import legacy_module_names
 from fastworkflow.utils.signatures import InputForParamExtraction, parameters_with_unfilled
 from pathlib import Path
 from fastworkflow.command_routing import RoutingDefinition
@@ -107,7 +108,8 @@ def frame_command_result(result, *, command_name: str, output_model: type | None
                 response=f"{text}\n{line}" if line else text, output=result
             )
         )
-    returned = f"{type(result).__module__}.{type(result).__qualname__}"
+    # the module as the workflow's name for it (a namespace digest written back to the bare basename)
+    returned = legacy_module_names(f"{type(result).__module__}.{type(result).__qualname__}")
     if output_model is not None and type(result) is not output_model:
         raise TypeError(_declared_output_message(command_name, type(result).__qualname__))
     if output_model is None:

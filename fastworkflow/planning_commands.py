@@ -162,12 +162,11 @@ A planning command file::
   own bounded sub-plan, passing its filled facts model to later phases by parameter name
   (``fastworkflow.planning_phases``; the loader builds its ``Phase`` list,
   ``planning.planned``). At load the phases are built on the placeholder inputs: their
-  parameters must bind (``_checked_plan``), their ``"from"`` must be well formed, and each
-  method's template call must succeed (``PlanningCommandFormatError`` otherwise); every command step
+  parameters must bind (``_checked_plan``), and each method's template call must succeed (``PlanningCommandFormatError`` otherwise); every command step
   must name a workflow command and only parameters of its ``Signature.Input``
   (``check_step_commands``: the planning command is skipped at load, logged as an error, and
-  ``fastworkflow command preview --check`` fails); a ``"from"`` naming a command or field the
-  workflow lacks is a logged warning (``check_phase_sources``), not a load failure.
+  ``fastworkflow command preview --check`` fails); a facts field typed with anything but a command's
+  Output or Input, a copy (``fact_from`` or ``"from"``) included, is a load error (3.12).
 - ``validate_extracted_parameters`` (optional, the signature of a command's): called with
   the checked arguments as an ``Input`` (``_validate_arguments``); it returns None to accept, and
   ``raise fastworkflow.Refused(message, field=...)`` refuses the call (the planner gets the message and
@@ -238,7 +237,6 @@ from fastworkflow.planning_command_json_schema_internal import (
 from fastworkflow.utils.workflow_vocabulary import (
     KIND_WORD_WHY, WorkflowVocabulary, description_kind_options, is_kind_word, is_pronoun_phrase,
     load_workflow_vocabulary)
-from fastworkflow.observation_offloading.facts import FactSourceError, fact_sources
 from fastworkflow.observation_offloading.finish_check import (
     KIND_COMMAND,
     KIND_CONDITIONAL,
@@ -729,7 +727,7 @@ def _spec_from_field(name: str, info, where: str) -> dict:
             raise PlanningCommandFormatError(f"{where}: field {name!r}: a Literal of text values only")
         type_text = f"enum[{', '.join(values)}]"
     else:
-        raise PlanningCommandFormatError(f"{where}: field {name!r} has type {annotation!r}; a planning command field is "
+        raise PlanningCommandFormatError(f"{where}: field {name!r} has type {python_utils.type_text(annotation)}; a planning command field is "
                                "str, bool, int, float, list[str] or Literal[...] of text values")
     spec: dict = {"type": type_text}
     if info.description:
@@ -1583,13 +1581,10 @@ def _checked_plan(command: PlanningCommandCommand, own_steps: bool = True) -> tu
     A flat result (``None`` or ``[]``, ``planning_phases.is_flat_plan``) is fine when the
     file defines its own ``steps()`` (*own_steps*), which that call then runs.
     Each other result must be a list of ``Phase`` whose parameters can be bound
-    (``planning_phases.check_bindings``) and whose ``output`` models' ``"from"`` are
-    well formed (``facts.fact_sources``); a parameter defaulting to None must bind (name an
-    earlier phase with an output) in at least one of the results. Returns the output models seen. Whether the
-    sources name real command fields is checked against the workflow later
-    (``check_phase_sources``), as a warning. Raises PlanningCommandFormatError.
+    (``planning_phases.check_bindings``); a parameter defaulting to None must bind (name an
+    earlier phase with an output) in at least one of the results. Returns the output models seen.
+    Raises PlanningCommandFormatError.
     """
-    from fastworkflow.observation_offloading.facts import FactSourceError, fact_sources
     from fastworkflow.planning_phases import PhaseError, active_phases, check_bindings, is_flat_plan
 
     models: list[type] = []
@@ -1625,21 +1620,8 @@ def _checked_plan(command: PlanningCommandCommand, own_steps: bool = True) -> tu
             raise PlanningCommandFormatError(f"{command.path}: plan() returns no phase")
         for phase in phases:
             if phase.output is not None and phase.output not in models:
-                from fastworkflow.typed_phase_facts import (
-                    check_typed_facts_model,
-                    handles_typed_output,
-                    union_members,
-                )
-
-                # Facts-model ``from_`` is checked at field-source resolution (3.3), not here.
-                for message in check_typed_facts_model(
-                        command.path, phase.output, {}, {}):
-                    raise PlanningCommandFormatError(f"{command.path}: {message}")
-                if not handles_typed_output(phase.output):
-                    try:
-                        fact_sources(phase.output)
-                    except FactSourceError as exc:
-                        raise PlanningCommandFormatError(f"{command.path}: phase {phase.name!r}: {exc}") from None
+                # The facts models' typing (3.12) and ``from_`` (3.3) are checked at field-source
+                # resolution, against the workflow's own commands (``check_typed_facts_model``).
                 models.append(phase.output)
     for (phase, what, parameter), bound in binds.items():
         if not bound:
@@ -1647,43 +1629,6 @@ def _checked_plan(command: PlanningCommandCommand, own_steps: bool = True) -> tu
                 f"{command.path}: phase {phase!r}: {what} takes {parameter!r}, which names no "
                 "earlier phase in any plan; check its spelling")
     return tuple(models)
-
-
-def check_phase_sources(command: PlanningCommandCommand, signatures: dict) -> list[str]:
-    """Load warnings for a phased planning command whose output models name unknown command fields.
-
-    Each output model is checked with ``facts.check_fact_sources`` against the
-    workflow's ``signatures`` (``facts.workflow_signatures``). A plain command name
-    that several contexts define is resolved against the record's context only when
-    the phase runs, so here it passes when some context resolves every field. A
-    missing command or field is a warning, not a load failure: a workflow may add a
-    command's ``Output`` after the planning command that reads it. Malformed ``from_`` on Input,
-    Output, or facts models is reported by ``resolve_field_sources`` without skipping
-    the planning command.
-    """
-    from fastworkflow.observation_offloading.facts import (
-        AmbiguousFactSourceError, FactSourceError, check_fact_sources)
-
-    contexts = sorted({name.split("/", 1)[0] for name in signatures if "/" in name})
-    warnings = []
-    for model in command.phase_outputs:
-        try:
-            check_fact_sources(model, signatures)
-            continue
-        except AmbiguousFactSourceError as error:
-            problem = str(error)
-        except FactSourceError as error:
-            warnings.append(f"{command.path}: {error}")
-            continue
-        for context in contexts:
-            try:
-                check_fact_sources(model, signatures, context_name=context)
-                break
-            except FactSourceError:
-                continue
-        else:
-            warnings.append(f"{command.path}: {problem}")
-    return warnings
 
 
 # ---------------------------------------------------------------- field sources (from_)
@@ -1769,10 +1714,7 @@ class FieldSourceResolution:
 
 
 def _annotation_text(annotation: Any) -> str:
-    if inspect.isclass(annotation) and not get_args(annotation):
-        return annotation.__name__
-    text = re.sub(r"\btyping\.", "", repr(annotation))
-    return text
+    return python_utils.type_text(annotation)
 
 
 def _strip_optional(annotation: Any) -> Any:
@@ -2223,13 +2165,14 @@ def _typed_phase_output_problems(
                 if phase.output is None:
                     continue
                 inst = input_instance(command, env)
+                # Design 3.12: the steps over the placeholder grid, as the template has them. An
+                # earlier phase's facts are not there at load, so the real call would run this phase on
+                # its defaults (a ``None`` fact returns no steps) and miss the command it reads.
                 try:
-                    lines = phase_steps(phase, {"input": inst})
+                    lines = placeholder_steps(phase)
                 except PhaseError:
-                    # An earlier phase's facts are not there at load: the phase's steps on
-                    # placeholder facts are the ones it can run (a callee's step, read as the template has it).
                     try:
-                        lines = placeholder_steps(phase)
+                        lines = phase_steps(phase, {"input": inst})
                     except PhaseError:
                         lines = []
                 step_cmds = [name for name, _ in step_commands(lines, known)]

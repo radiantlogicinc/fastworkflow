@@ -8,10 +8,12 @@ declares the planning command exactly as a command's does (docstring, ``Input``,
 
     from pydantic import BaseModel, Field
 
-    from fastworkflow.planning import fact_from, run
+    from fastworkflow.planning import run
+    from .find_book import Signature as FindBook        # the commands whose Output the facts are typed by
+    from .show_book import Signature as ShowBook
 
 
-    class Signature:                                  # the book the request names: its author and copies
+    class Signature:                                  # the book the request names
         plain_utterances = ["who wrote Persuasion", "how many copies of Emma are there"]
 
         class Input(BaseModel):
@@ -19,16 +21,15 @@ declares the planning command exactly as a command's does (docstring, ``Input``,
 
 
     class PlanGenerator:
-        class Found(BaseModel):                       # facts: like a command's Output
-            book_uids: list[str] = fact_from("find_book.book_uids")
-
-        def find(self, input) -> Found:               # a phase; it fills Found
+        def find(self, input) -> FindBook.Output:     # a phase; it fills find_book's Output
             return [run("find_book", query=input.title)]
 
-        class Book(BaseModel):
-            name: str = fact_from("show_book.title")
-            author: str = fact_from("show_book.author")
-            copies: int = fact_from("show_book.copies")
+        class Book(BaseModel):                        # facts: a field typed with a command's Output
+            show: ShowBook.Output
+
+            @property                                 # other values: computed, not copied
+            def name(self) -> str:
+                return self.show.title
 
         def book(self, find) -> Book:                 # reads find's facts
             if not find.book_uids:
@@ -38,8 +39,8 @@ declares the planning command exactly as a command's does (docstring, ``Input``,
         def answer(self, input, book=None):           # None: the book phase was skipped
             if book is None:
                 return [f"say that no book matches {input.title}"]
-            return [f"say that {book.name} is by {book.author}; the library owns "
-                    f"{book.copies} copies"]
+            return [f"say that {book.name} is by {book.show.author}; the library owns "
+                    f"{book.show.copies} copies"]
 
 The rules (the one-page guide: ``docs/planning_command_file_layout.md``)
 -------------------------------------------------------------
@@ -48,8 +49,10 @@ The rules (the one-page guide: ``docs/planning_command_file_layout.md``)
    written; ``_name`` methods are helpers.
 2. A phase's parameters name what it reads: ``input`` and earlier phases by name (None, its
    default, when that phase was skipped).
-3. Its return annotation is the facts model it fills, each field copied from a command's
-   field with ``fact_from("command.field")``; no annotation: it fills nothing.
+3. Its return annotation is what it fills: a command's ``Output`` (``-> FindBook.Output``), or a
+   facts model whose fields are typed with a command's ``Output`` or ``Input``. Any other value is a
+   property or method of the facts model (copies, ``fact_from`` and ``"from"``, are not read); no
+   annotation: it fills nothing.
 4. It returns its steps as text, exactly the lines the agent reads. ``return []`` skips it:
    always decided when the phase is reached, on the real facts (the method is called once).
 
@@ -85,14 +88,14 @@ from typing import Any, Callable, Optional
 from pydantic import BaseModel
 
 from fastworkflow.observation_offloading.finish_check import quote_step_value
+from fastworkflow.utils.python_utils import type_text
 from fastworkflow.planning_phases import (Phase, PhaseError, Placeholder, _template_kwargs,
-                                       concatenated_steps, fact_from, from_, is_building_template,
+                                       concatenated_steps, from_, is_building_template,
                                        is_placeholder, tests_noted)
 
 __all__ = [
     "count",
     "do_not_run",
-    "fact_from",
     "from_",
     "full_list",
     "listed",
@@ -336,8 +339,9 @@ _OPTIONS = ("over", "max_items", "until", "noun", "optional", "output", "bind")
 def phase(**options: Any) -> Callable:
     """What a phase needs beyond the rules (``planning_phases.Phase``'s options):
 
-    - ``over``: run the phase once per item: ``"find.uids"`` (an earlier phase's list
-      field) or a function of ``input`` giving the items. The method's one parameter that
+    - ``over``: run the phase once per item: ``"find.uids"`` (a list an earlier phase's output
+      names: a field, or a property of it or of a typed field's model) or a function of ``input``
+      giving the items. The method's one parameter that
       is neither ``input`` nor a phase gets the item (``def book(self, uid)``);
     - ``max_items``, ``noun``, ``until`` (a function whose parameter named after this phase
       gets the items' facts so far; true stops the fan-out), ``bind``;
@@ -425,7 +429,7 @@ def _output(cls: type, fn: Callable, options: dict, input: Any) -> Any:
             annotation = eval(annotation, fn.__globals__, _namespace(cls))  # noqa: S307
         except Exception as error:  # noqa: BLE001
             raise PhaseError(f"phase {fn.__name__!r}: cannot read its return annotation "
-                             f"{annotation!r}: {error}") from None
+                             f"{annotation}: {error}") from None
     if annotation is None or annotation is inspect.Signature.empty:
         return None
     if union_members(annotation) is not None:
@@ -433,7 +437,7 @@ def _output(cls: type, fn: Callable, options: dict, input: Any) -> Any:
     if inspect.isclass(annotation) and issubclass(annotation, BaseModel):
         return annotation
     raise PhaseError(f"phase {fn.__name__!r}: its return annotation must be the facts model "
-                     f"it fills (a pydantic model), got {annotation!r}; a model that depends "
+                     f"it fills (a pydantic model), got {type_text(annotation)}; a model that depends "
                      "on the input goes in @phase(output=lambda input: ...)")
 
 

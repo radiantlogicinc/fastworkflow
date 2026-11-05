@@ -17,24 +17,22 @@ from pydantic import BaseModel, Field
 import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse, tracing
 from fastworkflow.observability import store as observability_store
+import fastworkflow.observation_offloading.facts
 from fastworkflow.observation_offloading import (
-    AmbiguousFactSourceError,
-    FactSourceError,
     MissingFactError,
     RuntimeHandleArchive,
     RuntimeHandleScope,
     archive_step,
-    check_fact_sources,
     command_run_record,
-    facts_from_archive,
-    facts_from_runs,
 )
+from fastworkflow.observation_offloading.facts import _join_list, _page_key
 from fastworkflow.observation_offloading.agent import build_compacting_step
 from fastworkflow.observation_offloading.labels import alias_line
 from fastworkflow.observation_offloading.state import (
     note_command_run,
     reset_observation_state,
 )
+from fastworkflow.typed_phase_facts import check_typed_facts_model, fill_typed_phase_output
 from fastworkflow.utils.react import fastWorkflowReAct
 from fastworkflow.workflow_agent import _hold_command_run
 
@@ -241,10 +239,19 @@ def test_the_execute_step_holds_its_command_output_for_the_archive(store):
 
 
 class Found(BaseModel):
-    book_uids: list[str] = Field(json_schema_extra={"from": "list_books.book_uids"})
-    total: int = Field(json_schema_extra={"from": "list_books.total"})
-    query: str = Field(json_schema_extra={"from": "Library/find_book.query"})
-    uid: Optional[str] = Field(default=None, json_schema_extra={"from": "find_book.uid"})
+    """Each field is typed with a command's Output or Input (design 3.12)."""
+
+    listed: ListBooks.Output
+    search: FindBook.Input
+    found: Optional[FindBook.Output] = None
+
+
+#: A plan note that asks for the full list: the typed fill then joins the pages of a listing.
+FULL = "list_books: full list"
+
+
+def fill(model, runs, *, signatures=SIGNATURES, plan_text=FULL, **kwargs):
+    return fill_typed_phase_output(model, runs, signatures=signatures, plan_text=plan_text, **kwargs)
 
 
 def page(uids, start=None, total=3, context=SHELF):
@@ -263,40 +270,47 @@ RUNS = [
 
 
 def test_facts_fill_from_outputs_and_inputs_with_exact_values():
-    facts = facts_from_runs(Found, RUNS, signatures=SIGNATURES)
-    assert facts == Found(book_uids=["b1", "b2", "b3"], total=3, query="Emma", uid="x1")
+    facts = fill(Found, RUNS)
+    assert facts == Found(
+        listed=ListBooks.Output(book_uids=["b1", "b2", "b3"], titles=["b1", "b2", "b3"], total=3),
+        search=FindBook.Input(query="Emma"), found=FindBook.Output(uid="x1"))
 
 
 def test_list_fields_join_pages_in_order_and_skip_failed_runs():
-    facts = facts_from_runs(Found, RUNS[:3] + RUNS[3:5])
-    assert facts.book_uids == ["b1", "b2", "b3"]
+    facts = fill(Found, RUNS[:3] + RUNS[3:5])
+    assert facts.listed.book_uids == ["b1", "b2", "b3"]
 
 
 def test_a_scalar_takes_the_latest_successful_run():
     runs = [page(["b1"], total=1), page(["b2"], start=1, total=7),
             run("Shelf/list_books", output={"book_uids": [], "titles": [], "total": 9},
                 parameters={"start": 5}, success=False)]
-    assert facts_from_runs(Found, runs + RUNS[:1]).total == 7
+    assert fill(Found, runs + RUNS[:1]).listed.total == 7
 
 
 def test_a_run_in_another_context_is_not_used():
     runs = [page(["b1"], total=1), page(["z9"], total=5, context="Shelf D1"),
             run("Library/find_book", parameters={"query": "Dune"}, output={"uid": "x0"})]
-    facts = facts_from_runs(Found, runs, context=SHELF)
-    assert (facts.book_uids, facts.total) == (["b1"], 1)
+    facts = fill(Found, runs, context=SHELF)
+    assert (facts.listed.book_uids, facts.listed.total) == (["b1"], 1)
 
 
 def test_a_missing_required_field_names_the_field_and_its_source():
-    with pytest.raises(MissingFactError, match=r"Found\.query.*'Library/find_book\.query'"):
-        facts_from_runs(Found, [page(["b1"])])
+    with pytest.raises(MissingFactError, match=r"Found\.search.*'Library/find_book'"):
+        fill(Found, [page(["b1"])])
 
 
 def test_an_optional_field_with_no_value_keeps_its_default():
     runs = [page(["b1"]), run("Library/find_book", parameters={"query": "Dune"})]
-    assert facts_from_runs(Found, runs).uid is None
+    assert fill(Found, runs).found is None
+
+
+COPIES_TAIL = r"copies are no longer read \(fact_from and \"from\" are removed\)"
 
 
 def test_an_unknown_command_or_field_is_rejected():
+    # A copy ("from") field is a load error now, whatever it names: an unknown command, an
+    # unknown field, or a malformed source all fail the same way, with the 3.12 message.
     class UnknownCommand(BaseModel):
         x: str = Field(json_schema_extra={"from": "burn_book.uid"})
 
@@ -306,24 +320,38 @@ def test_an_unknown_command_or_field_is_rejected():
     class Malformed(BaseModel):
         x: str = Field(json_schema_extra={"from": "find_book"})
 
-    with pytest.raises(FactSourceError, match="no command named 'burn_book'"):
-        check_fact_sources(UnknownCommand, SIGNATURES)
-    with pytest.raises(FactSourceError, match="no Output or Input field 'isbn'"):
-        facts_from_runs(UnknownField, RUNS, signatures=SIGNATURES)
-    with pytest.raises(FactSourceError, match="must be"):
-        facts_from_runs(Malformed, RUNS)
+    for model in (UnknownCommand, UnknownField, Malformed):
+        [message] = check_typed_facts_model("facts.py", model, {}, SIGNATURES)
+        assert message.startswith(f"{model.__name__}.x is str; a facts field is typed with a "
+                                  "command's Output or Input. Compute other values in a "
+                                  f"property or method of {model.__name__}")
+        assert message.endswith(COPIES_TAIL.replace("\\", ""))
+    with pytest.raises(ValueError, match=COPIES_TAIL):
+        fill(UnknownField, RUNS)
+    with pytest.raises(ValueError, match="Malformed.x is str"):
+        fill(Malformed, RUNS)
+
+    class Computed(BaseModel):
+        n: int  # not typed with an Output or Input, and no copy tail
+
+    [message] = check_typed_facts_model("facts.py", Computed, {}, SIGNATURES)
+    assert "Computed.n is int" in message and "copies are no longer read" not in message
 
 
 def test_an_ambiguous_short_name_must_be_qualified():
+    # There is no source name to resolve now, so a short name shared by two contexts is not
+    # ambiguous: a copy field fails the load, and a typed field names its command by class.
     class Ambiguous(BaseModel):
         x: str = Field(json_schema_extra={"from": "find_book.uid"})
 
-    with pytest.raises(AmbiguousFactSourceError, match="ambiguous source"):
-        check_fact_sources(Ambiguous, {**SIGNATURES, "Shelf/find_book": FindBook})
+    signatures = {**SIGNATURES, "Shelf/find_book": FindBook}
+    [message] = check_typed_facts_model("facts.py", Ambiguous, {}, signatures)
+    assert "Ambiguous.x is str" in message and "ambiguous" not in message
+    assert fastworkflow.observation_offloading.facts.fact_sources(Ambiguous) == []
 
 
-# Two contexts, each with its own same-named command.
-class CountItems:
+# Two contexts, each with its own same-named command (its own classes).
+class ShelfCount:
     class Input(BaseModel):
         start: Optional[int] = None
 
@@ -332,7 +360,16 @@ class CountItems:
         total: int
 
 
-TWO_CONTEXTS = {"Shelf/count_items": CountItems, "Cart/count_items": CountItems}
+class CartCount:
+    class Input(BaseModel):
+        start: Optional[int] = None
+
+    class Output(BaseModel):
+        item_uids: list[str]
+        total: int
+
+
+TWO_CONTEXTS = {"Shelf/count_items": ShelfCount, "Cart/count_items": CartCount}
 CART = "Cart k7"
 TWO_CONTEXT_RUNS = [
     run("Shelf/count_items", output={"item_uids": ["s1"], "total": 1}),
@@ -340,36 +377,41 @@ TWO_CONTEXT_RUNS = [
 ]
 
 
-def test_a_qualified_source_picks_its_context_command():
-    class CartTotal(BaseModel):
-        total: int = Field(json_schema_extra={"from": "Cart/count_items.total"})
-        item_uids: list[str] = Field(json_schema_extra={"from": "Cart/count_items.item_uids"})
+class CartTotal(BaseModel):
+    cart: CartCount.Output
 
-    facts = facts_from_runs(CartTotal, TWO_CONTEXT_RUNS, signatures=TWO_CONTEXTS)
-    assert (facts.total, facts.item_uids) == (2, ["c1", "c2"])
+
+class ShelfTotal(BaseModel):
+    shelf: ShelfCount.Output
+
+
+def test_a_qualified_source_picks_its_context_command():
+    facts = fill(CartTotal, TWO_CONTEXT_RUNS, signatures=TWO_CONTEXTS)
+    assert (facts.cart.total, facts.cart.item_uids) == (2, ["c1", "c2"])
 
 
 def test_a_plain_source_resolves_against_the_record_context():
-    class Total(BaseModel):
-        total: int = Field(json_schema_extra={"from": "count_items.total"})
-
-    # The record the runs were on decides, with or without signatures.
-    assert facts_from_runs(Total, TWO_CONTEXT_RUNS, context=CART).total == 2
-    assert facts_from_runs(Total, TWO_CONTEXT_RUNS, context=SHELF,
-                           signatures=TWO_CONTEXTS).total == 1
-    assert check_fact_sources(Total, TWO_CONTEXTS, context_name="Cart")[0].command == "Cart/count_items"
+    # The command is the one whose Output class types the field; the record the runs were on
+    # (the context clause) narrows which runs fill it.
+    assert fill(CartTotal, TWO_CONTEXT_RUNS, context=CART, signatures=TWO_CONTEXTS).cart.total == 2
+    assert fill(ShelfTotal, TWO_CONTEXT_RUNS, context=SHELF, signatures=TWO_CONTEXTS).shelf.total == 1
+    with pytest.raises(MissingFactError):
+        fill(CartTotal, TWO_CONTEXT_RUNS, context=SHELF, signatures=TWO_CONTEXTS)
 
 
 def test_a_plain_source_that_cannot_be_resolved_is_ambiguous():
+    # A plain "count_items.total" copy is no longer resolved, so it is a load error rather
+    # than an ambiguity; the typed fields stay unambiguous because each names its class.
     class Total(BaseModel):
         total: int = Field(json_schema_extra={"from": "count_items.total"})
 
-    with pytest.raises(AmbiguousFactSourceError, match=r"ambiguous source.*Cart/count_items, Shelf/count_items"):
-        check_fact_sources(Total, TWO_CONTEXTS)
-    with pytest.raises(AmbiguousFactSourceError, match="ambiguous source"):
-        facts_from_runs(Total, TWO_CONTEXT_RUNS)
-    with pytest.raises(AmbiguousFactSourceError, match="none is in context 'Desk'"):
-        facts_from_runs(Total, TWO_CONTEXT_RUNS, context_name="Desk")
+    [message] = check_typed_facts_model("facts.py", Total, {}, TWO_CONTEXTS)
+    assert "Total.total is int" in message and "ambiguous" not in message
+    with pytest.raises(ValueError, match=COPIES_TAIL):
+        fill(Total, TWO_CONTEXT_RUNS, signatures=TWO_CONTEXTS)
+    both = fill(CartTotal, TWO_CONTEXT_RUNS, signatures=TWO_CONTEXTS), \
+        fill(ShelfTotal, TWO_CONTEXT_RUNS, signatures=TWO_CONTEXTS)
+    assert (both[0].cart.total, both[1].shelf.total) == (2, 1)
 
 
 # Pages and queries: a list field joins the pages of one query, keyed on the normalised Input.
@@ -385,11 +427,11 @@ class BrowseShelf:
 
 
 BROWSE = {"Shelf/browse_shelf": BrowseShelf}
+BROWSE_FULL = "browse_shelf: full list"
 
 
 class Browsed(BaseModel):
-    book_uids: list[str] = Field(json_schema_extra={"from": "browse_shelf.book_uids"})
-    total: int = Field(json_schema_extra={"from": "browse_shelf.total"})
+    shelf: BrowseShelf.Output
 
 
 def browse(uids, total=3, **parameters):
@@ -397,62 +439,70 @@ def browse(uids, total=3, **parameters):
                output={"book_uids": uids, "total": total})
 
 
+def browsed(runs):
+    return fill_typed_phase_output(Browsed, runs, signatures=BROWSE, plan_text=BROWSE_FULL).shelf
+
+
 def test_none_default_and_not_given_sentinel_read_the_same_page():
     runs = [
         browse(["b1", "b2"], filter=None, start=None),
         browse(["b1", "b2"], filter="NOT_FOUND", start=0),       # the extractor's sentinel; row 0
-        browse(["b1", "b2"], filter="None", order="title"),       # "None" text; the field default
+        browse(["b1", "b2"], filter="None"),                      # "None" text
         browse(["b1", "b2"], filter="", start=-sys.maxsize),      # empty text; the int marker
     ]
-    facts = facts_from_runs(Browsed, runs, signatures=BROWSE)
-    assert facts.book_uids == ["b1", "b2"]
-    # Without signatures the defaults are unknown; the other forms still match.
-    assert facts_from_runs(Browsed, runs[:2] + runs[3:]).book_uids == ["b1", "b2"]
+    assert browsed(runs).book_uids == ["b1", "b2"]
+    # The typed fill does not pass an Input's defaults on, so a parameter given at its default
+    # ("order": "title") is read through the helper, which still takes the defaults.
+    assert _page_key({"order": "title"}, ("start",), {"order": "title"}) == \
+        _page_key({"filter": None}, ("start",), None)
 
 
 def test_a_different_page_offset_is_joined_and_a_reread_page_replaces_its_read():
     runs = [browse(["b1", "b2"], start=0), browse(["b3"], start=2),
             browse(["b1", "b2"]), browse(["b3"], start=2, filter=None)]
-    assert facts_from_runs(Browsed, runs, signatures=BROWSE).book_uids == ["b1", "b2", "b3"]
+    assert browsed(runs).book_uids == ["b1", "b2", "b3"]
 
 
 def test_a_filtered_reread_is_not_joined_into_the_full_list():
     full = [browse(["b1", "b2"]), browse(["b3"], start=2)]
     narrowed = browse(["b2"], total=1, filter="Dune")
     for runs in (full[:1] + [narrowed] + full[1:], full + [narrowed]):
-        facts = facts_from_runs(Browsed, runs, signatures=BROWSE)
+        facts = browsed(runs)
         assert facts.book_uids == ["b1", "b2", "b3"]
         assert facts.total == 3  # a scalar: the latest run of the broadest query
     # Only narrowed reads: the latest of the equally narrow queries is the list.
     other = browse(["b9"], total=1, filter="Emma")
-    assert facts_from_runs(Browsed, [narrowed, other]).book_uids == ["b9"]
+    assert browsed([narrowed, other]).book_uids == ["b9"]
 
 
 def test_a_scalar_comes_from_the_broadest_query_not_a_later_filtered_read():
     runs = [browse(["b1", "b2"], total=3), browse(["b3"], total=3, start=2),
             browse(["b2"], total=1, filter="Dune")]
-    facts = facts_from_runs(Browsed, runs, signatures=BROWSE)
-    assert facts == Browsed(book_uids=["b1", "b2", "b3"], total=3)
+    assert browsed(runs) == BrowseShelf.Output(book_uids=["b1", "b2", "b3"], total=3)
     # A later page of the broadest query is as good as its first page.
     runs = [browse(["b1", "b2"], total=3), browse(["b3"], total=4, start=2),
             browse(["b2"], total=1, filter="Dune")]
-    assert facts_from_runs(Browsed, runs, signatures=BROWSE).total == 4
+    assert browsed(runs).total == 4
 
 
 def test_a_scalar_takes_the_latest_run_when_every_run_is_the_same_query():
     runs = [browse(["b1"], total=1, filter="Dune"), browse(["b1"], total=2, filter="Dune"),
             browse(["b1"], total=5, filter="Dune", start=1)]
-    assert facts_from_runs(Browsed, runs, signatures=BROWSE).total == 5
+    assert browsed(runs).total == 5
 
 
 def test_a_field_can_name_its_own_paging_parameter():
-    class ByCursor(BaseModel):
-        book_uids: list[str] = Field(
-            json_schema_extra={"from": "browse_shelf.book_uids", "page_by": "order"})
-
+    # The typed fill pages on PAGING_PARAMETERS only ("start"); a per-field "page_by" has no
+    # typed counterpart. The rule is asserted through the helpers the typed fill uses.
     runs = [browse(["b1"], order="a"), browse(["b2"], order="b")]
-    assert facts_from_runs(ByCursor, runs).book_uids == ["b1", "b2"]
-    assert facts_from_runs(Browsed, runs).book_uids == ["b2"]  # two queries; the latest wins
+
+    def keyed(page_by):
+        return [(*_page_key(r["input"], page_by, None), r["output"]["book_uids"], r["output"])
+                for r in runs]
+
+    assert _join_list(keyed(("order",))) == ["b1", "b2"]
+    assert _join_list(keyed(("start",))) == ["b2"]  # two queries; the latest wins
+    assert browsed(runs).book_uids == ["b2"]  # the typed fill pages on "start"
 
 
 # A listing whose first page alone carries a whole-scope tally (later pages report none).
@@ -469,48 +519,119 @@ class OverdueShelf:
 
 
 class Overdue(BaseModel):
-    uids: list[str] = Field(json_schema_extra={"from": "overdue_shelf.overdue_uids"})
-    count: Optional[int] = Field(json_schema_extra={"from": "overdue_shelf.overdue_count"})
-    complete: bool = Field(json_schema_extra={"from": "overdue_shelf.overdue_complete"})
-    total: int = Field(json_schema_extra={"from": "overdue_shelf.total"})
+    shelf: OverdueShelf.Output
 
 
 def overdue_page(uids, start=None, total=5, **tally):
+    # An archived Output is a whole model dump: every field is there, a later page's tally empty.
     return run("Shelf/overdue_shelf", parameters={"start": start},
-               output={"book_uids": uids, "total": total, **tally})
+               output={"book_uids": uids, "total": total, "overdue_uids": [],
+                       "overdue_count": None, "overdue_complete": False, **tally})
 
 
 def test_paged_scalars_come_from_the_page_that_carries_them_not_the_last_page():
+    signatures = {"Shelf/overdue_shelf": OverdueShelf}
     first = overdue_page(["b1", "b2"], overdue_uids=["b2", "b4"], overdue_count=2,
                          overdue_complete=True)
     runs = [first, overdue_page(["b3", "b4"], start=2), overdue_page(["b5"], start=4)]
-    facts = facts_from_runs(Overdue, runs, signatures={"Shelf/overdue_shelf": OverdueShelf})
-    assert facts == Overdue(uids=["b2", "b4"], count=2, complete=True, total=5)
+
+    def tally(shelf):
+        return (shelf.overdue_uids, shelf.overdue_count, shelf.overdue_complete, shelf.total)
+
+    facts = fill_typed_phase_output(Overdue, runs, signatures=signatures,
+                                    plan_text="overdue_shelf: full list").shelf
+    assert tally(facts) == (["b2", "b4"], 2, True, 5)
     # The order the pages were read in does not matter.
-    assert facts_from_runs(Overdue, runs[1:] + runs[:1]) == facts
+    reordered = fill_typed_phase_output(Overdue, runs[1:] + runs[:1], signatures=signatures,
+                                        plan_text="overdue_shelf: full list").shelf
+    assert tally(reordered) == tally(facts)
 
 
 def test_an_empty_page_past_the_end_never_overwrites_an_earlier_page():
     runs = [browse(["b1"], total=1), browse([], total=0, start=1)]
-    assert facts_from_runs(Browsed, runs, signatures=BROWSE) == Browsed(book_uids=["b1"], total=1)
+    assert browsed(runs) == BrowseShelf.Output(book_uids=["b1"], total=1)
     # An empty FIRST page is a real answer: nothing listed, total 0.
-    assert facts_from_runs(Browsed, [browse([], total=0)]).total == 0
+    assert browsed([browse([], total=0)]).total == 0
     # Only empty pages: the latest one still gives the value.
-    assert facts_from_runs(Browsed, [browse([], total=0, start=3)]).total == 0
+    assert browsed([browse([], total=0, start=3)]).total == 0
+
+
+class FlagShelf:
+    class Input(BaseModel):
+        start: Optional[int] = None
+
+    class Output(BaseModel):
+        book_uids: list[str]
+        total: int
+        done: bool
+
+
+class Done(BaseModel):
+    page: FlagShelf.Output
 
 
 def test_a_paged_flag_is_true_when_any_page_says_so():
     runs = [browse(["b1"], total=2), browse(["b2"], total=2, start=1)]
+    pages = [{**r, "command": "Shelf/flag_shelf",
+              "output": {**r["output"], "done": done}} for r, done in zip(runs, (False, True))]
 
-    class Done(BaseModel):
-        done: bool = Field(json_schema_extra={"from": "browse_shelf.done"})
+    def done(runs):
+        return fill_typed_phase_output(Done, runs, signatures={"Shelf/flag_shelf": FlagShelf},
+                                       plan_text="flag_shelf: full list").page.done
 
-    pages = [{**r, "output": {**r["output"], "done": done}} for r, done in zip(runs, (False, True))]
-    assert facts_from_runs(Done, pages).done is True
-    assert facts_from_runs(Done, pages[::-1]).done is True
+    assert done(pages) is True
+    assert done(pages[::-1]) is True
     # One page read twice: the latest read stands, as for any re-read.
     reread = [{**pages[0], "output": {**pages[0]["output"], "done": True}}, pages[0]]
-    assert facts_from_runs(Done, reread).done is False
+    assert done(reread) is False
+
+
+class NotedShelf:
+    class Input(BaseModel):
+        start: Optional[int] = None
+
+    class Output(BaseModel):
+        book_uids: list[str]
+        total: int
+        note: Optional[str] = None
+        tags: list[str] = []
+
+
+class Noted(BaseModel):
+    shelf: NotedShelf.Output
+
+
+def noted_page(uids, start=None, **fields):
+    # An archived page carries the keys it gave; the keys in *fields* are the ones it has.
+    return run("Shelf/noted_shelf", parameters={"start": start},
+               output={"book_uids": uids, "total": 3, **fields})
+
+
+def noted(runs):
+    return fill_typed_phase_output(Noted, runs, signatures={"Shelf/noted_shelf": NotedShelf},
+                                   plan_text="noted_shelf: full list").shelf
+
+
+def test_a_key_an_earlier_page_carries_survives_when_the_last_page_omits_it():
+    runs = [noted_page(["b1", "b2"], note="first", tags=["x"]),
+            noted_page(["b3"], start=2, note="second", tags=["y"]),
+            noted_page(["b4"], start=3)]  # the last page gives neither key
+    # The list is joined over the pages that give it; the scalar is the last value any page gives.
+    assert noted(runs) == NotedShelf.Output(book_uids=["b1", "b2", "b3", "b4"], total=3,
+                                            note="second", tags=["x", "y"])
+    # A None on the last page is "not given" too: the earlier value stands.
+    runs[2] = noted_page(["b4"], start=3, note=None, tags=None)
+    assert noted(runs).note == "second"
+    # The scalar is the value of the last page that gives one, in run order: a page that gives
+    # none, read first, does not change it.
+    assert noted([runs[2], runs[0], runs[1]]).note == "second"
+
+
+def test_list_joins_over_three_pages_are_unchanged():
+    runs = [noted_page(["b1"], tags=["a"]), noted_page(["b2", "b3"], start=1, tags=["b", "c"]),
+            noted_page(["b4"], start=3, tags=["d"])]
+    assert noted(runs) == NotedShelf.Output(book_uids=["b1", "b2", "b3", "b4"], total=3,
+                                            tags=["a", "b", "c", "d"])
 
 
 def test_facts_fill_from_the_archive(store):
@@ -521,9 +642,14 @@ def test_facts_fill_from_the_archive(store):
                                       output=ListBooks.Output(book_uids=["b1"], titles=["Dune"], total=1)))
     archive_step(execute_step(1, "list_books", "1 book"), 1, scope=SCOPE, selected_archive=store)
 
-    facts = facts_from_archive(Found, store, SCOPE, signatures=SIGNATURES)
-    assert facts == Found(book_uids=["b1"], total=1, query="Dune", uid="b1")
-    assert fastworkflow.observation_offloading.facts_from_runs is facts_from_runs
+    # facts_from_archive is gone: the typed fill takes the archive's command runs.
+    facts = fill(Found, store.command_runs(SCOPE))
+    assert facts == Found(
+        listed=ListBooks.Output(book_uids=["b1"], titles=["Dune"], total=1),
+        search=FindBook.Input(query="Dune"), found=FindBook.Output(uid="b1"))
+    for removed in ("facts_from_runs", "facts_from_archive", "check_fact_sources",
+                    "AmbiguousFactSourceError", "FactSourceError"):
+        assert not hasattr(fastworkflow.observation_offloading, removed)
 
 
 def test_facts_text_renders_a_facts_model_as_compact_field_value_text():

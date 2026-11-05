@@ -15,7 +15,7 @@ import fastworkflow
 from fastworkflow import command_directory, planning_commands, workflow_agent
 from fastworkflow.command_executor import call_response_generator
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
-from fastworkflow.planning import (StepFormError, count, fact_from, listed, num, phase, pick,
+from fastworkflow.planning import (StepFormError, count, listed, num, phase, pick,
                                 picks_noted, planned, planning_command_parts)
 from fastworkflow.planning_phases import (Placeholder, check_bindings, concatenated_steps,
                                        phase_steps, runs_now, stops_after)
@@ -24,8 +24,9 @@ from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F40
 
 
 class Found(BaseModel):
-    uids: list[str] = fact_from("find_item.item_uids")
-    labels: list[str] = fact_from("find_item.labels")
+    """Stands for find_item's Output: the facts are its fields, read where the phase ran."""
+    uids: list[str]
+    labels: list[str]
 
 
 class Signature:
@@ -50,8 +51,8 @@ class PlanGenerator:
         return ["open_catalog", f"find_item query={input.name}"]
 
     class Item(BaseModel):
-        uid: str = fact_from("open_item_by_uid.item_uid")
-        late: bool = fact_from("open_item_by_uid.late")
+        uid: str
+        late: bool
 
     @phase(over="find.uids", noun="items",
            until=lambda input: _late if input.stop_late else None)
@@ -203,7 +204,7 @@ def test_a_parameter_naming_a_phase_the_call_does_not_have_keeps_its_default():
             return [f"find_item query={input.name}"]
 
         class Extra(BaseModel):
-            total: int = fact_from("count_checks.total")
+            total: int
 
         def extra(self) -> Extra:
             return ["count_checks"]
@@ -436,7 +437,7 @@ class Lookup:
         return [f"find_item query={input.name}"]
 
     class Item(BaseModel):
-        uid: str = fact_from("open_item_by_uid.item_uid")
+        uid: str
 
     def item(self, input, find) -> "Item":                 # a string annotation: base's model
         if not find.uids:
@@ -453,7 +454,7 @@ class Lookup:
 def test_a_subclass_that_adds_phases_writes_call_with_the_order():
     class Parts(Lookup):
         class PartFacts(BaseModel):
-            labels: list[str] = fact_from("list_parts.labels")
+            labels: list[str]
 
         def parts(self, item=None) -> PartFacts:
             if item is None:
@@ -482,7 +483,7 @@ def test_call_places_base_phases_and_an_override_reads_by_its_own_signature():
             return [self.find, self.item, self.parts]
 
         class PartFacts(BaseModel):
-            labels: list[str] = fact_from("list_parts.labels")
+            labels: list[str]
 
         def parts(self, item=None) -> PartFacts:
             if item is None:
@@ -514,8 +515,8 @@ class Parts(Lookup):
         return [self.find, self.item, self.parts]
 
     class PartFacts(BaseModel):
-        labels: list[str] = fact_from("list_parts.labels")
-        total: int = fact_from("list_parts.total")
+        labels: list[str]
+        total: int
 
     def parts(self, item=None) -> PartFacts:
         if item is None:

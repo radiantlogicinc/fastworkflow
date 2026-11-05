@@ -5,9 +5,10 @@ new loans phase in order, and __result__ extends the shared answer with super().
 """
 from pydantic import BaseModel, Field
 
-from fastworkflow.planning import fact_from, full_list, listed
+from fastworkflow.planning import full_list, listed
 
 from ._book_phases import BookPhases
+from .list_loans import Signature as ListLoans
 
 
 class Signature:
@@ -24,11 +25,7 @@ class PlanGenerator(BookPhases):
     def __phases__(self, input):
         return [self.find, self.book, self.loans]
 
-    class Loans(BaseModel):
-        borrowers: list[str] = fact_from("list_loans.borrowers")
-        total: int = fact_from("list_loans.total")
-
-    def loans(self, book=None) -> Loans:
+    def loans(self, book=None) -> ListLoans.Output:
         if book is None:
             return []
         return [full_list("list_loans", book_uid=book.uid)]

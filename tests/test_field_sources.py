@@ -1,8 +1,8 @@
 """Field sources (``from_`` and ``resolve_field_sources``): exports, producer edge
 resolution, error rows of 3.3, type checks, unqualified resolution and ambiguity,
 hand-written ``available_from`` errors, ``Signature.Output`` / ``Signature.Input``
-model map, ``check_previews`` integration, and unchanged ``fact_from`` copy-edge
-behaviour."""
+model map, ``check_previews`` integration, and the retired copy edges (Phase 15): ``fact_from``
+is not importable, and a facts field that copies fails the load with the 3.12 message."""
 from __future__ import annotations
 
 import argparse
@@ -24,8 +24,6 @@ from fastworkflow import ModuleType, from_, planning_commands, command_preview, 
 from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.observation_offloading.facts import facts_from_runs
-from fastworkflow.planning import fact_from
 from fastworkflow.planning import from_ as planning_from_
 from fastworkflow.planning_phases import fill_output
 from fastworkflow.planning_phases import from_ as phases_from_
@@ -122,7 +120,7 @@ def _preview_check(folder: str, out_dir: str, capsys) -> tuple[int, str]:
 
 
 # ------------------------------------------------------------------
-# Step 1: from_ and its exports, PLANNING_COMMAND_FIELD_KEYS, fact_from
+# Step 1: from_ and its exports, PLANNING_COMMAND_FIELD_KEYS, the retired copy edges
 # ------------------------------------------------------------------
 
 
@@ -167,30 +165,28 @@ def test_from_has_no_kind_keyword():
     assert list(sig.parameters) == ["source", "field_kwargs"]
 
 
-def test_fact_from_and_copy_edges_keep_existing_behaviour(tmp_path):
-    class FoundBooks(BaseModel):
-        uids: list[str] = fact_from("find_book.book_uids", min_length=1)
-        titles: list[str] = fact_from("find_book.titles")
-        total: int = fact_from("find_book.total")
+_COPY_LOAD_ERROR = (
+    "is list[str]; a facts field is typed with a command's Output or Input. Compute other values in a "
+    "property or method of Found; copies are no longer read (fact_from and \"from\" are removed)"
+)
 
-    runs = [
-        {
-            "command": "Library/find_book",
-            "input": {"query": "Dune"},
-            "output": {"book_uids": ["b1", "b2"], "titles": ["Dune", "Dune Messiah"], "total": 2},
-            "success": True,
-            "context_clause": "Library",
-            "context_name": "Library",
-        }
-    ]
-    filled = facts_from_runs(FoundBooks, runs)
-    assert filled.uids == ["b1", "b2"]
-    assert filled.titles == ["Dune", "Dune Messiah"]
-    assert filled.total == 2
 
-    # Phased skill using fact_from loads cleanly without triggering from_ error on facts model
-    phased_planning_command = '''from pydantic import BaseModel
-from fastworkflow.planning import fact_from
+def test_fact_from_is_no_longer_importable():
+    import fastworkflow.planning as planning
+    import fastworkflow.planning_phases as planning_phases
+
+    assert not hasattr(planning, "fact_from")
+    assert not hasattr(planning_phases, "fact_from")
+    assert "fact_from" not in planning.__all__
+    with pytest.raises(ImportError):
+        from fastworkflow.planning import fact_from  # noqa: F401
+
+
+def test_a_facts_field_that_copies_fails_the_load_and_typed_facts_still_fill(tmp_path):
+    """Phase 2's copy edge (``Field(json_schema_extra={"from": ...})``) is a load error now (3.12, Phase 15),
+    and the same facts, typed by the command's Output, load and fill as before."""
+    copying = '''from pydantic import BaseModel, Field
+from fastworkflow.planning import run
 
 
 class Signature:
@@ -202,31 +198,54 @@ class Signature:
 
 class PlanGenerator:
     class Found(BaseModel):
-        book_uids: list[str] = fact_from("find_book.book_uids")
-        titles: list[str] = fact_from("find_book.titles")
+        titles: list[str] = Field(json_schema_extra={"from": "find_book.titles"})
 
     def find(self, input) -> Found:
         return [f"find_book query={input.query}"]
+'''
+    folder = _build_workflow(tmp_path, "wf_copy_edge", extra_planning_commands={"Library/copy_titles": copying})
+    res = planning_commands.resolve_field_sources(folder)
+    assert any("Found.titles " + _COPY_LOAD_ERROR in err.message for err in res.errors), res.errors
+
+    typed = '''from pydantic import BaseModel
+from fastworkflow.planning import run
+from .find_book import Signature as FindBook
+
+
+class Signature:
+    """Find books and report their titles."""
+
+    class Input(BaseModel):
+        query: str
+
+
+class PlanGenerator:
+    def find(self, input) -> FindBook.Output:
+        return [run("find_book", query=input.query)]
 
     def __result__(self, input, find):
         return f"Found {find.titles}."
 '''
-    folder = _build_workflow(tmp_path, "wf_fact_from", extra_planning_commands={"Library/find_titles": phased_planning_command})
+    folder = _build_workflow(tmp_path, "wf_typed", extra_planning_commands={"Library/find_titles": typed})
     res = planning_commands.resolve_field_sources(folder)
     assert res.errors == ()
     loaded = workflow_agent.load_planning_command_map(folder)
     assert "Library/find_titles" in loaded
     cmd = loaded["Library/find_titles"]
     assert len(cmd.phase_outputs) == 1
-    found_model = cmd.phase_outputs[0]
-    runtime_filled = fill_output(
-        found_model,
-        runs,
-        record="Library",
-        record_context="Library",
-    )
-    assert runtime_filled.book_uids == ["b1", "b2"]
-    assert runtime_filled.titles == ["Dune", "Dune Messiah"]
+    runs = [
+        {
+            "command": "Library/find_book",
+            "input": {"query": "Dune"},
+            "output": {"book_uids": ["b1", "b2"], "titles": ["Dune", "Dune Messiah"], "total": 2},
+            "success": True,
+            "context_clause": "Library",
+            "context_name": "Library",
+        }
+    ]
+    filled = fill_output(cmd.phase_outputs[0], runs, record="Library", record_context="Library")
+    assert filled.titles == ["Dune", "Dune Messiah"]
+    assert filled.book_uids == ["b1", "b2"]
 
 
 # ------------------------------------------------------------------

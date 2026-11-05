@@ -6,6 +6,7 @@ phase), a flat skill and a skill without inputs, rendered to markdown.
 from __future__ import annotations
 
 import itertools
+import re
 import os
 import subprocess
 import sys
@@ -22,6 +23,11 @@ SHOW_ITEM = '''
 """show_item: one named item, its parts and, when asked, its open checks."""
 from pydantic import BaseModel, Field
 
+from .count_checks import Signature as CountChecks
+from .find_item import Signature as FindItem
+from .list_parts import Signature as ListParts
+from .open_item_by_uid import Signature as OpenItem
+
 
 class Signature:
     """Show one named item and its parts, and its open checks when asked. One job per item."""
@@ -37,17 +43,36 @@ class Signature:
 
 class ItemMatch(BaseModel):
     """The items the search listed."""
-    item_uids: list[str] = Field(json_schema_extra={"from": "find_item.item_uids"}, min_length=1)
+    found: FindItem.Output
+
+    @property
+    def item_uids(self) -> list[str]:
+        return self.found.item_uids
 
 
 class ItemFacts(BaseModel):
-    uid: str = Field(json_schema_extra={"from": "open_item_by_uid.item_uid"})
-    part_labels: list[str] = Field(json_schema_extra={"from": "list_parts.labels"})
-    weight: float = Field(json_schema_extra={"from": "list_parts.weight"})
+    opened: OpenItem.Output
+    parts: ListParts.Output
+
+    @property
+    def uid(self) -> str:
+        return self.opened.item_uid
+
+    @property
+    def part_labels(self) -> list[str]:
+        return self.parts.labels
+
+    @property
+    def weight(self) -> float:
+        return self.parts.weight
 
 
 class CheckFacts(BaseModel):
-    total: int = Field(json_schema_extra={"from": "count_checks.total"})
+    counted: CountChecks.Output
+
+    @property
+    def total(self) -> int:
+        return self.counted.total
 
 
 class PlanGenerator:
@@ -133,13 +158,13 @@ class PlanGenerator:
 STEP_STUBS = {
     "compare_alpha_beta": ((), ()),
     "count_checks": ((), (("total", "int", 0),)),
-    "find_bin": (("query", "mode", "note"), ()),
+    "find_bin": (("query", "mode", "note"), (("box_uid", "str", ""),)),
     "find_box": (("query", "mode", "note"), (("box_uid", "str", ""),)),
-    "find_crate": (("query", "mode", "note"), ()),
+    "find_crate": (("query", "mode", "note"), (("box_uid", "str", ""),)),
     "find_item": (('query', 'supplier'), (("item_uids", "list[str]", "list"),)),
     "find_kit": (("query",), ()),
     "find_shelf": (('query',), (("shelf_uid", "str", ""),)),
-    "find_tray": (("query", "mode", "note"), ()),
+    "find_tray": (("query", "mode", "note"), (("box_uid", "str", ""),)),
     "list_boxes": ((), (("box_uids", "list[str]", "list"), ("labels", "list[str]", "list"))),
     "list_items": ((), ()),
     "list_parts": (('supplier',), (("labels", "list[str]", "list"), ("weight", "float", 0.0))),
@@ -226,26 +251,27 @@ def test_phased_preview_shows_each_phase_its_facts_and_the_condition_both_ways(w
     assert "| `find` | `ItemMatch` | always |" in text
     assert "| `checks` | `CheckFacts` | only when checks = true |" in text
     assert "| `find` | `ItemMatch` | always |" in text and "`__result__`" in text
-    # facts and their sources
-    assert "| `item_uids` | `list[str]` | `find_item.item_uids` |" in text
-    assert "| `weight` | `float` | `list_parts.weight` |" in text
+    # facts and their sources: each typed field says which command's Output it is
+    assert "| `found` | `Output` | `find_item`'s `Output` |" in text
+    assert "| `parts` | `Output` | `list_parts`'s `Output` |" in text
+    assert "| `counted` | `Output` | `count_checks`'s `Output` |" in text
     assert "The items the search listed." in text
     # the condition both ways, earlier facts as placeholders
     off = text.index("### Plan when checks = false")
     on = text.index("### Plan when checks = true")
     assert off < on
-    assert "1. `open_item_by_uid item_uid=<find.item_uids[0]>`" in text
+    assert "1. `open_item_by_uid item_uid=<find.found.item_uids[0]>`" in text
     assert "Reads: `find`. Output: `ItemFacts`." in text
     assert "count_checks" not in text[off:on]
-    # the item's uid is the uid the find listed (one placeholder for one value)
-    assert "1. `count_checks on <find.item_uids[0]>`" in text[on:]
+    # the check reads the uid the item phase opened (one placeholder for one value)
+    assert "1. `count_checks on <item.opened.item_uid>`" in text[on:]
     # the answer __result__ writes, per plan, with the placeholders escaped for Markdown
     answer_off = text[text.index("### Answer when checks = false"):text.index("### Answer when checks = true")]
     answer_on = text[text.index("### Answer when checks = true"):]
-    assert ("Written by `__result__`: \\<find.item_uids[0]> has the parts \\<item.part_labels[0]>; "
-            "open checks: \\<checks.total>, weight \\<item.weight>.") in answer_on
-    assert ("Written by `__result__`: \\<find.item_uids[0]> has the parts \\<item.part_labels[0]>, "
-            "weight \\<item.weight>.") in answer_off
+    assert ("Written by `__result__`: \\<item.opened.item_uid> has the parts \\<item.parts.labels[0]>; "
+            "open checks: \\<checks.counted.total>, weight \\<item.parts.weight>.") in answer_on
+    assert ("Written by `__result__`: \\<item.opened.item_uid> has the parts \\<item.parts.labels[0]>, "
+            "weight \\<item.parts.weight>.") in answer_off
     # a phase that reads the same as in the first plan is one line
     assert "As in the plan when checks = false." in text[on:]
 
@@ -339,16 +365,44 @@ def test_check_fails_on_a_planning_command_file_the_loader_skips(workflow, monke
     assert "cannot be checked: planning command file(s) not loaded:" in out and "  broken: PlanningCommandFormatError:" in out
 
 
+COPY_FACTS = '''
+"""copy_item: a facts field that copies a value from a command, which is no longer read."""
+from pydantic import BaseModel, Field
+
+
+class Signature:
+    """Find one named item by copying its uids."""
+
+    class Input(BaseModel):
+        name: str = Field(description="the item's name")
+
+
+class PlanGenerator:
+    class ItemCopy(BaseModel):
+        item_uids: list[str] = Field(json_schema_extra={"from": "find_item.item_uids"})
+
+    def find(self, input) -> ItemCopy:
+        return [f"find_item query={input.name}"]
+'''
+
+
 def test_check_fails_on_a_fact_source_the_workflow_does_not_have(workflow, monkeypatch, capsys):
+    """A facts field that copies (``"from"``) is a load error: the file is skipped, and
+    ``command preview --check`` fails and names the command, which a typed field never needs."""
     command_preview.write_previews(workflow)
-    # the fixture has no _commands: its signatures cannot be read, so its sources go unchecked
     assert _run_cli(monkeypatch, "command", "preview", workflow, "--check") == 0
-    # a workflow whose commands have none of the fields the facts name
-    monkeypatch.setattr("fastworkflow.observation_offloading.facts.workflow_signatures", lambda folder: {})
+    with open(os.path.join(workflow, "_commands", "copy_item.py"), "w", encoding="utf-8") as handle:
+        handle.write(textwrap.dedent(COPY_FACTS))
     capsys.readouterr()
     assert _run_cli(monkeypatch, "command", "preview", workflow, "--check") == 1
     out = capsys.readouterr().out
-    assert "fact source not found: " in out and "show_item.py: " in out and "no command named" in out
+    assert "planning command file(s) not loaded" in out and "copy_item" in out
+    errors = [p.message for p in planning_commands.resolve_field_sources(workflow).errors
+              if p.command == "copy_item"]
+    assert errors and all(
+        "ItemCopy.item_uids is list[str]; a facts field is typed with a command's Output or Input. "
+        "Compute other values in a property or method of ItemCopy; "
+        "copies are no longer read (fact_from and \"from\" are removed)" in m for m in errors)
 
 
 def test_a_workflow_without_planning_commands_is_an_error(tmp_path):
@@ -364,6 +418,10 @@ from pydantic import BaseModel, Field
 
 from fastworkflow.planning import phase
 
+from .find_item import Signature as FindItem
+from .open_item_by_uid import Signature as OpenItem
+from .run_check import Signature as RunCheck
+
 
 class Signature:
     """Check the named items one by one until two pass. One job for the whole list."""
@@ -373,13 +431,17 @@ class Signature:
         deep: bool = Field(default=False, description="the request asks for the deep check")
 
 
-class Match(BaseModel):
-    item_uids: list[str] = Field(json_schema_extra={"from": "find_item.item_uids"})
-
-
 class Check(BaseModel):
-    uid: str = Field(json_schema_extra={"from": "open_item_by_uid.item_uid"})
-    passed: bool = Field(json_schema_extra={"from": "run_check.passed"})
+    opened: OpenItem.Output
+    ran: RunCheck.Output
+
+    @property
+    def uid(self) -> str:
+        return self.opened.item_uid
+
+    @property
+    def passed(self) -> bool:
+        return self.ran.passed
 
 
 class PlanGenerator:
@@ -395,7 +457,7 @@ class PlanGenerator:
     def quick(self, input):
         return [f"find_item query={input.names}", "run_check on each match", "say which passed"]
 
-    def find(self, input) -> Match:
+    def find(self, input) -> FindItem.Output:
         return [f"find_item query={input.names}"]
 
     @phase(over="find.item_uids", max_items=5, noun="matches",
@@ -432,7 +494,7 @@ def test_conditions_fan_out_settings_and_a_flat_plan_are_rendered(checks_workflo
     # When the call runs as phases is said once; the table is about the phased calls.
     assert ("The call runs as phases only when deep = true; for other inputs it runs flat, "
             "as one plan.") in text
-    assert "| `find` | `Match` | always | no |" in text
+    assert "| `find` | `find_item`'s `Output` | always | no |" in text
     assert ("| `checks` | `Check` | always | per item of `find.item_uids` as "
             "`uid` (matches); at most 5; until `lambda checks: sum(c.passed for c in checks) >= 2` |") in text
     # A phase's condition is the tests its method made on placeholder facts (len() reads
@@ -495,6 +557,10 @@ from pydantic import BaseModel, Field
 
 from fastworkflow.planning import phase
 
+from .list_boxes import Signature as ListBoxes
+from .open_box import Signature as OpenBox
+from .weigh_box import Signature as WeighBox
+
 
 class Signature:
     """Walk the boxes of one shelf, or only the boxes the request names. One job per shelf."""
@@ -515,19 +581,25 @@ class Signature:
         return None
 
 
-class Shelf(BaseModel):
-    box_uids: list[str] = Field(json_schema_extra={"from": "list_boxes.box_uids"})
-    box_labels: list[str] = Field(json_schema_extra={"from": "list_boxes.labels"})
-
-
 class Box(BaseModel):
-    uid: str = Field(json_schema_extra={"from": "open_box.box_uid"})
-    label: str = Field(json_schema_extra={"from": "open_box.label"})
-    weight: float = Field(json_schema_extra={"from": "weigh_box.weight"})
+    opened: OpenBox.Output
+    weighed: WeighBox.Output
+
+    @property
+    def uid(self) -> str:
+        return self.opened.box_uid
+
+    @property
+    def label(self) -> str:
+        return self.opened.label
+
+    @property
+    def weight(self) -> float:
+        return self.weighed.weight
 
 
 class PlanGenerator:
-    def shelf(self, input) -> Shelf:
+    def shelf(self, input) -> ListBoxes.Output:
         return [f"find_shelf query={input.shelf}", "list_boxes"]
 
     @phase(over=lambda input: [n for n in (input.first, input.second) if n]
@@ -545,8 +617,7 @@ class PlanGenerator:
         lines = []
         for one in box:
             kind = one.label.split("_", 1)[0]
-            where = "on the shelf" if one.uid in shelf.box_uids else "not on the shelf"
-            lines.append(f"{one.label} (kind {kind}) is {where} and weighs {int(one.weight)}.")
+            lines.append(f"{one.label} (kind {kind}) is on the shelf and weighs {int(one.weight)}.")
         return "\\n".join(lines)
 
 
@@ -555,7 +626,7 @@ def box_steps(uid, shelf):
         return ["open_box with the uid of the next box", "weigh_box"]
     index = next(i for i, one in enumerate(shelf.box_uids) if one == uid)
     return (["go_up"] if index else []) + [
-        f"open_box box_uid={uid} ({shelf.box_labels[index]})", "weigh_box"]
+        f"open_box box_uid={uid} ({shelf.labels[index]})", "weigh_box"]
 '''
 
 PICK_KIT = '''
@@ -565,6 +636,12 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from fastworkflow.planning import phase
+
+from .find_bin import Signature as FindBin
+from .find_box import Signature as FindBox
+from .find_crate import Signature as FindCrate
+from .find_tray import Signature as FindTray
+from .open_inner import Signature as OpenInner
 
 
 class Signature:
@@ -579,22 +656,40 @@ class Signature:
         count: int = Field(default=0, ge=1, description="never changes the steps")
 
 
-class BoxMatch(BaseModel):
-    uid: str = Field(json_schema_extra={"from": "find_box.box_uid"})
+class _Match:
+    @property
+    def uid(self) -> str:
+        return self.found.box_uid
 
     def matches(self, name):
         return bool(name)
 
 
-class CrateMatch(BoxMatch):
-    pass
+class BoxMatch(_Match, BaseModel):
+    found: FindBox.Output
+
+
+class CrateMatch(_Match, BaseModel):
+    found: FindCrate.Output
+
+
+class BinMatch(_Match, BaseModel):
+    found: FindBin.Output
+
+
+class TrayMatch(_Match, BaseModel):
+    found: FindTray.Output
 
 
 class Inner(BaseModel):
-    labels: list[str] = Field(json_schema_extra={"from": "open_inner.labels"})
+    opened: OpenInner.Output
+
+    @property
+    def labels(self) -> list[str]:
+        return self.opened.labels
 
 
-MODELS = {"box": BoxMatch, "crate": CrateMatch, "bin": BoxMatch, "tray": BoxMatch}
+MODELS = {"box": BoxMatch, "crate": CrateMatch, "bin": BinMatch, "tray": TrayMatch}
 
 
 class PlanGenerator:
@@ -678,14 +773,15 @@ def test_fan_out_caps_and_outputs_are_shown_with_the_inputs_that_give_them(shelf
             "to a record") in alternatives
     assert all(a.startswith(("when ", "unless ")) for a in alternatives)
     find = next(line for line in previews["pick_kit.md"].splitlines() if line.startswith("| `find` |"))
-    assert "when kind = crate: `CrateMatch`" in find and "unless kind = crate: `BoxMatch`" in find
+    assert "when kind = crate: `CrateMatch`" in find and "when kind = box: `BoxMatch`" in find
+    assert "when kind = bin: `BinMatch`" in find and "when kind = tray: `TrayMatch`" in find
 
 
 def test_placeholders_survive_splitting_and_number_conversion(shelf_workflow):
     """Fixes 4 and 5: a split on "_" keeps the whole placeholder; int() gives 999999, said so."""
     text = command_preview.render_previews(shelf_workflow)["walk_boxes.md"]
     every = _plan(text, "when scope = every, boxes = 0")
-    assert ("Written by `__result__`: \\<shelf.box_labels[0]> (kind \\<shelf.box_labels[0]>) is on "
+    assert ("Written by `__result__`: \\<box[0].opened.label> (kind \\<box[0].opened.label>) is on "
             "the shelf and weighs 999999.") in text[text.index("### Answer when scope = every, boxes = 0"):]
     assert "(kind <shelf)" not in text and "weighs 0" not in text
     assert "999999" in command_preview.PLACEHOLDER_NOTE
@@ -697,9 +793,9 @@ def test_placeholder_facts_are_consistent_so_the_matched_path_renders(shelf_work
     text = command_preview.render_previews(shelf_workflow)["walk_boxes.md"]
     every = _plan(text, "when scope = every, boxes = 0")
     assert ("For the first item, `uid` = `<shelf.box_uids[0]>`:\n\n"
-            "1. `open_box box_uid=<shelf.box_uids[0]> (<shelf.box_labels[0]>)`") in every
+            "1. `open_box box_uid=<shelf.box_uids[0]> (<shelf.labels[0]>)`") in every
     assert ("For each later item (shown for the second), `uid` = `<shelf.box_uids[1]>`:\n\n"
-            "1. `go_up`\n2. `open_box box_uid=<shelf.box_uids[1]> (<shelf.box_labels[1]>)`") in every
+            "1. `go_up`\n2. `open_box box_uid=<shelf.box_uids[1]> (<shelf.labels[1]>)`") in every
     assert "not on the shelf" not in every
     assert "open_box with the uid of the next box" not in text
 
@@ -726,7 +822,7 @@ def test_many_renders_show_plans_that_need_two_changed_inputs(shelf_workflow):
     assert len(titles) < 48
     assert any("kind = crate, mode = deep" in t for t in titles)
     crate = _plan(text, next(t[len("### Plan "):] for t in titles if "kind = crate, mode = deep" in t))
-    assert "1. `open_inner of <find.uid>`" in crate
+    assert "1. `open_inner of <find.found.box_uid>`" in crate
     sizes = [4, 3, 2, 2]
     cover = command_preview._pairwise(sizes, (0, 0, 0, 0))
     assert cover[0] == (0, 0, 0, 0) and len(cover) < 48
@@ -814,7 +910,8 @@ def test_answer_mode_is_by_code_only_for_say_that_and_guards_need_a_negation():
 ANSWER_MODE = '''
 """answer_mode: a verbatim answer phase, then a judgement last phase, and no __result__."""
 from pydantic import BaseModel, Field
-from fastworkflow.planning import fact_from
+
+from .find_item import Signature as FindItem
 
 
 class Signature:
@@ -825,14 +922,11 @@ class Signature:
 
 
 class PlanGenerator:
-    class Match(BaseModel):
-        uids: list[str] = fact_from("find_item.item_uids")
-
-    def find(self, input) -> Match:
+    def find(self, input) -> FindItem.Output:
         return ["open_catalog", f"find_item query={input.name}"]
 
     def summary(self, find):
-        return [f"say that {find.uids[0]} is listed"]
+        return [f"say that {find.item_uids[0]} is listed"]
 
     def report(self, find):
         return ["say which item is heavier"]
@@ -956,7 +1050,8 @@ SHELF_WALK = '''
 """shelf_walk: one shelf, its named box when the request names one, and its label."""
 from pydantic import BaseModel, Field
 
-from fastworkflow.planning import fact_from
+from .find_shelf import Signature as FindShelf
+from .open_box_by_uid import Signature as OpenBox
 
 
 class Signature:
@@ -972,14 +1067,15 @@ class PlanGenerator:
         box = [self.box] if input.box else []
         return [self.find, *box, self.label, self.only_after_box]
 
-    class ShelfMatch(BaseModel):
-        uid: str = fact_from("find_shelf.shelf_uid")
-
-    def find(self, input) -> ShelfMatch:
+    def find(self, input) -> FindShelf.Output:
         return [f"find_shelf query={input.shelf}"]
 
     class BoxFacts(BaseModel):
-        uid: str = fact_from("open_box_by_uid.box_uid")
+        opened: OpenBox.Output
+
+        @property
+        def uid(self) -> str:
+            return self.opened.box_uid
 
     def box(self, input, find) -> BoxFacts:
         return [f"open_box_by_uid with the uid of the {input.box} match"]
@@ -1224,11 +1320,11 @@ def test_a_union_output_renders_each_member_as_a_labelled_variant(union_workflow
     assert "### `find` -> `Lib/find_book`'s `Output` | `Lib/find_member`'s `Output`" in text
     # each member, labelled by its command, with its own fields
     assert ("`Lib/find_book`'s `Output`:\n\n| fact | type | from |\n|---|---|---|\n"
-            "| `titles` | `list[str]` | not filled from a command |\n"
-            "| `total` | `int` | not filled from a command |") in text
+            "| `titles` | `list[str]` | `Lib/find_book`'s `Output` |\n"
+            "| `total` | `int` | `Lib/find_book`'s `Output` |") in text
     assert ("`Lib/find_member`'s `Output`:\n\n| fact | type | from |\n|---|---|---|\n"
-            "| `names` | `list[str]` | not filled from a command |\n"
-            "| `total` | `int` | not filled from a command |") in text
+            "| `names` | `list[str]` | `Lib/find_member`'s `Output` |\n"
+            "| `total` | `int` | `Lib/find_member`'s `Output` |") in text
 
 
 def test_a_from_edge_to_a_field_of_one_member_resolves_and_says_which_member_has_it(union_workflow):
@@ -1309,3 +1405,122 @@ def test_the_library_previews_write_and_check_clean_in_a_tmp_dir(tmp_path, monke
     assert _run_cli(monkeypatch, "command", "preview", LIBRARY, "--out", str(out)) == 0
     assert (out / "Library" / "find_record.md").is_file()
     assert _run_cli(monkeypatch, "command", "preview", LIBRARY, "--check", "--out", str(out)) == 0
+
+
+# ---------------------------------------------------------------------------
+# over= may name a property (of the facts model, or of a typed field's model); the preview shows
+# the items on the placeholder facts, or says they are decided at run time (Phase 15 follow-up).
+
+PROP_FIND = '''
+"""find_props: find a book, then go through the titles the facts compute."""
+from typing import Optional
+
+from pydantic import BaseModel, Field
+
+from fastworkflow.planning import phase
+
+from .find_book import Signature as FindBook
+
+
+class Listing(BaseModel):
+    """The phase's facts: a typed command Output, and properties computed from it."""
+
+    found: Optional[FindBook.Output] = None
+
+    @property
+    def shown(self) -> list[str]:
+        return sorted(self.found.titles) if self.found else []
+
+    @property
+    def ranked(self) -> str:
+        return {"first": "1"}[self.found.titles[0]]
+
+
+class Signature:
+    """Find a book and go through its titles."""
+
+    plain_utterances = ["go through the titles of Dune"]
+
+    class Input(BaseModel):
+        name: str = Field(description="the name to look for")
+
+
+class PlanGenerator:
+    def __phases__(self, input):
+        return [self.find, self.each]
+
+    def find(self, input) -> Listing:
+        return [f"find_book query={input.name}"]
+
+    @phase(over="OVER")
+    def each(self, title):
+        return [f"find_book query={title}"]
+'''
+
+
+def _props_workflow(root, over: str = "find.shown", output: str = "Listing") -> str:
+    # The folder's basename is fixed ("props_workflow") and its parent is the caller's: two copies at
+    # two paths share a basename, so only the path tells their namespaces apart.
+    folder = root / "props_workflow"
+    commands = folder / "_commands" / "Lib"
+    commands.mkdir(parents=True)
+    (commands / "_Lib.py").write_text(UNION_CONTEXT)
+    (commands / "find_book.py").write_text(UNION_STUB.replace("OUTPUT_FIELDS", BOOK_FIELDS))
+    text = PROP_FIND.replace("OVER", over).replace("-> Listing", f"-> {output}")
+    (commands / "find_props.py").write_text(text)
+    return str(folder)
+
+
+def test_a_property_of_the_facts_model_fans_out_on_the_placeholder_facts(tmp_path):
+    text = command_preview.render_previews(_props_workflow(tmp_path / "one"))["Lib/find_props.md"]
+    # the property reads the placeholder titles: one item, its placeholder, and its steps read with it
+    assert "| `each` | none | always | per item of `find.shown` as `title` |" in text
+    assert "For the first item, `title` = `<find.found.titles[0]>`:\n\n1. `find_book query=<find.found.titles[0]>`" \
+        in text
+    assert "Items decided at run time" not in text
+
+
+def test_a_fan_out_over_a_property_shows_the_later_item_block_as_a_field_does(tmp_path):
+    # the property reads a list one typed command model down (found.titles); the placeholder list
+    # gives the fan-out its second item, so the later-items block renders as it does over a field
+    via_property = command_preview.render_previews(_props_workflow(tmp_path / "prop"))["Lib/find_props.md"]
+    via_field = command_preview.render_previews(
+        _props_workflow(tmp_path / "field", over="find.found.titles"))["Lib/find_props.md"]
+    for text, path in ((via_property, "find.found.titles"), (via_field, "find.found.titles")):
+        assert ("For each later item (shown for the second), `title` = `<find.found.titles[1]>`:\n\n"
+                "1. `find_book query=<find.found.titles[1]>`") in text, path
+    assert ("For the first item, `title` = `<find.found.titles[0]>`:\n\n"
+            "1. `find_book query=<find.found.titles[0]>`") in via_property
+
+
+def test_a_property_that_raises_on_the_placeholder_facts_is_decided_at_run_time(tmp_path):
+    text = command_preview.render_previews(
+        _props_workflow(tmp_path / "one", over="find.ranked"))["Lib/find_props.md"]
+    assert ("_Items decided at run time (KeyError while the template was built, with every fact unknown)._"
+            in text)
+    assert "find_book query=<find.found.titles[0]>" not in text
+
+
+def test_an_over_naming_neither_a_field_nor_a_property_is_still_unresolved(tmp_path):
+    folder = _props_workflow(tmp_path / "one", over="find.nosuch")
+    with pytest.raises(command_preview.PreviewError) as error:
+        command_preview.render_previews(folder)
+    assert "Listing has no field 'nosuch'" in str(error.value)
+
+
+def test_two_copies_of_one_workflow_at_different_paths_preview_identically(tmp_path):
+    # the Optional facts field (found) renders its type by the class's plain name, so no path or
+    # namespace digest reaches the preview: the two copies' previews are the same text
+    first = command_preview.render_previews(_props_workflow(tmp_path / "first"))
+    second = command_preview.render_previews(_props_workflow(tmp_path / "second"))
+    assert first == second
+    for text in first.values():
+        assert not re.search(r"__[0-9a-f]{8}", text)
+        assert "talk_to" not in text and "props_workflow." not in text
+
+
+def test_an_optional_facts_field_renders_its_type_by_plain_class_name(tmp_path):
+    text = command_preview.render_previews(_props_workflow(tmp_path / "one"))["Lib/find_props.md"]
+    # the Optional field: its command Output by plain name, as a non-Optional typed field renders
+    assert "Optional" not in text and "typing." not in text
+    assert "| `found` | `Output | None` |" in text.replace("\\|", "|")

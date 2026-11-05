@@ -5,7 +5,10 @@ __result__ says what book found, or that no book matches.
 """
 from pydantic import BaseModel, Field
 
-from fastworkflow.planning import fact_from, run
+from fastworkflow.planning import run
+
+from .find_book import Signature as FindBook
+from .show_book import Signature as ShowBook
 
 
 class Signature:
@@ -18,16 +21,23 @@ class Signature:
 
 
 class PlanGenerator:
-    class Found(BaseModel):
-        book_uids: list[str] = fact_from("find_book.book_uids")
-
-    def find(self, input) -> Found:
+    def find(self, input) -> FindBook.Output:
         return [run("find_book", query=input.title)]
 
     class Book(BaseModel):
-        name: str = fact_from("show_book.title")
-        author: str = fact_from("show_book.author")
-        copies: int = fact_from("show_book.copies")
+        show: ShowBook.Output
+
+        @property
+        def name(self) -> str:
+            return self.show.title
+
+        @property
+        def author(self) -> str:
+            return self.show.author
+
+        @property
+        def copies(self) -> int:
+            return self.show.copies
 
     def book(self, find) -> Book:
         if not find.book_uids:

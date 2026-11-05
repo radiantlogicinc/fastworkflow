@@ -9,7 +9,8 @@ import json
 
 from pydantic import BaseModel, Field
 
-from fastworkflow.planning import fact_from, run
+from fastworkflow.planning import run
+from fastworkflow._framework_commands.review_proposal import Signature as ReviewProposal
 from fastworkflow.review_proposals import SubTask
 
 
@@ -28,7 +29,11 @@ class Signature:
 
 class PlanGenerator:
     class Review(BaseModel):
-        accepted: str = fact_from("review_proposal.accepted")
+        proposal: ReviewProposal.Output
+
+        @property
+        def accepted(self) -> str:
+            return self.proposal.accepted
 
     def review(self, input) -> Review:
         return [run("review_proposal", round=1, items=input.subtasks)]

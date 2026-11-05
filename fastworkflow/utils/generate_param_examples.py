@@ -6,6 +6,7 @@ import random
 import sys
 import re
 import json
+from fastworkflow.utils.python_utils import legacy_module_names
 from enum import Enum
 from types import UnionType
 from typing import (
@@ -581,7 +582,7 @@ def render_field_examples(
         try:
             rendered.append(repr(run_stable_form(example)))
         except TypeError:
-            type_name = f"{type(example).__module__}.{type(example).__qualname__}"
+            type_name = legacy_module_names(f"{type(example).__module__}.{type(example).__qualname__}")
             logger.warning(
                 f"Field '{field_name}' of command '{command_name}' declares an example "
                 f"of type {type_name}, which has no run-stable representation. The "

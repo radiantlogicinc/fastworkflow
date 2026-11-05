@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import re
 import shutil
 import sys
 from types import SimpleNamespace
@@ -132,3 +133,17 @@ def test_a_namespaced_module_name_digests_as_the_bare_name_it_had_before(tmp_pat
     assert python_utils.legacy_module_names(f"{namespace}._commands.startup") == "library._commands.startup"
     assert cache._canonical_digest({"type": f"{namespace}.application.library.Book"}) == \
         cache._canonical_digest({"type": "library.application.library.Book"})
+
+
+def test_two_copies_of_the_tutorial_workflow_at_two_paths_preview_identically(tmp_path):
+    """The previews name a planning command's types by their plain names: a workflow folder's namespace
+    digest (set by its path) never reaches a preview, so two copies at two paths preview the same text."""
+    from fastworkflow import command_preview
+
+    tutorial = os.path.join(ROOT, "tests", "planning_tutorial_workflow")
+    first = command_preview.render_previews(_copy(tutorial, tmp_path / "first" / "planning_tutorial_workflow"))
+    second = command_preview.render_previews(_copy(tutorial, tmp_path / "second" / "planning_tutorial_workflow"))
+    assert first and first == second
+    for name, text in first.items():
+        assert re.search(r"__[0-9a-f]{8}", text) is None, name
+        assert str(tmp_path) not in text, name

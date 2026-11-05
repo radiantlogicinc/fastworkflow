@@ -5,7 +5,10 @@ sub-plan; __result__ names every book with its copies.
 """
 from pydantic import BaseModel, Field
 
-from fastworkflow.planning import count, fact_from, phase, run
+from fastworkflow.planning import count, phase, run
+
+from .find_book import Signature as FindBook
+from .show_book import Signature as ShowBook
 
 
 class Signature:
@@ -19,18 +22,11 @@ class Signature:
 
 
 class PlanGenerator:
-    class Found(BaseModel):
-        book_uids: list[str] = fact_from("find_book.book_uids")
-
-    def find(self, input) -> Found:
+    def find(self, input) -> FindBook.Output:
         return [run("find_book", query=input.author)]
 
-    class Book(BaseModel):
-        name: str = fact_from("show_book.title")
-        copies: int = fact_from("show_book.copies")
-
     @phase(over="find.book_uids", max_items=5, noun="books", bind=False)
-    def book(self, uid) -> Book:
+    def book(self, uid) -> ShowBook.Output:
         return [run("show_book", book_uid=uid)]
 
     def __result__(self, input, book=None):
@@ -39,5 +35,5 @@ class PlanGenerator:
     def _books_by(self, author, book):
         if not book:
             return f"No book by {author} was found."
-        copies = "; ".join(f"{b.name} ({count(b.copies, 'copy', 'copies')})" for b in book)
+        copies = "; ".join(f"{b.title} ({count(b.copies, 'copy', 'copies')})" for b in book)
         return f"The books by {author}: {copies}."

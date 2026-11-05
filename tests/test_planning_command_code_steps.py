@@ -205,16 +205,19 @@ def command_from_module(name, module, path):
                                            plan_fn=getattr(module, "plan", None))
 
 
-def _from(source, **kwargs):
-    return Field(json_schema_extra={"from": source}, **kwargs)
+def _todo_signature(manager: str, command: str):
+    """A todo_list_workflow command's Signature, loaded as the workflow loads it, so that its
+    Output is the type a phase hands on (a facts model is typed with a command's Output)."""
+    import os
+    from fastworkflow.utils import python_utils
+    folder = os.path.join(os.path.dirname(__file__), "todo_list_workflow")
+    path = os.path.join(folder, "_commands", manager, f"{command}.py")
+    return python_utils.get_module(path, folder).Signature
 
 
-class Lists(BaseModel):
-    list_ids: list[int] = _from("list_todo_lists.todolist_ids", min_length=1)
-
-
-class Opened(BaseModel):
-    description: str = _from("get_todo_list.description")
+#: What list_todo_lists gives (``todolist_ids``) and what get_todo_list gives (``description``).
+Lists = _todo_signature("TodoListManager", "list_todo_lists").Output
+Opened = _todo_signature("TodoListManager", "get_todo_list").Output
 
 
 def lists_steps():
@@ -222,7 +225,7 @@ def lists_steps():
 
 
 def open_steps(lists: Optional[Lists] = None):
-    return [f"get_todo_list id={lists.list_ids[-1] if lists else '<the id>'}",
+    return [f"get_todo_list id={lists.todolist_ids[-1] if lists else '<the id>'}",
             "get_all_children (full list)"]
 
 
@@ -481,7 +484,7 @@ def test_a_phase_of_mechanical_steps_runs_with_no_model_call(todo):
                                   "get_properties"]
     spans = _phases(todo.sink)
     assert [s.attributes["phase"] for s in spans] == ["lists", "open", "report"]
-    assert spans[0].attributes["facts"] == {"list_ids": [1, 7, 8]}
+    assert spans[0].attributes["facts"] == {"todolist_ids": [1, 7, 8]}
     assert spans[1].attributes["facts"] == {"description": "errands"}
     assert [s.attributes["steps_by_code"] for s in spans] == [1, 2, 1]
     assert [s.attributes["code_stop"] for s in spans] == ["done", "done", "done"]
@@ -590,7 +593,7 @@ def test_a_failed_code_step_hands_over_with_the_failure_last(todo):
     spans = _phases(todo.sink)
     assert spans[1].attributes["code_stop"] == "step 1 failed"
     # Code did not fail the phase; the fill did, as for any run that read nothing.
-    assert "the planned run was not found" in spans[1].attributes["facts_error"]
+    assert "no successful run of 'TodoListManager/get_todo_list' fills the phase output" in spans[1].attributes["facts_error"]
     assert "stopped at its part 'open'" in result.answer
 
 
@@ -645,7 +648,7 @@ def test_planner_steps_before_run_first_and_the_first_phase_runs_its_code_steps(
     assert todo.workflow.sent == ["list_todo_lists", "list_todo_lists", "get_todo_list id=8",
                                   "get_all_children", "get_properties"]
     # Facts fill from the first phase's own run and the next phase binds them.
-    assert spans[1].attributes["facts"] == {"list_ids": [1, 7, 8]}
+    assert spans[1].attributes["facts"] == {"todolist_ids": [1, 7, 8]}
     assert spans[2].attributes["facts"] == {"description": "errands"}
 
 
@@ -883,8 +886,7 @@ def climbable(monkeypatch):
 
 
 def test_a_fan_out_of_mechanical_items_runs_every_item_with_no_model_call(todo, climbable):
-    class Props(BaseModel):
-        description: str = _from("get_todo_list.description")
+    Props = Opened
 
     todo.plan = _plan(
         Phase("each", lambda item: [f"get_todo_list id={item}", "get_properties"],

@@ -374,17 +374,13 @@ def test_inherited_result_is_checked(tmp_path):
 
 _MATCH_RESULT_BASE = '''\
 """Shared find phase and __result__ for title match planning commands."""
-from pydantic import BaseModel
+from fastworkflow.planning import run
 
-from fastworkflow.planning import fact_from, run
-
-
-class FoundBooks(BaseModel):
-    book_uids: list[str] = fact_from("find_book.book_uids")
+from .find_book import Signature as FindBook
 
 
 class PlanGenerator:
-    def find(self, input) -> FoundBooks:
+    def find(self, input) -> FindBook.Output:
         return [run("find_book", query=input.title)]
 
     def __result__(self, input, find):
@@ -731,12 +727,11 @@ class PlanGenerator:
     path = os.path.join(folder, "_commands", "Book", "bad_shelf.py")
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(bad)
-    mod = python_utils.get_module(path, folder)
-    with pytest.raises(
-        PlanningCommandFormatError,
-        match=r"Shelf\.borrowers is list\[str\]; a facts field is typed with a command's Output or Input",
-    ):
-        planning_commands.command_from_module("Book/bad_shelf", mod, path)
+    # The command still loads (a field-source error is logged, not raised); the workflow's field-source
+    # resolution reports the untyped field as an error, which fails ``command preview --check``.
+    errors = planning_commands.resolve_field_sources(folder).errors_for("Book/bad_shelf")
+    assert any("Shelf.borrowers is list[str]; a facts field is typed with a command's Output or Input" in e
+               for e in errors), errors
 
 
 def test_library_loan_report_result_uses_list_loans_output(library_proof_env):

@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 import dspy
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model, model_validator
 
 from fastworkflow import planning_phases, tracing
 from fastworkflow.planning import phase, planned
@@ -21,7 +21,6 @@ from fastworkflow.observation_offloading.archive import command_run_record
 from fastworkflow.planning_commands import (
     PlanningCommandCallPlan,
     PlanningCommandFormatError,
-    check_phase_sources,
     call_phases,
     phases_for,
 )
@@ -31,10 +30,9 @@ from fastworkflow.planning_phases import (
     PhaseError,
     bound_arguments,
     concatenated_steps,
-    fact_from,
     phase_query,
     phase_step_budget,
-    fill_output,
+    fill_output as _fill_output,
     planned_record,
     planned_steps,
     runs_for_facts,
@@ -69,17 +67,53 @@ LIBRARY = "Library"
 BOOK = "Book b1 Dune"
 
 
-class Found(BaseModel):
-    book_uids: list[str] = fact_from("find_book.book_uids", min_length=1)
+def command_output(command: str, **fields):
+    """The ``Output`` of a library command as a phase hands it on: a model named ``Output`` whose module
+    sits under ``_commands`` (so that it reads as *command*'s Output, as a ``Signature.Output`` does).
+    A facts field is typed with such a model; any other value is computed in a property."""
+    return create_model("Output", __module__=f"library_fixture._commands.{command}", **fields)
+
+
+#: find_book's Output: a phase that found nothing fails (the min_length)
+Found = command_output("find_book", book_uids=(list[str], Field(min_length=1)))
+OpenBookOutput = command_output("open_book_by_uid", book_uid=(str, ...))
+ListLoansOutput = command_output("list_loans", loan_uids=(list[str], ...))
+#: count_notes's Output, handed on as it is
+NoteFacts = command_output("count_notes", total=(int, ...))
 
 
 class BookFacts(BaseModel):
-    uid: str = fact_from("open_book_by_uid.book_uid")
-    loan_uids: list[str] = fact_from("list_loans.loan_uids")
+    """The book's facts: one field per command, typed with its Output; the old flat names are
+    computed (``BookFacts(uid=..., loan_uids=...)`` still builds it, the fixtures' shorthand)."""
+
+    opened: OpenBookOutput
+    loans: ListLoansOutput
+
+    @model_validator(mode="before")
+    @classmethod
+    def _flat(cls, data):
+        if isinstance(data, dict) and ("uid" in data or "loan_uids" in data):
+            return {"opened": {"book_uid": data.get("uid")}, "loans": {"loan_uids": data.get("loan_uids")}}
+        return data
+
+    @property
+    def uid(self) -> str:
+        return self.opened.book_uid
+
+    @property
+    def loan_uids(self) -> list[str]:
+        return self.loans.loan_uids
 
 
-class NoteFacts(BaseModel):
-    total: int = fact_from("count_notes.total")
+#: The workflow's command names a phase's steps are read with: the runs' command names alone are not
+#: enough (a step that opens a record no run opened names a command none of the phase's runs is).
+FILL_COMMANDS = ("open_library", "find_book", "open_book_by_uid", "list_loans", "list_books", "count_notes")
+
+
+def fill_output(model, runs, **kwargs):
+    """``planning_phases.fill_output`` read with the library's command names."""
+    kwargs.setdefault("commands", FILL_COMMANDS)
+    return _fill_output(model, runs, **kwargs)
 
 
 #: What each steps_fn was called with, by phase name.
@@ -242,11 +276,16 @@ def test_when_false_leaves_the_phase_out():
 
 
 def test_a_malformed_from_fails_the_load():
-    class Bad(BaseModel):
-        uid: str = fact_from("open_book_by_uid")
+    # A copy (a facts field with a "from", well formed or not) is a load error: copies are no longer read.
+    from fastworkflow.typed_phase_facts import check_typed_facts_model
 
-    with pytest.raises(PlanningCommandFormatError, match="must be"):
-        _phased_command(plan=lambda input: [Phase("find", lambda: ["x"], output=Bad)])
+    class Bad(BaseModel):
+        uid: str = Field(json_schema_extra={"from": "open_book_by_uid"})
+
+    (message,) = check_typed_facts_model("_commands/show_book.py", Bad, {}, {})
+    assert message == (
+        "Bad.uid is str; a facts field is typed with a command's Output or Input. Compute other values in "
+        "a property or method of Bad; copies are no longer read (fact_from and \"from\" are removed)")
 
 
 def test_a_parameter_no_earlier_phase_provides_fails_the_load():
@@ -303,20 +342,31 @@ class ListLoans:
 
 
 def test_a_missing_source_field_is_a_load_warning_not_a_failure():
+    # check_phase_sources is gone with the copies it checked: no phase output names a field of
+    # another command to be missing. The facts of the library skill are typed with Outputs, which load.
+    from fastworkflow import planning_commands
+    from fastworkflow.typed_phase_facts import check_typed_facts_model
+
+    assert not hasattr(planning_commands, "check_phase_sources")
     command = _phased_command()
     signatures = {"Library/find_book": FindBook, "Library/open_book_by_uid": OpenBook,
                   "Book/list_loans": ListLoans}
-    warnings = check_phase_sources(command, signatures)
-    # count_notes does not exist yet: one warning, for NoteFacts only.
-    assert len(warnings) == 1 and "count_notes" in warnings[0]
+    for model in command.phase_outputs:
+        assert check_typed_facts_model(command.path, model, {}, signatures) == []
 
 
 def test_a_plain_name_several_contexts_define_passes_when_one_context_resolves_it():
-    command = _phased_command()
+    # A facts model typed with the Output of a command several contexts define loads: each context's
+    # Output is its own type, and the model names one of them.
+    from fastworkflow.typed_phase_facts import check_typed_facts_model
+
+    class Shelf(BaseModel):
+        loans: ListLoans.Output
+
     signatures = {"Library/find_book": FindBook, "Library/open_book_by_uid": OpenBook,
                   "Book/list_loans": ListLoans, "Shelf/list_loans": FindBook,
                   "Book/count_notes": SimpleNamespace(Output=NoteFacts)}
-    assert check_phase_sources(command, signatures) == []
+    assert check_typed_facts_model("_commands/shelf.py", Shelf, {}, signatures) == []
 
 
 def test_parameters_bind_by_name_and_keep_their_defaults():
@@ -385,8 +435,7 @@ def _cmd_run(command, input, output=None, context=LIBRARY, success=True):
 FIND_PLAN = "1. open_library\n2. find_book query=Dune"
 
 
-class Opened(BaseModel):
-    uid: str = fact_from("open_book_by_uid.book_uid")
+Opened = command_output("open_book_by_uid", book_uid=(str, ...))
 
 
 def test_an_off_plan_lookup_does_not_replace_the_planned_fact():
@@ -404,8 +453,7 @@ def test_an_off_plan_lookup_does_not_replace_the_planned_fact():
 def test_only_an_off_plan_lookup_fails_naming_the_planned_step():
     runs = [_cmd_run("open_library", None, context=""),
             _cmd_run("Library/find_book", {"query": "Emma"}, {"book_uids": ["b2"]})]
-    with pytest.raises(MissingFactError, match=r"Found\.book_uids.*the planned run was not found.*"
-                                               r"step 2 \(find_book query=Dune\)"):
+    with pytest.raises(MissingFactError, match=r"Output: no successful run of 'find_book' fills the phase output"):
         fill_output(Found, runs, record=LIBRARY, plan_text=FIND_PLAN)
 
 
@@ -413,19 +461,20 @@ def test_pages_of_the_planned_query_still_join():
     runs = [_cmd_run("find_book", {"query": "Dune", "start": None}, {"book_uids": ["b1", "b3"]}),
             _cmd_run("find_book", {"query": "Emma"}, {"book_uids": ["b2"]}),
             _cmd_run("find_book", {"query": "Dune", "start": 2}, {"book_uids": ["b4"]})]
-    filled = fill_output(Found, runs, record=LIBRARY, plan_text=FIND_PLAN)
+    # The pages join when the step asks for the full list (a typed fill reads page 1 otherwise).
+    filled = fill_output(Found, runs, record=LIBRARY, plan_text=FIND_PLAN + " (full list)")
     assert filled.book_uids == ["b1", "b3", "b4"]
 
 
 def test_a_step_with_a_prose_or_placeholder_argument_keeps_the_looser_match():
-    runs = [_cmd_run("open_book_by_uid", {"book_uid": "b1"}),
-            _cmd_run("open_book_by_uid", {"book_uid": "b2"})]
+    runs = [_cmd_run("open_book_by_uid", {"book_uid": "b1"}, {"book_uid": "b1"}),
+            _cmd_run("open_book_by_uid", {"book_uid": "b2"}, {"book_uid": "b2"})]
     for plan in ("1. open_book_by_uid with the uid of the Dune match",
                  "1. open_book_by_uid book_uid=<the uid of the match>"):
-        assert fill_output(Opened, runs, record=LIBRARY, plan_text=plan).uid == "b2"
+        assert fill_output(Opened, runs, record=LIBRARY, plan_text=plan).book_uid == "b2"
     # A concrete uid takes only its own run.
     assert fill_output(Opened, runs, record=LIBRARY,
-                       plan_text="1. open_book_by_uid book_uid=b1").uid == "b1"
+                       plan_text="1. open_book_by_uid book_uid=b1").book_uid == "b1"
 
 
 def test_a_command_no_step_names_keeps_the_earlier_rules():
@@ -433,10 +482,7 @@ def test_a_command_no_step_names_keeps_the_earlier_rules():
     assert fill_output(Found, runs, record=LIBRARY, plan_text="1. say the uid").book_uids == ["b2"]
 
 
-class KindLoans(BaseModel):
-    kind: str = fact_from("list_loans.kind")
-    loan_uids: list[str] = fact_from("list_loans.loan_uids")
-    total: int = fact_from("list_loans.total")
+KindLoans = command_output("list_loans", kind=(str, ...), loan_uids=(list[str], ...), total=(int, ...))
 
 
 OPEN_KIND_PLAN = "1. list_loans kind=<the kind the book names: print or ebook>"
@@ -444,7 +490,7 @@ OPEN_KIND_PLAN = "1. list_loans kind=<the kind the book names: print or ebook>"
 
 def _loans(kind, uids, start=None):
     return _cmd_run("list_loans", {"kind": kind, "start": start},
-                    {"loan_uids": uids, "total": len(uids)}, context=BOOK)
+                    {"kind": kind, "loan_uids": uids, "total": len(uids)}, context=BOOK)
 
 
 def _kind_loans(runs, plan=OPEN_KIND_PLAN):
@@ -461,8 +507,8 @@ def test_a_probe_of_an_open_argument_that_listed_nothing_does_not_replace_the_re
     # Pages of the read with rows still join; its empty page past the end carries nothing.
     runs = [_loans("print", ["l1", "l2"]), _loans("print", [], start=2), _loans("ebook", [])]
     runs[0]["output"]["total"] = 2
-    assert _kind_loans(runs) == ("print", ["l1", "l2"], 2)
-    # Without a plan nothing is dropped: the latest read wins, as facts_from_runs reads it.
+    assert _kind_loans(runs, plan=OPEN_KIND_PLAN + " (full list)") == ("print", ["l1", "l2"], 2)
+    # Without a plan nothing is dropped: the latest read wins, as the facts read it.
     filled = fill_output(KindLoans, [_loans("print", ["l1"]), _loans("ebook", [])], record=BOOK)
     assert (filled.kind, filled.loan_uids) == ("ebook", [])
 
@@ -476,15 +522,14 @@ def test_an_empty_read_is_kept_when_it_is_no_probe_of_an_open_argument():
     # A step that fixes the value takes only its own run, empty or not.
     assert _kind_loans([_loans("print", ["l1"]), _loans("ebook", [])],
                        plan="1. list_loans kind=ebook") == ("ebook", [], 0)
-    # Queries that give other parameters are not values of one argument: the broadest wins.
+    # Queries that give other parameters are not values of one argument: a typed fill has no "broadest
+    # query" rule (it read copies), so the latest read of the command is the facts.
     narrowed = _cmd_run("list_loans", {"kind": "ebook", "filter": "Ann"},
-                        {"loan_uids": ["l9"], "total": 1}, context=BOOK)
-    assert _kind_loans([_loans("print", []), narrowed]) == ("print", [], 0)
+                        {"kind": "ebook", "loan_uids": ["l9"], "total": 1}, context=BOOK)
+    assert _kind_loans([_loans("print", []), narrowed]) == ("ebook", ["l9"], 1)
 
 
-class FoundNamed(BaseModel):
-    book_uids: list[str] = fact_from("find_book.book_uids", min_length=1)
-    labels: list[str] = fact_from("find_book.labels")
+FoundNamed = command_output("find_book", book_uids=(list[str], Field(min_length=1)), labels=(list[str], ...))
 
 
 FIND_TITLE_PLAN = "1. open_library\n2. find_book query=Dune Messiah"
@@ -511,7 +556,7 @@ def test_the_planned_row_is_picked_out_of_many():
     assert (filled.book_uids, filled.labels) == (["b14"], ["Dune Messiah"])
     # Two rows hold the value: no single row, so the run is refused as before.
     runs[0]["output"]["labels"][0] = "Dune Messiah"
-    with pytest.raises(MissingFactError, match="the planned run was not found"):
+    with pytest.raises(MissingFactError, match="no successful run of"):
         fill_output(FoundNamed, runs, record=LIBRARY, plan_text=FIND_TITLE_PLAN)
 
 
@@ -535,7 +580,7 @@ def test_a_lookup_in_another_form_whose_output_lacks_the_planned_value_still_fai
     for labels in (["Emma"], ["Dune Messiah 2"], []):
         runs = [_cmd_run("find_book", {"query": "Dun"},
                          {"book_uids": ["b2"] * len(labels), "labels": labels})]
-        with pytest.raises(MissingFactError, match="the planned run was not found"):
+        with pytest.raises(MissingFactError, match="no successful run of"):
             fill_output(FoundNamed, runs, record=LIBRARY, plan_text=FIND_TITLE_PLAN)
 
 
@@ -551,13 +596,12 @@ def test_the_planned_run_still_wins_over_a_lookup_in_another_form():
 def test_a_listing_with_another_scope_never_counts_for_the_planned_scope():
     # The wrong-record case: the planned scope word is not in the output, so an empty
     # listing of another scope never fills the planned listing's facts.
-    class Loans(BaseModel):
-        loan_uids: list[str] = fact_from("list_loans.loan_uids")
+    Loans = ListLoansOutput
 
     plan = "1. list_loans scope=branch scope_uid=x1 (no filter)"
     runs = [_cmd_run("list_loans", {"scope": "shelf", "scope_uid": "x1"},
                      {"loan_uids": [], "scope": "shelf", "scope_uid": "x1"})]
-    with pytest.raises(MissingFactError, match="the planned run was not found"):
+    with pytest.raises(MissingFactError, match="no successful run of"):
         fill_output(Loans, runs, record=LIBRARY, plan_text=plan)
     runs[0]["output"]["scope"] = "branch"   # its output now names both values
     assert fill_output(Loans, runs, record=LIBRARY, plan_text=plan).loan_uids == []
@@ -566,20 +610,30 @@ def test_a_listing_with_another_scope_never_counts_for_the_planned_scope():
 def test_an_opener_with_another_value_never_counts_even_when_its_output_names_the_planned_one():
     # open b2 moved the workflow onto b2; its output mentions b1, but an opener of another
     # record never stands in for the planned opener.
-    class OpenedWithLink(BaseModel):
-        uid: str = fact_from("open_book_by_uid.book_uid")
+    OpenedWithLink = Opened
 
     runs = [_cmd_run("open_book_by_uid", {"book_uid": "b2"}, {"book_uid": "b2", "sequel_of": "b1"}),
             _cmd_run("list_loans", {}, {"loan_uids": []}, context=OTHER_BOOK)]
-    with pytest.raises(MissingFactError, match="the planned run was not found"):
+    with pytest.raises(MissingFactError, match="no successful run of"):
         fill_output(OpenedWithLink, runs, record=OTHER_BOOK,
                     plan_text="1. open_book_by_uid book_uid=b1")
 
 
 class OpenedBook(BaseModel):
-    uid: str = fact_from("open_book_by_uid.book_uid")
-    title: str = fact_from("open_book_by_uid.title")
-    loan_uids: list[str] = fact_from("list_loans.loan_uids")
+    opened: command_output("open_book_by_uid", book_uid=(str, ...), title=(str, ...))
+    loans: ListLoansOutput
+
+    @property
+    def uid(self) -> str:
+        return self.opened.book_uid
+
+    @property
+    def title(self) -> str:
+        return self.opened.title
+
+    @property
+    def loan_uids(self) -> list[str]:
+        return self.loans.loan_uids
 
 
 BOOK_PLAN = "1. open_book_by_uid book_uid=b1\n2. list_loans (full list)"
@@ -596,7 +650,7 @@ def test_a_phase_already_on_its_planned_record_fills_from_the_run_that_opened_it
     earlier = [_cmd_run("Library/find_book", {"query": "Dune"}, {"book_uids": ["b1"]}),
                _opened("b1", "Dune")]
     runs = [_cmd_run("Book/list_loans", {"start": None}, {"loan_uids": ["l1"]}, context=BOOK)]
-    with pytest.raises(MissingFactError, match="the planned run was not found"):
+    with pytest.raises(MissingFactError, match="no successful run of"):
         fill_output(OpenedBook, runs, record=BOOK, plan_text=BOOK_PLAN)
     filled = fill_output(OpenedBook, runs, record=BOOK, plan_text=BOOK_PLAN, earlier_runs=earlier)
     # Input and Output facts both come from the run that really opened the record.
@@ -614,11 +668,11 @@ def test_a_phase_on_a_different_record_than_its_step_opens_still_fails():
                _cmd_run("go_up", None, context=BOOK),
                _opened("b2", "Emma")]
     runs = [_cmd_run("Book/list_loans", {"start": None}, {"loan_uids": ["l9"]}, context=OTHER_BOOK)]
-    with pytest.raises(MissingFactError, match=r"OpenedBook\.uid.*the planned run was not found"):
+    with pytest.raises(MissingFactError, match=r"OpenedBook\.opened: no successful run of 'open_book_by_uid'"):
         fill_output(OpenedBook, runs, record=OTHER_BOOK, plan_text=BOOK_PLAN, earlier_runs=earlier)
     # Even when the archive misses the run that opened b2, so that opening b1 looks
     # like the run that entered b2: b1 is not a word of b2's clause.
-    with pytest.raises(MissingFactError, match="the planned run was not found"):
+    with pytest.raises(MissingFactError, match="no successful run of"):
         fill_output(OpenedBook, runs, record=OTHER_BOOK, plan_text=BOOK_PLAN,
                     earlier_runs=earlier[:1])
     # At the root or a bare context there is no record to be already on.
@@ -630,7 +684,7 @@ def test_only_the_run_that_entered_the_record_stands_in_never_an_earlier_reading
     # list_loans ran on b1 in an earlier phase; this phase skipped it: not carried over.
     earlier = [_opened("b1", "Dune"),
                _cmd_run("Book/list_loans", {"start": None}, {"loan_uids": ["l1"]}, context=BOOK)]
-    with pytest.raises(MissingFactError, match=r"OpenedBook\.loan_uids"):
+    with pytest.raises(MissingFactError, match=r"OpenedBook\.loans"):
         fill_output(OpenedBook, [], record=BOOK, plan_text=BOOK_PLAN, earlier_runs=earlier)
     assert runs_that_entered_record(earlier, [], BOOK, planned_steps(
         BOOK_PLAN, ["open_book_by_uid", "list_loans"]), ["open_book_by_uid", "list_loans"]) == [
@@ -728,7 +782,7 @@ SCRIPT = {
     "find": dict(runs=[_run("open_library", context=""),
                        _run("find_book", {"book_uids": ["b1"]}, {"query": "Dune"})],
                  record=LIBRARY, answer="found b1"),
-    "book": dict(runs=[_run("open_book_by_uid", None, {"book_uid": "b1"}),
+    "book": dict(runs=[_run("open_book_by_uid", {"book_uid": "b1"}, {"book_uid": "b1"}),
                        _run("list_loans", {"loan_uids": ["l1", "l2"]}, context=BOOK)],
                  record=BOOK, answer="b1 has two loans"),
     "notes": dict(runs=[_run("count_notes", {"total": 3}, context=BOOK)],
@@ -841,6 +895,9 @@ def phased(initialized_fastworkflow, todo_workflow_path, monkeypatch):
         raise AssertionError("a phased skill must not be handed off")
 
     monkeypatch.setattr(ctx, "_hand_off", no_hand_off)
+    # The todo workflow has no library commands: the phase steps are read with the library's names,
+    # as a typed output (which names no source command) leaves them to the workflow's routing.
+    monkeypatch.setattr(ctx, "_workflow_command_names", lambda: list(FILL_COMMANDS))
     reviews = []
     monkeypatch.setattr(
         "fastworkflow.observation_offloading.finish_check.review_finish",
@@ -927,12 +984,12 @@ def test_a_missing_fact_fails_the_phase_cleanly_and_stops_the_call(phased):
     assert result.answer.startswith(f"{FOUND_FACTS_LEAD}\n\nfind:\n- book uids: b1\n\n")
     assert "found b1" not in result.answer and "b1 has two loans" not in result.answer
     assert "stopped at its part 'book'" in result.answer
-    assert "BookFacts.loan_uids" in result.answer and "list_loans" in result.answer
+    assert "BookFacts.loans" in result.answer and "list_loans" in result.answer
     assert "Not run" not in result.answer        # book is the last phase here
     assert "report" not in SEEN                  # __result__ never ran
     span = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[-1]
     assert span.status == tracing.STATUS_ERROR
-    assert "BookFacts.loan_uids" in span.attributes["facts_error"]
+    assert "BookFacts.loans" in span.attributes["facts_error"]
     assert phased.ctx._phase_run is None
 
 
@@ -945,7 +1002,7 @@ def test_the_facts_come_only_from_the_phase_own_runs(phased):
     phased.start()
     result = phased.ctx.process_turn("show the book Dune and its notes")
     assert "stopped at its part 'notes'" in result.answer
-    assert "NoteFacts.total" in result.answer
+    assert "no successful run of 'count_notes'" in result.answer
 
 
 def _knows_the_toy_commands(phased, monkeypatch):
@@ -1036,7 +1093,7 @@ def test_the_trace_shows_each_phase(phased):
     assert [s.attributes["steps_used"] for s in spans] == [2, 2]
     assert [s.attributes["answer_only"] for s in spans] == [False, False]
     assert spans[0].attributes["facts"] == {"book_uids": ["b1"]}
-    assert spans[1].attributes["facts"] == {"uid": "b1", "loan_uids": ["l1", "l2"]}
+    assert spans[1].attributes["facts"] == {"opened": {"book_uid": "b1"}, "loans": {"loan_uids": ["l1", "l2"]}}
     assert spans[1].attributes["record"] == BOOK
     assert all(s.status == tracing.STATUS_OK for s in spans)
     contract = tracing.SPAN_CONTRACTS[tracing.SPAN_PLANNING_COMMAND_PHASE].attributes
@@ -1091,7 +1148,7 @@ def test_a_phase_executor_is_held_to_its_phase(phased):
 def test_a_search_phase_that_ended_on_a_record_fills_from_its_own_search(phased):
     # The find phase searched from the hub, then opened the book and ended on it.
     phased.script["find"] = dict(SCRIPT["find"], runs=SCRIPT["find"]["runs"] + [
-        _run("open_book_by_uid", None, {"book_uid": "b1"}),
+        _run("open_book_by_uid", {"book_uid": "b1"}, {"book_uid": "b1"}),
         _run("list_loans", {"loan_uids": ["l1"]}, context=BOOK)], record=BOOK)
     phased.start()
     result = phased.ctx.process_turn("show the book Dune")
@@ -1120,13 +1177,13 @@ def test_a_record_phase_never_reads_another_record_runs(phased):
     # and opening b2 is not the planned step (open b1), so b2's uid is not taken either.
     phased.script["book"] = dict(SCRIPT["book"], runs=SCRIPT["book"]["runs"] + [
         _run("go_up", context=BOOK),
-        _run("open_book_by_uid", None, {"book_uid": "b2"})], record=OTHER_BOOK)
+        _run("open_book_by_uid", {"book_uid": "b2"}, {"book_uid": "b2"})], record=OTHER_BOOK)
     executor = phased.start()
     result = phased.ctx.process_turn("show the book Dune")
 
     assert len(executor.calls) == 2
-    assert "stopped at its part 'book'" in result.answer and "BookFacts.uid" in result.answer
-    assert "the planned run was not found" in result.answer
+    assert "stopped at its part 'book'" in result.answer and "BookFacts.opened" in result.answer
+    assert "no successful run of 'open_book_by_uid'" in result.answer
     book = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[1]
     assert book.status == tracing.STATUS_ERROR and book.attributes["record"] == OTHER_BOOK
 
@@ -1148,14 +1205,14 @@ def test_a_search_of_an_earlier_phase_never_counts(phased):
 
     # "again" names no command: answer-only, so it ran nothing and has no run to fill from.
     assert len(executor.calls) == 1 and len(phased.answered) == 1
-    assert "stopped at its part 'again'" in result.answer and "Found.book_uids" in result.answer
+    assert "stopped at its part 'again'" in result.answer and "no successful run of 'find_book'" in result.answer
 
 
 def test_a_phase_whose_opening_step_finds_the_record_already_open_fills_its_facts(phased):
     # The find phase also opened b1 and ended on it. The book phase's step 1 (open b1)
     # was answered "already in context" and ran nothing; its other step ran on b1.
     phased.script["find"] = dict(SCRIPT["find"], runs=SCRIPT["find"]["runs"] + [
-        _run("open_book_by_uid", None, {"book_uid": "b1"})], record=BOOK)
+        _run("open_book_by_uid", {"book_uid": "b1"}, {"book_uid": "b1"})], record=BOOK)
     phased.script["book"] = dict(SCRIPT["book"], runs=SCRIPT["book"]["runs"][1:])
     phased.start()
     result = phased.ctx.process_turn("show the book Dune")
@@ -1163,7 +1220,7 @@ def test_a_phase_whose_opening_step_finds_the_record_already_open_fills_its_fact
     assert result.answer == "B1 has loans l1, l2."
     book = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[1]
     assert book.status == tracing.STATUS_OK
-    assert book.attributes["facts"] == {"uid": "b1", "loan_uids": ["l1", "l2"]}
+    assert book.attributes["facts"] == {"opened": {"book_uid": "b1"}, "loans": {"loan_uids": ["l1", "l2"]}}
 
 
 # ----------------------------------------------------------------------
@@ -1301,7 +1358,7 @@ class FanBooks:
 
 def _book_item(uid, clause, loans):
     return dict(runs=[_run("go_up", context="Book bx"),
-                      _run("open_book_by_uid", None, {"book_uid": uid}),
+                      _run("open_book_by_uid", {"book_uid": uid}, {"book_uid": uid}),
                       _run("list_loans", {"loan_uids": loans}, context=clause)],
                 record=clause, answer=f"{uid} has {len(loans)} loans")
 
@@ -1404,7 +1461,7 @@ def test_a_bound_item_fills_from_its_record_even_when_it_ended_elsewhere(fanned)
     span = fanned.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[2]
     assert span.status == tracing.STATUS_OK
     assert span.attributes["record"] == SECOND
-    assert span.attributes["facts"] == {"uid": "b2", "loan_uids": ["l2"]}
+    assert span.attributes["facts"] == {"opened": {"book_uid": "b2"}, "loans": {"loan_uids": ["l2"]}}
 
 
 def test_the_cap_is_applied_and_said_in_the_answer(fanned, monkeypatch):
@@ -1845,8 +1902,16 @@ SHELF = "Shelf s1 Fiction"
 
 
 class ListedBook(BaseModel):
-    uid: str = fact_from("Shelf/list_books.book_uid")
-    loan_uids: list[str] = fact_from("list_loans.loan_uids")
+    listed: command_output("Shelf.list_books", book_uid=(str, ...))
+    loans: ListLoansOutput
+
+    @property
+    def uid(self) -> str:
+        return self.listed.book_uid
+
+    @property
+    def loan_uids(self) -> list[str]:
+        return self.loans.loan_uids
 
 
 LISTED_PLAN = "1. go_up\n2. list_books book_uid=b1 (this opens it)\n3. list_loans (full list)"
@@ -1861,23 +1926,24 @@ def _listed_runs(opener_uid="b1", opened_record=BOOK):
 
 
 def test_another_command_that_entered_the_record_with_the_value_stands_in_for_the_opener():
-    filled = fill_output(ListedBook, _listed_runs(), record=BOOK, plan_text=LISTED_PLAN)
-    assert (filled.uid, filled.loan_uids) == ("b1", ["l1"])
+    # A typed field is the planned command's own Output: another command's run (open_book_by_uid
+    # entered the record the planned list_books opens) no longer stands in for it.
+    with pytest.raises(MissingFactError, match=r"ListedBook\.listed: no successful run of 'Shelf/list_books'"):
+        fill_output(ListedBook, _listed_runs(), record=BOOK, plan_text=LISTED_PLAN)
     # The planned opener's own run is used when it ran.
-    runs = [_cmd_run("Shelf/list_books", {"book_uid": "b1"}, None, context=SHELF),
+    runs = [_cmd_run("Shelf/list_books", {"book_uid": "b1"}, {"book_uid": "b1"}, context=SHELF),
             _cmd_run("Book/list_loans", {"start": None}, {"loan_uids": ["l1"]}, context=BOOK)]
     assert fill_output(ListedBook, runs, record=BOOK, plan_text=LISTED_PLAN).uid == "b1"
-    # It also stands in from before the phase (an earlier phase opened the record).
-    runs = _listed_runs()
-    assert fill_output(ListedBook, runs[3:], record=BOOK, plan_text=LISTED_PLAN,
-                       earlier_runs=runs[:3]).uid == "b1"
+    # It also stands in from before the phase (an earlier phase ran the opener and entered the record).
+    assert fill_output(ListedBook, runs[1:], record=BOOK, plan_text=LISTED_PLAN,
+                       earlier_runs=runs[:1]).uid == "b1"
 
 
 def test_an_opener_with_another_value_does_not_stand_in():
     # b2 was opened, and the phase is on b2: the step's b1 is not that value.
     runs = _listed_runs("b2", OTHER_BOOK)
     runs[2]["context_clause"] = LIBRARY
-    with pytest.raises(MissingFactError, match=r"ListedBook\.uid.*the planned run was not found"):
+    with pytest.raises(MissingFactError, match=r"ListedBook\.listed: no successful run of 'Shelf/list_books'"):
         fill_output(ListedBook, runs, record=OTHER_BOOK, plan_text=LISTED_PLAN)
 
 
@@ -1885,15 +1951,15 @@ def test_an_opener_onto_another_record_does_not_stand_in():
     # The run opened b1, but the phase ended on b2 (the record it is filled on).
     runs = _listed_runs() + [_cmd_run("go_up", None, context=BOOK),
                              _opened("b2", "Emma")]
-    with pytest.raises(MissingFactError, match=r"ListedBook\.uid"):
+    with pytest.raises(MissingFactError, match=r"ListedBook\.listed"):
         fill_output(ListedBook, runs, record=OTHER_BOOK, plan_text=LISTED_PLAN)
     # A failed opener never stands in.
     runs = _listed_runs()
     runs[2]["success"] = False
-    with pytest.raises(MissingFactError, match=r"ListedBook\.uid"):
+    with pytest.raises(MissingFactError, match=r"ListedBook\.listed"):
         fill_output(ListedBook, runs, record=BOOK, plan_text=LISTED_PLAN)
     # A step without a concrete value takes no stand-in.
-    with pytest.raises(MissingFactError, match=r"ListedBook\.uid"):
+    with pytest.raises(MissingFactError, match=r"ListedBook\.listed"):
         fill_output(ListedBook, _listed_runs(), record=BOOK,
                     plan_text="1. list_books book_uid=<the uid>\n2. list_loans")
 
@@ -1992,7 +2058,7 @@ def test_an_optional_phase_that_fails_does_not_stop_the_call(phased):
     assert SEEN["report"]["notes"] is None          # counts as not run: None (step 1a)
     assert phased.answered == []
     notes = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[2]
-    assert notes.status == tracing.STATUS_ERROR and "NoteFacts.total" in notes.attributes["facts_error"]
+    assert notes.status == tracing.STATUS_ERROR and "no successful run of 'count_notes'" in notes.attributes["facts_error"]
     assert phased.ctx._phase_run is None
 
 
@@ -2007,7 +2073,7 @@ def test_a_required_phase_that_fails_still_stops_the_call(phased):
     assert "7 notes" not in result.answer
     # The facts already filled, as code rendered them.
     assert "find:\n- book uids: b1" in result.answer
-    assert "book:\n- uid: b1\n- loan uids: l1, l2" in result.answer
+    assert "book:\n- opened: (book uid: b1)\n- loans: (loan uids: l1, l2)" in result.answer
 
 
 def test_an_optional_phase_whose_condition_raises_is_left_out(phased):
@@ -2053,9 +2119,11 @@ def test_a_stopped_job_shows_its_facts_readably():
 def test_an_answer_only_answer_that_drops_a_list_item_gets_it_appended(phased):
     phased.command = _phased_command(plan=lambda input: [
         Phase("find", lambda: find_steps(input.name), output=Found),
-        Phase("book", lambda find: book_steps(find), output=BookFacts),
-        Phase("report", lambda book=None: [f"name every loan of {book.uid}: "
-                                           + ", ".join(book.loan_uids)] if book else
+        # The list is a field of the phase's own Output (a top-level list); a list nested in a
+        # command's Output held by a facts model (BookFacts.loans) is checked too, by the same
+        # rule (test_missing_list_items_reads_lists_inside_a_nested_output_by_the_same_rule).
+        Phase("book", lambda find: book_steps(find), output=ListLoansOutput),
+        Phase("report", lambda book=None: ["name every loan of b1: " + ", ".join(book.loan_uids)] if book else
               ["name every loan"])])
     phased.script["report"] = dict(SCRIPT["report"], answer="Dune (b1) is on loan: l1.")
     phased.start()
@@ -2102,23 +2170,34 @@ def test_the_star_import_is_the_author_api():
 
     names: dict = {}
     exec("from fastworkflow.planning_phases import *", names)
-    assert {"Phase", "concatenated_steps", "fact_from", "facts_text"} <= set(names)
+    assert {"Phase", "concatenated_steps", "facts_text"} <= set(names)
+    assert "fact_from" not in names
     assert "write_answer" not in names and "item_record" not in names
     # the framework's own names stay importable
     assert callable(planning_phases.write_answer) and callable(planning_phases.item_record)
 
 
 def test_fact_from_is_the_field_of_a_fact_copied_from_a_command_field():
-    class Page(BaseModel):
-        uids: list[str] = fact_from("list_items.item_uids", min_length=1,
-                                    json_schema_extra={"page_by": "cursor"})
-        total: int = fact_from(["count_items.total", "list_items.total"], default=0)
+    # fact_from is removed: it is no longer importable, and the field it wrote (a "from" in the
+    # field's json_schema_extra) is a load error, with the tail that says copies are not read.
+    from fastworkflow.typed_phase_facts import check_typed_facts_model
 
-    uids, total = Page.model_fields["uids"], Page.model_fields["total"]
-    assert uids.json_schema_extra == {"page_by": "cursor", "from": "list_items.item_uids"}
-    assert uids.is_required() and Page.model_json_schema()["properties"]["uids"]["minItems"] == 1
-    assert total.json_schema_extra == {"from": ["count_items.total", "list_items.total"]}
-    assert total.default == 0
+    with pytest.raises(ImportError):
+        from fastworkflow.planning_phases import fact_from  # noqa: F401
+    with pytest.raises(ImportError):
+        from fastworkflow.planning import fact_from  # noqa: F401,F811
+
+    class Page(BaseModel):
+        uids: list[str] = Field(min_length=1, json_schema_extra={
+            "page_by": "cursor", "from": "list_items.item_uids"})
+        total: int = Field(default=0, json_schema_extra={"from": ["count_items.total", "list_items.total"]})
+
+    uids_error, total_error = check_typed_facts_model("_commands/page.py", Page, {}, {})
+    assert uids_error == (
+        "Page.uids is list[str]; a facts field is typed with a command's Output or Input. Compute other "
+        "values in a property or method of Page; copies are no longer read (fact_from and \"from\" are removed)")
+    assert total_error.startswith("Page.total is int; a facts field is typed with")
+    assert total_error.endswith("copies are no longer read (fact_from and \"from\" are removed)")
 
 
 def test_the_answer_checks_in_code():
@@ -2152,9 +2231,54 @@ def test_missing_list_items_reads_lists_the_steps_give_in_full_as_rows():
                               "Ivanhoe (b3)", {"shelf": shelf}) == []
 
 
+def test_missing_list_items_reads_lists_inside_a_nested_output_by_the_same_rule():
+    class Loans(BaseModel):
+        loan_uids: list[str] = []
+
+    class BookLoans(BaseModel):
+        loans: Loans  # a command's Output nested in a facts model
+        history: list[str] = []  # a list the steps do not name in full
+
+    class Outer(BaseModel):
+        book: BookLoans
+
+    plan = "1. say what b1 has on loan, naming each: l1, l2, l3"
+    book = BookLoans(loans=Loans(loan_uids=["l1", "l2", "l3"]), history=["h1", "h2"])
+    # A nested list the answer leaves a row of is caught, as a top-level list is.
+    assert missing_list_items("B1 has l1 and l2.", plan, {"book": book}) == ["l3"]
+    assert missing_list_items("B1 has l1, l2 and l3.", plan, {"book": book}) == []
+    # The same at a deeper level, and inside a fan-out phase's list of outputs.
+    assert missing_list_items("B1 has l1 and l2.", plan, {"outer": Outer(book=book)}) == ["l3"]
+    assert missing_list_items("nothing", plan, {"books": [book, BookLoans(loans=Loans())]}) == [
+        "l1", "l2", "l3"]
+    # A nested list that is not a list to name in full is not checked: one item, or only
+    # background in a step that names nothing.
+    one = BookLoans(loans=Loans(loan_uids=["l9"]))
+    assert missing_list_items("nothing", plan, {"book": one}) == []
+    background = "1. say that b1 has loans l1, l2, l3"
+    assert missing_list_items("nothing", background, {"book": book}) == []
+
+
+def test_missing_list_items_pairs_a_nested_lists_rows_only_within_their_own_model():
+    class Loans(BaseModel):
+        loan_uids: list[str] = []
+        loan_labels: list[str] = []
+
+    class Book(BaseModel):
+        loans: Loans
+        shelf_uids: list[str] = []  # the enclosing model's list, of the same length
+
+    plan = "1. name every loan of b1 and every book on the shelf: l1, l2, b1, b2"
+    book = Book(loans=Loans(loan_uids=["l1", "l2"], loan_labels=["Dune", "Emma"]),
+                shelf_uids=["b1", "b2"])
+    # The nested lists are columns of their own table, and the shelf's are another one.
+    assert missing_list_items("l1 (Dune), l2 (Emma), b1, b2", plan, {"book": book}) == []
+    assert missing_list_items("l1, b1", plan, {"book": book}) == ["l2", "b2"]
+
+
 def test_answer_only_answer_appends_rows_left_out(monkeypatch):
     monkeypatch.setattr("fastworkflow.planning_phases.write_answer", lambda query: "Loans: l1.")
-    book = BookFacts(uid="b1", loan_uids=["l1", "l2"])
+    book = ListLoansOutput(loan_uids=["l1", "l2"])
     # "list ...: facts" is no verbatim step (only "say that" is), so the model writes it.
     assert answer_only_answer("q", "1. list the loans of b1: l1, l2",
                               {"book": book}) == \
@@ -2215,7 +2339,7 @@ def test_answer_only_answer_makes_no_model_call_when_every_step_is_verbatim(monk
     calls = []
     monkeypatch.setattr("fastworkflow.planning_phases.write_answer",
                         lambda query: calls.append(query) or "Model text.")
-    book = BookFacts(uid="b1", loan_uids=["l1", "l2"])
+    book = ListLoansOutput(loan_uids=["l1", "l2"])
     steps = "1. say that what b1 has on loan: l1, l2\n2. apply no change"
     assert answer_only_answer("q", steps, {"book": book}) == "What b1 has on loan: l1, l2."
     assert calls == []
@@ -2348,8 +2472,10 @@ def test_capped_steps_cuts_a_long_background_list_and_never_a_list_to_name():
 
 def test_facts_text_caps_lists_only_when_asked():
     book = BookFacts(uid="b1", loan_uids=[f"l{k}" for k in range(6)])
-    assert facts_text(book) == "uid: b1; loan_uids: l0, l1, l2, l3, l4, l5"
-    assert facts_text(book, max_items=2) == "uid: b1; loan_uids: l0, l1 (and 4 more; 6 in all)"
+    assert facts_text(book) == "opened: (book_uid: b1); loans: (loan_uids: l0, l1, l2, l3, l4, l5)"
+    assert facts_text(book, max_items=2) == (
+        "opened: (book_uid: b1); loans: (loan_uids: l0, l1 (and 4 more; 6 in all))")
+    assert facts_text(book.loans, max_items=2) == "loan_uids: l0, l1 (and 4 more; 6 in all)"
 
 
 def test_extra_command_steps_move_out_of_an_answer_only_last_phase():
@@ -2488,3 +2614,115 @@ def test_the_steps_before_phase_is_rebuilt_after_a_restore(phased, monkeypatch):
     second = phased.ctx.process_turn("go on")
     assert second.status == TurnStatus.COMPLETED
     assert second.answer == "b1 has 3 notes.\n\nDune (b1) is on loan: l1, l2."
+
+
+# ----------------------------------------------------------------------
+# over= may name a property: of the phase's facts model, or of a typed field's model (Phase 15
+# follow-up). The load types the names by their annotations; the run reads them with getattr.
+
+
+class RosterFacts(BaseModel):
+    """A unit's roster: a typed field of the phase's facts, whose model computes the uids."""
+
+    identities: list[str] = Field(default_factory=list)
+
+    @property
+    def identity_uids(self) -> list[str]:
+        return [f"id-{name}" for name in self.identities]
+
+
+class UnitFacts(BaseModel):
+    """The phase output that holds the roster as a typed field (``roster.unit.identity_uids``)."""
+
+    unit: RosterFacts
+
+
+class Shelf(BaseModel):
+    title: str
+
+
+class ShelfFacts(BaseModel):
+    """A property whose return annotation is a list of models: its items are typed by the model."""
+
+    names: list[str] = Field(default_factory=list)
+
+    @property
+    def books(self) -> list[Shelf]:
+        return [Shelf(title=name) for name in self.names]
+
+
+class UntypedFacts(BaseModel):
+    names: list[str] = Field(default_factory=list)
+
+    @property
+    def raw(self):  # no return annotation: its value is only known when the phase runs
+        return self.names
+
+
+def _over_plan(output, over: str):
+    return lambda input: [
+        Phase("roster", lambda: ["open_library"], output=output),
+        Phase("each", lambda uid: [f"open_book_by_uid book_uid={uid}"], over=over, item="uid"),
+    ]
+
+
+def test_over_names_a_property_of_a_typed_field_model_and_fans_out_at_run_time():
+    phase = Phase("each", lambda uid: [], over="roster.unit.identity_uids", item="uid")
+    outputs = {"roster": UnitFacts(unit=RosterFacts(identities=["ann", "bo"]))}
+    assert planning_phases.fan_out_items(phase, outputs) == (["id-ann", "id-bo"], 2)
+
+
+def test_over_names_a_property_of_the_phase_facts_model_itself():
+    class Listing(BaseModel):
+        names: list[str] = Field(default_factory=list)
+
+        @property
+        def shown(self) -> list[str]:
+            return sorted(self.names)
+
+    phase = Phase("each", lambda uid: [], over="listing.shown", item="uid")
+    assert planning_phases.fan_out_items(phase, {"listing": Listing(names=["b", "a", "b"])}) == (["a", "b"], 2)
+    # a property that gives nothing: no items, and the run goes on with none
+    assert planning_phases.fan_out_items(phase, {"listing": Listing()}) == ([], 0)
+
+
+def test_a_property_of_a_fan_out_outputs_list_is_read_item_by_item():
+    phase = Phase("each", lambda uid: [], over="roster.unit.identity_uids", item="uid")
+    outputs = {"roster": [UnitFacts(unit=RosterFacts(identities=["ann"])),
+                          UnitFacts(unit=RosterFacts(identities=["bo", "ann"]))]}
+    assert planning_phases.fan_out_items(phase, outputs) == (["id-ann", "id-bo"], 2)
+
+
+def test_a_property_with_a_return_annotation_is_type_checked_deeper_at_load():
+    # a list of models: its items are read as the model, so a field of the model passes
+    phase_ok = Phase("each", lambda shelf: [], over="shelf.books.title", item="title")
+    check_bindings([Phase("shelf", lambda: [], output=ShelfFacts), phase_ok])
+    # a field the model does not declare fails the load, naming the list it was read on
+    with pytest.raises(PhaseError, match=r"has no field 'isbn' on books \(list\[Shelf\]\)"):
+        check_bindings([Phase("shelf", lambda: [], output=ShelfFacts),
+                        Phase("each", lambda: [], over="shelf.books.isbn", item="title")])
+    # a list of str has no fields to read past it
+    with pytest.raises(PhaseError, match=r"has no field 'x' on unit\.identity_uids \(list\[str\]\)"):
+        check_bindings([Phase("roster", lambda: [], output=UnitFacts),
+                        Phase("each", lambda: [], over="roster.unit.identity_uids.x", item="uid")])
+
+
+def test_a_property_without_a_return_annotation_is_accepted_and_not_checked_past_it():
+    # the names after an untyped property are not checked at load; a missing one fails when the phase runs
+    check_bindings([Phase("raw", lambda: [], output=UntypedFacts),
+                    Phase("each", lambda: [], over="raw.raw.anything", item="uid")])
+    phase = Phase("each", lambda uid: [], over="raw.raw", item="uid")
+    assert planning_phases.fan_out_items(phase, {"raw": UntypedFacts(names=["x"])}) == (["x"], 1)
+    missing = Phase("each", lambda uid: [], over="raw.raw.anything", item="uid")
+    with pytest.raises(PhaseError, match="has no field 'anything'"):
+        planning_phases.fan_out_items(missing, {"raw": UntypedFacts(names=["x"])})
+
+
+def test_an_over_naming_neither_a_field_nor_a_property_is_the_load_error():
+    with pytest.raises(PlanningCommandFormatError, match="has no field 'nosuch'"):
+        _phased_command(plan=_over_plan(UnitFacts, "roster.nosuch"))
+    with pytest.raises(PlanningCommandFormatError, match="has no field 'nosuch' on unit"):
+        _phased_command(plan=_over_plan(UnitFacts, "roster.unit.nosuch"))
+    # a property is no more than a name on the model: the same load error for a property of another model
+    with pytest.raises(PlanningCommandFormatError, match="has no field 'identity_uids'"):
+        _phased_command(plan=_over_plan(UnitFacts, "roster.identity_uids"))

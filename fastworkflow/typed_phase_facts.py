@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 import re
 import types
 import typing
@@ -19,9 +20,9 @@ from fastworkflow.observation_offloading.facts import (
     _join_list,
     _page_key,
     _scalar_of_pages,
-    fact_sources,
 )
 from fastworkflow.planning_phases import FULL_LIST_PHRASES, is_from_source
+from fastworkflow.utils.python_utils import type_text
 
 
 @dataclass(frozen=True)
@@ -61,9 +62,8 @@ def union_members(annotation: Any) -> tuple[type[BaseModel], ...] | None:
 
 
 def _type_label(annotation: Any) -> str:
-    if inspect.isclass(annotation) and not get_args(annotation):
-        return annotation.__name__
-    return re.sub(r"\btyping\.", "", repr(annotation))
+    # the same text as a plain class name (no module), Optional included (python_utils.type_text)
+    return type_text(annotation)
 
 
 def carries_copy_field(info: Any) -> bool:
@@ -74,22 +74,26 @@ def carries_copy_field(info: Any) -> bool:
     return not is_from_source(extra["from"])
 
 
-def model_uses_copy_edges(model: type[BaseModel]) -> bool:
-    return any(carries_copy_field(info) for info in model.model_fields.values())
+#: The load error's tail for a field that still copies (Phase 15, design 3.12).
+COPIES_NOT_READ = "copies are no longer read (fact_from and \"from\" are removed)"
+
+
+def _not_typed_text(model: type[BaseModel], name: str, info: Any) -> str:
+    """The 3.12 load error for a facts field that is not typed with a command's Output or Input."""
+    text = (f"{model.__name__}.{name} is {_type_label(info.annotation)}; a facts field is typed "
+            f"with a command's Output or Input. Compute other values in a property or method "
+            f"of {model.__name__}")
+    if carries_copy_field(info):
+        text += f"; {COPIES_NOT_READ}"
+    return text
 
 
 def handles_typed_output(model: Any) -> bool:
-    """Whether :func:`fill_typed_phase_output` fills *model* instead of copy ``from_`` facts."""
+    """Whether :func:`fill_typed_phase_output` fills *model*: a command's Output, a union of
+    them, or a facts model (design 3.12). Copy edges are not read (Phase 15)."""
     if union_members(model) is not None:
         return True
-    if not (inspect.isclass(model) and issubclass(model, BaseModel)):
-        return False
-    if model_uses_copy_edges(model):
-        return False
-    try:
-        return not fact_sources(model)
-    except Exception:  # noqa: BLE001
-        return True
+    return inspect.isclass(model) and issubclass(model, BaseModel)
 
 
 def _role_for_model(model_cls: type[BaseModel], command: str,
@@ -108,8 +112,6 @@ def _facts_field_type_errors(model: type[BaseModel], model_to_command: Mapping[t
     """Load errors for fields of a facts model (not a command's whole Output/Input)."""
     errors: list[str] = []
     for name, info in model.model_fields.items():
-        if carries_copy_field(info):
-            continue
         extra = info.json_schema_extra if isinstance(info.json_schema_extra, Mapping) else {}
         if "from" in extra and is_from_source(extra["from"]):
             # ``from_`` on facts fields is validated in ``resolve_field_sources`` (3.3).
@@ -122,33 +124,18 @@ def _facts_field_type_errors(model: type[BaseModel], model_to_command: Mapping[t
             continue
         if optional_none and inner is type(None):
             continue
-        origin = get_origin(inner)
-        if origin in (list, tuple) or (inspect.isclass(origin) and origin.__module__ == "builtins"):
-            args = get_args(inner)
-            if origin is list and args == (str,):
-                errors.append(
-                    f"{model.__name__}.{name} is list[str]; a facts field is typed "
-                    f"with a command's Output or Input. Compute other values in a property or "
-                    f"method of {model.__name__}"
-                )
-                continue
-        errors.append(
-            f"{model.__name__}.{name} is {_type_label(info.annotation)}; a facts field is typed "
-            f"with a command's Output or Input. Compute other values in a property or method "
-            f"of {model.__name__}"
-        )
+        errors.append(_not_typed_text(model, name, info))
     return errors
 
 
 def typed_field_specs(model: type[BaseModel], model_to_command: Mapping[type, str],
                       signatures: Mapping[str, Any]) -> list[TypedFieldSpec]:
     """Every typed field of *model* (empty when the whole model is one command's Output)."""
+    model_to_command = _extended_mapping(model, signatures, model_to_command)
     if model in model_to_command:
         return [TypedFieldSpec("", model_to_command[model], "output", True)]
     specs: list[TypedFieldSpec] = []
     for name, info in model.model_fields.items():
-        if carries_copy_field(info):
-            continue
         extra = info.json_schema_extra if isinstance(info.json_schema_extra, Mapping) else {}
         if "from" in extra and is_from_source(extra["from"]):
             continue
@@ -165,11 +152,7 @@ def typed_field_specs(model: type[BaseModel], model_to_command: Mapping[type, st
             continue
         if optional and inner is type(None):
             continue
-        raise ValueError(
-            f"{model.__name__}.{name} is {_type_label(info.annotation)}; a facts field is typed "
-            f"with a command's Output or Input. Compute other values in a property or method "
-            f"of {model.__name__}"
-        )
+        raise ValueError(_not_typed_text(model, name, info))
     return specs
 
 
@@ -208,8 +191,6 @@ def check_typed_facts_model(
                 ]
         return []
     if not (inspect.isclass(model) and issubclass(model, BaseModel)):
-        return []
-    if model_uses_copy_edges(model):
         return []
     if model in mapping:
         return []
@@ -308,10 +289,29 @@ def _extended_mapping(
     for cls in candidates:
         if cls in mapping:
             continue
-        qname = _command_qname_from_class(cls)
+        qname = _command_qname_from_class(cls) or _same_definition_qname(cls, mapping)
         if qname is not None:
             mapping[cls] = qname
     return mapping
+
+
+def _same_definition_qname(cls: type, mapping: Mapping[type, str]) -> str | None:
+    """The command of a class that is the same definition as one in *mapping*: the same file and
+    qualified name, loaded under another module name (a framework command, which the workflow's
+    routing and an import from another module load twice)."""
+    try:
+        path = os.path.realpath(inspect.getfile(cls))
+    except (TypeError, OSError):
+        return None
+    for known, qname in mapping.items():
+        if known.__qualname__ != cls.__qualname__ or known.__module__ == cls.__module__:
+            continue
+        try:
+            if os.path.realpath(inspect.getfile(known)) == path:
+                return qname
+        except (TypeError, OSError):
+            continue
+    return None
 
 
 def _matching_runs(runs: Sequence[Mapping[str, Any]], command: str, *,
@@ -335,12 +335,24 @@ def _output_blob_from_runs(runs: Sequence[Mapping[str, Any]], command: str, *,
         return None
     if not full_list or len(matching) <= 1:
         return dict(output)
+    # The pages' keys, every one any page gave: a key an earlier page carries and the last
+    # page omits is still in the facts. Its kind (list or scalar) is that of the latest page
+    # that gives it a value.
+    kinds: dict[str, Any] = {}
+    for run in matching:
+        page = run.get("output")
+        if not isinstance(page, Mapping):
+            continue
+        for key, val in page.items():
+            if val is not None or key not in kinds:
+                kinds[key] = val
     joined: dict[str, Any] = {}
-    for key, val in output.items():
+    for key, val in kinds.items():
         if isinstance(val, (list, tuple)):
             keyed = [
                 (*_page_key(r.get("input"), PAGING_PARAMETERS, None), r["output"][key], r["output"])
-                for r in matching if isinstance(r.get("output"), Mapping) and key in r["output"]
+                for r in matching
+                if isinstance(r.get("output"), Mapping) and isinstance(r["output"].get(key), (list, tuple))
             ]
             joined[key] = _join_list(keyed) if keyed else list(val)
         else:
@@ -364,7 +376,7 @@ def _input_blob_from_runs(runs: Sequence[Mapping[str, Any]], command: str, *,
 def _plan_uses_full_list(plan_text: str, command: str) -> bool:
     stem = command.split("/")[-1]
     for line in str(plan_text or "").splitlines():
-        text = line.strip().lower()
+        text = re.sub(r"^\d+[.)]\s*", "", line.strip().lower())
         if not text.startswith(stem.lower()):
             continue
         if any(phrase in text for phrase in FULL_LIST_PHRASES):
@@ -492,8 +504,6 @@ def preview_output_type(model: Any, model_to_command: Mapping[type, str]) -> str
 
 def preview_fact_rows(model: type[BaseModel], model_to_command: Mapping[type, str]) -> list[tuple[str, str, str]]:
     """Facts-section rows: ``(field, type text, from text)``."""
-    if model_uses_copy_edges(model):
-        return []
     rows: list[tuple[str, str, str]] = []
     for name, info in model.model_fields.items():
         if carries_copy_field(info):
@@ -516,7 +526,6 @@ __all__ = [
     "check_typed_facts_model",
     "fill_typed_phase_output",
     "handles_typed_output",
-    "model_uses_copy_edges",
     "preview_fact_rows",
     "preview_output_type",
     "required_commands_for_output",

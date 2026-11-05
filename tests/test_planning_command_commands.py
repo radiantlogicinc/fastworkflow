@@ -84,6 +84,8 @@ def _write_step_stubs(folder) -> None:
     for name in STEP_STUB_NAMES:
         param = STEP_STUB_PARAMS.get(name)
         body = (f'        {param}: str = ""\n' if param else "        pass\n")
+        if name == "find_group":  # the command whose Output a phased fixture types its facts with
+            body += "\n    class Output(BaseModel):\n        uids: list[str] = []\n"
         (folder / "_commands" / f"{name}.py").write_text(
             "from pydantic import BaseModel\n\n\nclass Signature:\n"
             '    """Stub: a command a fixture\'s steps name."""\n\n    class Input(BaseModel):\n'
@@ -956,18 +958,15 @@ def test_command_utterances_never_raises_on_an_unreadable_workflow(tmp_path):
 
 PHASED_LOOKUP = LOOKUP + '''
 
-from fastworkflow.planning import fact_from
+from .find_group import Signature as FindGroup
 
 FLAT = PlanGenerator().steps
 
 
 class PlanGenerator:
-    """The same steps as two phases: find (fills Found), then the rest (reads find)."""
+    """The same steps as two phases: find (fills find_group's Output), then the rest (reads find)."""
 
-    class Found(BaseModel):
-        uids: list[str] = fact_from("find_group.uids")
-
-    def find(self, input) -> Found:
+    def find(self, input) -> FindGroup.Output:
         return FLAT(input)[:2]
 
     def rest(self, input, find):
@@ -983,7 +982,7 @@ ONE_PHASE_LOOKUP = LOOKUP.replace(
 def test_a_planning_command_file_with_plan_loads_and_keeps_its_flat_steps(tmp_path, caplog):
     command = _command(tmp_path, PHASED_LOOKUP)
     assert command.plan_fn is not None
-    assert [m.__name__ for m in command.phase_outputs] == ["Found"]
+    assert [m.__name__ for m in command.phase_outputs] == ["Output"]
     # The template (what matching and the fallback read) is the flat steps, as before.
     assert command.template == _command(tmp_path / "flat", LOOKUP).template
 

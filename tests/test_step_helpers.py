@@ -26,6 +26,8 @@ from fastworkflow.command_executor import (
     _resolve_planning_command_name,
     call_response_generator,
 )
+from fastworkflow.examples.library._commands.Library.find_book import Signature as FindBook
+from fastworkflow.examples.library._commands.Library.open_book import Signature as OpenBook
 from fastworkflow.examples.library._commands.Record.add_note import Signature as AddNote
 from fastworkflow.observation_offloading import finish_check
 from fastworkflow.observation_offloading.facts import workflow_signatures
@@ -38,7 +40,6 @@ from fastworkflow.plan_frame import runs_outside_ranges
 from fastworkflow.planning import (
     StepFormError,
     do_not_run,
-    fact_from,
     from_,
     full_list,
     pick,
@@ -327,11 +328,9 @@ class PlanGenerator:
         return ["show_notes (if the member has any)"]
 '''
     good_steps = '''from pydantic import BaseModel, Field
-from fastworkflow.planning import fact_from, full_list, run, when
+from fastworkflow.planning import full_list, run, when
 
-
-class Found(BaseModel):
-    book_uids: list[str] = fact_from("find_book.book_uids")
+from .find_book import Signature as FindBook
 
 
 class Signature:
@@ -343,7 +342,7 @@ class Signature:
 
 
 class PlanGenerator:
-    def find(self, input) -> Found:
+    def find(self, input) -> FindBook.Output:
         return [
             run("find_book", query=input.title).note("the first page"),
             run("find_book", query=input.title).note("first page only"),
@@ -435,11 +434,9 @@ class PlanGenerator:
 
 def test_pick_without_named_is_a_planning_command_load_error(tmp_path):
     bad_pick = '''from pydantic import BaseModel, Field
-from fastworkflow.planning import fact_from, pick, run
+from fastworkflow.planning import pick, run
 
-
-class Found(BaseModel):
-    book_uids: list[str] = fact_from("find_book.book_uids")
+from .find_book import Signature as FindBook
 
 
 class Signature:
@@ -450,7 +447,7 @@ class Signature:
 
 
 class PlanGenerator:
-    def find(self, input) -> Found:
+    def find(self, input) -> FindBook.Output:
         return [run("find_book", query=input.title)]
 
     def book(self, input, find):
@@ -990,13 +987,9 @@ def _note_member_without_in_request() -> str:
     )
 
 
-class FoundBooks(BaseModel):
-    book_uids: list[str] = fact_from("find_book.book_uids")
-
-
-class OpenedBook(BaseModel):
-    book_uid: str = fact_from("open_book.book_uid")
-    title: str = fact_from("open_book.title")
+#: The phases' typed outputs: whole command Outputs (the facts are those commands' fields).
+FoundBooks = FindBook.Output
+OpenedBook = OpenBook.Output
 
 
 def _build_planning_command(plan_cls, args_fields: dict[str, tuple[type, object]] | None = None):
@@ -1038,7 +1031,8 @@ def test_pick_in_a_later_phase_runs_by_code_on_the_one_exact_match(library_env):
     spans = library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
     assert [s.attributes["phase"] for s in spans] == ["find", "book"]
     assert spans[1].attributes["code_stop"] == "done"
-    assert spans[1].attributes["facts"] == {"book_uid": "b1", "title": "Dune"}
+    assert spans[1].attributes["facts"] == {
+        "book_uid": "b1", "title": "Dune", "author": "Frank Herbert", "copies": 3}
 
 
 def test_pick_goes_to_the_agent_when_two_rows_or_none_match(library_env):
@@ -1277,11 +1271,9 @@ class PlanGenerator:
         ]
 '''
     helper_written = '''from pydantic import BaseModel, Field
-from fastworkflow.planning import do_not_run, fact_from, full_list, pick, run, when
+from fastworkflow.planning import do_not_run, full_list, pick, run, when
 
-
-class Found(BaseModel):
-    book_uids: list[str] = fact_from("find_book.book_uids")
+from .find_book import Signature as FindBook
 
 
 class Signature:
@@ -1296,7 +1288,7 @@ class PlanGenerator:
     def branches(self):
         return [run("list_branches")]
 
-    def find(self, input) -> Found:
+    def find(self, input) -> FindBook.Output:
         return [run("find_book", query=input.title).note("the first page")]
 
     def book(self, input, find):

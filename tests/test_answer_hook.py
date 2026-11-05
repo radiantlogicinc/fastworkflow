@@ -242,7 +242,8 @@ def test_the_fallback_model_call_is_given_the_facts_the_phases_filled(library_en
     _run(library_env, _build_planning_command(Plan))
 
     assert len(answered) == 1
-    assert "b1" in answered[0] and "b2" in answered[0]
+    # Facts are shown readably: a uid column is left out where the labels name the rows.
+    assert "Dune" in answered[0] and "Dune Messiah" in answered[0]
 
 
 # ----------------------------------------------------------------------
@@ -469,7 +470,8 @@ def test_none_from_result_gives_a_phased_call_one_deferred_answer_from_its_facts
     # is made now, from the facts the phase filled (3.16), and it has its own span.
     assert result.answer == "written"
     assert len(answered) == 1
-    assert "b1" in answered[0] and "b2" in answered[0]
+    # Facts are shown readably: a uid column is left out where the labels name the rows.
+    assert "Dune" in answered[0] and "Dune Messiah" in answered[0]
     assert not any("__result__" in r.message for r in caplog.records)
     assert _outputs(library_env, command) == []
     spans = library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_ANSWER)

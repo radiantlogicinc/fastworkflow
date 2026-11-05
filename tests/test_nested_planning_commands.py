@@ -24,16 +24,19 @@ from fastworkflow import plan_frame as plan_frame_module
 from fastworkflow import tracing
 from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError
 from fastworkflow.context_identity import context_class_for
-from fastworkflow.planning import fact_from, run
+from fastworkflow.planning import run
 from fastworkflow.planning import phase
-from fastworkflow.observation_offloading.facts import MissingFactError, facts_from_archive
+from fastworkflow.observation_offloading.facts import MissingFactError, workflow_signatures
 from fastworkflow.observation_offloading.labels import printed_alias
 from fastworkflow.observation_offloading.state import (
     archive_for_path,
     observability_db_path,
     scope_for_host,
 )
-from fastworkflow.plan_frame import TURN_MAX_STEPS_ENV, PlanFrame, turn_max_steps
+from fastworkflow.plan_frame import TURN_MAX_STEPS_ENV, PlanFrame, runs_outside_ranges, turn_max_steps
+from fastworkflow.typed_phase_facts import fill_typed_phase_output
+from fastworkflow.examples.library._commands.Library.book_by_title import Signature as BookByTitle
+from fastworkflow.examples.library._commands.Library.find_book import Signature as FindBook
 from fastworkflow.planning_commands import PlanningCommandInputError
 from fastworkflow.state_serialization import validate_state
 from fastworkflow.turn import TurnStatus
@@ -1016,14 +1019,6 @@ def test_ac_the_parent_reads_leave_out_the_runs_inside_the_child_range(nested_en
     assert any(BOOK_BY_TITLE in commands for commands in during_parent)
 
 
-class HeldBook(BaseModel):
-    book_uid: str = fact_from("book_by_title.book_uid")
-
-
-class ChildFind(BaseModel):
-    book_uids: list[str] = fact_from("find_book.book_uids")
-
-
 def test_ad_facts_from_archive_leaves_out_a_child_range_when_given_it(nested_env):
     ctx = nested_env.ctx
     _run_book_loans(nested_env)
@@ -1035,12 +1030,14 @@ def test_ad_facts_from_archive_leaves_out_a_child_range_when_given_it(nested_env
     ranges = [[min(child_steps), max(child_steps)]]
 
     assert ranges == [[1, 2]]
-    assert facts_from_archive(HeldBook, store, scope, child_step_ranges=ranges).book_uid == "b1"
+    runs = store.command_runs(scope)
+    outside = runs_outside_ranges(runs, ranges)
+    assert fill_typed_phase_output(BookByTitle.Output, outside).book_uid == "b1"
     # The child's find is in its range, so the parent's facts cannot read it.
     with pytest.raises(MissingFactError, match="find_book"):
-        facts_from_archive(ChildFind, store, scope, child_step_ranges=ranges)
-    # Without the ranges the same read sees the child's find.
-    assert "b1" in facts_from_archive(ChildFind, store, scope).book_uids
+        fill_typed_phase_output(FindBook.Output, outside)
+    # Without dropping the ranges the same read sees the child's find.
+    assert "b1" in fill_typed_phase_output(FindBook.Output, runs).book_uids
 
 
 def test_af_the_parent_continues_in_the_context_its_child_ended_on(nested_env):
@@ -1082,12 +1079,9 @@ def test_ag_a_resumed_step_whose_child_navigated_carries_the_now_in_note(open_fi
 OPEN_BY_UID = '''from pydantic import BaseModel, Field
 
 from fastworkflow import CommandResponse
-from fastworkflow.planning import fact_from, run
+from fastworkflow.planning import run
 
-
-class Opened(BaseModel):
-    book_uid: str = fact_from("open_book.book_uid")
-    title: str = fact_from("open_book.title")
+from .open_book import Signature as OpenBook
 
 
 class Signature:
@@ -1102,7 +1096,7 @@ class Signature:
 
 
 class PlanGenerator:
-    def book(self, input) -> Opened:
+    def book(self, input) -> OpenBook.Output:
         return [run("open_book", book_uid=input.book_uid)]
 
     def __result__(self, input, book):
@@ -1127,21 +1121,26 @@ def open_by_uid_env(tmp_path, initialized_fastworkflow, monkeypatch):
     state.ctx.pop_active_workflow()
 
 
-class ItemOpened(BaseModel):
-    book_uid: str = fact_from("open_by_uid.book_uid")
-    title: str = fact_from("open_by_uid.title")
+def _item_opened(state):
+    """open_by_uid's Output, as the workflow loaded it: the model a fan-out phase fills."""
+    from fastworkflow import planning_commands
+
+    # A planning command is not routed: its Signature is in the field-source resolution.
+    signatures = planning_commands.resolve_field_sources(state.wf.folderpath).signatures
+    return signatures[OPEN_BY_UID_PLANNING_COMMAND].Output
 
 
 def test_ae_a_fan_out_item_whose_sub_plan_calls_a_planning_command_is_bound_to_its_record(
         open_by_uid_env, monkeypatch):
     state = open_by_uid_env
+    item_opened = _item_opened(state)
 
     class Plan:
         def find(self, input) -> FoundBooks:
             return [run("find_book", query=input.title)]
 
-        @phase(over="find.book_uids")
-        def opened(self, uid) -> ItemOpened:
+        @phase(over="find.book_uids", output=item_opened)
+        def opened(self, uid):
             return [run("open_by_uid", book_uid=uid)]
 
         def __result__(self, input, find, opened):
@@ -1189,7 +1188,7 @@ def test_ah_the_first_pushed_frame_is_current_under_the_childs_alias(nested_env,
 
 def test_ai_a_facts_model_does_not_read_the_find_run_of_the_child_it_calls(nested_env):
     class Plan:
-        def look(self, input) -> ChildFind:
+        def look(self, input) -> FindBook.Output:
             return [run("book_by_title", title=input.title)]
 
     nested_env.planning_command = _planning_command("Library/look_for_books", Plan, TitleInput)
@@ -1207,7 +1206,7 @@ def test_ai_a_facts_model_does_not_read_the_find_run_of_the_child_it_calls(neste
 
 def test_aj_the_same_call_fills_a_fact_from_the_child_output_it_names(nested_env):
     class Plan:
-        def look(self, input) -> HeldBook:
+        def look(self, input) -> BookByTitle.Output:
             return [run("book_by_title", title=input.title)]
 
     nested_env.planning_command = _planning_command("Library/look_for_books", Plan, TitleInput)
@@ -1217,18 +1216,19 @@ def test_aj_the_same_call_fills_a_fact_from_the_child_output_it_names(nested_env
     assert result.status == TurnStatus.COMPLETED
     [span] = _phase_spans(nested_env, "Library/look_for_books")
     assert span.attributes.get("facts_error") is None
-    assert span.attributes["facts"] == {"book_uid": "b1"}
+    assert span.attributes["facts"]["book_uid"] == "b1" and span.attributes["facts"]["found"] is True
 
 
 def test_ak_two_fan_out_items_each_open_their_record_in_place(open_by_uid_env, monkeypatch):
     state = open_by_uid_env
+    item_opened = _item_opened(state)
 
     class Plan:
         def find(self, input) -> FoundBooks:
             return [run("find_book", query=input.title)]
 
-        @phase(over="find.book_uids")
-        def opened(self, uid) -> ItemOpened:
+        @phase(over="find.book_uids", output=item_opened)
+        def opened(self, uid):
             return [run("open_by_uid", book_uid=uid)]
 
         def __result__(self, input, find, opened):

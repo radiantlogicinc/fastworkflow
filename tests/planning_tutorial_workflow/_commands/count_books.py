@@ -5,7 +5,9 @@ answer from that fact.
 """
 from pydantic import BaseModel, Field
 
-from fastworkflow.planning import fact_from, run
+from fastworkflow.planning import run
+
+from .find_book import Signature as FindBook
 
 
 class Signature:
@@ -19,10 +21,7 @@ class Signature:
 
 
 class PlanGenerator:
-    class Found(BaseModel):
-        total: int = fact_from("find_book.total")
-
-    def find(self, input) -> Found:
+    def find(self, input) -> FindBook.Output:
         return [run("find_book", query=input.query)]
 
     def __result__(self, input, find):

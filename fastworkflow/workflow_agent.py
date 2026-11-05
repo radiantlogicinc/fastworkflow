@@ -1460,23 +1460,8 @@ def _build_parsed_planning_commands(workflow_folderpath: str) -> tuple[
         if step_problems:
             logger.error(f"skipping planning command {name!r}: " + "; ".join(step_problems))
             continue
-        if command.phase_outputs:
-            _warn_phase_sources(command, workflow_folderpath, signatures)
         out.append((name, loaded.description, command.template, command, loaded.plain_utterances))
     return tuple(out)
-
-
-def _warn_phase_sources(command: PlanningCommandCommand, workflow_folderpath: str,
-                        signatures: Optional[dict] = None) -> None:
-    """Log a warning for each phase output field whose ``"from"`` names no command field.
-
-    Not a load failure: the workflow may add the command's ``Output`` later
-    (``planning_commands.check_phase_sources``). A phase whose field is still missing
-    when it runs fails then, naming the field; ``fastworkflow command preview --check``
-    fails on it (``phase_source_problems``).
-    """
-    for warning in phase_source_problems(command, workflow_folderpath, signatures):
-        logger.warning(f"planning command {command.name!r}: phase output source not found (loaded anyway): {warning}")
 
 
 def command_signatures(workflow_folderpath: str) -> dict[str, Any]:
@@ -1509,20 +1494,6 @@ def step_command_problems(command: PlanningCommandCommand, workflow_folderpath: 
                            f"to check its steps: {type(error).__name__}: {error}")
             return []
     return planning_commands.check_step_commands(command, signatures)
-
-
-def phase_source_problems(command: PlanningCommandCommand, workflow_folderpath: str,
-                          signatures: Optional[dict] = None) -> list[str]:
-    """``planning_commands.check_phase_sources`` of *command* against the workflow's command
-    signatures (``command_signatures``); empty, with a logged warning, when they cannot be read."""
-    if signatures is None:
-        try:
-            signatures = command_signatures(workflow_folderpath)
-        except Exception as error:  # noqa: BLE001 - the check is advice; the planning command still loads
-            logger.warning(f"planning command {command.name!r}: could not read the workflow's command signatures "
-                           f"to check its phase outputs: {type(error).__name__}: {error}")
-            return []
-    return planning_commands.check_phase_sources(command, signatures)
 
 
 def load_planning_commands(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ...]], ...]:

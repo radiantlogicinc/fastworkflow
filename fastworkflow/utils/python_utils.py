@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import os
 import importlib
 import importlib.machinery
@@ -10,7 +11,8 @@ import types
 from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Optional
+import typing
+from typing import Any, Optional, Union, get_args, get_origin
 
 from fastworkflow.utils.logging import logger
 
@@ -57,6 +59,34 @@ def legacy_module_names(text: str) -> str:
     still matches and a trained or cached artifact is not regenerated for that reason alone.
     """
     return _NAMESPACE_DIGEST.sub(lambda match: match.group(1), text)
+
+
+def type_text(annotation: Any) -> str:
+    """An annotation as user-facing text: a class by its plain name (its module is left out, so a
+    workflow folder's namespace never reaches a preview or an error), a generic by its arguments
+    (``list[Book]``, ``Book | None``)."""
+    if annotation is type(None):
+        return "None"
+    if annotation is Ellipsis:
+        return "..."
+    if isinstance(annotation, str):
+        return annotation
+    if inspect.isclass(annotation) and not get_args(annotation):
+        return annotation.__name__
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin is typing.Annotated:
+        return type_text(args[0])
+    if origin in (Union, types.UnionType):
+        return " | ".join(type_text(arg) for arg in args)
+    if origin is typing.Literal:
+        return f"Literal[{', '.join(repr(arg) for arg in args)}]"
+    if origin is None:
+        return re.sub(r"\btyping\.", "", repr(annotation))
+    name = getattr(origin, "__name__", None) or str(origin)
+    if not args:
+        return name
+    return f"{name}[{', '.join(type_text(arg) for arg in args)}]"
 
 
 @contextmanager

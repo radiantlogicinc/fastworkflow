@@ -5,7 +5,9 @@ books)", or "12 books (...; 10 of 12 shown)" when the page read holds fewer than
 """
 from pydantic import BaseModel, Field
 
-from fastworkflow.planning import fact_from, listed, run
+from fastworkflow.planning import listed, run
+
+from .find_book import Signature as FindBook
 
 
 class Signature:
@@ -18,11 +20,7 @@ class Signature:
 
 
 class PlanGenerator:
-    class Found(BaseModel):
-        titles: list[str] = fact_from("find_book.titles")
-        total: int = fact_from("find_book.total")
-
-    def find(self, input) -> Found:
+    def find(self, input) -> FindBook.Output:
         return [run("find_book", query=input.query)]
 
     def __result__(self, input, find):

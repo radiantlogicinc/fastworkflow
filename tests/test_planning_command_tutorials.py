@@ -96,8 +96,9 @@ def load_problem(folder: str, name: str) -> str:
     else:
         problems = []
         if loaded.command is not None:
-            problems = (workflow_agent.step_command_problems(loaded.command, folder)
-                        or workflow_agent.phase_source_problems(loaded.command, folder))
+            problems = list(dict.fromkeys(
+                workflow_agent.step_command_problems(loaded.command, folder)
+                or planning_commands.resolve_field_sources(folder).errors_for(name)))
         text = "\n".join(problems)
     return text.replace(folder + os.sep, "")
 

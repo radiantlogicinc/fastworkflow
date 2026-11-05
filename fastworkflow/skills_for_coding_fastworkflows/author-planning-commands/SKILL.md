@@ -89,7 +89,12 @@ from the facts the earlier phases filled.
 """
 from pydantic import BaseModel, Field
 
-from fastworkflow.planning import fact_from, pick
+from fastworkflow.planning import count, pick
+
+from .count_checks import Signature as CountChecks
+from .find_item import Signature as FindItem
+from .list_parts import Signature as ListParts
+from .open_item_by_uid import Signature as OpenItemByUid
 
 
 class Signature:
@@ -111,26 +116,30 @@ class PlanGenerator:
         checks = [self.checks] if input.checks else []
         return [self.find, self.item, *checks, self.report]
 
-    class ItemMatch(BaseModel):
-        uids: list[str] = fact_from("find_item.item_uids", min_length=1)
-        labels: list[str] = fact_from("find_item.labels")
-
-    def find(self, input) -> ItemMatch:
+    def find(self, input) -> FindItem.Output:
         return [f"find_item query={input.name}"]
 
     class ItemFacts(BaseModel):
-        uid: str = fact_from("open_item_by_uid.item_uid")
-        label: str = fact_from("open_item_by_uid.label")
-        part_labels: list[str] = fact_from("list_parts.labels")
+        opened: OpenItemByUid.Output
+        parts: ListParts.Output
+
+        @property
+        def uid(self) -> str:
+            return self.opened.item_uid
+
+        @property
+        def label(self) -> str:
+            return self.opened.label
+
+        @property
+        def part_labels(self) -> list[str]:
+            return self.parts.labels
 
     def item(self, input, find) -> ItemFacts:
-        return [pick("open_item_by_uid", item_uid=find.uids[0], named=input.name),
+        return [pick("open_item_by_uid", item_uid=find.item_uids[0], named=input.name),
                 "list_parts (full list)"]
 
-    class CheckFacts(BaseModel):
-        total: int = fact_from("count_checks.total")
-
-    def checks(self) -> CheckFacts:
+    def checks(self) -> CountChecks.Output:
         return ["count_checks"]
 
     def report(self, item, checks=None):
@@ -204,15 +213,16 @@ The code appends the rule sentence of `in_request` (and of `in_request: "subject
 planner (`extraction_sentences`), so the description does not repeat it. Full rules: the
 `planning_commands` module doc.
 
-## Phases, facts and `fact_from`
+## Phases and facts (typed by commands)
 
 - Each public method of `PlanGenerator` is a phase (`planning.py` `planned`, building the
   runtime's `planning_phases.Phase`), in the order written; `_name` methods are helpers. Each phase
   is a fresh executor run with its own step budget (`PHASE_MAX_STEPS`, default 15), except an
   answer-only phase (one model call, or none). The last phase writes the answer.
 - Its return annotation is its facts model. Two forms:
-  - a facts model whose fields are each `fact_from("<command>.<field>", **Field_kwargs)`
-    (`planning_phases.py` `fact_from`): a field of that command's `Output`, else its `Input`;
+  - a facts model whose fields are each typed with a command's `Signature.Output` (or `Input`),
+    `show: ShowBook.Output`, with the other values as properties or methods of the model; a copy
+    (`fact_from`, or a `"from"` on a facts field) is not read and fails the load (design 3.12);
   - a command's `Signature.Output` class, a phase "typed by its command": its fields are filled from
     the output of that command in the phase's runs (`typed_phase_facts.py`
     `fill_typed_phase_output`).
@@ -236,7 +246,7 @@ planner (`extraction_sentences`), so the description does not repeat it. Full ru
   (`planning.py` `_runs_flat`). A phase repeated for several cases is one method each, calling one
   shared module function (a `self._helper` called with a fact is not run in the template, it reads as
   its name).
-- `@phase(over="<phase>.<list field>")` (or a function of `input` giving the items) fans a phase out,
+- `@phase(over="<phase>.<list field or property>")` (or a function of `input` giving the items) fans a phase out,
   one sub-plan per item (at most `FANOUT_MAX_ITEMS`, 10, unless `max_items` says otherwise); its one
   parameter that is neither `input` nor a phase gets the item; `max_items`, `noun`, `bind`
   tune it (`docs/planning_command_phases.md`, "Fan-out phases"). `@phase(optional=True)`: the job goes
@@ -249,11 +259,10 @@ planner (`extraction_sentences`), so the description does not repeat it. Full ru
   helper.
 - At load (`planning_commands.py` `_checked_plan`, `placeholder_template`, `check_step_commands`;
   `workflow_agent.py` `step_command_problems`): a method without `self`, a bad annotation, a parameter
-  that cannot bind, a malformed `"from"`, a method that fails on placeholder facts or writes `None`
-  into a step, and a step naming a command the workflow lacks or a parameter its `Signature.Input`
-  lacks fail the load. A `"from"` naming a command or field the workflow lacks is only a warning at
-  load (`check_phase_sources`) and fails `fastworkflow command preview --check`.
-- A planning command imports from `fastworkflow.planning` what it writes: `fact_from`, `from_`,
+  that cannot bind, a facts field typed with anything but a command's `Output` or `Input` (a copy
+  included), a method that fails on placeholder facts or writes `None` into a step, and a step naming
+  a command the workflow lacks or a parameter its `Signature.Input` lacks fail the load.
+- A planning command imports from `fastworkflow.planning` what it writes: `from_`,
   `pick`, `run`, `full_list`, `when`, `do_not_run`, `phase`, `num`, `count`, `listed`.
 
 ## Step helpers
@@ -434,7 +443,7 @@ that name each step.
 - [ ] File stem is the planning command's name; the Signature docstring says the job; plain_utterances are generic
 - [ ] Input types are str / bool / int / Literal / Optional[str] = None; bools default false
 - [ ] Signature + top-level PlanGenerator; each phase a method with self, in run order; helpers _named
-- [ ] Every fact field uses fact_from with a real "<command>.<field>" (or the phase is typed by a command's Output)
+- [ ] Every fact field is typed with a command's Output or Input (or the phase returns a command's Output)
 - [ ] Every Input handle that another command supplies carries from_ (not available_from)
 - [ ] Input-dependent shape in __phases__; a skip is `if not <what it needs>: return []`;
       a phase that may be skipped is read through =None
