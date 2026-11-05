@@ -181,6 +181,15 @@ the turn's trace (`fw.planner.plan`), and the planner writes the rest of it agai
 (`fw.planner.replan`) when a step's arguments are refused or the user's answer to a question
 changes what is needed.
 
+**Before anything runs, the parts are reviewed.** A request with several parts, or a part with no confident
+match, is shown back as a proposed plan. Each part has its goal, its inputs (a value, or `from sub-task N`) and
+its means: a planning command, a plain command, or build from scratch. Reply `accept` to run the plan, `no` to
+stop, or change it with `change 1: means=plain:find_member`, `change 2: inputs=query=from sub-task 1` or
+`drop 3`. A reply in your own words is read into those changes by one model call, and shown back for you to
+confirm. A part with one confident match, or an exact command name, runs at once with no review. A review
+admits 8 replies or 15 minutes. An unattended turn, or a host that is not a person (MCP, REST, another agent),
+runs the proposed plan as it stands and marks it `not_reviewed`.
+
 With `JEV_API_KEY` set, Jev first decides whether a planning command fits the part, one
 scope at a time along the lookup path above. A confident match is planned in one of two ways:
 
@@ -212,7 +221,8 @@ should I use?` The reply runs the call again with the value. An unattended turn 
 the planner plans from the template instead.
 
 Without `JEV_API_KEY` no planning command is matched first: the planner plans every part from
-the full list, where each planning command is shown with its template, and may call one as a
+the listing (the full list, or a large workflow's shortlist), where each planning command is shown with its
+template, and may call one as a
 step or copy its steps. An INFO line naming `JEV_API_KEY` says so, once per workflow.
 
 So the declarations of page 5 tell the planner and the agent where values and contexts come
@@ -241,12 +251,9 @@ say which books Mia Chen has on loan, and that the note was added
 
 `member_report` leaves the workflow on Mia Chen (page 5), so `add_note` runs on her record.
 
-**A larger workflow is still listed in full in this release.** The planner is shown every command
-of the workflow, each planning command with its template, whatever the workflow's size. A shortlist
-for a large workflow is built and measured, and it is off: the planner keeps the full list until the
-plan review round that shows the proposed commands to the user is in place, so that a command the
-shortlist leaves out can be corrected. When the shortlist is switched on, it works like this. For a
-request it would hold:
+**A larger workflow is shortlisted.** The planner is shown every command of the workflow, each planning
+command with its template, while the full list is 7000 characters or less. A larger workflow that has trained
+heads is shown a shortlist instead, built like this for a request:
 
 1. **The commands that match**, in every scope on the path and in every context the library can
    navigate into through a declared `descends_to` (`Book`, `Member`, and their base `Record`):
@@ -258,7 +265,9 @@ request it would hold:
    on the list; and the core commands.
 
 In that case the planner sees the shortlist in full, each planning command on it with its template,
-and every other context as one line. The list follows the workflow: when a step moves it into
+and every other context as one line. A workflow with no trained heads is listed in full at every size. A part
+bound to a plain command in a reviewed plan is shown that command, its producers and its navigation, not the
+whole list. The list follows the workflow: when a step moves it into
 another context, the list is shown again from there.
 
 So in a large workflow, **the edges you declare decide what the plan can reach**: a producer `from_`
@@ -296,6 +305,6 @@ the planner fills its inputs, code checks them and writes its steps, and the pla
 steps the request asks for beyond it; a value the request leaves out is asked for in an
 attended turn. When the call fails, the planner adapts the command's template. Without the key,
 or for a part no planning command covers, the planner plans from the list of commands, which
-shows each planning command with its template. The planner is shown the full list of commands in this release. A shortlist, which your producer
-`from_` and `descends_to` declarations complete, is built for a large workflow and is off until the
-review rounds are in place.
+shows each planning command with its template. The planner is shown the full list of commands up to 7000
+characters; above that, the shortlist of a large workflow, which your producer `from_` and `descends_to`
+declarations complete.

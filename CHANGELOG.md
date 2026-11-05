@@ -213,6 +213,24 @@ error that names the new form; there is no legacy support, except where an item 
 
 ### Added
 
+- **Sub-tasks are reviewed before a multi-part request runs** (fix-3rsq.plan-review.2, round 1). In agent mode,
+  a request split into several sub-tasks, or a sub-task with no confident match, is shown as a proposed plan
+  before anything runs. Each sub-task has its goal, its inputs (values, or `from sub-task N`) and its means: a
+  planning command, a plain command, or build from scratch. The proposal is drawn from the head candidates
+  (execution and planning top-k), the shortlist and, with `JEV_API_KEY`, Jev's planning match. Replies are
+  `accept`, `no` (the turn ends and nothing runs), typed edits (`change N: means=...`, `change N: inputs=...`,
+  `drop N`), or free text: one model call reads the free text into structured edits, which are shown back for
+  confirmation. A review admits 8 replies or 15 minutes.
+- **Fast path.** One sub-task with a confident head match, or an exact command name, runs directly, with no review.
+- **No answerer runs the draft.** An unattended turn, or a host surface (MCP/REST, agent-to-agent), runs the draft
+  plan as proposed and marks it `not_reviewed` (span attribute `subtask_review`). Commands with an approval
+  annotation still need their approval.
+- **Hand-off of the reviewed plan.** Each sub-task runs with its means: a planning command through the phase runner
+  with its checked arguments, a plain command with a listing narrowed to it (its producers and the navigation to its
+  context included), or build from scratch. A `from sub-task N` input takes N's typed Output when N produced one,
+  and N's answer text only when it did not. An accept after a restart resumes the review.
+- **Goals complete only through the finish check.** A successful command does not complete its sub-task's goal.
+
 - **`fastworkflow command run-code`, and `fastworkflow.planning.run_code`** (fix-3rsq.17.1). One call of a command,
   run with no model: a planning command phase by phase, as the tutorial's runs show it, stopping at the first
   open step with exit 0; `--start-with` puts the workflow on a record first; a step naming a planning command
@@ -291,9 +309,8 @@ error that names the new form; there is no legacy support, except where an item 
 
 - **Full run listing by default** (fix-3rsq.10.15). A sub-task's run is shown the full listing of
   commands. A size-based command shortlist exists for a larger workflow, above
-  `FULL_LISTING_MAX_CHARS` (7000 characters). It is off in this release, so the full listing is used
-  at every size. It is expected to be switched on together with the plan review round that shows the
-  proposed commands to the user.
+  `FULL_LISTING_MAX_CHARS` (7000 characters). Round 1 of plan review switched production to the shortlist
+  above that size (see the production listing entry under Changed).
 
 - **The library example has eight seeds per command** (fix-3rsq.10.17). Its
   `plain_utterances` are the worked example for the seed count. Follow it, and keep each command's
@@ -870,6 +887,10 @@ error that names the new form; there is no legacy support, except where an item 
   A folder under `_skills` is not a skill (see the skill-context note above).
 
 ### Changed
+
+- **Production listing is the shortlist above 7000 characters** (fix-3rsq.plan-review.2.10). The agent's listing
+  uses the threshold arm: the full list up to 7000 characters, and the shortlist of the matching commands with their
+  producers and navigation above it. A workflow with no trained heads falls back to the full list at every size.
 
 - **`verify` on a bool that defaults to true asks which value the argument takes** (fix-jd9o.9).
   Before, the check asked "Does the request ask against this?". Jev read that double negative close
