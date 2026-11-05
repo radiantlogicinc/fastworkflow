@@ -16,7 +16,6 @@ from pydantic import BaseModel, Field
 
 import fastworkflow
 from fastworkflow import command_preview, planning_commands, planning_phases, tracing, workflow_agent
-from fastworkflow.command_routing import RoutingDefinition
 from fastworkflow.planning import phase, pick, run
 from fastworkflow.planning_commands import PlanningCommandFormatError
 from fastworkflow.turn import TurnStatus
@@ -47,11 +46,9 @@ class Other(BaseModel):
 @pytest.fixture(autouse=True)
 def _fresh_command_caches():
     # library_env copies the library workflow into tmp_path and loads its command modules.
-    RoutingDefinition._GLOBAL_COMMAND_CLASS_CACHE.clear()
     planning_commands.resolve_field_sources.cache_clear()
     workflow_agent._build_parsed_planning_commands.cache_clear()
     yield
-    RoutingDefinition._GLOBAL_COMMAND_CLASS_CACHE.clear()
     planning_commands.resolve_field_sources.cache_clear()
     workflow_agent._build_parsed_planning_commands.cache_clear()
 

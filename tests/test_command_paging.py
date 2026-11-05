@@ -23,7 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 import fastworkflow
 from fastworkflow import ModuleType, planning_phases
 from fastworkflow.command_executor import frame_command_result
-from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
+from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.observation_offloading.facts import output_page, paging_parameters
 from fastworkflow.planning_commands import PlanningCommandFormatError
 from tests.test_planning_command_code_steps import (  # noqa: F401 - the todo fixtures of that file
@@ -45,14 +45,6 @@ GET_TODO_LIST = "TodoListManager/get_todo_list"
 _COPY_IGNORE = shutil.ignore_patterns("___workflow_contexts", "___convo_info", "__pycache__", "versions")
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
-
-
-@pytest.fixture(autouse=True)
-def _loader_caches_per_test():
-    # The routing cache is keyed by command name alone, and these tests rewrite the same command.
-    RoutingDefinition._GLOBAL_COMMAND_CLASS_CACHE.clear()
-    yield
-    RoutingDefinition._GLOBAL_COMMAND_CLASS_CACHE.clear()
 
 
 # ----------------------------------------------------------------------

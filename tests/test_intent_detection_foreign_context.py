@@ -768,9 +768,6 @@ class TestTheDeclaredEnteringCommandIsRead:
 
     @pytest.fixture
     def declared_workflows(self, tmp_path):
-        # The command-class cache is keyed by command name alone, so a class another copy
-        # loaded (without descends_to) would answer for this one.
-        fastworkflow.RoutingRegistry.clear_registry()
         workflow_path = tmp_path / "todo_list_workflow"
         shutil.copytree(
             os.path.join(os.path.dirname(__file__), "todo_list_workflow"),
@@ -1029,8 +1026,6 @@ class TestTheHintPathOnARealWorkflow:
 
     @pytest.fixture
     def workflows(self, tmp_path):
-        # See declared_workflows: the command-class cache is keyed by command name alone.
-        fastworkflow.RoutingRegistry.clear_registry()
         workflow_path = tmp_path / "todo_list_workflow"
         shutil.copytree(
             os.path.join(os.path.dirname(__file__), "todo_list_workflow"),

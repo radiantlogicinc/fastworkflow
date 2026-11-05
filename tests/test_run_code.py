@@ -40,19 +40,14 @@ def _copy(source: str, destination) -> str:
     return str(destination)
 
 
-# A workflow's modules are named from its folder's basename, so two copies both called "library" would share
-# module names in one pytest process (the second would import the first's classes). Each test's copy is named
-# after the test.
-
-
 @pytest.fixture
 def library(tmp_path) -> str:
-    return _copy(LIBRARY, tmp_path / f"library_{tmp_path.name}")
+    return _copy(LIBRARY, tmp_path / "library")
 
 
 @pytest.fixture
 def todo(tmp_path) -> str:
-    return _copy(TODO, tmp_path / f"todo_list_workflow_{tmp_path.name}")
+    return _copy(TODO, tmp_path / "todo_list_workflow")
 
 
 def _no_llm_env() -> dict:

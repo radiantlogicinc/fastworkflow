@@ -37,7 +37,7 @@ import fastworkflow
 from fastworkflow import Action, CommandOutput, CommandResponse
 from fastworkflow.command_executor import CommandExecutor, frame_command_result
 from fastworkflow import ModuleType
-from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
+from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.examples.library.application.library import Library
 from tests.example_workflow.application.todo_manager import TodoListManager as ExampleTodoListManager
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
@@ -57,14 +57,6 @@ _COPY_IGNORE = shutil.ignore_patterns(
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
 
 THREE_ARGUMENT_CALL = "(self, workflow: Workflow, command: str, command_parameters)"
-
-
-@pytest.fixture(autouse=True)
-def _loader_caches_per_test():
-    # The routing cache is keyed by command name alone, and these tests rewrite the same commands.
-    RoutingDefinition._GLOBAL_COMMAND_CLASS_CACHE.clear()
-    yield
-    RoutingDefinition._GLOBAL_COMMAND_CLASS_CACHE.clear()
 
 
 # ----------------------------------------------------------------------

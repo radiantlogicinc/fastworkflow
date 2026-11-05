@@ -43,10 +43,6 @@ from fastworkflow.workflow_execution_context import (
 )
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_plan_frames import no_turn_budget_env, warnings_logged  # noqa: F401 - fixtures
-from tests.test_planning_commands import (  # noqa: F401 - the library_wf module purge
-    _clear_library_wf_sys_modules,
-    _purge_library_wf_sys_modules,
-)
 from tests.test_step_helpers import (
     LIBRARY,
     FoundBooks,
@@ -390,8 +386,6 @@ def _verify_book_by_title() -> str:
 def _nested_state(tmp_path, initialized_fastworkflow, monkeypatch, *, command_texts=None,
                   extracted=None):
     monkeypatch.delenv(TURN_MAX_STEPS_ENV, raising=False)
-    # A second copy in one test (origin and restored) must not load the first copy's modules.
-    _purge_library_wf_sys_modules()
     return _make_library_runner_env(
         tmp_path,
         initialized_fastworkflow,

@@ -87,8 +87,10 @@ class RoutingDefinition(BaseModel):
     # Maps command → contexts (set)
     routing_definition_map: Dict[str, Set[str]] = {}
 
-    # Single, process-wide cache of imported command classes
-    _GLOBAL_COMMAND_CLASS_CACHE: ClassVar[dict[str, Type[Any]]] = {}
+    # Single, process-wide cache of imported command classes, keyed by (workflow folder, command key).
+    # Keyed by name alone, a second workflow in the same process would get the first one's class for
+    # any command name they share (fix-3rsq.phase10-routing-class-cache).
+    _GLOBAL_COMMAND_CLASS_CACHE: ClassVar[dict[tuple[str, str], Type[Any]]] = {}
 
     # ------------------------------------------------------------------
     # Command Router functionality
@@ -143,18 +145,18 @@ class RoutingDefinition(BaseModel):
         Retrieves a command's implementation class from the cache or loads it.
         The context is no longer needed for lookup, as command names are unique.
         """
-        cache_key = f"{command_name}:{module_type.name}"
+        cache_key = (os.path.abspath(self.workflow_folderpath), f"{command_name}:{module_type.name}")
 
         cls = type(self)
 
-        # First check the **global** cache shared by every RoutingDefinition
+        # First check the **global** cache shared by every RoutingDefinition of this workflow folder
         if cache_key in cls._GLOBAL_COMMAND_CLASS_CACHE:
             return cls._GLOBAL_COMMAND_CLASS_CACHE[cache_key]
 
         # Not cached yet – load it now.
         result = self._load_command_class(command_name, module_type)
 
-        # Store in both caches so *all* future RoutingDefinition objects benefit.
+        # Store it so every future RoutingDefinition of this folder benefits.
         cls._GLOBAL_COMMAND_CLASS_CACHE[cache_key] = result
         return result
 

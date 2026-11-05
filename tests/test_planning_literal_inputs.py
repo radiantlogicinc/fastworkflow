@@ -30,7 +30,6 @@ from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from tests.test_intent_detection_foreign_context import (
     _refusing_router as refusing_router,
 )
-from tests.test_planning_commands import _purge_library_wf_sys_modules
 from tests.test_step_helpers import LibraryRunner, _library_workflow
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixture
     initialized_fastworkflow,
@@ -97,7 +96,6 @@ class RoutedKindParams(BaseModel):
 def literal_env(tmp_path, initialized_fastworkflow, monkeypatch):
     """A library copy with a root planning command that has Literal inputs; the classifier is
     a double that raises if consulted."""
-    _purge_library_wf_sys_modules()
     folder = _library_workflow(tmp_path)
     Path(folder, "_commands", f"{ROOT_PLANNING}.py").write_text(
         INSPECT_ENTITY_SOURCE, encoding="utf-8")

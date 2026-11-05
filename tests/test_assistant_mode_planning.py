@@ -11,7 +11,6 @@ name, and a needs-agent one is refused with the reasons (``command_executor._ass
 from __future__ import annotations
 
 import os
-import sys
 import uuid
 
 import pytest
@@ -31,16 +30,6 @@ from tests.test_step_helpers import (
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-@pytest.fixture(autouse=True)
-def _forget_library_copies():
-    """Each test loads its library copy as a ``library_wf`` package from its own tmp folder. Drop those
-    modules afterwards: a stale one left in sys.modules poisons the next file's library copy (the
-    ``cannot import name 'Branch' from 'library_wf.application.library'`` failures of
-    test_planning_command_contexts when run after this file)."""
-    yield
-    for key in list(sys.modules):
-        if key == "library_wf" or key.startswith("library_wf."):
-            del sys.modules[key]
 LIBRARY = os.path.join(ROOT, "fastworkflow", "examples", "library")
 
 MECHANICAL_LIBRARY = [

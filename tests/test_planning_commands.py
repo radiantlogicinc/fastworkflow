@@ -121,22 +121,6 @@ def _run_planning_command(env, planning_command, args: dict | None = None):
     return env.ctx.process_turn("look up the book")
 
 
-def _purge_library_wf_sys_modules() -> None:
-    # Each library test copy lives under tmp_path/library_wf but reuses the
-    # same top-level package name, so stale library_wf.* entries poison later
-    # relative imports (e.g. find_book.Signature) in the same process.
-    for key in list(sys.modules):
-        if key == "library_wf" or key.startswith("library_wf."):
-            del sys.modules[key]
-
-
-@pytest.fixture(autouse=True)
-def _clear_library_wf_sys_modules():
-    _purge_library_wf_sys_modules()
-    yield
-    _purge_library_wf_sys_modules()
-
-
 @pytest.fixture(autouse=True)
 def _clear_missing_output_warnings():
     reset_missing_declared_output_warnings()
@@ -1645,7 +1629,6 @@ RECIPE_COMMANDS = (
 def _start(tmp_path, initialized, monkeypatch, *, extra_planning_commands=None):
     """A library copy with the real dispatch, the turn planner unscripted, and no planner model."""
     monkeypatch.delenv(TURN_MAX_STEPS_ENV, raising=False)
-    _purge_library_wf_sys_modules()
     return _make_library_runner_env(
         tmp_path,
         initialized,

@@ -1,9 +1,12 @@
+import hashlib
 import os
 import importlib
+import importlib.machinery
 import re
 import importlib.util
 import sys
 import threading
+import types
 from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
@@ -15,6 +18,45 @@ from fastworkflow.utils.logging import logger
 _FALLBACK_LOAD_LOCK = threading.RLock()
 # Dotted name -> mtime_ns of the file when it was last executed or first reused.
 _LOADED_MTIMES: dict[str, int] = {}
+# Separates a workflow folder's basename from the digest of its resolved path in a module namespace.
+_NAMESPACE_SEP = "__"
+_NAMESPACE_LOCK = threading.RLock()
+_NAMESPACE_DIGEST = re.compile(r"\b(\w+?)__[0-9a-f]{8}(?=\.)")
+
+
+def workflow_namespace(folder: str) -> str:
+    """The top-level package name under which a workflow folder's command modules are loaded.
+
+    It is the folder's basename plus a short digest of its resolved path, so two folders with the
+    same basename (two copies of ``library``) get different module names and never share modules or
+    relative imports. The namespace package is registered in ``sys.modules`` with the folder as its
+    ``__path__``, so ``from ..application import x`` inside a command file resolves inside that folder.
+    """
+    real = os.path.realpath(folder)
+    digest = hashlib.sha256(real.encode("utf-8")).hexdigest()[:8]
+    basename = os.path.basename(real).replace(".", "_") or "workflow"
+    namespace = f"{basename}{_NAMESPACE_SEP}{digest}"
+    with _NAMESPACE_LOCK:
+        package = sys.modules.get(namespace)
+        if package is None or list(getattr(package, "__path__", ())) != [real]:
+            package = types.ModuleType(namespace)
+            package.__path__ = [real]
+            package.__package__ = namespace
+            spec = importlib.machinery.ModuleSpec(namespace, None, is_package=True)
+            spec.submodule_search_locations = [real]
+            package.__spec__ = spec
+            sys.modules[namespace] = package
+    return namespace
+
+
+def legacy_module_names(text: str) -> str:
+    """*text* with each workflow namespace written back to the bare basename it had before the
+    namespace existed (``library__3fa2b1c4.x`` -> ``library.x``).
+
+    Applied where a module name is digested into a cache key, so a key written before the namespace
+    still matches and a trained or cached artifact is not regenerated for that reason alone.
+    """
+    return _NAMESPACE_DIGEST.sub(lambda match: match.group(1), text)
 
 
 @contextmanager
@@ -175,6 +217,16 @@ def get_module(module_path: str, search_root: Optional[str] = None) -> Any:
                 f"Module {abs_module_path} is outside of permitted roots: {project_root} or {fw_pkg_root}")
 
         # Build import path relative to project root
+        if relative_base == project_root and search_root:
+            folder = os.path.abspath(search_root)
+            inside = os.path.relpath(abs_module_path, folder)
+            if not inside.startswith(os.pardir) and not os.path.isabs(inside):
+                # A workflow file: named under the folder's own namespace (see workflow_namespace).
+                namespace = workflow_namespace(folder)
+                inside = inside.rsplit(".py", 1)[0]
+                dotted = inside.replace(os.sep, ".")
+                return _load_module_once(f"{namespace}.{dotted}", abs_module_path)
+
         relative_path = os.path.relpath(abs_module_path, relative_base)
         module_pythonic_path = relative_path.replace(os.sep, ".").rsplit(".py", 1)[0]
         if relative_base == fw_pkg_root:

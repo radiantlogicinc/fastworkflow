@@ -52,9 +52,11 @@ def workflow(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, GATE, gate)
     monkeypatch.setattr(sys, "path", list(sys.path))
     python_utils.get_module.cache_clear()
-    yield name, wf, gate
+    # A workflow's command modules load under its namespace (basename plus a digest of the folder path).
+    namespace = python_utils.workflow_namespace(str(wf))
+    yield namespace, wf, gate
     python_utils.get_module.cache_clear()
-    for mod in [m for m in sys.modules if m == name or m.startswith(name + ".")]:
+    for mod in [m for m in sys.modules if m == namespace or m.startswith(namespace + ".")]:
         del sys.modules[mod]
 
 

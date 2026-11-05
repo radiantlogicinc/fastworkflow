@@ -39,7 +39,7 @@ from tests.test_intent_detection_foreign_context import (
     _refusing_router as refusing_router,
 )
 from tests.test_nested_planning_commands import BOOK_LOANS
-from tests.test_planning_commands import _purge_library_wf_sys_modules, recipe_env  # noqa: F401 - recipe_env is a fixture
+from tests.test_planning_commands import recipe_env  # noqa: F401 - recipe_env is a fixture
 from tests.test_step_helpers import LibraryRunner, _library_workflow
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixture
     initialized_fastworkflow,
@@ -88,7 +88,6 @@ def planning_name_env(tmp_path, initialized_fastworkflow, monkeypatch):
     The startup command leaves the workflow in Library, the context the live agent was in.
     The classifier is replaced by a double that raises if consulted (see `refusing_router`).
     """
-    _purge_library_wf_sys_modules()
     folder = _library_workflow(
         tmp_path,
         extra_commands=("_commands/Library/count_books.py", "_commands/Book/loan_report.py"),

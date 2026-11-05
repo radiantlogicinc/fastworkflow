@@ -9,7 +9,6 @@ import json
 import logging
 import os
 import shutil
-import sys
 from pathlib import Path
 
 import pytest
@@ -673,11 +672,6 @@ class PlanGenerator:
 
 def _with_rule_check(tmp_path) -> str:
     """A library copy with the rule_check planning command, loaded as a workflow's commands are."""
-    # Every library test copy is a library_wf package; a stale one left in sys.modules by an
-    # earlier test poisons the relative imports of this copy (see test_planning_commands).
-    for key in list(sys.modules):
-        if key == "library_wf" or key.startswith("library_wf."):
-            del sys.modules[key]
     folder = _library_workflow(tmp_path)
     # The Library planning command the rule test reads (its extraction sentences), and its helper.
     for rel in ("_commands/Library/_wording.py", "_commands/Library/book_by_title.py"):

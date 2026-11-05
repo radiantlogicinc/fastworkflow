@@ -60,14 +60,9 @@ def _open_session(folder: str):
     import fastworkflow
     from fastworkflow import Action
     from fastworkflow.command_executor import CommandExecutor
-    from fastworkflow.command_routing import RoutingDefinition
 
     if fastworkflow.RoutingRegistry is None:   # init sets the registries; {} is enough: no model is read
         fastworkflow.init({})
-    # The command-class cache is keyed by command name alone (fix-3rsq.phase10-routing-class-cache), so a
-    # run after another workflow in the same process would get that workflow's classes (its ``startup``
-    # opens the other workflow's root object). Each run loads its own classes.
-    RoutingDefinition._GLOBAL_COMMAND_CLASS_CACHE.clear()
     workflow = fastworkflow.Workflow.create(folder, workflow_id_str=f"run-code-{uuid.uuid4().hex}")
     startup = os.path.join(folder, "startup_action.json")
     if os.path.isfile(startup):

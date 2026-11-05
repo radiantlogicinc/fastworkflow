@@ -20,7 +20,6 @@ from fastworkflow.planning_commands import PlanningCommandInputError
 from fastworkflow.turn import TurnStatus
 from fastworkflow.utils.signatures import InputForParamExtraction
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
-from tests.test_planning_commands import _clear_library_wf_sys_modules  # noqa: F401 - the library_wf purge
 from tests.test_text_planner_and_split import (  # noqa: F401 - workflow_env is a fixture
     RecordingTraceSink, _prompt, _session, workflow_env)
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - shared fixture
@@ -107,11 +106,8 @@ def _module(field: str) -> str:
 
 
 def _reset_loader_caches() -> None:
-    """The step-command stubs this file writes share command names with other tests' workflows, and the
-    routing cache is keyed by command name alone, so each test starts and ends with the caches cleared."""
-    from fastworkflow.command_routing import RoutingDefinition
-
-    RoutingDefinition._GLOBAL_COMMAND_CLASS_CACHE.clear()
+    """The step-command stubs this file writes share a folder's loader caches across tests, so each test
+    starts and ends with them cleared."""
     pc.resolve_field_sources.cache_clear()
     workflow_agent._build_parsed_planning_commands.cache_clear()
 

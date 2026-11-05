@@ -38,6 +38,13 @@ from fastworkflow.context_navigation import (
 
 logger = logging.getLogger(__name__)
 
+def _routing_registry():
+    """The routing registry class itself. ``fastworkflow.RoutingRegistry`` stays None until
+    ``fastworkflow.init()`` runs, and the listing is read on paths that may come first."""
+    from fastworkflow.command_routing import RoutingRegistry
+    return RoutingRegistry
+
+
 #: A listing whose full text is at most this many characters is given whole (production policy). Set from the
 #: offline measurement of Phase 10 step 4 (10.7): the library's full listing (6,516 characters from its Library
 #: context) is whole, the no-hints tutorial's (6,353) too, and the app's (82,055) is shortlisted.
@@ -177,7 +184,7 @@ def gather(workflow, sub_task: str, planning_probabilities: Mapping[str, float] 
     the commands whose names the sub-task writes, and the planning-command match's confident and unsure candidates.
     """
     folder = workflow.folderpath
-    crd = fastworkflow.RoutingRegistry.get_definition(folder)
+    crd = _routing_registry().get_definition(folder)
     found = _mentioned_names(sub_task, crd, gather_contexts(workflow))
     if planning_probabilities:
         confident, unsure = planning_candidates(planning_probabilities)
@@ -234,7 +241,7 @@ def expand(workflow, seeds: Iterable[str]) -> frozenset[str]:
 
     folder = workflow.folderpath
     active = workflow.current_command_context_name
-    crd = fastworkflow.RoutingRegistry.get_definition(folder)
+    crd = _routing_registry().get_definition(folder)
     resolution = planning_commands.resolve_field_sources(folder)
     known: set[str] = set()
     for context in crd.contexts:
@@ -356,7 +363,7 @@ def exact_command_name(workflow, sub_task: str) -> str | None:
         return None
     from fastworkflow.context_navigation import exact_name_scopes
 
-    crd = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
+    crd = _routing_registry().get_definition(workflow.folderpath)
     for scope in exact_name_scopes(workflow):    # the lookup path intent detection reads, nearest first
         for qualified in _context_names(crd, scope.context_name):
             if qualified.split("/")[-1].lower() != token:
@@ -385,7 +392,7 @@ def live_gather(workflow, sub_task: str, planning_probabilities: Mapping[str, fl
     merged = dict(head_planning)
     for name, probability in (planning_probabilities or {}).items():
         merged[name] = max(merged.get(name, 0.0), float(probability))
-    crd = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
+    crd = _routing_registry().get_definition(workflow.folderpath)
     known = {name for context in crd.contexts for name in _context_names(crd, context)}
     seeds = set(gather(workflow, sub_task, merged or None))
     seeds.update(label for label in labels if label in known)
@@ -509,7 +516,7 @@ def bound_command_names(workflow, name: str) -> frozenset[str]:
     commands and descends_to declarations). Producers and navigation are followed transitively, as expansion follows them."""
     folder = workflow.folderpath
     active = workflow.current_command_context_name
-    crd = fastworkflow.RoutingRegistry.get_definition(folder)
+    crd = _routing_registry().get_definition(folder)
     resolution = planning_commands.resolve_field_sources(folder)
     known: set[str] = set()
     for context in crd.contexts:
@@ -540,7 +547,7 @@ def command_shortlist_text(workflow, names: Iterable[str]) -> str:
     every other context as one line."""
     folder = workflow.folderpath
     active = workflow.current_command_context_name
-    crd = fastworkflow.RoutingRegistry.get_definition(folder)
+    crd = _routing_registry().get_definition(folder)
     by_owner: dict[str, list[str]] = {}
     for name in sorted(names):
         by_owner.setdefault(_owner(name, crd, active), []).append(name)
