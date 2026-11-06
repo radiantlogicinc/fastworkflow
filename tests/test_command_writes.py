@@ -7,6 +7,7 @@ other library tests script it); the executor's model is scripted (``Model``), th
 """
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -85,6 +86,12 @@ def test_a_read_only_planning_command_refuses_a_note_its_phase_does_not_name(wri
     [refused] = _outputs(writes_env, "add_note")
     assert refused.success is False
     assert "changes the application's data" in refused.command_response.response
+    # A refused write never ran: it is marked, and the action log (what distillation and the policy
+    # read as executed) holds the phase's real steps but not the refused write.
+    assert refused.command_response.artifacts.get("write_refused") is True
+    logged = json.dumps(writes_env.ctx._action_log)
+    assert "open_book" in logged, "the action log records the steps that ran"
+    assert "add_note" not in logged and "spine is cracked" not in logged
     assert writes_env.model.asked, "the agent was asked for a step, and tried the write"
     # the books were still opened, by the phase's own steps
     assert [o.command_response.output.book_uid for o in _outputs(writes_env, "open_book")] == ["b3", "b4"]

@@ -597,8 +597,11 @@ class CommandExecutor(CommandExecutorInterface):
         if refusal is not None:
             if "is_assistant_mode_command" in chat_session.cme_workflow._context:
                 del chat_session.cme_workflow._context["is_assistant_mode_command"]
+            # Marked so the agent loop neither logs it as an executed action nor lets the policy
+            # remember it as run (workflow_agent._execute_workflow_query skips both, as for policy_blocked).
             refused = CommandOutput(
-                command_response=fastworkflow.CommandResponse(response=refusal, success=False),
+                command_response=fastworkflow.CommandResponse(
+                    response=refusal, success=False, artifacts={"write_refused": True}),
                 command_name=command_name)
             refused.workflow_name = workflow_name
             refused.context = context

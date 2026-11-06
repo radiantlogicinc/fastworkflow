@@ -860,9 +860,11 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     # Append executed action to the session action log for external consumers
     # (agent mode only): distillation compares teacher/student passes off it and
     # final-answer synthesis summarizes it.
-    # A command the policy blocked never ran, so it is not an executed action;
-    # what ran is also what the policy remembers (fastworkflow.policy_runtime).
-    if not (getattr(command_output.command_response, "artifacts", None) or {}).get("policy_blocked"):
+    # A command the policy blocked, or a write refused inside a read-only planning command's phase
+    # (command_writes), never ran, so it is not an executed action; what ran is also what the policy
+    # remembers (fastworkflow.policy_runtime).
+    artifacts = getattr(command_output.command_response, "artifacts", None) or {}
+    if not (artifacts.get("policy_blocked") or artifacts.get("write_refused")):
         _append_action_record(chat_session_obj, action_record(command, command_output, response_text))
         if not internal and (policy := policy_of(chat_session_obj.workflow_tool_agent)):
             policy.record_command(
