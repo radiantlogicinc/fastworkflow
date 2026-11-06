@@ -87,6 +87,13 @@ REFUSED_EXTRACTION_NOTE = (
     "command above, correcting that: copy each value exactly as the command writes it, and answer "
     f"{NOT_FOUND} for a value the command does not give.)")
 
+#: Appended to the request when a call's first phase found nothing for its lookup, and the arguments are extracted
+#: once more (``planning_commands.reextracted_arguments``): the phase's observation, in the refusal note's style.
+PHASE_FAILED_EXTRACTION_NOTE = (
+    "(A first run of this command found nothing for its lookup: {observation}. Extract the values again from the "
+    "command above, correcting that: copy each value exactly as the command writes it, and answer "
+    f"{NOT_FOUND} for a value the command does not give.)")
+
 NOT_WRITTEN_WHY = "is not written in the request"
 EXAMPLE_WHY = "is an example from the field's description, not a value the request writes"
 BRACKET_PLACEHOLDER_WHY = "is a placeholder, not a value"

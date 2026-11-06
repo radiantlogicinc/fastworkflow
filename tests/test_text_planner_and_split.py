@@ -547,6 +547,47 @@ def test_a_split_cut_off_twice_leaves_the_request_whole():
     assert lm.finishes == ["length", "length"]
 
 
+# A sub-tasks field that is not empty but holds no numbered item: visibly broken, like a cut-off reply.
+_NO_NUMBERED_ITEM = "[[ ## reasoning ## ]]\nr\n\n[[ ## subtasks ## ]]\nit\n\n[[ ## completed ## ]]"
+_THREE_ITEMS = ("[[ ## reasoning ## ]]\nThree jobs.\n\n[[ ## subtasks ## ]]\n"
+                "1. Renew the loan of Ada Ng.\n2. List the holds of Ben Ito.\n3. Check the fines of Cy Ro.\n\n"
+                "[[ ## completed ## ]]")
+
+
+def test_a_split_with_no_numbered_item_is_retried_and_the_retry_is_used():
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    query = "Ada Ng renews a loan, Ben Ito lists holds and Cy Ro checks fines."
+    lm = _ScriptedReplies([(_NO_NUMBERED_ITEM, "stop", 10), (_THREE_ITEMS, "stop", 60)])
+    assert split_into_subtasks(query, planner_lm=lm) == [
+        "Renew the loan of Ada Ng.", "List the holds of Ben Ito.", "Check the fines of Cy Ro."]
+    assert lm.finishes == ["stop", "stop"]
+
+
+def test_a_split_with_no_numbered_item_twice_leaves_the_request_whole():
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    query = "Ada Ng renews a loan, Ben Ito lists holds and Cy Ro checks fines."
+    lm = _ScriptedReplies([(_NO_NUMBERED_ITEM, "stop", 10), (_NO_NUMBERED_ITEM, "stop", 10)])
+    assert split_into_subtasks(query, planner_lm=lm) == [query]
+    assert lm.finishes == ["stop", "stop"]
+
+
+def test_a_genuine_one_item_split_still_returns_the_request_verbatim():
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    query = "Renew the loan of Ada Ng, please."
+    one_item = {"reasoning": "r", "subtasks": "1. Renew the loan of Ada Ng."}
+    lm = _ScriptedReplies([(_split_reply_for(one_item), "stop", 20)])
+    assert split_into_subtasks(query, planner_lm=lm) == [query]
+    assert lm.finishes == ["stop"]
+
+
+def _split_reply_for(answer):
+    return ("[[ ## reasoning ## ]]\n" + answer["reasoning"] + "\n\n[[ ## subtasks ## ]]\n"
+            + answer["subtasks"] + "\n\n[[ ## completed ## ]]")
+
+
 class _ProviderLM(DummyLM):
     """A planner LM whose calls are checked as litellm checks them. ``only_temperature_1`` makes it a model
     that takes only ``temperature=1`` (Bedrock Claude Haiku 5.5): any other temperature is refused with

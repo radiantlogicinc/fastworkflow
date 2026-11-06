@@ -2726,3 +2726,102 @@ def test_an_over_naming_neither_a_field_nor_a_property_is_the_load_error():
     # a property is no more than a name on the model: the same load error for a property of another model
     with pytest.raises(PlanningCommandFormatError, match="has no field 'identity_uids'"):
         _phased_command(plan=_over_plan(UnitFacts, "roster.identity_uids"))
+
+
+# ----------------------------------------------------------------------
+# A call whose first phase's lookup found nothing is planned again once (fix-variance)
+# ----------------------------------------------------------------------
+
+#: The first phase's lookup listed nothing: no run of find_book, so its required fact is missing.
+EMPTY_FIND = dict(runs=[_run("open_library", context="")], record=LIBRARY, answer="found nothing")
+
+
+def _extraction_stub(phased, monkeypatch, *, extracted, on_extract=None):
+    """``planning_commands.extracted_arguments`` (the LLM boundary of the extraction) answers *extracted* and
+    records each call's query; ``on_extract`` runs first (the second extraction, say, has the lookup list now)."""
+    queries = []
+
+    def fake_extracted(command, query, workflow=None):
+        queries.append(query)
+        if on_extract is not None:
+            on_extract(len(queries))
+        return dict(extracted)
+
+    monkeypatch.setattr("fastworkflow.planning_commands.extracted_arguments", fake_extracted)
+    return queries
+
+
+def test_a_first_phase_that_finds_nothing_is_extracted_again_and_the_call_restarted_once(phased, monkeypatch):
+    phased.args.update(name="Dunne")                       # the first extraction misspelt the title
+    phased.script["find"] = dict(EMPTY_FIND)
+    queries = _extraction_stub(
+        phased, monkeypatch, extracted={"name": "Dune", "notes": False},
+        on_extract=lambda n: phased.script.__setitem__("find", dict(SCRIPT["find"])))  # the lookup lists now
+    executor = phased.start()
+    result = phased.ctx.process_turn("show the book Dune")
+
+    assert len(queries) == 1                                # one re-extraction
+    assert "found nothing for its lookup" in queries[0] and "find_book" in queries[0]
+    finds = [call for call in executor.calls if "(find)" in call["user_query"]]
+    assert len(finds) == 2                                  # the first phase ran twice: once per plan
+    assert "find_book query=Dune" in finds[1]["user_query"]
+    assert result.status == TurnStatus.COMPLETED
+    assert result.answer == "B1 has loans l1, l2."
+    spans = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    assert spans[0].status == tracing.STATUS_ERROR
+    assert "no successful run of 'find_book'" in spans[0].attributes["facts_error"]
+    assert [s.attributes.get("reextracted") for s in spans[:3]] == [None, True, True]
+
+
+def test_a_second_first_phase_failure_stops_the_call(phased, monkeypatch):
+    phased.args.update(name="Dunne")
+    phased.script["find"] = dict(EMPTY_FIND)
+    queries = _extraction_stub(phased, monkeypatch, extracted={"name": "Dune", "notes": False})
+    executor = phased.start()
+    result = phased.ctx.process_turn("show the book Dune")
+
+    assert len(queries) == 1                                # never a second re-extraction
+    assert len([call for call in executor.calls if "(find)" in call["user_query"]]) == 2
+    assert "report" not in SEEN                             # the call stopped in its first phase
+    assert "stopped at its part 'find'" in result.answer
+    assert phased.ctx._phase_run is None
+
+
+def test_a_failure_after_an_earlier_phase_ran_does_not_restart_the_call(phased, monkeypatch):
+    phased.script["book"] = dict(SCRIPT["book"], runs=SCRIPT["book"]["runs"][:1])  # no list_loans
+    queries = _extraction_stub(phased, monkeypatch, extracted={"name": "Dune", "notes": False})
+    executor = phased.start()
+    result = phased.ctx.process_turn("show the book Dune")
+
+    assert queries == []                                    # the find phase ran; the book phase failed: no retry
+    assert len(executor.calls) == 2
+    assert "stopped at its part 'book'" in result.answer
+
+
+def test_a_first_phase_whose_steps_name_a_writing_command_is_not_restarted(phased, monkeypatch):
+    # The library's find_book is declared writes = True (stubbed here: the todo workflow declares none). Its
+    # step ran before the facts failed, so a restart would write it twice: no re-extraction, no second plan.
+    from fastworkflow import command_writes
+    monkeypatch.setattr(command_writes, "write_commands",
+                        lambda folderpath: frozenset({"find_book"}))
+    phased.args.update(name="Dunne")
+    phased.script["find"] = dict(EMPTY_FIND)
+    queries = _extraction_stub(phased, monkeypatch, extracted={"name": "Dune", "notes": False})
+    executor = phased.start()
+    result = phased.ctx.process_turn("show the book Dune")
+
+    assert queries == []
+    assert len([call for call in executor.calls if "(find)" in call["user_query"]]) == 1
+    assert "stopped at its part 'find'" in result.answer
+
+
+def test_arguments_extracted_again_that_are_the_same_do_not_restart_the_call(phased, monkeypatch):
+    phased.script["find"] = dict(EMPTY_FIND)
+    queries = _extraction_stub(phased, monkeypatch, extracted={"name": "Dune", "notes": False})
+    executor = phased.start()
+    result = phased.ctx.process_turn("show the book Dune")
+
+    assert len(queries) == 1
+    assert len([call for call in executor.calls if "(find)" in call["user_query"]]) == 1
+    assert "stopped at its part 'find'" in result.answer
+    assert phased.ctx._phase_run is None

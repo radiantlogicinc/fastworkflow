@@ -372,7 +372,11 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # verdict the planning command call read ("verify <param>=<value> (<probability>, sure | not sure, not used)"), so a
 # verdict that changed no argument is still on the span. The attribute set is unchanged; the content is. The
 # classifier calls behind the verdicts now run under the turn's context, so each leaves an fw.llm.call span.
-SPAN_CONTRACT_VERSION = 39
+#
+# v40: fw.skill.phase v7 (fix-variance) -- `reextracted`: True on the phases of a planning command call planned
+# again after its first phase's lookup found nothing (the arguments extracted once more, the call restarted once).
+# Null on every other phase. The attribute set gains this key; no other span changes.
+SPAN_CONTRACT_VERSION = 40
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -661,8 +665,10 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         version=1,
         attributes=frozenset({"skill", "phase", "phase_index", "phase_count", "error_type"}),
     ),
+    # v7: `reextracted` (SPAN_CONTRACT_VERSION v40): True on the phases of a call planned again after its first
+    # phase's lookup found nothing; None otherwise.
     SPAN_PLANNING_COMMAND_PHASE: SpanContract(
-        version=6,
+        version=7,
         attributes=frozenset(
             {
                 "answer_only",
@@ -684,6 +690,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "step_budget",
                 "first_step",
                 "resumed",
+                "reextracted",
                 "steps",
                 "steps_used",
                 "exhausted",

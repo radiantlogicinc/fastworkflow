@@ -2395,7 +2395,8 @@ def split_into_subtasks(user_query: str, planner_lm=None,
     request whole. A reply cut off at ``split_max_tokens()`` is not an answer, even
     when it parses (a field header written mid-reasoning, e.g. the output template
     echoed back, parses as "{subtasks}"): it gets the one retry, and a second
-    cut-off reply leaves the request whole. When both replies are visibly broken, the
+    cut-off reply leaves the request whole. A non-empty sub-tasks field with no numbered item (``it``) is
+    visibly broken too and gets the same one retry. When both replies are visibly broken, the
     one that names fewer of the request's records in two sub-tasks is used (``_breakage``).
     The model's split then goes through ``split_merge.merge_subtasks`` (code only), which joins parts that are not independent jobs and returns the
     request whole when one job is left.
@@ -2440,6 +2441,10 @@ def split_into_subtasks(user_query: str, planner_lm=None,
             logger.warning(f"the split was cut off at {split_max_tokens()} tokens; not using it")
             continue
         subtasks = [without_repeated_clauses(item.translate(_HYPHENS)) for item in _split_items(text)]
+        if not subtasks and text.strip():
+            # A non-empty sub-tasks field with no numbered item ("it") is a visibly broken reply: retried once.
+            logger.warning("the split listed no numbered sub-task; retrying once")
+            continue
         if not subtasks or len(subtasks) > MAX_SUBTASKS:
             return [user_query]
         if not _visibly_broken(subtasks):

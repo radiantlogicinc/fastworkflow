@@ -322,3 +322,26 @@ def test_default_not_found_still_asks_the_user_as_before(workflow):
         CommandExecutor.perform_action(workflow, action)
 
     assert "name" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# A backslash escape of punctuation in a key=value value (fix-variance)
+# ---------------------------------------------------------------------------
+
+class _LookupParams(BaseModel):
+    account: str = Field(description="the account to look up")
+
+
+@pytest.mark.parametrize("text, value", [
+    (r"find_account account=ann\@example.org", "ann@example.org"),           # a model's escaped @
+    (r"find_account account=ann\_lee", "ann_lee"),                           # a model's escaped _
+    (r'find_account account="ann\@example.org"', "ann@example.org"),         # escaped inside quotes
+    (r"find_account account=C:\new\path", "C:\\new\\path"),                  # letters after a backslash: kept
+    (r"find_account account=a\\b", "a\\\\b"),                                # a doubled backslash: kept
+    (r"find_account account=ann\ lee", "ann\\ lee"),                         # a backslash before a space: kept
+])
+def test_a_key_value_lookup_reads_escaped_punctuation_as_the_character(text, value):
+    params = ParameterExtraction._extract_parameters_from_key_values(text, _LookupParams, "find_account")
+
+    assert params is not None
+    assert params.account == value
