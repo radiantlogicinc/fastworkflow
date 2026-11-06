@@ -4,12 +4,14 @@ Main CLI entry point for fastWorkflow.
 
 import argparse
 import contextlib
+import json
 import os
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 import importlib.resources
 from rich import print as rprint
 from rich.live import Live
@@ -395,6 +397,353 @@ def add_run_chatbot_parser(subparsers):
 
     parser_run_chatbot.set_defaults(func=_run_chatbot_main_wrapper)
 
+def add_distill_parser(subparsers):
+    """Add subparser for the 'distill' command."""
+    parser_distill = subparsers.add_parser(
+        "distill",
+        help="Compare a student run against a recorded teacher run: extract "
+             "insights and record the divergences as annotations.",
+        description="Distil two recorded runs of the same workflow. Both are read "
+                    "from the observability store, so this re-runs as often as you "
+                    "like over the same pair without re-running either agent — which "
+                    "is what makes tuning the judge affordable.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser_distill.add_argument("workflow_folderpath", help="Path to the workflow folder")
+    parser_distill.add_argument(
+        "--teacher", metavar="EXPERIMENT_ID",
+        help="Experiment id of the run to learn FROM (with --student)",
+    )
+    parser_distill.add_argument(
+        "--student", metavar="EXPERIMENT_ID",
+        help="Experiment id of the run to learn ABOUT (with --teacher)",
+    )
+    parser_distill.add_argument(
+        "--self", dest="self_experiment", metavar="EXPERIMENT_ID",
+        help="Self-distillation: one run with several trials per task; each failing "
+             "trial is compared with a passing trial of the same task. Use instead "
+             "of --teacher/--student.",
+    )
+    parser_distill.add_argument(
+        "--pool-students", nargs="+", metavar="EXPERIMENT_ID",
+        help="Pool distillation: runs of the model to improve. Every failing trial "
+             "is compared with a passing reference - a passing trial of the same "
+             "model if any, else a passing trial from --pool-teachers.",
+    )
+    parser_distill.add_argument(
+        "--pool-teachers", nargs="*", default=[], metavar="EXPERIMENT_ID",
+        help="Pool distillation: teacher runs; only their PASSING trials are used, "
+             "and only for tasks with no passing student trial.",
+    )
+    parser_distill.add_argument(
+        "--max-pairs-per-task", type=int, default=None, metavar="N",
+        help="Self/pool distillation: distil at most N failing trials per task.",
+    )
+    parser_distill.add_argument(
+        "--provenance", metavar="FILE",
+        help="Write a JSON file mapping every compared pair to its runs, its "
+             "reference source and the insights it produced.",
+    )
+    parser_distill.add_argument(
+        "--teacher-attempt", type=int, default=None, metavar="N",
+        help="--teacher/--student: the teacher attempt used as the reference for "
+             "every task. Default: the lowest recorded attempt.",
+    )
+    parser_distill.add_argument(
+        "--student-attempt", action="append", dest="student_attempts", metavar="N|all",
+        help="--teacher/--student: a student attempt to compare with the reference, "
+             "for every task; repeatable, or 'all' for every recorded attempt. "
+             "Default: the lowest recorded attempt. Pairs are taken as given, "
+             "whatever their outcomes.",
+    )
+    parser_distill.add_argument(
+        "--task", action="append", dest="task_ids", metavar="TASK_ID",
+        help="Only this task; repeatable. Default: every task the runs share.",
+    )
+    parser_distill.add_argument(
+        "env_file_path", nargs="?", default=None,
+        help="Path to the environment file (default: resolved from the workflow path)",
+    )
+    parser_distill.add_argument(
+        "passwords_file_path", nargs="?", default=None,
+        help="Path to the passwords file (default: resolved from the workflow path)",
+    )
+    parser_distill.set_defaults(func=_distill_main)
+
+
+def _distill_mode_error(args) -> Optional[str]:
+    """Why the distill mode flags do not name exactly one mode, or None."""
+    modes = [
+        bool(args.self_experiment),
+        bool(args.pool_students),
+        bool(args.teacher or args.student),
+    ]
+    if sum(modes) != 1 or (modes[2] and not (args.teacher and args.student)):
+        return (
+            "give exactly one of: --teacher EXPERIMENT_ID with --student "
+            "EXPERIMENT_ID; --self EXPERIMENT_ID; or --pool-students EXPERIMENT_ID... "
+            "[--pool-teachers EXPERIMENT_ID...]"
+        )
+    if args.pool_teachers and not args.pool_students:
+        return "--pool-teachers needs --pool-students"
+    teacher_mode = bool(args.teacher and args.student)
+    if not teacher_mode and (args.teacher_attempt is not None or args.student_attempts):
+        return "--teacher-attempt and --student-attempt need --teacher and --student"
+    if teacher_mode and args.max_pairs_per_task is not None:
+        return ("--max-pairs-per-task applies to --self and --pool-students; with "
+                "--teacher/--student choose the pairs with --student-attempt")
+    try:
+        _student_attempt_choice(args.student_attempts)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def _student_attempt_choice(values):
+    """``--student-attempt`` values as compare_runs takes them: None, "all" or ints."""
+    if not values:
+        return None
+    if any(str(v).strip().lower() == "all" for v in values):
+        if len(values) > 1:
+            raise ValueError("--student-attempt all cannot be combined with attempt numbers")
+        return "all"
+    try:
+        return [int(v) for v in values]
+    except ValueError:
+        raise ValueError(
+            f"--student-attempt takes attempt numbers or 'all', got {values!r}") from None
+
+
+def _open_workflow_store(args, usage: str):
+    """Load the workflow's env files and open its observability store.
+
+    Returns the store, or None after printing why it could not.
+    """
+    import fastworkflow
+    from dotenv import dotenv_values
+
+    from fastworkflow.observability.store import get_observability_sink
+
+    default_env, default_passwords = find_default_env_files(args.workflow_folderpath)
+    if not os.path.exists(default_env):
+        # The bundled examples keep one env file beside the workflow folders
+        # rather than inside each one, so look up a level before giving up.
+        parent = Path(args.workflow_folderpath).resolve().parent
+        if (parent / "fastworkflow.env").exists():
+            default_env = parent / "fastworkflow.env"
+            default_passwords = parent / "fastworkflow.passwords.env"
+
+    env_file = args.env_file_path or default_env
+    passwords_file = args.passwords_file_path or default_passwords
+    if not os.path.exists(env_file):
+        print(
+            f"Error: environment file not found at: {env_file}\n"
+            f"Pass it explicitly: {usage}",
+            file=sys.stderr,
+        )
+        return None
+
+    # Model calls made here (the distillation judge, the policy readers in a live
+    # replay) read their settings from the env, so it is loaded even though no
+    # agent runs.
+    fastworkflow.init(
+        env_vars={**dotenv_values(env_file), **dotenv_values(passwords_file)}
+    )
+
+    # Recording has no switch: every caller gets a sink, and None means only that
+    # the store could not be opened (the store has already logged why). Without a
+    # store there is nothing to read and nothing to do.
+    sink = get_observability_sink(args.workflow_folderpath)
+    if sink is None:
+        print(
+            "Error: could not open the observability store for this workflow. "
+            "This command reads recorded runs, so it needs that store.",
+            file=sys.stderr,
+        )
+        return None
+    return sink.store
+
+
+def _distill_main(args):
+    """Run a distillation comparison over recorded runs."""
+    from fastworkflow import distillation_compare
+
+    if problem := _distill_mode_error(args):
+        print(f"Error: {problem}", file=sys.stderr)
+        return 1
+    store = _open_workflow_store(
+        args,
+        f"fastworkflow distill {args.workflow_folderpath} <env_file> <passwords_file> "
+        "--teacher ... --student ...",
+    )
+    if store is None:
+        return 1
+
+    if args.pool_students:
+        results = distillation_compare.compare_pool(
+            store,
+            student_experiments=args.pool_students,
+            teacher_experiments=args.pool_teachers,
+            workflow_folderpath=args.workflow_folderpath,
+            task_ids=args.task_ids,
+            max_pairs_per_task=args.max_pairs_per_task,
+        )
+    elif args.self_experiment:
+        results = distillation_compare.compare_self(
+            store,
+            experiment_id=args.self_experiment,
+            workflow_folderpath=args.workflow_folderpath,
+            task_ids=args.task_ids,
+            max_pairs_per_task=args.max_pairs_per_task,
+        )
+    else:
+        results = distillation_compare.compare_runs(
+            store,
+            teacher_experiment_id=args.teacher,
+            student_experiment_id=args.student,
+            workflow_folderpath=args.workflow_folderpath,
+            task_ids=args.task_ids,
+            teacher_attempt=args.teacher_attempt,
+            student_attempts=_student_attempt_choice(args.student_attempts),
+        )
+    if args.provenance:
+        with open(args.provenance, "w", encoding="utf-8") as f:
+            json.dump(
+                distillation_compare.provenance_records(results),
+                f,
+                indent=1,
+                ensure_ascii=False,
+            )
+    return _print_distill_report(results)
+
+
+def _outcome_tag(passed) -> str:
+    """The tag the report prints after an attempt: [pass], [fail], or nothing if ungraded."""
+    return "" if passed is None else (" [pass]" if passed else " [fail]")
+
+
+def _print_distill_report(results) -> int:
+    """Print per-task findings. Returns a process exit code."""
+    if not results:
+        print("No tasks in common between the two runs; nothing to distil.")
+        return 1
+
+    diverged = insights = feedback = skipped = 0
+    for result in results:
+        if result.skipped_reason:
+            skipped += 1
+            print(f"  task {result.task_id}: skipped — {result.skipped_reason}")
+            continue
+        pair = (
+            f"task {result.task_id} (attempt {result.student_attempt}"
+            f"{_outcome_tag(result.student_passed)} vs {result.teacher_attempt}"
+            f"{_outcome_tag(result.reference_passed)}"
+            + (f", {result.reference_source} reference" if result.reference_source else "")
+            + ")"
+        )
+        if not result.diverged:
+            print(f"  {pair}: no divergence")
+            continue
+        diverged += 1
+        insights += result.insight_count
+        feedback += result.feedback_written
+        print(f"  {pair}: DIVERGED")
+        if result.execution_summary:
+            for line in result.execution_summary.splitlines():
+                print(f"      execution | {line}")
+        if result.planning_summary:
+            for line in result.planning_summary.splitlines()[:3]:
+                print(f"      planning  | {line}")
+        for insight in result.execution_insights + result.planning_insights:
+            print(f"      insight   > {insight}")
+
+    print(
+        f"\n{len(results)} task(s): {diverged} diverged, {skipped} skipped, "
+        f"{insights} insight(s), {feedback} annotation(s)"
+    )
+    return 0
+
+
+def add_policy_parser(subparsers):
+    """Add the 'policy' command group: 'policy replay' audits a table on recorded runs."""
+    parser_policy = subparsers.add_parser(
+        "policy",
+        help="Work with a workflow's policy verifier table (_policy/table.py).",
+    )
+    policy_subparsers = parser_policy.add_subparsers(dest="action", required=True)
+    parser_replay = policy_subparsers.add_parser(
+        "replay",
+        help="Replay a recorded experiment through a policy table and report every "
+             "step it would block, next to what the recording shows.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser_replay.add_argument("workflow_folderpath", help="Path to the workflow folder")
+    parser_replay.add_argument(
+        "--experiment", required=True, metavar="EXPERIMENT_ID",
+        help="Experiment id of the recorded run to replay",
+    )
+    parser_replay.add_argument(
+        "--table", default=None, metavar="PATH[:ATTR]",
+        help="Another table to audit (path.py or package.module; ATTR defaults to "
+             "TABLE). Default: the workflow's own _policy/table.py",
+    )
+    parser_replay.add_argument(
+        "--task", action="append", dest="task_ids", metavar="TASK_ID",
+        help="Only this task; repeatable. Default: every task in the run.",
+    )
+    parser_replay.add_argument(
+        "--live", action="store_true",
+        help="Re-read every user message and judge every question with the policy "
+             "model (LLM_POLICY_INTENT, else LLM_AGENT), as the live loop would",
+    )
+    parser_replay.add_argument(
+        "env_file_path", nargs="?", default=None,
+        help="Path to the environment file (default: resolved from the workflow path)",
+    )
+    parser_replay.add_argument(
+        "passwords_file_path", nargs="?", default=None,
+        help="Path to the passwords file (default: resolved from the workflow path)",
+    )
+
+    def _replay_main_wrapper(args):
+        code = _policy_replay_main(args)
+        if code:
+            sys.exit(code)
+
+    parser_replay.set_defaults(func=_replay_main_wrapper)
+
+
+def _policy_replay_main(args) -> int:
+    """Replay a recorded experiment through a policy table."""
+    from fastworkflow.policy_loader import POLICY_FOLDER, TABLE_FILE, load_policy
+    from fastworkflow.policy_replay import format_report, replay_experiment
+
+    store = _open_workflow_store(
+        args,
+        f"fastworkflow policy replay {args.workflow_folderpath} <env_file> "
+        "<passwords_file> --experiment ... [--table ...]",
+    )
+    if store is None:
+        return 1
+    point, facts = load_policy(args.workflow_folderpath, reference=args.table)
+    if not point.enabled:
+        print(
+            f"{args.workflow_folderpath} has no {POLICY_FOLDER}/{TABLE_FILE}; "
+            "pass --table to audit another table.",
+            file=sys.stderr,
+        )
+        return 1
+    report = replay_experiment(
+        store, args.experiment, point.table, facts,
+        task_ids=args.task_ids, live=args.live,
+    )
+    if not report.attempts:
+        print(f"No attempts recorded for experiment {args.experiment}.", file=sys.stderr)
+        return 1
+    print(format_report(report))
+    return 0
+
+
 def add_run_fastapi_mcp_parser(subparsers):
     """Add subparser for the 'run_fastapi_mcp' command."""
     parser_run_fastapi_mcp = subparsers.add_parser("run_fastapi_mcp", help="Run a workflow as a FastAPI server with MCP support.")
@@ -627,6 +976,8 @@ def main():
     add_run_fastapi_mcp_parser(subparsers)
     add_run_chatbot_parser(subparsers)
     add_command_parser(subparsers)
+    add_distill_parser(subparsers)
+    add_policy_parser(subparsers)
 
     try:
         args = parser.parse_args()

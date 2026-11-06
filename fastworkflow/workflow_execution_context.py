@@ -1384,6 +1384,13 @@ class WorkflowExecutionContext:
             "conversation_id": _owner_encoded(self._live_pending_owner()),
             "parked_pending": {key: list(items) for key, items in self._parked_pending.items()},
         }
+        # The policy verifier's memory of the conversation, only when a policy is
+        # enabled: a session resumed in another process keeps what was read and
+        # asked. Absent otherwise, so a state written without a policy is unchanged.
+        from fastworkflow.policy_runtime import policy_of
+
+        if policy := policy_of(self._workflow_tool_agent):
+            payload["policy_state"] = policy.export_state()
         # No default=str round-trip. This is the first serializer, so coercing
         # here is what made every downstream strictness check vacuous: an
         # unsupported value would already be a string by the time anything
@@ -1504,6 +1511,12 @@ class WorkflowExecutionContext:
 
         # Restore the turn agent with the turn frame on top: _workflow_tool_agent reads the top frame.
         del self._frame_stack()[1:]
+        if state.get("policy_state") is not None:
+            from fastworkflow.policy_runtime import policy_of
+
+            self._ensure_agent_initialized()
+            if policy := policy_of(self._workflow_tool_agent):
+                policy.import_state(state["policy_state"])
         react_blob = state.get("react")
         if react_blob and self._awaiting_user:
             self._ensure_agent_initialized()
@@ -2401,6 +2414,10 @@ class WorkflowExecutionContext:
 
         if self._app_workflow:
             self._app_workflow.context["raw_user_message"] = message
+        from fastworkflow.policy_runtime import policy_of
+
+        if policy := policy_of(self._workflow_tool_agent):
+            policy.observe_turn(message)
 
         refined_user_query = self._refine_user_query(message, self.conversation_history)
         self._turn_refined_message = refined_user_query
@@ -2613,7 +2630,8 @@ class WorkflowExecutionContext:
             available_commands = sub_task_commands_text(self, query, planning_probabilities=planning_distribution or None)
         step_kwargs = {} if first_step is None else {"first_step": first_step}
         self._attach_finish_check(
-            evidence_floor if evidence_floor is not None else (first_step or 0))
+            evidence_floor if evidence_floor is not None else (first_step or 0),
+            final=self._last_subtask_running())
 
         return self._call_agent_with_retry(
             lambda: self._workflow_tool_agent(
@@ -2624,8 +2642,14 @@ class WorkflowExecutionContext:
             trace_input=command_info_and_refined_message_with_todolist,
         )
 
+    def _last_subtask_running(self) -> bool:
+        """Whether the sub-task running now is the turn's last (always, for an unsplit turn)."""
+        subtasks = getattr(self, "_subtasks", None) or []
+        return getattr(self, "_subtask_index", 0) >= len(subtasks) - 1
+
     def _attach_finish_check(self, floor: int, *, values: bool = False,
-                             item_binding: Optional[tuple[Any, list, list]] = None) -> None:
+                             item_binding: Optional[tuple[Any, list, list]] = None,
+                             final: bool = True) -> None:
         """Give the agent this run's finish check, or none when the run has no plan.
 
         The plan is the one ``build_query_with_next_steps`` just made for this
@@ -2640,6 +2664,10 @@ class WorkflowExecutionContext:
         if agent is None:
             return
         agent.finish_reviewer = None
+        # *final*: this run ends the turn (the last sub-task, the last phase). The
+        # policy's finish check reads the answer against the whole request, so it
+        # only runs there (fastworkflow.policy_runtime).
+        agent.policy_final_run = final
         from fastworkflow.observation_offloading import finish_check
 
         plan_text = str(getattr(self, "_initial_plan_text", "") or "")
@@ -3180,6 +3208,11 @@ class WorkflowExecutionContext:
         budget, and ask_user is off for an unattended turn. Also set on a restored frame, which
         is built the same way before its suspended state is imported."""
         frame.agent = self._build_react_agent()
+        # One policy verifier per conversation (fastworkflow.policy_runtime): a nested planning-command
+        # frame shares the turn agent's, so what was read and asked is remembered across frames.
+        turn_policy = getattr(self._turn_frame().agent, "policy", None)
+        if turn_policy is not None:
+            frame.agent.policy = turn_policy
         frame.agent.disabled_tools = (
             frozenset({"ask_user"}) if getattr(self, "_turn_unattended", False) else frozenset())
         limit = turn_max_steps()
@@ -3476,7 +3509,8 @@ class WorkflowExecutionContext:
                 self._attach_finish_check(
                     state["first_step"], values=True,
                     item_binding=(item, others, planned) if phase.fans_out and phase.bind
-                    else None)
+                    else None,
+                    final=bool(last and last_item) and self._last_subtask_running())
                 if resumed:
                     result = self._call_agent_resume(
                         resume_observation, completes_step=resume_completes_step)

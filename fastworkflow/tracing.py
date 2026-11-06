@@ -356,7 +356,12 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # `argument_check_refusals_final` (the values still refused after it, treated as not given) and
 # `argument_check_respelled` ({field: value}: the request's or the declared spelling taken). A span
 # recorded before this carries none of them.
-SPAN_CONTRACT_VERSION = 36
+#
+# v37: fw.agent.step v8 (main's policy verifiers, merged into the unified command architecture) -- the
+# policy verifier's decision on a step it rewrote (fastworkflow.policy_runtime): `policy_mode`, `policy_outcome`,
+# `policy_source`, `policy_table_version`, `policy_intent`, `policy_requests`, `policy_judgement`, and `answer`
+# (the answer a finish policy sent back). Main numbered this v24; on this line it follows v36.
+SPAN_CONTRACT_VERSION = 37
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -693,8 +698,14 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # `tool_args` is still what the model sent.
     # v7 (fix-6llp): `by_code` (true) on a step code ran (planning_phases.CodeSteps),
     # not the model; `thought` then says "run by code".
+    # v8: written on a step the policy verifier rewrote (fastworkflow.policy_runtime):
+    # `policy_source` names the row that fired, `policy_outcome` / `policy_mode` /
+    # `policy_table_version` what it decided under which table, `policy_intent` /
+    # `policy_requests` the intent reader's state, `policy_judgement` the question
+    # judge's reason (ask_user only), and `answer` the answer a finish policy sent
+    # back; the step's `observation` is the rewrite the agent read.
     SPAN_AGENT_STEP: SpanContract(
-        version=7,
+        version=8,
         attributes=frozenset(
             {
                 "step_index",
@@ -709,6 +720,14 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "repaired_tool_name",
                 "folded_command",
                 "by_code",
+                "policy_mode",
+                "policy_outcome",
+                "policy_source",
+                "policy_table_version",
+                "policy_intent",
+                "policy_requests",
+                "policy_judgement",
+                "answer",
             }
         ),
     ),
