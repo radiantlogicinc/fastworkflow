@@ -2264,9 +2264,22 @@ def _breakage(user_query: str, subtasks: list[str], workflow_folderpath: str | N
     return len(named) - len(set(named)), references
 
 
+#: The splitter's ``conversation`` input (added only when the turn has earlier turns, so a first turn's prompt is
+#: unchanged): the earlier turns' summaries, for words of the new request that point back to them.
+SPLIT_CONVERSATION_DESC = ("earlier turns of the conversation, for resolving words of user_query that point back to "
+                           "them ('its loans' after a turn about Dune). Background only: nothing in it is a "
+                           "sub-task, and a sub-task takes from it only the name such a word refers to")
+
+
 def split_into_subtasks(user_query: str, planner_lm=None,
-                        workflow_folderpath: str | None = None) -> list[str]:
+                        workflow_folderpath: str | None = None, conversation: str = "") -> list[str]:
     """The request as independent sub-tasks, in order; ``[user_query]`` when it is not split.
+
+    ``user_query`` is the user's new request only: it is what the merge treats as the request (its ground truth,
+    and the text it returns when everything merges back into one job). ``conversation`` (optional) is the
+    earlier turns' summaries, given to the splitter as a separate input (``SPLIT_CONVERSATION_DESC``) so it can
+    resolve references to them; the merge reads it only so that a name taken from it is not an invention, and
+    never returns it (fix-bydz).
 
     One call on the planner LM, with no command catalog: the split is about the
     request, not about how to carry it out. It is shown the workflow's planning commands
@@ -2296,8 +2309,12 @@ def split_into_subtasks(user_query: str, planner_lm=None,
             with dspy.context(lm=_split_lm(planner_lm, temperature),
                               adapter=CommandsSystemPreludeAdapter()), watch_cut_off_replies() as replies:
                 signature = _split_signature(workflow_folderpath) if workflow_folderpath else SplitIntoSubtasks
-                text = dspy.ChainOfThought(signature)(
-                    job_types=job_types, user_query=user_query).subtasks or ""
+                inputs = {"job_types": job_types, "user_query": user_query}
+                if conversation:
+                    signature = signature.insert(
+                        1, "conversation", dspy.InputField(desc=SPLIT_CONVERSATION_DESC), type_=str)
+                    inputs["conversation"] = conversation
+                text = dspy.ChainOfThought(signature)(**inputs).subtasks or ""
         except Exception:  # noqa: BLE001 - splitting is an optimisation; never fail the turn
             if any(replies):
                 logger.warning(f"the split was cut off at {split_max_tokens()} tokens and did not parse")
@@ -2313,24 +2330,80 @@ def split_into_subtasks(user_query: str, planner_lm=None,
         if not subtasks or len(subtasks) > MAX_SUBTASKS:
             return [user_query]
         if not _visibly_broken(subtasks):
-            return _merged(user_query, subtasks, workflow_folderpath)
+            return _merged(user_query, subtasks, workflow_folderpath, conversation)
         if len(set(subtasks)) == len(subtasks):
             usable.append(subtasks)
     if not usable:
         return [user_query]
     best = min(usable, key=lambda subtasks: _breakage(user_query, subtasks, workflow_folderpath))
-    return _merged(user_query, best, workflow_folderpath)
+    return _merged(user_query, best, workflow_folderpath, conversation)
 
 
-def _merged(user_query: str, subtasks: list[str], workflow_folderpath: str | None = None) -> list[str]:
-    """``split_merge.merge_subtasks`` on the model's split; the split unchanged if the merge fails."""
+def _merged(user_query: str, subtasks: list[str], workflow_folderpath: str | None = None,
+            conversation: str = "") -> list[str]:
+    """``split_merge.merge_subtasks`` on the model's split; the split unchanged if the merge fails.
+
+    With a Jev key, rule 3's joins (a sub-task naming no subject, or the same subjects as the one before it)
+    are Jev's call (``_same_request_check``); without one, the lexical rule joins them as before.
+    """
     try:
         identifiers = identifier_patterns(workflow_folderpath) if workflow_folderpath else ()
-        merged = merge_subtasks(user_query, subtasks, identifiers)
+        merged = merge_subtasks(user_query, subtasks, identifiers, same_job=_same_request_check(user_query),
+                                context=conversation)
     except Exception:  # noqa: BLE001 - the merge is a clean-up; never fail the turn
         logger.warning("could not merge the split; keeping it as the model gave it", exc_info=True)
         return subtasks
     return resolve_referents(user_query, merged, workflow_folderpath) if len(merged) > 1 else merged
+
+
+#: Rule 3 of the merge joins two adjacent sub-tasks (no subject, or the same subjects) only when Jev says they are
+#: one request at or above this probability; below it they stay two jobs. Calibrated on the fix-bydz diagnosis
+#: requests (library example and planning tutorial, Nemotron splits): Jev gave independent jobs 0.00-0.01 and steps
+#: of one job 0.27-0.99, so the bar is low and only a confident "separate" keeps two parts apart.
+SAME_REQUEST_THRESHOLD = 0.2
+
+_SAME_REQUEST_OPTIONS = (
+    ("separate", "Two separate requests: each part asks for something of its own and gets its own answer, "
+                 "and either could be asked alone."),
+    ("one", "One request: the later part is a step of the earlier one; it continues it, or acts on or "
+            "narrows what the earlier part finds (find a record, then open it)."),
+)
+
+
+class SameRequest(dspy.Signature):
+    """Decide whether two parts cut from a user's request are separate requests or steps of one request."""
+
+    request: str = dspy.InputField(desc="the user's whole request")
+    earlier: str = dspy.InputField(desc="a part cut from the request")
+    later: str = dspy.InputField(desc="the part cut from the request right after it")
+    relation: Choice[_SAME_REQUEST_OPTIONS] = dspy.OutputField(
+        desc="Are the two parts separate requests, each needing its own answer, or one request whose "
+             "later part is a step of the earlier one?")
+
+
+def _same_request_check(user_query: str):
+    """The merge's rule 3 decision (``split_merge.SameJob``) on Jev, or None without a Jev key.
+
+    ``(earlier, later) -> True`` when Jev says the two parts are one request with probability at least
+    ``SAME_REQUEST_THRESHOLD``, False when it says otherwise, None (the lexical rule) when the call fails.
+    """
+    jev_lm = _jev_lm()
+    if jev_lm is None:
+        return None
+
+    def same_job(earlier: str, later: str) -> bool | None:
+        try:
+            with dspy.context(lm=jev_lm):
+                choice = dspy.Predict(SameRequest)(request=user_query, earlier=earlier, later=later).relation
+            value, probability = _choice_value_and_probability(choice)
+            one = probability if value == "one" else float((choice.probabilities or {}).get("one", 1 - probability))
+        except Exception:  # noqa: BLE001 - the lexical rule decides; never fail the turn
+            logger.warning("could not ask whether two sub-tasks are one request", exc_info=True)
+            return None
+        logger.info(f"same request? {earlier!r} / {later!r}: {value} (one: {one:.2f})")
+        return one >= SAME_REQUEST_THRESHOLD
+
+    return same_job
 
 
 #: A sub-task's referent is written in only at or above this Jev probability.

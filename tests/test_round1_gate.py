@@ -252,3 +252,59 @@ def test_with_no_jev_key_jev_is_never_called_and_the_draft_is_still_built(gated,
         workflow_agent._planning_command_matcher.cache_clear()
     assert calls == []
     assert draft.items[0].means.name == "Library/book_by_title"
+
+
+# ----------------------------------------------------------------------
+# The split sees the new request only (fix-bydz)
+# ----------------------------------------------------------------------
+
+
+conversations: list[str] = []
+
+
+def _recording_split(monkeypatch, gated):
+    """The split seam, recording the text it is given (its conversation input in ``conversations``) and returning
+    it whole (one job). The real
+    ``_refine_user_query`` is put back (the ``todo`` fixture makes it return the message as is), so the turn's
+    request carries the conversation summary as it does in production."""
+    vars(gated.ctx).pop("_refine_user_query", None)
+    conversations.clear()
+    seen: list[str] = []
+
+    def split(user_query, **kwargs):
+        seen.append(user_query)
+        conversations.append(kwargs.get("conversation", ""))
+        return [user_query]
+
+    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks", split)
+    return seen
+
+
+def test_the_split_gets_the_summary_as_its_own_input_not_in_the_request(gated, monkeypatch):
+    seen = _recording_split(monkeypatch, gated)
+    gated.ctx.append_conversation_turn("startup -> The library is open.")
+    gated.script.steps = _finish()
+    out = gated.ctx.process_turn(FIND)
+    assert out.status is TurnStatus.COMPLETED
+    assert seen == [FIND]
+    assert conversations == ["conversation summary: startup -> The library is open."]
+    # The summary is still there for the run of an unsplit request: the turn's refined text carries it.
+    refined = gated.ctx._turn_refined_message
+    assert "The library is open." in refined and refined.endswith(f"new_user_query: {FIND}")
+
+
+def test_a_first_turn_gives_the_split_no_conversation(gated, monkeypatch):
+    seen = _recording_split(monkeypatch, gated)
+    gated.script.steps = _finish()
+    gated.ctx.process_turn(FIND)
+    assert seen == [FIND] and conversations == [""]
+
+
+def test_a_drafted_goal_never_holds_the_conversation_summary(gated, monkeypatch):
+    seen = _recording_split(monkeypatch, gated)
+    gated.ctx.append_conversation_turn("startup -> The library is open.")
+    gated.script.steps = _finish()
+    out = gated.ctx.process_turn(JOKE, unattended=True)
+    assert out.status is TurnStatus.COMPLETED
+    assert seen == [JOKE] and conversations == ["conversation summary: startup -> The library is open."]
+    assert [item.goal for item in gated.ctx._turn_subtask_plan.items] == [JOKE]
