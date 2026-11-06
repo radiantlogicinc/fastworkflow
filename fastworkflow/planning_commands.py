@@ -2865,6 +2865,15 @@ def _confident(verdicts: dict | None, name: str):
     return verdict if verdict is not None and verdict[1] >= VERIFY_THRESHOLD else None
 
 
+def _allowed_values(command: PlanningCommandCommand, p: Param) -> tuple[str, ...]:
+    """The values a ``str`` argument allows when its type does not say (``argument_checks.allowed_values``,
+    the execution checker's reader: on a planning command, a ``One of: a, b`` list in its description)."""
+    from fastworkflow.utils.argument_checks import allowed_values  # argument_checks imports this module
+
+    info = command.input_model.model_fields.get(p.name) if command.input_model is not None else None
+    return allowed_values(info) if info is not None else ()
+
+
 def _request_numbers(request: str, args: dict, command: PlanningCommandCommand) -> set[int]:
     """The numbers ``request`` writes (digits, with a thousands separator or a minus sign, or number words)
     outside the str arguments' text. The execution side's reader (``argument_checks.written_numbers``), so
@@ -3196,6 +3205,9 @@ def check_arguments(command: PlanningCommandCommand, raw: dict, request: str,
       verbatim (case-insensitive; any Unicode dash matches "-") substring of ``request``;
       it takes the request's own spelling. One that is not: an optional argument takes its default, a required one
       fails the call (the planner fills it once more, then falls back to the template path);
+    - a str argument whose description lists its values (``One of: a, b``) must be one of them, ignoring
+      case, and takes the declared spelling (``argument_checks.allowed_member``, the execution checker's rule);
+      one that is not is reset or fails the call as above;
     - a str argument inside an identifier match of the request (``command.identifiers``)
       becomes the whole match; a ``subject`` one must name a record of the request
       (``_as_subject``); one that does not is reset or fails the call as above;
@@ -3217,6 +3229,7 @@ def check_arguments(command: PlanningCommandCommand, raw: dict, request: str,
     that the request names no such argument raises PlanningCommandCallError.
     """
     from fastworkflow.utils.signatures import is_sentinel_number
+    from fastworkflow.utils.argument_checks import allowed_member, not_allowed_why  # it imports this module
 
     notes: list[str] = []
     args: dict = {}
@@ -3326,6 +3339,18 @@ def check_arguments(command: PlanningCommandCommand, raw: dict, request: str,
                     raise PlanningCommandInputError(f"missing required argument {p.name}")
                 args[p.name] = p.default
                 continue
+            allowed = _allowed_values(command, p)
+            if allowed and text:
+                # the allowed-values rule shared with the execution checker (argument_checks.allowed_member):
+                # a value outside the field's "One of:" list is refused; one in it takes the declared spelling.
+                # The checks below still run (an in_request field keeps the request's spelling).
+                member = allowed_member(allowed, text)
+                if member is None:
+                    refuse(p, shown, not_allowed_why(allowed))
+                    continue
+                if member != text:
+                    notes.append(f"{p.name}={shown!r} -> {member!r} (a declared value)")
+                    text = compared = member
             if text and text.lower() not in named:
                 # the free-text screens: a template token, a pronoun, a word of the workflow's own
                 # vocabulary. A value the request names as a record (a subject) always passes.
