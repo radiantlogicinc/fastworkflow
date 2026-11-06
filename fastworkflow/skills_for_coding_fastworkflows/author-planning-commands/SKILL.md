@@ -228,7 +228,9 @@ planner (`extraction_sentences`), so the description does not repeat it. Full ru
     `fill_typed_phase_output`).
   Either way the facts come from the runs of that phase only. A required fact no run holds fails the
   phase, and the job stops with the facts found so far. A model only one phase fills is nested right
-  above the method; one that depends on the input is `@phase(output=lambda input: ...)`.
+  above the method. Rule: use the return annotation when the facts type is fixed (or a union for
+  "whichever ran"); use `@phase(output=lambda input: ...)` only when the type depends on the input.
+  A phase with both is a load error (`PhaseError`, naming the phase).
 - `from_("<command>.<field>")` on a command's `Input` field names the command that supplies the
   value, so the planner can run it first (`planning_commands.py` `resolve_field_sources`). It
   replaces the hand-written `available_from` hint: a hand-written one is an error that

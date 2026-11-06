@@ -186,9 +186,7 @@ def run_main(args):
 
     startup_action: Optional[fastworkflow.Action] = None
     if args.startup_action:
-        with open(args.startup_action, 'r') as file:
-            startup_action_dict = json.load(file)
-        startup_action = fastworkflow.Action(**startup_action_dict)
+        startup_action = fastworkflow.load_startup_action(args.startup_action)
 
     context_dict = None
     if args.context_file_path:
@@ -340,7 +338,7 @@ if __name__ == "__main__":
         "--startup_command", help="Optional startup command", default=""
     )
     parser.add_argument(
-        "--startup_action", help="Optional startup action", default=""
+        "--startup_action", help="Optional startup action: a path to a JSON file, or an inline JSON object starting with '{'", default=""
     )
     parser.add_argument(
         "--keep_alive", help="Optional keep_alive", default=True

@@ -33,7 +33,6 @@ class TypedFieldSpec:
     command: str
     role: str  # ``output`` or ``input``
     required: bool
-    page_by: tuple[str, ...] = PAGING_PARAMETERS
 
 
 def _strip_optional(annotation: Any) -> Any:

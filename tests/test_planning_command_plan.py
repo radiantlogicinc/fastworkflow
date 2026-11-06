@@ -597,6 +597,33 @@ def test_phases_from_several_bases_need_call():
         planned(Both)
 
 
+def test_output_and_a_return_annotation_on_one_phase_is_a_load_error():
+    from fastworkflow.planning_phases import PhaseError
+
+    class Both:
+        @phase(output=lambda input: Found)
+        def find(self, input) -> Found:
+            return ["find it"]
+
+    with pytest.raises(PhaseError, match=r"phase 'find' of .*Both has both @phase\(output=\.\.\.\) and a "
+                                         r"return annotation: use the return annotation"):
+        planned(Both)
+
+
+def test_output_alone_and_a_return_annotation_alone_both_load():
+    class OutputOnly:
+        @phase(output=lambda input: Found)
+        def find(self, input):
+            return ["find it"]
+
+    class AnnotationOnly:
+        def find(self, input) -> Found:
+            return ["find it"]
+
+    assert [p.name for p in planned(OutputOnly)(_input())] == ["find"]
+    assert [p.name for p in planned(AnnotationOnly)(_input())] == ["find"]
+
+
 def test_a_name_a_subclass_sets_to_a_non_function_is_not_a_phase():
     class NoItem(Lookup):
         item = None

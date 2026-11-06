@@ -103,8 +103,7 @@ class MissingFactError(FactsError):
         self.source = source
 
 
-#: Input parameters taken as a row position (a page of the same query) when a
-#: facts field does not name its own with ``"page_by"``.
+#: Input parameters taken as a row position (a page of the same query).
 PAGING_PARAMETERS = ("start",)
 
 
@@ -157,7 +156,6 @@ class FactSource:
     source_field: str
     is_list: bool
     required: bool
-    page_by: tuple[str, ...] = PAGING_PARAMETERS
 
     @property
     def spelled(self) -> str:

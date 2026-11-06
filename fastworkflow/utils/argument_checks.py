@@ -184,8 +184,10 @@ def _given(field_info: Any, value: Any) -> bool:
     return _is_filled(field_info, value)
 
 
-def _written_numbers(request: str, texts: List[str]) -> set:
-    """The whole numbers *request* writes (digits or number words), outside the text of *texts*."""
+def written_numbers(request: str, texts: List[str]) -> set:
+    """The whole numbers *request* writes (digits, with thousands separators and a minus sign, or number
+    words), outside the text of *texts*. Shared by the execution check and the planning check
+    (``planning_commands._request_numbers``)."""
     lowered = request.lower()
     taken: List[Tuple[int, int]] = []
     for text in texts:
@@ -301,7 +303,7 @@ def check_extracted_values(params: BaseModel, request: Optional[str]) -> Extract
             if number is not None and not is_sentinel_number(number):
                 numbers.append((name, value, number))
     if numbers:
-        written = _written_numbers(request, texts)
+        written = written_numbers(request, texts)
         for name, value, number in numbers:
             if written and number not in written:
                 check.refused[name] = (

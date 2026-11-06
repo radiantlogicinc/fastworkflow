@@ -5,6 +5,7 @@ if "dspy" in _sys.modules and "openai" in _sys.modules:
     _sys.modules["openai"].__version__
 import contextlib
 from dataclasses import dataclass
+import json
 from datetime import datetime
 from enum import Enum
 import os
@@ -27,6 +28,27 @@ class Action(BaseModel):
     command: str = ""   # only use is to display autocomplete item in the UI
     parameters: dict[str, Optional[Union[str, bool, int, float, BaseModel]]] = {}
     workflow_id: Optional[int] = None    # when creating a new action, this is set by the workflow
+
+def load_startup_action(value: str) -> "Action":
+    """Build the Action for a ``--startup_action`` value.
+
+    The value is a path to a JSON file holding the action object. An inline JSON
+    object is also accepted when the value starts with "{". A missing file raises
+    ValueError naming the path, so the CLI and the server report the same error.
+    """
+    text = value.strip()
+    if text.startswith("{"):
+        data = json.loads(text)
+    else:
+        try:
+            with open(value, "r") as file:
+                data = json.load(file)
+        except FileNotFoundError:
+            raise ValueError(
+                f"--startup_action file not found: {value!r}. Pass a path to a JSON file, "
+                "or an inline JSON object starting with '{'."
+            ) from None
+    return Action(**data)
 
 class Recommendation(BaseModel):
     summary: str

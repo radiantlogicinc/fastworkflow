@@ -1854,6 +1854,13 @@ Today's date is {today}.
             guard_refusal = self._check_option_arguments(command, cmd_parameters, diagnostics)
             if guard_refusal is not None:
                 return (False, guard_refusal, {}, [])
+        if is_valid and planning is not None:
+            # The roles of two required str inputs given one value (3.4), as the typed planning call checks them.
+            values = {param.name: getattr(cmd_parameters, param.name, None) for param in planning.params}
+            try:
+                planning_commands._check_roles(planning, values, self.command)
+            except planning_commands.PlanningCommandInputError as refusal:
+                return (False, str(refusal), {}, [])
 
         hook_refusal = None
         if is_valid and self.input_for_param_extraction_class and \

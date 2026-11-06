@@ -1519,7 +1519,6 @@ def planned_record(runs: Sequence[Mapping[str, Any]], plan_text: Optional[str], 
 
 def runs_without_empty_probes(runs: Sequence[Mapping[str, Any]],
                               steps: Mapping[str, Sequence[Any]],
-                              sources: Iterable[Any] = (),
                               names: Iterable[str] = ()) -> list[dict[str, Any]]:
     """*runs* without the reads that probed a step's open argument and listed nothing.
 
@@ -1537,19 +1536,16 @@ def runs_without_empty_probes(runs: Sequence[Mapping[str, Any]],
     is left to the "broadest query" rule, and when every query listed nothing, or
     every one listed rows, the runs are kept as they are (the latest still wins).
     Queries and pages are told apart as ``facts_from_runs`` tells them (``_page_key``),
-    with the paging parameters of *sources* (the model's ``fact_sources``).
+    with the paging parameters (``facts.PAGING_PARAMETERS``).
     """
     from fastworkflow.observation_offloading import finish_check
     from fastworkflow.observation_offloading.facts import (
         PAGING_PARAMETERS, _listed_nothing, _page_key)
 
     names = {str(n).lower() for n in names}
-    paging_of: dict[str, set[str]] = {}
-    for source in sources:
-        paging_of.setdefault(_plain(source.command), set()).update(source.page_by)
+    paging = set(PAGING_PARAMETERS)
     dropped: set[int] = set()
     for command, group in steps.items():
-        paging = set(PAGING_PARAMETERS) | paging_of.get(command, set())
         for step in group:
             mine = [index for index, run in enumerate(runs)
                     if _plain(run.get("command")) == command and run.get("success")
@@ -1635,7 +1631,7 @@ def fill_output(model: type[BaseModel], runs: Sequence[Mapping[str, Any]], *,
         kept = ([found.get(index) or run for index, run in enumerate(kept)
                  if index in found or run in on_plan] if found else on_plan)
         # An open argument probed with a value that listed nothing (fix-xhy3).
-        kept = runs_without_empty_probes(kept, steps, fact_sources(model), plain_names)
+        kept = runs_without_empty_probes(kept, steps, plain_names)
         if earlier_runs:
             kept = runs_that_entered_record(earlier_runs, runs, record, steps, plain_names) + kept
         kept = runs_standing_in_for_openers(

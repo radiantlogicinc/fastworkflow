@@ -286,7 +286,6 @@ RESERVED_NAMES = frozenset({"user_query", "available_commands", "steps_before", 
 _NAME = r"[A-Za-z_][A-Za-z0-9_]*"
 _COMMAND_LINE = re.compile(r"^- ([A-Za-z_][A-Za-z0-9_]*)\s*$", re.M)
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_NUMBER = re.compile(r"\b(\d+|" + "|".join(NUMBER_WORDS) + r")\b", re.I)
 #: A 16+ hex-digit run with a digit in it, or a dashed uuid: an id only the run can know.
 _UID = re.compile(r"\b(?=[0-9a-f-]*\d)(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,})\b",
                   re.I)
@@ -2777,7 +2776,8 @@ def check_input(command: PlanningCommandCommand, args: dict, request: str, workf
 def _check_roles(command: PlanningCommandCommand, args: dict, request: str) -> None:
     """The same value for two required free-text inputs: the one whose role the request does not
     write just before the value is refused (``_role_fits``); when both fit or neither does, the
-    first is refused. Raises PlanningCommandInputError."""
+    first is refused. Raises PlanningCommandInputError. One rule on both paths: the typed planning
+    call (``_validate_arguments``) and the turn frame (``signatures.validate_parameters``)."""
     required = [p for p in command.params if p.type == "str" and p.required and not p.values]
     for i, p in enumerate(required):
         for q in required[i + 1:]:
@@ -2866,22 +2866,13 @@ def _confident(verdicts: dict | None, name: str):
 
 
 def _request_numbers(request: str, args: dict, command: PlanningCommandCommand) -> set[int]:
-    """The numbers ``request`` writes (digits or number words) outside the str arguments' text."""
-    lowered = request.lower()
-    taken: list[tuple[int, int]] = []
-    for p in command.params:
-        text = str(args.get(p.name) or "").lower() if p.type == "str" else ""
-        at = lowered.find(text) if text else -1
-        while at >= 0:
-            taken.append((at, at + len(text)))
-            at = lowered.find(text, at + 1)
-    found = set()
-    for m in _NUMBER.finditer(request):
-        if any(a <= m.start() < b for a, b in taken):
-            continue
-        word = m.group(1).lower()
-        found.add(int(word) if word.isdigit() else NUMBER_WORDS[word])
-    return found
+    """The numbers ``request`` writes (digits, with a thousands separator or a minus sign, or number words)
+    outside the str arguments' text. The execution side's reader (``argument_checks.written_numbers``), so
+    "1,000" is 1000 and "-5" is -5 on both sides."""
+    from fastworkflow.utils.argument_checks import written_numbers  # argument_checks imports this module
+
+    texts = [str(args.get(p.name) or "") for p in command.params if p.type == "str"]
+    return written_numbers(request, [text for text in texts if text])
 
 
 def _spans(request: str, text: str) -> list[tuple[int, int]]:

@@ -216,6 +216,13 @@ The preview lists the phases its facts models come from.
 | `find` | when kind = book: `BookMatch`<br>when kind = member: `MemberMatch` | always | no |
 ```
 
+## Which form to write
+
+Write the phase's return annotation when its facts type is fixed: one `Output`, a union for
+"whichever ran", or a facts model, as on this page. Use `@phase(output=lambda input: ...)` only
+when the type depends on the input. A phase with both a return annotation and `output=` does
+not load: the error names the phase.
+
 ## What you learned
 
 A phase's facts are typed by the commands that produce them: a union of `Output`s hands on

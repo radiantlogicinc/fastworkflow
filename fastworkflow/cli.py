@@ -284,7 +284,7 @@ def add_run_parser(subparsers):
     )
     parser_run.add_argument("--context_file_path", help="Optional context file path", default="")
     parser_run.add_argument("--startup_command", help="Optional startup command", default="")
-    parser_run.add_argument("--startup_action", help="Optional startup action", default="")
+    parser_run.add_argument("--startup_action", help="Optional startup action: a path to a JSON file, or an inline JSON object starting with '{'", default="")
     parser_run.add_argument("--keep_alive", help="Optional keep_alive", default=True)
     parser_run.add_argument("--project_folderpath", help="Optional path to project folder containing application code", default=None)
     parser_run.add_argument(
@@ -415,7 +415,7 @@ def add_run_fastapi_mcp_parser(subparsers):
     )
     parser_run_fastapi_mcp.add_argument("--context", help="Optional context (JSON string)", default=None)
     parser_run_fastapi_mcp.add_argument("--startup_command", help="Optional startup command", default=None)
-    parser_run_fastapi_mcp.add_argument("--startup_action", help="Optional startup action (JSON string)", default=None)
+    parser_run_fastapi_mcp.add_argument("--startup_action", help="Optional startup action: a path to a JSON file, or an inline JSON object starting with '{'", default=None)
     parser_run_fastapi_mcp.add_argument("--project_folderpath", help="Optional path to project folder containing application code", default=None)
     parser_run_fastapi_mcp.add_argument("--port", type=int, default=8000, help="Port to run the FastAPI server on (default: 8000)")
     parser_run_fastapi_mcp.add_argument("--host", default="0.0.0.0", help="Host to bind the FastAPI server to (default: 0.0.0.0)")

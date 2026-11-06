@@ -590,6 +590,12 @@ def planned(cls: type) -> Callable[[Any], list[Phase]]:
         if next(iter(inspect.signature(fn).parameters), None) != "self":
             raise PhaseError(f"PlanGenerator.{name}: a phase method takes self first, as a "
                              "ResponseGenerator's methods do")
+    for name, fn in methods.items():
+        if "output" in getattr(fn, "__phase_options__", {}) and "return" in fn.__annotations__:
+            raise PhaseError(f"phase {name!r} of {cls.__qualname__} has both @phase(output=...) and a "
+                             "return annotation: use the return annotation when the facts type is "
+                             "fixed (or a union for whichever ran), and output=... only when the type "
+                             "depends on the input")
     order = list(methods)
     if _defines_call(cls):
         raise PhaseError("PlanGenerator defines __call__; rename it to __phases__")

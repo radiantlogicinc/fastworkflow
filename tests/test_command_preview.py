@@ -8,10 +8,12 @@ from __future__ import annotations
 import itertools
 import re
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
 import uuid
+from pathlib import Path
 from typing import Optional
 
 import pytest
@@ -1524,3 +1526,64 @@ def test_an_optional_facts_field_renders_its_type_by_plain_class_name(tmp_path):
     # the Optional field: its command Output by plain name, as a non-Optional typed field renders
     assert "Optional" not in text and "typing." not in text
     assert "| `found` | `Output | None` |" in text.replace("\\|", "|")
+
+
+# --- kind-list warnings (`command preview --check`): a str field whose description lists kind words ---
+
+TUTORIAL_WORKFLOW = Path(__file__).resolve().parent / "planning_tutorial_workflow"
+
+KIND_LIST_STR = '''
+from pydantic import BaseModel, Field
+
+
+class Signature:
+    """File a request about one thing."""
+
+    class Input(BaseModel):
+        resource_type: str = Field(description="which kind of thing the request is about. One of: book, member, branch")
+        query: str = Field(description="free text to search for")
+
+
+class PlanGenerator:
+    def steps(self, input):
+        return [f"look up {input.query}"]
+'''
+
+KIND_LIST_LITERAL = KIND_LIST_STR.replace(
+    "resource_type: str = Field(description=\"which kind of thing the request is about. One of: book, member, branch\")",
+    "resource_type: Literal[\"book\", \"member\", \"branch\"] = Field(description=\"which kind of thing the request is about\")",
+).replace("from pydantic import BaseModel, Field", "from typing import Literal\n\nfrom pydantic import BaseModel, Field")
+
+
+@pytest.fixture
+def kind_list_copy(tmp_path):
+    """A copy of the tutorial workflow (its contexts are the kind words) with one planning command
+    whose str field lists kinds, and one whose field is a Literal of the same words."""
+    folder = tmp_path / "kind_list_wf"
+    shutil.copytree(TUTORIAL_WORKFLOW, folder,
+                    ignore=shutil.ignore_patterns("___command_info", "__pycache__", "versions"))
+    (folder / "_commands" / "file_request.py").write_text(KIND_LIST_STR, encoding="utf-8")
+    (folder / "_commands" / "file_request_fixed.py").write_text(KIND_LIST_LITERAL, encoding="utf-8")
+    return str(folder)
+
+
+def test_a_str_field_whose_description_lists_kind_words_warns_and_a_literal_does_not(kind_list_copy):
+    warnings = command_preview.check_kind_list_warnings(kind_list_copy)
+
+    listed = [w for w in warnings if "file_request input 'resource_type'" in w]
+    assert len(listed) == 1
+    assert "lists kind words (book, branch, member)" in listed[0]
+    assert "Literal" in listed[0]
+    assert not [w for w in warnings if "file_request_fixed" in w]
+
+
+def test_the_kind_list_warning_alone_leaves_preview_check_at_exit_zero(kind_list_copy, tmp_path,
+                                                                       monkeypatch, capsys):
+    out = str(tmp_path / "previews")
+    assert _run_cli(monkeypatch, "command", "preview", kind_list_copy, "--out", out) == 0
+    capsys.readouterr()
+
+    assert _run_cli(monkeypatch, "command", "preview", kind_list_copy, "--check", "--out", out) == 0
+    printed = capsys.readouterr().out
+    assert "warning: file_request input 'resource_type'" in printed
+    assert "are current" in printed

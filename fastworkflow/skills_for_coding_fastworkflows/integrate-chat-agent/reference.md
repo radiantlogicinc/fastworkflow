@@ -14,7 +14,7 @@ python -m fastworkflow.run_fastapi_mcp \
 ```
 
 Other CLI flags: `--host` (default `0.0.0.0`), `--context` (JSON string), `--startup_command`,
-`--startup_action` (JSON file path), `--expect_encrypted_jwt` (enable JWT signature verification;
+`--startup_action` (JSON file path, or an inline JSON object starting with `{`), `--expect_encrypted_jwt` (enable JWT signature verification;
 off by default for trusted networks). Requires `pip install "fastworkflow[server]"`.
 
 Interactive docs are served at `/docs` (Swagger) and `/redoc`. CORS is open (`*`) by default —

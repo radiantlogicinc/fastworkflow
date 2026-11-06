@@ -632,7 +632,7 @@ def load_args():
     parser.add_argument("--passwords_file_path", required=False)
     parser.add_argument("--context", required=False)  # JSON string
     parser.add_argument("--startup_command", required=False)
-    parser.add_argument("--startup_action", required=False)  # JSON string
+    parser.add_argument("--startup_action", required=False)  # JSON file path, or an inline JSON object
     parser.add_argument("--project_folderpath", required=False)
     parser.add_argument("--port", type=int, default=8000, help="Port to run the server on (default: 8000)")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind the server to (default: 0.0.0.0)")
@@ -1485,9 +1485,7 @@ async def initialize(
         if request.startup_action:
             startup_action = fastworkflow.Action(**request.startup_action)
         elif ARGS.startup_action:
-            with open(ARGS.startup_action, 'r') as file:
-                startup_action_dict = json.load(file)
-            startup_action = fastworkflow.Action(**startup_action_dict)
+            startup_action = fastworkflow.load_startup_action(ARGS.startup_action)
 
         # Per-session workflow context [R24]: the request field overrides the
         # server-level --context CLI arg for this session; absent means the

@@ -1986,6 +1986,37 @@ def check_note_condition_warnings(workflow_folder: str) -> list[str]:
     return warnings
 
 
+def check_kind_list_warnings(workflow_folder: str) -> list[str]:
+    """Warnings (not failures) for a ``str`` input field, of a planning or execution command, whose
+    description lists two or more kind words: the kind-selector detection of
+    ``workflow_vocabulary.description_kind_options``. A fixed set of kinds is a ``Literal``. Nothing here
+    changes extraction or the vocabulary."""
+    from fastworkflow.command_directory import CommandDirectory
+    from fastworkflow.utils import workflow_vocabulary as wv
+
+    folder = os.path.abspath(workflow_folder)
+    try:
+        kinds = wv.kind_words_of(wv.gather_metadata(folder))
+        directory = CommandDirectory.load(folder)
+    except Exception:  # noqa: BLE001 - without the command metadata there is nothing to check
+        return []
+    core = set(directory.core_command_names)
+    warnings: list[str] = []
+    for name in sorted(directory.map_command_2_metadata):
+        if name in core:
+            continue
+        for field, (annotation, description) in wv._input_fields(directory, name).items():
+            if annotation is not str:
+                continue
+            listed = wv.description_kind_options(description, kinds)
+            if listed:
+                warnings.append(
+                    f"warning: {name} input {field!r} is a str field whose description lists kind words "
+                    f"({', '.join(sorted(listed))}); if that set is fixed, type it as a Literal of those "
+                    "words, so the planner and the screens see the choices")
+    return warnings
+
+
 def preview_main(args) -> int:
     """``fastworkflow command preview``: write the previews, or with ``--check`` compare them."""
     from fastworkflow import planning_commands
@@ -2002,6 +2033,8 @@ def preview_main(args) -> int:
         for warning in check_hand_typed_warnings(args.workflow_folder):
             print(warning)
         for warning in check_note_condition_warnings(args.workflow_folder):
+            print(warning)
+        for warning in check_kind_list_warnings(args.workflow_folder):
             print(warning)
         if problems:
             print(f"planning command previews in {out_dir} are not current "
@@ -2027,6 +2060,7 @@ __all__ = [
     "PreviewError",
     "answer_mode",
     "check_hand_typed_warnings",
+    "check_kind_list_warnings",
     "check_note_condition_warnings",
     "check_previews",
     "condition_text",

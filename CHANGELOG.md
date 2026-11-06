@@ -1203,6 +1203,8 @@ error that names the new form; there is no legacy support, except where an item 
 - **Span contract v30** (fix-3rsq.6, `fastworkflow/tracing.py`):
   `fw.planner.plan` / `fw.planner.replan` v8, `fw.agent.execute` v3 and
   `fw.nlu.param_extraction` v7.
+- **`@phase` with both `output=` and a return annotation is a load error** (fix-3rsq epic note, D). The error names the phase: use the return annotation when the facts type is fixed (or a union), and `output=` only when the type depends on the input.
+- **`fastworkflow command preview --check` warns on a `str` input whose description lists kind words** (fix-3rsq epic note, H). A warning, not a failure; if the set of kinds is fixed, type the field as a `Literal`.
 
 ### Fixed
 
@@ -1279,6 +1281,10 @@ error that names the new form; there is no legacy support, except where an item 
 
 - **A question back or a hesitation no longer reads as stop_asking** (fix-jd9o.12, `workflow_agent.classify_user_reply`, `ClassifyReply`). `stop_asking` now needs Jev's reading and an explicit request to stop being asked ("stop asking", "just do it", "don't ask me again", "never mind"), so `ask_user` stays available for the turn after a question or a hesitation.
 - **A near tie between two values is no longer auto-applied** (fix-jd9o.10, `DatabaseValidator.fuzzy_match`, `near_tie_margin`). A unique match is applied only when no other candidate scores within 0.08 of it (edits / length); otherwise the result is a suggestion list with every candidate within the margin, so the hook asks the user to choose. A clear winner still applies.
+- **`--startup_action` is a JSON file path, or an inline JSON object** (fix-3rsq epic note, F). The help and the server comment said "JSON string"; `fastworkflow.load_startup_action` reads a path, or an object when the value starts with `{`, for `run` and `run_fastapi_mcp`.
+- **Planning number reading matches the execution side** (fix-3rsq epic note, numbers). `"1,000"` was refused for 1000 and `"-5"` was read as 5; the planning check now uses `argument_checks.written_numbers`.
+- **The turn-frame path refuses one value given to two required str inputs of a planning command** (fix-3rsq.check-roles-one-step). `validate_parameters` runs the role check the typed call already runs, with the same rule: every required `str` input.
+- **Dependencies** (Dependabot): black 26.5.1 → 26.10.1 and setuptools 83.0.0 → 84.2.1 in `poetry.lock`; the resolver also moved urllib3 2.8.0, httpcore2/httpx2 2.13.1, litellm 1.95.1 and typesafe-sdk 0.7.4.
 
 ## 3.6.0 — DSPy 3.4, request splitting, workflow facts on classes
 
