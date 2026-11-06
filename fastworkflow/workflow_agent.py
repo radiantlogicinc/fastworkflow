@@ -1307,9 +1307,41 @@ def split_max_tokens() -> int:
     return int(fastworkflow.get_env_var("LLM_SPLIT_MAX_TOKENS", int, default=SPLIT_MAX_TOKENS))
 
 
-def _split_lm(planner_lm, temperature: float):
-    """The planner LM as the splitter uses it: ``temperature``, output capped at ``split_max_tokens()``."""
+def _split_lm(planner_lm, temperature: float, retry: bool = False):
+    """The planner LM as the splitter uses it: ``temperature``, output capped at ``split_max_tokens()``.
+
+    The retry's other temperature is what makes it a new answer. On a planner whose temperature is
+    left out (a model that takes only its default, ``dspy_utils.drops_rejected_params``) it would
+    change nothing, so the retry skips the response cache instead (fix-z62t).
+    """
+    if retry and dspy_utils.drops_rejected_params(planner_lm):
+        return planner_lm.copy(temperature=temperature, max_tokens=split_max_tokens(), cache=False)
     return planner_lm.copy(temperature=temperature, max_tokens=split_max_tokens())
+
+
+#: Causes of a failed split already logged at WARNING, as ``(planner model, root error type)``: a misconfigured
+#: planner fails every turn the same way, and is logged once per process rather than once per turn.
+_SPLIT_FAILURES_WARNED: set[tuple[str, str]] = set()
+
+
+def _log_split_failure(planner_lm, error: Exception) -> None:
+    """Log a split that failed, with its cause: at WARNING the first time this cause is seen, else at DEBUG.
+
+    The cause is the error at the root of the chain: DSPy wraps every provider error in its own type.
+    """
+    root, seen = error, {id(error)}
+    while (inner := root.__cause__ or root.__context__) is not None and id(inner) not in seen:
+        root = inner
+        seen.add(id(root))
+    model = str(getattr(planner_lm, "model", "") or "")
+    cause = (model, f"{type(root).__module__}.{type(root).__qualname__}")
+    message = f"could not split the request with {model or 'the planner'}; running it whole"
+    if cause in _SPLIT_FAILURES_WARNED:
+        logger.debug(f"{message} ({type(root).__name__}: {root})")
+        return
+    _SPLIT_FAILURES_WARNED.add(cause)
+    logger.warning(f"{message}. Every split that fails this way runs whole; later ones are logged at DEBUG "
+                   f"({type(root).__name__}: {root})", exc_info=error)
 
 
 _NUMBERED_LINE = re.compile(r"^\s*\d+[.)]\s+(.*\S)\s*$")
@@ -2335,24 +2367,31 @@ def split_into_subtasks(user_query: str, planner_lm=None,
     # A split whose only flaw is a leftover reference ("each of them") is still
     # better than none, so it is kept when the retry does not fix it; when both
     # attempts are like that, the less broken one (``_breakage``; the first on a tie).
+    # A model that refuses a temperature (Bedrock Claude Haiku 5.5 takes only 1) is called again
+    # without it (``dspy_utils.call_dropping_rejected_params``); its retry skips the cache (``_split_lm``).
     usable: list[list[str]] = []
-    for temperature in (0.0, 0.7):
+    for attempt, temperature in enumerate((0.0, 0.7)):
         replies: list = []
-        try:
-            with dspy.context(lm=_split_lm(planner_lm, temperature),
-                              adapter=CommandsSystemPreludeAdapter()), watch_cut_off_replies() as replies:
+
+        def split(lm) -> str:
+            with dspy.context(lm=lm, adapter=CommandsSystemPreludeAdapter()):
                 signature = _split_signature(workflow_folderpath) if workflow_folderpath else SplitIntoSubtasks
                 inputs = {"job_types": job_types, "user_query": user_query}
                 if conversation:
                     signature = signature.insert(
                         1, "conversation", dspy.InputField(desc=SPLIT_CONVERSATION_DESC), type_=str)
                     inputs["conversation"] = conversation
-                text = dspy.ChainOfThought(signature)(**inputs).subtasks or ""
-        except Exception:  # noqa: BLE001 - splitting is an optimisation; never fail the turn
+                return dspy.ChainOfThought(signature)(**inputs).subtasks or ""
+
+        try:
+            with watch_cut_off_replies() as replies:
+                text = dspy_utils.call_dropping_rejected_params(
+                    _split_lm(planner_lm, temperature, retry=attempt > 0), split)
+        except Exception as error:  # noqa: BLE001 - splitting is an optimisation; never fail the turn
             if any(replies):
                 logger.warning(f"the split was cut off at {split_max_tokens()} tokens and did not parse")
                 continue
-            logger.warning("could not split the request; running it whole", exc_info=True)
+            _log_split_failure(planner_lm, error)
             return [user_query]
         if replies and replies[-1]:
             # The parsed reply stopped at the cap: whatever parsed is not the model's answer.

@@ -511,6 +511,160 @@ def test_a_split_cut_off_twice_leaves_the_request_whole():
     assert lm.finishes == ["length", "length"]
 
 
+class _ProviderLM(DummyLM):
+    """A planner LM whose calls are checked as litellm checks them. ``only_temperature_1`` makes it a model
+    that takes only ``temperature=1`` (Bedrock Claude Haiku 5.5): any other temperature is refused with
+    litellm's ``UnsupportedParamsError``, unless the call has ``drop_params``, which leaves the temperature
+    out. ``refused`` and ``sent`` record each call as ``(temperature, drop_params, cache)``; ``fail`` makes
+    every sent call raise it, as a provider that is down. Each instance is its own model, so no call is
+    answered from the DSPy response cache of another test or an earlier run."""
+
+    def __init__(self, answers, *, only_temperature_1=False, fail=None):
+        super().__init__(answers)
+        self.model = f"scripted/provider-model-{uuid.uuid4().hex}"
+        self.only_temperature_1 = only_temperature_1
+        self.fail = fail
+        self.refused: list = []
+        self.sent: list = []
+        self._engine_spec = self._engine()
+
+    def _engine(self):
+        import litellm
+        from dspy.clients.engines.dummy_engine import DummyEngine
+
+        owner = self
+
+        class Engine(DummyEngine):
+            def complete_legacy(self, lm, request, **context):
+                temperature, dropping = request.get("temperature"), bool(request.get("drop_params"))
+                call = (temperature, dropping, lm.cache)
+                if owner.only_temperature_1 and temperature not in (None, 1):
+                    if not dropping:
+                        owner.refused.append(call)
+                        raise litellm.UnsupportedParamsError(
+                            message=f"{lm.model} does not support temperature={temperature}. Only temperature=1 "
+                                    "is supported. To drop unsupported params, set `litellm.drop_params = True`.",
+                            status_code=400)
+                owner.sent.append(call)
+                if owner.fail is not None:
+                    raise owner.fail
+                return super().complete_legacy(lm, request, **context)
+
+        return Engine(self)
+
+    def copy(self, **kwargs):
+        copied = super().copy(**kwargs)
+        copied._engine_spec = self._engine()  # the copy answers from, and records on, this LM
+        return copied
+
+
+@pytest.fixture
+def fresh_process(monkeypatch):
+    """No model refused a parameter yet and no split failure logged yet, as in a new process."""
+    from fastworkflow import workflow_agent as agent
+    from fastworkflow.utils import dspy_utils
+
+    monkeypatch.setattr(dspy_utils, "_PARAMS_REJECTED", set())
+    monkeypatch.setattr(agent, "_SPLIT_FAILURES_WARNED", set())
+
+
+@pytest.fixture
+def warnings_log(caplog):
+    """Capture fastWorkflow warnings: that logger does not propagate to root, so attach the handler directly."""
+    import logging
+
+    log = logging.getLogger("fastWorkflow")
+    log.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger="fastWorkflow"):
+            yield caplog
+    finally:
+        log.removeHandler(caplog.handler)
+
+
+_CLEAN = {"reasoning": "r", "subtasks": "1. Audit right A.\n2. Sweep Hubbard."}
+_DUPLICATED = {"reasoning": "r", "subtasks": "1. Same thing.\n2. Same thing."}
+_FIXED = {"reasoning": "r", "subtasks": "1. Part A.\n2. Part B."}
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_a_planner_that_takes_only_temperature_1_still_splits(fresh_process, warnings_log):
+    """fix-z62t: temperature 0.0 is refused, so the call goes again without it, and the split is used."""
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    lm = _ProviderLM([_CLEAN], only_temperature_1=True)
+    assert split_into_subtasks("the request", planner_lm=lm) == ["Audit right A.", "Sweep Hubbard."]
+    assert lm.refused == [(0.0, False, True)]
+    assert lm.sent == [(0.0, True, True)]  # with drop_params, litellm leaves the 0.0 out
+    refusals = [r for r in warnings_log.records if "refused a parameter" in r.getMessage()]
+    assert len(refusals) == 1 and "Only temperature=1 is supported" in refusals[0].getMessage()
+    assert not [r for r in warnings_log.records if "could not split" in r.getMessage()]
+
+    # Later splits on that model leave the temperature out from the start: nothing more is refused or logged.
+    lm.answers = iter([_CLEAN])
+    assert split_into_subtasks("another request", planner_lm=lm) == ["Audit right A.", "Sweep Hubbard."]
+    assert lm.refused == [(0.0, False, True)]
+    assert lm.sent == [(0.0, True, True), (0.0, True, True)]
+    assert len([r for r in warnings_log.records if "refused a parameter" in r.getMessage()]) == 1
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_the_retry_on_a_planner_without_its_temperature_skips_the_cache(fresh_process):
+    """The retry's 0.7 cannot change that model's answer, so the retry is sent past the response cache."""
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    lm = _ProviderLM([_DUPLICATED, _FIXED], only_temperature_1=True)
+    assert split_into_subtasks("the request", planner_lm=lm) == ["Part A.", "Part B."]
+    assert lm.sent == [(0.0, True, True), (0.7, True, False)]
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_a_planner_that_takes_any_temperature_is_called_as_before(fresh_process, warnings_log):
+    """No behaviour change for a model that takes the temperatures: 0.0 then 0.7, no drop_params, cached."""
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    lm = _ProviderLM([_DUPLICATED, _FIXED])
+    assert split_into_subtasks("the request", planner_lm=lm) == ["Part A.", "Part B."]
+    assert lm.refused == []
+    assert lm.sent == [(0.0, False, True), (0.7, False, True)]
+    assert not [r for r in warnings_log.records if "refused a parameter" in r.getMessage()]
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_a_split_that_always_fails_is_logged_once_with_its_cause(fresh_process, warnings_log):
+    """A misconfigured planner fails every turn the same way: one WARNING naming the cause, not one per turn."""
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    lm = _ProviderLM([], fail=RuntimeError("provider down"))
+    for _ in range(3):
+        assert split_into_subtasks("the request", planner_lm=lm) == ["the request"]
+    assert len(lm.sent) == 3  # each turn tried; only the log is once
+    failures = [r for r in warnings_log.records if "could not split" in r.getMessage()]
+    assert len(failures) == 1
+    assert lm.model in failures[0].getMessage()
+    assert "provider down" in failures[0].getMessage()
+
+    # Another cause is new, so it gets its own WARNING.
+    lm.fail = ValueError("bad reply")
+    assert split_into_subtasks("the request", planner_lm=lm) == ["the request"]
+    assert len([r for r in warnings_log.records if "could not split" in r.getMessage()]) == 2
+
+
+def test_only_litellms_refusal_of_a_parameter_counts_as_one():
+    from fastworkflow.utils.dspy_utils import params_rejected
+    import litellm
+
+    refusal = litellm.UnsupportedParamsError(message="does not support temperature=0.0", status_code=400)
+    try:
+        try:
+            raise refusal
+        except litellm.UnsupportedParamsError as inner:
+            raise RuntimeError("wrapped by DSPy") from inner
+    except RuntimeError as wrapped:
+        assert params_rejected(wrapped)
+    assert not params_rejected(RuntimeError("does not support temperature=0.0"))
+
+
 _TWICE_REQUEST = ("Audit the right Billing_Admin. Ann Lee, Bob Kerr and Cid Moss need the same treatment, so I want "
                   "each of them down to their logins. Dee Ray leaves on Friday, so sweep Dee Ray's reach.")
 
