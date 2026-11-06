@@ -260,6 +260,23 @@ error that names the new form; there is no legacy support, except where an item 
   that is not a bool, is a load error. Outside a phase nothing changes. The library example declares it on
   `Record/add_note` (its one write): `author_books` no longer adds notes to the books it opens.
 
+- **A drift test keeps the planning and execution argument checkers in agreement** (fix-48np.3,
+  `tests/test_argument_checker_drift.py`). One table of argument cases (the typed-call strictness corpus, the
+  execution checks' cases adapted to fields both checkers read, and cases per deliberate difference) runs
+  through `planning_commands.checked_arguments` and `argument_checks.check_extracted_values` on the same
+  `Input`s, and their verdicts (accepted, accepted as another value, refused, not given) must be equal, except
+  on a documented list of deliberate differences (an int the request does not write, an absent int, exemptions,
+  which values are checked, planning-only concepts), each of which a case must show exactly. A new disagreement
+  fails the test; the fix is to align the checkers or to add a list entry by an explicit decision.
+
+- **A planning command's `str` argument with a `One of: a, b` description list must be one of them** (fix-48np.3,
+  the first rule both argument checkers share). The allowed-values rule (`argument_checks.allowed_member`: a
+  case-insensitive match, the declared spelling taken, a value outside the list refused) now runs in
+  `planning_commands.check_arguments` as well as on execution commands; the drift test found the planning path
+  did not check the list. A refused value is refused like any other (an optional argument takes its default, a
+  required one fails the call); the planning checks after it are unchanged. A planning command's choice declared
+  as a `Literal` is checked as before. Execution commands are unchanged.
+
 - **Sub-tasks are reviewed before a multi-part request runs** (fix-3rsq.plan-review.2, round 1). In agent mode,
   a request split into several sub-tasks, or a sub-task with no confident match, is shown as a proposed plan
   before anything runs. Each sub-task has its goal, its inputs (values, or `from sub-task N`) and its means: a

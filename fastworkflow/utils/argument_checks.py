@@ -14,7 +14,9 @@ extractor fills them, get the same kinds of checks here, built on the same helpe
 - **allowed values**: a ``str`` field whose allowed values are declared outside its type, in
   ``json_schema_extra={"enum": [...]}`` (the JSON Schema keyword) or in its description as
   ``One of: a, b, c``, must hold one of them (case-insensitive; the declared spelling is taken).
-  A ``Literal`` or ``Enum`` field is already checked by its type in ``validate_parameters``.
+  A ``Literal`` or ``Enum`` field is already checked by its type in ``validate_parameters``. The rule
+  (``allowed_member``) is shared: ``planning_commands.check_arguments`` applies it to a planning command's
+  ``One of:`` list (fix-48np.3).
 - **numbers**: an ``int`` value must be a number the request writes, when the request writes any
   number outside the text of its ``str`` values. Unlike the planning rule, a value the request does
   not write is refused, never replaced by the one number the request writes.
@@ -153,6 +155,21 @@ def allowed_values(field_info: Any) -> Tuple[str, ...]:
     return tuple(items)
 
 
+def allowed_member(allowed: Tuple[str, ...], text: str) -> Optional[str]:
+    """The allowed-values rule, shared by both checkers (fix-48np.3): the member of *allowed* that *text* is,
+    ignoring case, in its declared spelling; None when *text* is none of them (the value is refused). The
+    execution checker reads *allowed* from ``allowed_values``; the planning checker
+    (``planning_commands.check_arguments``) from ``allowed_values`` too, where its loader admits only the
+    ``One of:`` description list (a planning command's choice is otherwise a ``Literal``)."""
+    folded = text.lower()
+    return next((v for v in allowed if v.lower() == folded), None)
+
+
+def not_allowed_why(allowed: Tuple[str, ...]) -> str:
+    """The refusal of a value outside *allowed*, on either path."""
+    return f"is not one of {', '.join(allowed)}"
+
+
 def is_grounding_exempt(field_info: Any) -> bool:
     """Whether a ``str`` field's value need not be written in the request: it carries
     ``json_schema_extra={"in_request": False}``, or declares a ``pattern`` (a format the value is
@@ -248,9 +265,9 @@ def _str_check(name: str, field_info: Any, value: Any, request: str, folded: str
 
     allowed = allowed_values(field_info)
     if allowed:
-        member = next((v for v in allowed if v.lower() == text.lower()), None)
+        member = allowed_member(allowed, text)
         if member is None:
-            check.refused[name] = (value, f"is not one of {', '.join(allowed)}")
+            check.refused[name] = (value, not_allowed_why(allowed))
             return None
         if member != value:
             check.respelled[name] = (value, member)
