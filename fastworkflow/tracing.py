@@ -367,7 +367,12 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # policy verifier's decision on a step it rewrote (fastworkflow.policy_runtime): `policy_mode`, `policy_outcome`,
 # `policy_source`, `policy_table_version`, `policy_intent`, `policy_requests`, `policy_judgement`, and `answer`
 # (the answer a finish policy sent back). Main numbered this v24; on this line it follows v37.
-SPAN_CONTRACT_VERSION = 38
+#
+# v39: fw.planner.plan / fw.planner.replan v9 (fix-verify-finish) -- `skill_notes` also carries one note per verify
+# verdict the planning command call read ("verify <param>=<value> (<probability>, sure | not sure, not used)"), so a
+# verdict that changed no argument is still on the span. The attribute set is unchanged; the content is. The
+# classifier calls behind the verdicts now run under the turn's context, so each leaves an fw.llm.call span.
+SPAN_CONTRACT_VERSION = 39
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -770,14 +775,16 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # v8: the v6 keys `experiment_arm`, `fast_path` and `recipe_choice` are withdrawn: the Phase 6
     # arms were removed by owner decision 2026-10-30 (SPAN_CONTRACT_VERSION v30). A span recorded at
     # v6 or v7 still carries them.
+    # v9: `skill_notes` also carries each verify verdict read (SPAN_CONTRACT_VERSION v39). A span recorded
+    # at v8 carries only the notes of the changes.
     SPAN_PLANNER_PLAN: SpanContract(
-        version=8,
+        version=9,
         attributes=frozenset({"model", "replan_trigger", "plan", "plan_source",
                               "skill", "skill_args", "skill_notes", "skill_fallback",
                               "skill_refusal_asked"}),
     ),
     SPAN_PLANNER_REPLAN: SpanContract(
-        version=8,
+        version=9,
         attributes=frozenset({"model", "replan_trigger", "plan", "plan_source",
                               "skill", "skill_args", "skill_notes", "skill_fallback",
                               "skill_refusal_asked"}),

@@ -3,8 +3,9 @@
 When the agent chooses ``finish``, the run's initial plan is read step by step
 against the outputs the run archived (``O<step>`` rows of ``offload_evidence``).
 Steps found unmet are named in one short note that replaces the finish
-observation, and the agent goes back to the loop -- once per agent run, only
-with iterations left; a second ``finish`` is not checked.
+observation, and the agent goes back to the loop. Up to two finishes of an agent run
+are checked (``react.FINISH_REVIEWS_PER_RUN``), only with iterations left; a finish after
+the second is not checked, and the run may end.
 
 No model is called. Each numbered plan step is read for the workflow command
 it names (the first token that is a declared command). Conditional steps
@@ -521,8 +522,10 @@ def build_note(unmet: Sequence[Verdict]) -> Optional[str]:
     lines = ["Finish check: not every plan step is done yet."]
     for verdict in sorted(unmet, key=lambda v: v.step):
         lines.append(f"- Step {verdict.step} ({verdict.next_command}) was not run: run it now.")
-    lines.append("Do not repeat a change already made. Then finish; if a step cannot be done,"
-                 " say so instead of claiming it.")
+    # Every unmet step is a command step (unmet_steps), so the note tells the agent to run it. A step is
+    # reported as not done only when its command ran and failed: a step never run is run, not excused.
+    lines.append("Do not repeat a change already made. Run each of these steps now, then finish."
+                 " Report a step as not done only when its command ran and failed.")
     note = "\n".join(lines)
     while len(note.encode("utf-8")) > NOTE_MAX_BYTES and len(lines) > 3:
         lines.pop(-2)

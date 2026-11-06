@@ -976,6 +976,7 @@ error that names the new form; there is no legacy support, except where an item 
 
 ### Changed
 
+- **The finish check reviews up to two finishes per run** (`react.FINISH_REVIEWS_PER_RUN`, `finish_check`): a second note reopens the loop once more, a third finish ends the run; the note's closing line tells the agent to run an unmet step, and to report one not done only when its command ran and failed.
 - **Drafting is on by default, and a bound sub-task runs with the inputs its review showed** (fix-48np.1).
   `FW_DRAFT_ARGUMENTS` now defaults to on; `FW_DRAFT_ARGUMENTS=off` (or 0, false, no) restores the previous
   behaviour exactly. `resolve_inputs` no longer skips drafted inputs. Measured before the flip (24 multi-sub-task
@@ -1305,6 +1306,7 @@ error that names the new form; there is no legacy support, except where an item 
 
 ### Fixed
 
+- **Verify classifier calls are traced under the turn, and their verdicts are on the planner span** (fix-verify-finish, `planning_commands.check_verdicts`, `typed_planning_call`): the worker threads run under the submitter's context, so each call leaves an `fw.llm.call` span; `skill_notes` lists each verdict read (span contract v39).
 - **A request split is cleaned before it runs** (fix-5kz5, `workflow_agent.split_into_subtasks`, `split_merge.without_repeated_clauses`): a numbered list written inline after the model's reasoning gives one sub-task per item, a clause the model wrote twice inside a sub-task is written once, a sub-task the model listed twice is one job, and a request that comes back as one job is returned as the user wrote it.
 - **The agent's command tool refuses a blank command, or one that names the tool itself, unrun** (fix-wfxt, `workflow_agent.execute_workflow_query`, `command_executor.invoke_command`, `run_listing.head_answers`). Blank text reached intent detection, whose predict raises `Input text cannot be empty` and ended the turn, and `execute_workflow_query` as a command was classified as an utterance; both now return a failed step that tells the agent to name a workflow command.
 

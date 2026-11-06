@@ -707,6 +707,41 @@ def test_the_planner_path_checks_verified_params_with_jev(tmp_path, workflow_env
     assert span.attributes["plan_source"] == "skill_call"
     assert span.attributes["skill_args"]["include_risk"] is True
     assert "assess_risk" in span.attributes["plan"]
+    # the verdict read is on the planner span, sure or not
+    assert "verify include_risk=True (0.92, sure)" in span.attributes["skill_notes"]
+
+
+def test_a_verify_classifier_call_leaves_a_span_under_the_turn_and_its_verdict_is_read(tmp_path, workflow_env):
+    """check_verdicts runs its classifier calls in worker threads; they still belong to the turn's trace."""
+    from dataclasses import replace
+
+    from dspy.utils import DummyLM
+
+    from fastworkflow.utils import dspy_logger
+
+    workflow_env()
+    sink = RecordingTraceSink()
+    ctx, _wf = _session(sink)
+    ctx._begin_turn(REQUEST)
+    command = _command(tmp_path, CHECKED)
+    one_check = replace(command, params=tuple(p for p in command.params if p.name == "include_risk"))
+    # the classifier's evidence: one probability per option (the option labels), and its confidence
+    evidence = {"probabilities": {"true": 0.9, "false": 0.1}, "confidence": 0.9}
+    classifier = DummyLM([{"value": evidence}])
+    with dspy_logger.observe_dspy_host(ctx):
+        verdicts = sc.check_verdicts(classifier, one_check, REQUEST)
+    assert verdicts["include_risk"][0] is True
+    llm_spans = sink.named("fw.llm.call")
+    assert llm_spans, "the classifier call left no fw.llm.call span"
+    assert all(span.trace_id == ctx._turn_key for span in llm_spans)
+    assert sc.verdict_notes(verdicts) == [f"verify include_risk=True ({verdicts['include_risk'][1]:.2f}, "
+                                           f"{'sure' if verdicts['include_risk'][1] >= sc.VERIFY_THRESHOLD else 'not sure, not used'})"]
+
+
+def test_verdict_notes_say_whether_a_verdict_was_sure_enough_to_use():
+    assert sc.verdict_notes({"include_risk": (True, 0.92), "kind": ("feed", 0.5)}) == [
+        "verify include_risk=True (0.92, sure)", "verify kind='feed' (0.50, not sure, not used)"]
+    assert sc.verdict_notes(None) == []
 
 
 # ---------------------------------------------------------------- record names (subject), identifiers, extra steps
