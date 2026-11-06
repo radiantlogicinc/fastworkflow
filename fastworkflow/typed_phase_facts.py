@@ -98,13 +98,14 @@ def handles_typed_output(model: Any) -> bool:
 def _role_for_model(model_cls: type[BaseModel], command: str,
                     signatures: Mapping[str, Any]) -> str:
     signature = signatures.get(command)
-    if signature is None:
-        return "output"
-    if model_cls is getattr(signature, "Output", None):
-        return "output"
-    if model_cls is getattr(signature, "Input", None):
-        return "input"
-    return "output"
+    if signature is not None:
+        if model_cls is getattr(signature, "Output", None):
+            return "output"
+        if model_cls is getattr(signature, "Input", None):
+            return "input"
+    # The run-time fill passes no signatures, and a command module can be loaded under more than one
+    # name, so a command's ``Signature.Input`` is known by its class name: it fills from the run's input.
+    return "input" if model_cls.__name__ == "Input" else "output"
 
 
 def _facts_field_type_errors(model: type[BaseModel], model_to_command: Mapping[type, str]) -> list[str]:

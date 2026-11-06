@@ -276,6 +276,16 @@ def test_facts_fill_from_outputs_and_inputs_with_exact_values():
         search=FindBook.Input(query="Emma"), found=FindBook.Output(uid="x1"))
 
 
+def test_an_input_typed_field_fills_from_the_runs_input_when_no_signatures_are_passed():
+    """The run-time fill (planning_phases.fill_output) passes no signatures: a field typed with a
+    command's Input still reads the run's input, not its Output."""
+    mapping = {ListBooks.Output: "Shelf/list_books", FindBook.Input: "Library/find_book",
+               FindBook.Output: "Library/find_book"}
+    facts = fill_typed_phase_output(Found, RUNS, plan_text=FULL, model_to_command=mapping)
+    assert facts.search == FindBook.Input(query="Emma")
+    assert facts.found == FindBook.Output(uid="x1")
+
+
 def test_list_fields_join_pages_in_order_and_skip_failed_runs():
     facts = fill(Found, RUNS[:3] + RUNS[3:5])
     assert facts.listed.book_uids == ["b1", "b2", "b3"]
