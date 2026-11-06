@@ -3,7 +3,7 @@ import re
 
 import pytest
 
-from fastworkflow.split_merge import merge_subtasks, request_subjects, subjects_in
+from fastworkflow.split_merge import merge_subtasks, request_subjects, subjects_in, without_repeated_clauses
 
 
 # ------------------------------------------------------------------ subjects
@@ -177,6 +177,21 @@ def test_per_person_jobs_without_a_comparison_stay_split():
 
 
 # ------------------------------------------------------------------ edges
+def test_a_clause_written_twice_is_cut_at_its_later_copy_and_other_text_is_untouched():
+    copied = ("Ada Ng has asked for the reading room pass: triage the request: what the pass exposes, and what "
+              "Ada Ng has asked for the reading room pass: triage the request: what the pass exposes, and what "
+              "Ada Ng can reach today.")
+    assert without_repeated_clauses(copied) == (
+        "Ada Ng has asked for the reading room pass: triage the request: what the pass exposes, and what "
+        "Ada Ng can reach today.")
+    # nothing repeats: the text comes back as it was, spacing and all
+    plain = "Show  Ada Ng's   loans, and her fines."
+    assert without_repeated_clauses(plain) is plain
+    # a short name or phrase written twice is the request's own words
+    assert without_repeated_clauses("Compare Ada Ng with Ada Ng's peer, Ben Ito.") == (
+        "Compare Ada Ng with Ada Ng's peer, Ben Ito.")
+
+
 def test_fewer_than_two_subtasks_are_returned_unchanged():
     assert merge_subtasks("q", []) == []
     assert merge_subtasks("q", ["only one"]) == ["only one"]

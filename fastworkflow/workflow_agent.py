@@ -30,7 +30,8 @@ from fastworkflow.planning_commands import (
     PlanningCommandCommand, PlanningCommandFormatError, PlanningCommandInputError, typed_planning_call, refusal_question,
     refusal_names_an_input)
 from fastworkflow.split_merge import (
-    definite_descriptions, merge_subtasks, request_subjects, subjects_in, unnamed_subjects, with_referent)
+    definite_descriptions, merge_subtasks, request_subjects, subjects_in, unnamed_subjects, with_referent,
+    without_repeated_clauses)
 from fastworkflow.utils.logging import logger
 from fastworkflow.policy_runtime import policy_of
 from fastworkflow.workflow_execution_context import CommandCancelledError
@@ -1345,8 +1346,39 @@ def _log_split_failure(planner_lm, error: Exception) -> None:
 
 
 _NUMBERED_LINE = re.compile(r"^\s*\d+[.)]\s+(.*\S)\s*$")
+#: A numbered-list marker anywhere in a line ("2. ", "3) "), not part of a number such as "3.5".
+_INLINE_MARKER = re.compile(r"(?<!\S)(\d{1,2})[.)]\s+")
 #: Typographic hyphens a model writes into names it was asked to copy exactly.
 _HYPHENS = str.maketrans({"\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-"})
+
+
+def _split_items(reply: str) -> list[str]:
+    """The sub-tasks a splitter reply lists: one per numbered line, and one per item of a numbered list
+    written inline on a line ("1. A 2. B 3. C", possibly after reasoning a model wrote in the same field).
+
+    An inline list is the last run that starts at "1." and counts up without a gap; text before it is not a
+    sub-task. A stray opening brace or bracket left by the reply's JSON is cut from the end of each item.
+    """
+    items: list[str] = []
+    for line in reply.splitlines():
+        markers = list(_INLINE_MARKER.finditer(line))
+        parts: list[str] = []
+        for index in range(len(markers) - 1, -1, -1):
+            if markers[index].group(1) != "1":
+                continue
+            run = [markers[index]]
+            for marker in markers[index + 1:]:
+                if int(marker.group(1)) != len(run) + 1:
+                    break
+                run.append(marker)
+            if len(run) > 1:
+                ends = [marker.start() for marker in run[1:]] + [len(line)]
+                parts = [line[marker.end():end] for marker, end in zip(run, ends)]
+                break
+        if not parts and (match := _NUMBERED_LINE.match(line)):
+            parts = [match.group(1)]
+        items.extend(re.sub(r"\s*[{\[]+\s*$", "", part.strip()).strip() for part in parts)
+    return [item for item in items if item]
 
 
 class SplitIntoSubtasks(dspy.Signature):
@@ -2397,14 +2429,15 @@ def split_into_subtasks(user_query: str, planner_lm=None,
             # The parsed reply stopped at the cap: whatever parsed is not the model's answer.
             logger.warning(f"the split was cut off at {split_max_tokens()} tokens; not using it")
             continue
-        subtasks = [match.group(1).translate(_HYPHENS) for line in text.splitlines()
-                    if (match := _NUMBERED_LINE.match(line))]
+        subtasks = [without_repeated_clauses(item.translate(_HYPHENS)) for item in _split_items(text)]
         if not subtasks or len(subtasks) > MAX_SUBTASKS:
             return [user_query]
         if not _visibly_broken(subtasks):
             return _merged(user_query, subtasks, workflow_folderpath, conversation)
-        if len(set(subtasks)) == len(subtasks):
-            usable.append(subtasks)
+        # A sub-task the model listed twice is one job: the list without its copies is a candidate too.
+        unique = list(dict.fromkeys(subtasks))
+        if len(unique) >= 2:
+            usable.append(unique)
     if not usable:
         return [user_query]
     best = min(usable, key=lambda subtasks: _breakage(user_query, subtasks, workflow_folderpath))
@@ -2417,7 +2450,11 @@ def _merged(user_query: str, subtasks: list[str], workflow_folderpath: str | Non
 
     With a Jev key, rule 3's joins (a sub-task naming no subject, or the same subjects as the one before it)
     are Jev's call (``_same_request_check``); without one, the lexical rule joins them as before.
+    One sub-task is one job, returned as the request the user wrote: the model's rewrite of a single job can
+    drop the words that qualify it (a leading record phrase), and nothing else restores them.
     """
+    if sum(1 for item in subtasks if item and item.strip()) < 2:
+        return [user_query]
     try:
         identifiers = identifier_patterns(workflow_folderpath) if workflow_folderpath else ()
         merged = merge_subtasks(user_query, subtasks, identifiers, same_job=_same_request_check(user_query),

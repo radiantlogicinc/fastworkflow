@@ -261,6 +261,42 @@ def test_a_split_that_refers_back_to_the_request_is_retried_once():
         "Audit each of them in Finance.", "Sweep Hubbard."]
 
 
+def test_a_single_sub_task_is_the_request_as_the_user_wrote_it():
+    # The model's rewrite of a one-job request dropped its leading record phrase: the request comes back whole.
+    query = ("For Ada Ng's card, list the fines it carries with the payments that would clear them, and every "
+             "renewal option open to it. Renew nothing.")
+    answer = {"reasoning": "r", "subtasks": "1. List the fines the card carries with the payments that would clear "
+                                            "them, and every renewal option open to it. Renew nothing."}
+    assert _split_with_query(query, answer) == [query]
+
+
+def test_a_numbered_list_written_inline_after_reasoning_gives_one_sub_task_per_item():
+    query = "Renew the loan of Ada Ng and check its fines. Also list the holds of Ben Ito."
+    answer = {"reasoning": "r", "subtasks": (
+        "Two jobs: the renewal, and the holds. 1. Renew the loan of Ada Ng and check its fines. "
+        "2. List the holds of Ben Ito.   3. List the holds of Ben Ito.   {")}
+    assert _split_with_query(query, answer, answer) == [
+        "Renew the loan of Ada Ng and check its fines.", "List the holds of Ben Ito."]
+
+
+def test_a_clause_the_model_wrote_twice_in_one_sub_task_is_written_once():
+    query = ("Ada Ng has asked for the reading room pass: check the pass and what Ada Ng can reach today. "
+             "Ben Ito has asked for the same pass: check it too.")
+    answer = {"reasoning": "r", "subtasks": (
+        "1. Ada Ng has asked for the reading room pass: check the pass and what Ada Ng has asked for the reading "
+        "room pass: check the pass and what Ada Ng can reach today.\n"
+        "2. Ben Ito has asked for the same pass: check it too.")}
+    assert _split_with_query(query, answer) == [
+        "Ada Ng has asked for the reading room pass: check the pass and what Ada Ng can reach today.",
+        "Ben Ito has asked for the same pass: check it too."]
+
+
+def _split_with_query(query, *answers):
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    return split_into_subtasks(query, planner_lm=DummyLM(list(answers)))
+
+
 def test_the_split_goes_through_the_merge():
     from fastworkflow.workflow_agent import split_into_subtasks
 
