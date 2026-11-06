@@ -338,3 +338,27 @@ def test_messaging_app_4_set_current_user_corrects_a_near_name_and_refuses_one_i
     (is_valid, _message, _suggestions, fields) = extractor.validate_parameters(app, command, unknown)
     assert (is_valid, fields) == (True, [])
     assert unknown.user_name == "qzxv"
+
+
+def test_messaging_app_4_set_current_user_refuses_a_near_tie_with_field_and_both_names(messaging_on_a_user):
+    """fix-jd9o.10: 'Sarah Coen' is near both users, so the hook refuses by field with both names and
+    sets nothing; the field is then asked again rather than silently taking one of them."""
+    app, _cme, root, _user = messaging_on_a_user
+    from fastworkflow.examples.messaging_app_4.application.user import User
+
+    root.add_user(User(root, "Sarah Chen"))
+    root.add_user(User(root, "Sarah Cohen"))
+    app.command_context_for_response_generation = root
+    command = "ChatRoom/set_current_user"
+    params_cls = fastworkflow.RoutingRegistry.get_definition(app.folderpath).get_command_class(
+        command, ModuleType.COMMAND_PARAMETERS_CLASS)
+
+    extractor = InputForParamExtraction.create(app, command, "set sarah coen as the current user")
+    tied = params_cls(user_name="Sarah Coen")
+    (is_valid, message, _suggestions, fields) = extractor.validate_parameters(app, command, tied)
+
+    assert is_valid is False
+    assert fields == ["user_name"]
+    assert "Sarah Cohen" in message and "Sarah Chen" in message
+    assert "Did you mean" in message
+    assert tied.user_name == "Sarah Coen"   # nothing was written back

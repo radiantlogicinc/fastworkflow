@@ -375,3 +375,60 @@ class TestDefaultThresholds:
         _, _, suggestions = DatabaseValidator.fuzzy_match(
             uid, retail_names, threshold=0.2)
         assert suggestions, "expected the loose cutoff to produce suggestions"
+
+
+class TestNearTieMargin:
+    """fix-jd9o.10: a unique match with a runner-up within the margin is not auto-applied.
+
+    'Sarah Coen' is one edit from 'Sarah Chen' and from 'Sarah Cohen'; the window score alone picked Chen
+    (the extra letter in Cohen penalised it), which is the silent wrong pick the bead reports.
+    """
+
+    NAMES = ["Sarah Chen", "Sarah Cohen"]
+
+    def test_a_near_tie_is_not_applied_and_both_names_are_suggested(self):
+        matched, corrected, suggestions = DatabaseValidator.fuzzy_match("Sarah Coen", self.NAMES)
+        assert (matched, corrected) == (False, None)
+        assert set(suggestions) == {"Sarah Chen", "Sarah Cohen"}
+        assert suggestions[0] == "Sarah Cohen"   # nearest first (1/10 against 1/9)
+
+    def test_an_exact_tie_is_not_applied_and_both_are_suggested(self):
+        matched, corrected, suggestions = DatabaseValidator.fuzzy_match("aaaaa", ["aaaax", "aaaay"])
+        assert (matched, corrected) == (False, None)
+        assert set(suggestions) == {"aaaax", "aaaay"}
+
+    def test_a_tie_is_not_applied_with_a_zero_margin_either(self):
+        matched, _, suggestions = DatabaseValidator.fuzzy_match(
+            "aaaaa", ["aaaax", "aaaay"], near_tie_margin=0.0)
+        assert matched is False and set(suggestions) == {"aaaax", "aaaay"}
+
+    def test_a_clear_winner_still_applies(self):
+        assert (DatabaseValidator.fuzzy_match("Garrisen", PEOPLE)
+                == (True, "Aaron Garrison", []))
+        assert (DatabaseValidator.fuzzy_match("abcde", ["abcdx", "zzzzz"])
+                == (True, "abcdx", []))
+
+    def test_a_runner_up_exactly_at_the_margin_counts_as_within_it(self):
+        """Edit distances 1/5 (abcdx) and 2/5 (axxde): the gap is exactly 0.2."""
+        names = ["abcdx", "axxde"]
+        assert DatabaseValidator.fuzzy_match("abcde", names, near_tie_margin=0.2) == (
+            False, None, ["abcdx", "axxde"])
+
+    def test_a_runner_up_beyond_the_margin_does_not_block_the_unique_match(self):
+        names = ["abcdx", "axxde"]
+        assert DatabaseValidator.fuzzy_match("abcde", names, near_tie_margin=0.19) == (True, "abcdx", [])
+        assert DatabaseValidator.fuzzy_match("abcde", names) == (True, "abcdx", [])   # default 0.08
+
+    def test_a_margin_of_zero_applies_a_unique_match_with_a_gap(self):
+        assert DatabaseValidator.fuzzy_match("abcde", ["abcdx", "axxde"], near_tie_margin=0.0) == (
+            True, "abcdx", [])
+
+    def test_a_candidate_outside_the_suggest_threshold_never_blocks(self):
+        matched, corrected, _ = DatabaseValidator.fuzzy_match(
+            "Garrisen", PEOPLE + ["Zyxwvu Qpmlkj"], suggest_threshold=0.7)
+        assert (matched, corrected) == (True, "Aaron Garrison")
+
+    def test_suggestions_are_the_callers_candidate_list_in_nearest_order(self):
+        matched, _, suggestions = DatabaseValidator.fuzzy_match("Sarah Coen", ["Sarah Chen", "Sarah Cohen", "Zed Q"])
+        assert matched is False
+        assert suggestions == ["Sarah Cohen", "Sarah Chen"]

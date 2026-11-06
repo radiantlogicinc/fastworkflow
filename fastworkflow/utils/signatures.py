@@ -24,7 +24,9 @@ import fastworkflow
 from fastworkflow import ModuleType
 from fastworkflow.utils.logging import logger
 from fastworkflow.model_pipeline_training import get_route_layer_filepath_model
-from fastworkflow.utils.fuzzy_match import find_best_matches
+from fastworkflow.utils.fuzzy_match import (
+    best_window_distance, find_best_matches, normalize_text, normalized_levenshtein_distance,
+)
 from fastworkflow.utils import dspy_utils
 from fastworkflow.utils.dspy_logger import DSPyForward
 from fastworkflow.command_directory import CommandDirectory
@@ -772,13 +774,47 @@ _VALUE_PICK_OFF = ("off", "0", "false")
 _VALUE_PICK_FALLBACK_CANDIDATES = 5
 
 
+#: A unique fuzzy match is applied only when no other candidate scores within this margin of it (edits /
+#: length, the scale of auto_apply_threshold). Within the margin the value is ambiguous: 'Sarah Coen' is one
+#: edit from both 'Sarah Chen' (1/9) and 'Sarah Cohen' (1/10), and the longer name wins on ratio alone
+#: (fix-jd9o.10). 0.08 was picked on the fix-jd9o.10 dev sets, which scored window distance only; the score
+#: here is the smaller of window and whole-string distance, so re-measure before quoting a rate.
+NEAR_TIE_MARGIN = 0.08
+_NEAR_TIE_EPSILON = 1e-9   # float slack so a runner-up exactly at the margin still counts as within it
+
+
+def _near_tied_candidates(value: str, key_values: list[str], cutoff: float, margin: float) -> list[tuple[float, str]]:
+    """Each distinct candidate within ``cutoff`` with its score, nearest first, when it is within ``margin``
+    of the nearest candidate's score. A candidate's score is the smaller of its best-window distance (the
+    find_best_matches scale, which lets a containing name score 0.0) and its whole-string distance over the
+    longer of the two, so 'Sarah Cohen' (1/10 for 'Sarah Coen') is not penalised for its extra letter."""
+    normalized_value = normalize_text(value)
+    scored: dict[str, float] = {}
+    for candidate in key_values:
+        if candidate in scored:
+            continue
+        normalized_candidate = normalize_text(candidate)
+        window = best_window_distance(normalized_value, normalized_candidate, max_normalized=cutoff)
+        whole = normalized_levenshtein_distance(normalized_value, normalized_candidate, max_normalized=cutoff)
+        score = min(window, whole)
+        if score <= cutoff:
+            scored[candidate] = score
+    if not scored:
+        return []
+    nearest = min(scored.values())
+    ranked = sorted(scored.items(), key=lambda item: item[1])   # stable: ties keep list order
+    return [(score, candidate) for candidate, score in ranked
+            if score - nearest <= margin + _NEAR_TIE_EPSILON]
+
+
 class DatabaseValidator:
     """Generic validator for database lookups with fuzzy matching"""
 
     @staticmethod
     def fuzzy_match(value: str, key_values: list[str], threshold: float = 0.6,
                     suggest_threshold: float = 0.7,
-                    auto_apply_threshold: float = 0.2) -> Tuple[bool, Optional[str], List[str]]:
+                    auto_apply_threshold: float = 0.2,
+                    near_tie_margin: float = NEAR_TIE_MARGIN) -> Tuple[bool, Optional[str], List[str]]:
         """Find the closest matching value in the specified database.
 
         Three stages run in order, and each one short-circuits: a
@@ -807,6 +843,13 @@ class DatabaseValidator:
             characters exceeds this and is offered as a suggestion instead.
             Raise it per command if an extra clarification turn costs more than
             a wrong substitution.
+        near_tie_margin
+            A candidate's score is the smaller of its best-window distance and its whole-string distance
+            (edits / the longer length), so an extra letter does not hide a near tie. A match is applied only
+            when the window-best candidate is the only one within this margin of the best score. Otherwise
+            nothing is applied: the result is ``(False, None, suggestions)``, the window-best matches and every
+            candidate within the margin, nearest first, so the caller asks the user to choose. A tie is always
+            ambiguous; 0.0 asks only on exact ties (and when the two scores disagree on the best candidate).
         """
         if not value or value in [None, NOT_FOUND]:
             return False, None, []
@@ -821,10 +864,15 @@ class DatabaseValidator:
         best_matches, best_distance = find_best_matches(
             value, key_values, threshold = suggest_threshold, best_window = True)
         if best_matches:
-            if len(best_matches) == 1 and best_distance <= auto_apply_threshold:
+            near = [candidate for _, candidate in _near_tied_candidates(
+                value, key_values, suggest_threshold, near_tie_margin)]
+            # The window-best matches always stay in the suggestions (every tie at the best distance).
+            near = list(dict.fromkeys(near + best_matches))
+            if near == [best_matches[0]] and len(best_matches) == 1 and best_distance <= auto_apply_threshold:
                 return True, best_matches[0], []
-            # Ambiguous, or close enough to offer but too far to apply unannounced.
-            return False, None, best_matches
+            # Ambiguous (a tie, or a runner-up within the margin), or close enough to offer but too far
+            # to apply unannounced.
+            return False, None, near
 
         lowercase_matches = get_close_matches(
             value.lower(), 
