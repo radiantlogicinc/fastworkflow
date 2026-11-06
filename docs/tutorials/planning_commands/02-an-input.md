@@ -12,7 +12,9 @@ values from the request, the member's name and the note, and writes them into it
 One phase, so the call is one plan, run by one executor run. It finds the member, opens
 the one named, and adds the note there.
 """
-from pydantic import BaseModel, Field
+import re
+
+from pydantic import BaseModel, Field, model_validator
 
 from fastworkflow.planning import pick, run
 
@@ -34,7 +36,18 @@ class Signature:
     class Input(BaseModel):
         member: str = Field(description="the member's name",
                             json_schema_extra={"in_request": True})
-        text: str = Field(description="the note to add")
+        text: str = Field(description="what the note says, without the request around it "
+                                      "(to note that someone called: 'someone called')",
+                          json_schema_extra={"in_request": True})
+
+        @model_validator(mode="after")
+        def note_without_the_request(self):
+            # A note on Mia Chen's record does not name Mia Chen: a text that does holds the
+            # request ("Note on Mia Chen's record that ..."), not the note.
+            if re.search(rf"\b{re.escape(self.member)}\b", self.text, re.IGNORECASE):
+                raise ValueError(f"text is {self.text!r}, which holds the member's name: that is the "
+                                 "request around the note; give only the words the note says")
+            return self
 
 
 class PlanGenerator:
@@ -52,10 +65,18 @@ class PlanGenerator:
   (page 14); a step that calls the command fills it by the parameter extractor, as it does
   any command's arguments (page 9). The values are then checked before any step is written,
   by the options their fields carry.
-- **`json_schema_extra={"in_request": True}`** is such an option: the member's name must
-  appear in the request word for word (case and dashes aside), so nothing rewords a name or
-  invents one. `text` carries no option, so the extractor may tidy the note's words. A field
-  with no option is checked by its type alone. Page 9 lists the options.
+- **`json_schema_extra={"in_request": True}`** is such an option: the value must appear in
+  the request word for word (case and dashes aside), so nothing rewords a name or invents one.
+  `text` carries it too: a note is the user's words, and a note the extractor tidied,
+  shortened or made up ("Requested extension for upcoming project deadline" for "she asked
+  for an extension") is refused, and the extractor is asked once more. A field with no
+  option is checked by its type alone; leave the option off only a value the request may
+  legitimately write another way (a date written "next Monday"). Page 9 lists the options.
+- **The `model_validator`** refuses what `in_request` cannot see: a note that is written in
+  the request but holds more than the note. When the extractor takes the whole instruction
+  ("Note on Mia Chen's record that she asked for an extension"), the text names the member,
+  which a note on her own record does not. The validator's message says what to fix, and the
+  call is filled once more with it (page 9).
 - **Both fields are required** (no default). A field is a `str`, a `bool`, an `int` or a
   `Literal[...]` of text values.
 - **Each description says what this command takes, for a person.** `member` is "the
@@ -111,9 +132,10 @@ Depth: 1 (lower bound; open steps name no command)
 | input | type | default | sample | verify | in_request | description |
 |---|---|---|---|---|---|---|
 | `member` | str | required | `<member>` |  | yes | the member's name |
-| `text` | str | required | `<text>` |  |  | the note to add |
+| `text` | str | required | `<text>` |  | yes | what the note says, without the request around it (to note that someone called: 'someone called') |
 
 - `member` must be written in the request (`in_request`).
+- `text` must be written in the request (`in_request`).
 ```
 
 ## At run time

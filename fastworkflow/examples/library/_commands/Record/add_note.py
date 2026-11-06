@@ -25,6 +25,9 @@ class Signature:
 
 
 class ResponseGenerator:
+    #: It changes the record: inside a planning command's phase it runs only when a step names it.
+    writes = True
+
     def __call__(self, workflow: fastworkflow.Workflow, command: str,
                  input: Signature.Input) -> Signature.Output:
         record = workflow.command_context_for_response_generation

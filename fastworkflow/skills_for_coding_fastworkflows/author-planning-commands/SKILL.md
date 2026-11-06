@@ -7,10 +7,12 @@ description: >-
   instead of a command, the file shape (`Signature` + a top-level `PlanGenerator`), `Input` and
   `from_`, phases and facts typed by their commands, the step helpers (`run`, `full_list`, `when`,
   `do_not_run`, `pick`), nesting with its cycle guard and step budget, `__phases__` and `__result__`,
-  `in_request`, reuse from `_` modules only, the `command preview` / `--check` loop, the step wording
-  the framework reads in code, and descriptions written for people. Use when adding, reviewing or
-  debugging a planning command, or when its steps are run, checked or answered differently than
-  intended.
+  `in_request` (free text that must be the user's words included), an input for every scope users ask
+  about and an answer that keeps the description's promise, `writes` on commands that change data (so a
+  read-only planning command's phases make no writes), reuse from `_` modules only, the `command
+  preview` / `--check` loop, the step wording the framework reads in code, and descriptions written for
+  people. Use when adding, reviewing or debugging a planning command, or when its steps are run, checked
+  or answered differently than intended, or when a phase made a write nobody asked for.
 ---
 
 # Writing planning commands
@@ -212,6 +214,62 @@ returned value is written back to the arguments (a refusing validator still refu
 The code appends the rule sentence of `in_request` (and of `in_request: "subject"`) to the field's description for the
 planner (`extraction_sentences`), so the description does not repeat it. Full rules: the
 `planning_commands` module doc.
+
+### Free text that must be the user's words
+
+A free-text value the command stores or acts on (a note, a message, a reason) is the field most easily
+drafted wrong. Measured on the library example (fix-46mm), a `note_member.text` with no option was
+drafted as a paraphrase, an invented sentence ("Requested extension for upcoming project deadline" for
+"she asked for an extension"), the instruction itself ("Note on Mia Chen's record that she asked for an
+extension"), or the note with the next job of a bundled request glued on. Declare it in two layers:
+
+1. **`in_request: True`.** The note must be written in the request, so a paraphrase or an invented note is
+   refused and the extractor is asked once more with the refusal. The same check runs on a drafted
+   sub-task input, on the typed call and on a step that calls the command; nothing in the framework needs
+   to know the field is free text. Leave the option off only a value the request may legitimately write
+   another way (a date written "next Monday", an amount converted from words).
+2. **A validator for what the substring check cannot see.** A value that is the whole instruction is
+   written in the request too. Refuse it with a rule the command's own meaning gives, in a `model_validator`
+   on `Input` raising `ValueError` with what to fix (the call is filled once more with the message; a
+   `Refused(field=...)` from the hook would ask the user instead). For a note on a member's record, the
+   rule is that the note does not name that member: a text that does holds the request around the note.
+   Match the other value as whole words, so a short name does not refuse an unrelated note.
+
+Describe the field as what it holds, with a short worked case in prose ("what the note says, without
+the request around it (to note that someone called: 'someone called')"); the `in_request` sentence is
+added for the extractor. On the library, live with a small extraction model, that wording took the
+note's own words in 8 of 9 clean sub-tasks and the ninth was refused rather than written, where the bare
+"the note to add" let through a paraphrase, an invention and the whole instruction. Likewise a scope
+field names the values it takes ("such as Central or Riverside"): with them the branch was bound in 6 of
+6 branch questions and left empty in 6 of 6 whole-library ones; without them it was bound in 4 of 6.
+
+A free-text field's `examples` are a value a model can copy: an example value the request does not write is refused by the extraction
+checks, but a phase agent reading the listing can still write it into a call (the library's
+`add_note` example "the cover is torn" was added to records seven times inside `author_books`; see
+"Commands that write" below). A value a sub-task holds because the splitter left two jobs in it ("she
+moved to Riverside and report her loans") is a splitting failure, not one this declaration can catch.
+
+## Inputs for every scope, answers that keep the description's promise
+
+Two rules, from the library's `overdue_summary` (fix-1744: 19 of 36 failed direct sub-tasks of one
+drafting run were this command):
+
+- **Give the command an input for every way people scope the question it answers.** "How many loans are
+  overdue at Riverside?" matched `overdue_summary`, which had no branch input, so the call counted the
+  whole library and answered 2 for a branch that has 1. Its callee `count_overdue` took a branch; the
+  planning command must take it too and pass it on (`run("count_overdue", branch=input.branch or None)`).
+  An optional scope takes the default that means "all" (`""`), and the `Input` maps the words for "all"
+  ("all branches", "the whole library") to it and refuses a value that names nothing (a branch that does
+  not exist), naming the values that exist. A scope the user writes is not a handle: give it
+  `in_request` (with `ignore` for the kind word: "the Riverside branch" becomes "Riverside"), not
+  `from_`. A `from_` producer would make a draft take the value from an earlier sub-task that merely
+  listed the branches.
+- **The answer must deliver everything the description promises.** The description said "list the
+  branches, then say how many loans are overdue", but the last phase's agent sees only its own phase's
+  runs and steps, so the branches never reached the answer (it said "2", or wrote `{{list_branches}}`). A
+  value an earlier phase finds reaches the answer only as a fact: type that phase with the command's
+  `Output` and write the value into the answer step, or build the answer in `__result__`. Read each
+  description sentence against the answer path and check that every noun it promises arrives there.
 
 ## Phases and facts (typed by commands)
 
@@ -434,6 +492,34 @@ the exact parameters, single-use, and it expires. The listings mark the command,
 It is not read/write gating: an easy-to-undo write needs no annotation. Full rules are in
 `docs/planning_command_file_layout.md`.
 
+## Commands that write (`writes`)
+
+An execution command that changes the application's data declares it on its `ResponseGenerator`:
+
+```python
+class ResponseGenerator:
+    writes = True    # adds a note, cancels an order, sends a message
+```
+
+Absent means the command only reads, or only moves the workflow between records (navigation is
+`descends_to`). A planning command does not declare it: it writes when one of its steps (directly, or
+through a planning command it calls) runs a command that writes, and it is read-only otherwise
+(`command_writes.write_commands`). `writes` on a `PlanGenerator`, or a value that is not a bool, fails
+the load.
+
+Inside a planning command's phase, a command that writes runs only when a step of that phase names it:
+the phase's listing leaves out the other write commands, and a call of one is refused unrun with a
+message the agent reads (`command_writes.phase_write_refusal`, checked by the executor before the
+approval gate). So a read-only planning command changes nothing, and a writing one makes only the
+writes its steps name. Outside a phase (the turn's own agent, a typed command) nothing changes.
+
+Declare `writes` on every command that changes data, including the easy-to-undo ones that need no
+`approval`: the two are independent. Without it, the library's `author_books` (find books, open each)
+added notes to the books it opened in 6 of 36 failed direct sub-tasks (fix-fixv), the phase agent
+copying `add_note`'s description example. A phase that should write names the command in a step
+(`run("add_note", text=input.text)`); a step in open words ("add a note saying ...") names none, and
+the write is refused.
+
 A planning command runs in agent mode. In assistant mode an exactly named planning command runs only
 when it is mechanical (code runs every step). One that needs the agent is refused, with the reasons
 that name each step.
@@ -444,6 +530,10 @@ that name each step.
 - [ ] The job needs several existing commands in a known order (else: a command)
 - [ ] File stem is the planning command's name; the Signature docstring says the job; plain_utterances are generic
 - [ ] Input types are str / bool / int / Literal / Optional[str] = None; bools default false
+- [ ] An input for every way users scope the question (branch, date range, owner), with the "all" default
+- [ ] Every promise of the description reaches the answer (as a fact in the answer step, or __result__)
+- [ ] Free text the command stores is in_request, plus a validator for the instruction carried along
+- [ ] Every execution command its steps run that changes data declares writes = True
 - [ ] Signature + top-level PlanGenerator; each phase a method with self, in run order; helpers _named
 - [ ] Every fact field is typed with a command's Output or Input (or the phase returns a command's Output)
 - [ ] Every Input handle that another command supplies carries from_ (not available_from)

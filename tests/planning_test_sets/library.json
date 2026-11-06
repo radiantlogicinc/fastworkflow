@@ -1537,7 +1537,7 @@
       "related": "Library/overdue_summary",
       "source": "seed",
       "split": "train",
-      "utterance": "List the library's branches, then say how many loans are overdue across the library."
+      "utterance": "Name the branches, then say how many loans are overdue, in one branch or in all."
     },
     {
       "expected": "Library/overdue_summary",

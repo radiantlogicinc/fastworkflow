@@ -252,6 +252,14 @@ error that names the new form; there is no legacy support, except where an item 
 
 ### Added
 
+- **`writes = True` declares a command that changes data; a planning command's phases make only the writes
+  their steps name** (fix-fixv). An execution command's `ResponseGenerator` declares `writes = True`; a planning
+  command writes when its steps reach such a command and is read-only otherwise (`command_writes.write_commands`).
+  Inside a planning command's phase, a write command no step of the phase names is left out of the phase's
+  listing and refused unrun by the executor, before the approval gate. `writes` on a `PlanGenerator`, or a value
+  that is not a bool, is a load error. Outside a phase nothing changes. The library example declares it on
+  `Record/add_note` (its one write): `author_books` no longer adds notes to the books it opens.
+
 - **Sub-tasks are reviewed before a multi-part request runs** (fix-3rsq.plan-review.2, round 1). In agent mode,
   a request split into several sub-tasks, or a sub-task with no confident match, is shown as a proposed plan
   before anything runs. Each sub-task has its goal, its inputs (values, or `from sub-task N`) and its means: a
@@ -926,6 +934,18 @@ error that names the new form; there is no legacy support, except where an item 
   A folder under `_skills` is not a skill (see the skill-context note above).
 
 ### Changed
+
+- **Library example and planning tutorial workflow: `overdue_summary` takes an optional `branch` and its answer
+  names the branches** (fix-1744). The input (`in_request`, ignoring "the"/"branch"; words for every branch mean
+  the whole library; a name that is no branch is refused with the branches) is passed to `count_overdue`, and the
+  `branches` phase hands `list_branches`'s `Output` on to the answer step. Tutorial page 1 is updated. No
+  `plain_utterances` changed, so no utterance is generated again; the `Signature` docstring (a seed row of the
+  Library planning head) did change, so the next `fastworkflow train` retrains that head selectively. The
+  current heads keep working until then.
+- **Library example: `note_member.text` is `in_request`, and a note that names the member is refused**
+  (fix-46mm). An invented or paraphrased note is refused and extracted once more; a text that holds the request
+  around the note ("Note on Mia Chen's record that ...") is refused by an `Input` validator. Tutorial page 2 is
+  updated. The `author-planning-commands` skill has the lessons of all three fixes.
 
 - **A planning command's arguments come from the shared parameter extractor, not the planner's typed call** (fix-48np,
   stage 2). `typed_planning_call` now fills a planning command's arguments with `extracted_arguments` (the extractor

@@ -5,7 +5,7 @@ from contextlib import nullcontext
 import fastworkflow
 from pydantic import BaseModel
 from fastworkflow import tracing
-from fastworkflow import approval_binding
+from fastworkflow import approval_binding, command_writes
 from fastworkflow.command_interfaces import CommandExecutorInterface
 from fastworkflow.context_navigation import declared_descends_to
 
@@ -566,6 +566,19 @@ class CommandExecutor(CommandExecutorInterface):
         workflow = chat_session.get_active_workflow()
         workflow_name = workflow.folderpath.split('/')[-1]
         context = workflow.current_command_context_displayname
+
+        # A command that writes, called inside a planning command's phase whose steps do not name it,
+        # is refused unrun (fix-fixv, command_writes): a read-only planning command changes nothing.
+        refusal = command_writes.phase_write_refusal(chat_session, workflow.folderpath, command_name)
+        if refusal is not None:
+            if "is_assistant_mode_command" in chat_session.cme_workflow._context:
+                del chat_session.cme_workflow._context["is_assistant_mode_command"]
+            refused = CommandOutput(
+                command_response=fastworkflow.CommandResponse(response=refusal, success=False),
+                command_name=command_name)
+            refused.workflow_name = workflow_name
+            refused.context = context
+            return refused
 
         if planning_name := _resolve_planning_command_name(
             workflow.folderpath, command_name

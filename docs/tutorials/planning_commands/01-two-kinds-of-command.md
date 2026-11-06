@@ -69,14 +69,20 @@ class ResponseGenerator:
 ```python
 """overdue_summary: the library's branches, then how many loans are overdue.
 
-Two phases and no inputs: branches lists the branches; overdue counts the overdue loans
-across the library, and its agent writes the answer.
+Two phases and one optional input: branches lists the branches and hands them on; overdue
+counts the overdue loans in the branch the request names (in every branch when it names
+none), and its agent writes the answer, which names the branches.
 """
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
+
 from fastworkflow.planning import run
+
+from ...application.library import HOURS
+from .list_branches import Signature as ListBranches
 
 
 class Signature:
-    """List the library's branches, then say how many loans are overdue across the library."""
+    """Name the branches, then say how many loans are overdue, in one branch or in all."""
 
     plain_utterances = [
         "give me the library overview",
@@ -89,14 +95,38 @@ class Signature:
         "how is everything at the library, including late loans",
     ]
 
+    class Input(BaseModel):
+        branch: str = Field(default="", description="the branch asked about, if named (such as Central "
+                                                    "or Riverside); empty for all",
+                            json_schema_extra={"in_request": {"ignore": ["the", "branch"]}})
+
+        @field_validator("branch")
+        @classmethod
+        def a_branch_of_the_library(cls, value: str, info: ValidationInfo) -> str:
+            if not value.strip() or not (info.context or {}).get("request"):
+                return value      # no branch, or a placeholder of the template
+            if value.strip().casefold() in EVERY_BRANCH:
+                return ""
+            for name in HOURS:
+                if value.strip().casefold() == name.casefold():
+                    return name
+            raise ValueError(f"branch is {value!r}, which is not a branch of the library; "
+                             f"the branches are {', '.join(HOURS)}, or leave it empty for every branch")
+
 
 class PlanGenerator:
-    def branches(self):
+    def branches(self) -> ListBranches.Output:
         return [run("list_branches")]
 
-    def overdue(self):
-        return [run("count_overdue"),
-                "say how many loans are overdue across the library"]
+    def overdue(self, input, branches):
+        where = f"at {input.branch}" if input.branch else "across the library"
+        return [run("count_overdue", branch=input.branch or None),
+                f"name the branches ({', '.join(branches.names)}) and the number of overdue loans {where}"]
+
+
+#: Words that name every branch, not one: the whole library.
+EVERY_BRANCH = {"all", "all branches", "every branch", "each branch", "any branch", "the library",
+                "the whole library", "library", "overall"}
 ```
 
 ## Line by line
@@ -112,8 +142,13 @@ class PlanGenerator:
   and the one a request is matched by; a `Signature` without a docstring fails the load. Write it for a
   person: what the command does, starting with a verb. `plain_utterances` are example
   requests, written the way people ask.
-- **No `Input`.** This command takes nothing from the request. Leaving `Input` out and
-  writing an empty `class Input(BaseModel): pass` mean the same.
+- **`class Input(BaseModel)`** is what the command takes from the request: here one optional
+  value, the branch a question names ("how many loans are overdue at Riverside?"). Its
+  default, `""`, is the whole library. Give a command an input for every way people scope
+  the question it answers: without `branch`, a question about one branch would get the
+  library's count. Page 2 is about inputs and the `in_request` option; the validator turns
+  words for every branch ("all branches") into the default and refuses a name that is no
+  branch, with the branches named, so the call is filled once more (page 9).
 - **`class PlanGenerator`** makes it a planning command. The class name is the whole switch:
   a file defines exactly one of `ResponseGenerator` and `PlanGenerator`, and both in one
   file fails the load.
@@ -126,15 +161,21 @@ class PlanGenerator:
   to do only its steps, as part 1 of 2 of a larger job. Short, separate runs keep a long job
   from drifting.
 - **Each method returns its steps**, one per line of the plan, exactly the words the agent
-  will read. A method builds text only: it never calls the app or reads state. With no
-  inputs, the methods take only `self`.
+  will read. A method builds text only: it never calls the app or reads state. A method that
+  names `input` gets the checked arguments; one that names an earlier phase gets what that
+  phase handed on.
+- **`-> ListBranches.Output`** makes `branches` hand on `list_branches`'s `Output`, filled in
+  code from the run: a **fact**. `overdue` names `branches`, so its last step can write the
+  branch names into the words the agent reads. Page 3 is about facts.
 - **`run("list_branches")`** writes a step that names a command, which code runs itself. It
   comes from `fastworkflow.planning`, the module planning commands import their helpers from.
   Every step code acts on is written with a helper: `run` for a command, and page 7 has the
   rest. Every command a step names is checked against the workflow at load, and a typo
   keeps the planning command from loading (page 15).
-- **A plain string is the agent's.** `"say how many ..."` names no command, so the agent
-  does it: here, writing the answer.
+- **A plain string is the agent's.** `"name the branches (...) and the number of ..."` names
+  no command, so the agent does it: here, writing the answer. The answer delivers what the
+  description promises, the branches and the count, because the step asks for both and
+  carries the branches: the agent of the last phase sees only that phase's runs and steps.
 
 ## What the planner plans from
 
@@ -148,8 +189,10 @@ needs more.
 <!-- template: overdue_summary -->
 ```text
 list_branches
-count_overdue
-say how many loans are overdue across the library
+count_overdue branch=<branch> (only when branches.names and branch is given)
+name the branches (<branches.names[*]>) and the number of overdue loans at <branch> (only when branches.names and branch is given)
+count_overdue (only when branches.names and branch is empty)
+name the branches (<branches.names[*]>) and the number of overdue loans across the library (only when branches.names and branch is empty)
 ```
 
 `fastworkflow command preview` renders one markdown page per planning command:
@@ -163,7 +206,7 @@ add `--check` in CI to fail when a committed preview is stale. This command's pr
 its title:
 
 ```markdown
-List the library's branches, then say how many loans are overdue across the library.
+Name the branches, then say how many loans are overdue, in one branch or in all.
 
 Source: `_commands/Library/overdue_summary.py`.
 
@@ -172,42 +215,76 @@ Depth: 1 (lower bound; open steps name no command)
 
 ## Inputs
 
-None: every call runs the same plan.
+| input | type | default | sample | verify | in_request | description |
+|---|---|---|---|---|---|---|
+| `branch` | str | `""` | `<branch>` |  | yes; ignore `the`, `branch` | the branch asked about, if named (such as Central or Riverside); empty for all |
+
+- `branch` must be written in the request (`in_request`).
 
 ## Example requests
 
 - give me the library overview
 - how is the library doing
+- a status report on the library: branches and overdue loans
+- summarize the branches and how many loans are late
+- overall picture of the library, please
+- run the library summary
+- branches and overdue count for the whole library
+- how is everything at the library, including late loans
 
 ## Phases
 
 | phase | output | runs | fans out |
 |---|---|---|---|
-| `branches` | none | always | no |
-| `overdue` | none | always | no |
+| `branches` | `Library/list_branches`'s `Output` | always | no |
+| `overdue` | none | only when `branches.names` | no |
 
 ## Facts
 
 What each phase's output holds, filled in code from the commands the phase ran.
 
-No phase passes facts on.
+### `branches` -> `Library/list_branches`'s `Output`
+
+| fact | type | from |
+|---|---|---|
+| `names` | `list[str]` | `Library/list_branches`'s `Output` |
+| `total` | `int` | `Library/list_branches`'s `Output` |
 
 ## Plan
 
-One for every call: the planning command takes no inputs.
+For the sample inputs, once for each different plan the inputs that change them give: `branch`. Each is titled by the inputs that decide it.
 
-### Phase 1: `branches`
+### Plan when branch = given
 
-Reads no earlier facts. Output: none.
+#### Phase 1: `branches`
+
+Reads no earlier facts. Output: `Output`.
 
 1. `list_branches`
 
-### Phase 2: `overdue`
+#### Phase 2: `overdue`
 
-Reads no earlier facts. Output: none.
+Reads: `branches`. Output: none. Settings: `when=branches.names`.
+
+_Steps below are rendered with placeholder facts: `<phase.fact>` stands for that fact as read at run time, and 999999 (or 999,999) for a number fact the code converted; values computed from facts (counts, comparisons, matches) are not real._
+
+1. `count_overdue branch=<branch>`
+2. `name the branches (<branches.names[0]>) and the number of overdue loans at <branch>`
+
+### Plan when branch = empty
+
+#### Phase 1: `branches`
+
+As in the plan when branch = given.
+
+#### Phase 2: `overdue`
+
+Reads: `branches`. Output: none. Settings: `when=branches.names`.
+
+_Steps below are rendered with placeholder facts: `<phase.fact>` stands for that fact as read at run time, and 999999 (or 999,999) for a number fact the code converted; values computed from facts (counts, comparisons, matches) are not real._
 
 1. `count_overdue`
-2. `say how many loans are overdue across the library`
+2. `name the branches (<branches.names[0]>) and the number of overdue loans across the library`
 ```
 
 `Calls:` lists the commands its steps name, and `Depth:` is the longest chain of planning
@@ -219,24 +296,26 @@ the one place the depth is shown; nothing in the runtime depends on it.
 
 When a request is one this command covers, and a `JEV_API_KEY` makes the call typed (page 14),
 the plan for it (or for the part of it the command covers) is a call of it, and the agent runs
-its steps. With no inputs there is nothing to fill, so every call runs the steps above:
+its steps. For "how many loans are overdue at Riverside?" the typed call fills
+`branch=Riverside`, and the call runs:
 
 ```text
 Phase branches
   1. list_branches
   code runs: list_branches
+  facts: Output(names=['Central', 'Riverside'], total=2)
 Phase overdue
-  1. count_overdue
-  2. say how many loans are overdue across the library
-  code runs: count_overdue
+  1. count_overdue branch=Riverside
+  2. name the branches (Central, Riverside) and the number of overdue loans at Riverside
+  code runs: count_overdue branch=Riverside
   the agent writes the answer from these runs
 ```
 
 Each step `run` wrote, with every required value given, is one **code runs** itself, before
 the agent takes a step. The answer is the **last phase's**: its agent writes it from that
-phase's runs. Nothing else passes from one phase to the next: the branches the first phase
-listed are not in the answer. To say them too, the first phase must hand them on as a
-**fact**: page 3.
+phase's runs and steps. Only facts pass from one phase to the next: had `branches` handed
+nothing on, the branches it listed could not be in the answer, and the answer would say less
+than the description promises.
 
 This trace is what `fastworkflow command run-code` prints for the call: it runs every step code
 can run, against the sample commands, with no model, and stops where the agent would take over.

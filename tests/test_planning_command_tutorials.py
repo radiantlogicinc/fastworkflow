@@ -240,13 +240,19 @@ def test_the_composed_planning_command_places_the_base_phases_and_extends_the_ba
                          "  It is on loan to 1 borrower (Raj Patel).")
 
 
-def test_a_planning_command_with_no_inputs_runs_its_two_phases():
+def test_a_planning_command_with_one_optional_input_runs_its_two_phases():
+    # fix-1744: overdue_summary takes the branch a question names (optional), and its answer step
+    # names the branches the first phase listed.
     command = workflow_agent.load_planning_command_map(WORKFLOW)["overdue_summary"]
-    assert command.params == ()
+    assert [(p.name, p.required) for p in command.params] == [("branch", False)]
     text = dry_run("overdue_summary", {})
     assert [line for line in text.splitlines() if line.startswith("Phase")] == [
         "Phase branches", "Phase overdue"]
     assert "code runs: list_branches" in text and "code runs: count_overdue" in text
+    assert "name the branches (Central, Riverside)" in text
+    text = dry_run("overdue_summary", {"branch": "Central"})
+    assert "code runs: count_overdue branch=Central" in text
+    assert "the number of overdue loans at Central" in text
 
 
 def test_a_planning_step_is_read_against_its_input_model_on_the_library():

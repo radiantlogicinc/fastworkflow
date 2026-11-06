@@ -257,8 +257,21 @@ def _complete_ask_user_entry(chat_session_obj, answer: str) -> None:
 def _what_can_i_do(chat_session_obj: fastworkflow.ChatSession) -> str:
     """
     Returns a list of available commands, including their names and parameters.
+
+    Inside a planning command's phase, the commands that write and that no step of the phase names are
+    left out (fix-fixv, ``command_writes.unplanned_write_commands``).
     """
-    return _executor_commands_text(chat_session_obj.get_active_workflow())
+    workflow = chat_session_obj.get_active_workflow()
+    return _executor_commands_text(workflow, _unplanned_writes(chat_session_obj, workflow))
+
+
+def _unplanned_writes(host, workflow) -> frozenset[str]:
+    """The write commands the running phase's steps do not name (none outside a phase)."""
+    from fastworkflow import command_writes
+
+    if workflow is None:
+        return frozenset()
+    return command_writes.unplanned_write_commands(host, workflow.folderpath)
 
 
 def _executor_commands_text(current_workflow, exclude: frozenset[str] = frozenset()) -> str:
@@ -308,7 +321,8 @@ def _refresh_agent_available_commands(host, exclude: frozenset[str] = frozenset(
     if current_workflow is None:
         return
 
-    inputs["available_commands"] = _executor_commands_text(current_workflow, exclude)
+    inputs["available_commands"] = _executor_commands_text(
+        current_workflow, exclude | _unplanned_writes(host, current_workflow))
 
 
 _REPEAT_REASON = "it just returned the same result again"

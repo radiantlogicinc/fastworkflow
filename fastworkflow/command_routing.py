@@ -452,11 +452,13 @@ class RoutingDefinition(BaseModel):
 
 
 def _check_approval_annotations(workflow_folderpath: str, definition: "RoutingDefinition") -> None:
-    """Validate and snapshot each command's ``approval`` annotation (imported lazily: approval_annotations
-    imports this module)."""
+    """Validate and snapshot each command's ``approval`` annotation, and validate its ``writes`` declaration
+    (imported lazily: approval_annotations imports this module)."""
     from fastworkflow.approval_annotations import check_approval_annotations
+    from fastworkflow.command_writes import check_write_declarations
 
     check_approval_annotations(workflow_folderpath, definition)
+    check_write_declarations(workflow_folderpath, definition)
 
 
 class RoutingRegistry:
