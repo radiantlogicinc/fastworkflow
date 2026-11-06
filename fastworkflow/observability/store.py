@@ -2972,6 +2972,19 @@ class ObservabilityStore:
                     stats[str(trace_id)] = (int(count), int(max_rowid or 0))
         return stats
 
+    def existing_conversation_ids(self, channel_id: str, conversation_ids: Iterable[int]) -> set[int]:
+        """Which of *conversation_ids* still have a live conversation row for *channel_id* (one query, fix-ayez)."""
+        ids = sorted({int(item) for item in conversation_ids})
+        if not ids:
+            return set()
+        marks = ",".join("?" * len(ids))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT conversation_id FROM conversations WHERE channel_id=? AND conversation_id IN ({marks})",
+                [channel_id, *ids],
+            ).fetchall()
+        return {int(row[0]) for row in rows}
+
     def list_conversations(
         self, channel_id: Optional[str] = None, limit: int = 100, offset: int = 0
     ) -> list[dict[str, Any]]:

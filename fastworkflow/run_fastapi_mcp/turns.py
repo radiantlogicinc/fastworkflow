@@ -540,6 +540,10 @@ def _persist_after_turn(
     # moment it is evicted between turns.
     # A pending approval (ADR-EXP-025) is durable suspended state: it survives eviction and restart.
     pending_approval = approval_binding.active_record(ctx.app_workflow) is not None
+    # fix-ayez: parked state of a conversation the store no longer has is dropped before the save decides what to
+    # keep (the same call as utils.persist_pending_after_turn, its twin).
+    from fastworkflow.run_fastapi_mcp.utils import prune_parked_pending
+    prune_parked_pending(runtime)
     # Parked state (fix-newconv-pending) is saved too: it is kept for its conversation until that one is active again.
     if awaiting or ctx.has_open_command() or pending_approval or ctx.has_parked_pending():
         try:

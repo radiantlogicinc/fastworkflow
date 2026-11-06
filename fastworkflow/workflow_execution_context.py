@@ -1278,6 +1278,25 @@ class WorkflowExecutionContext:
         self._pending_owner_override = _OWNER_UNSET
         logger.info("restored parked pending state of conversation %s", key)
 
+    def bound_conversation_id(self):
+        """The conversation the context is bound to (None when it has none)."""
+        return self._conversation_id
+
+    def parked_conversation_ids(self) -> list[int]:
+        """The conversation ids that have parked state. "none" and the unowned marker are not conversation ids."""
+        return [int(key) for key in self._parked_pending if key.isdigit()]
+
+    def drop_parked_pending(self, conversation_id) -> int:
+        """Forget the pending state parked for *conversation_id* (fix-ayez): the conversation was deleted or archived.
+
+        Only the parked entries under that id go. The live state is left alone, because it belongs to whichever
+        conversation the context is bound to. Returns the number of snapshots dropped.
+        """
+        items = self._parked_pending.pop(_owner_key(conversation_id), None) or []
+        if items:
+            logger.info("dropped %d parked pending state(s) of conversation %s", len(items), conversation_id)
+        return len(items)
+
     def serialize_state(self, *, channel_id: str) -> dict[str, Any]:
         """
         Export durable Topology-B state for cross-process resume.

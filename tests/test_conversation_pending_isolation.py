@@ -263,3 +263,236 @@ def test_new_conversation_parks_the_question_and_saves_it_before_any_next_messag
     saved = store.load("ch-new-conversation")
     assert saved is not None and saved["parked_pending"]        # the saved state agrees with the live one
     assert saved["parked_pending"]["1"][0]["conversation_id"] == CONV_A
+
+
+# ----------------------------------------------------------------------
+# A deleted or archived conversation takes its parked state with it (fix-ayez)
+# ----------------------------------------------------------------------
+
+
+def test_dropping_a_conversation_removes_only_the_state_parked_for_it(todo, annotated_library):
+    todo.ctx.bind_observability_identity(conversation_id=CONV_A)
+    _ask_aaron(todo)
+    todo.ctx.bind_observability_identity(conversation_id=CONV_B)
+    assert todo.ctx.has_parked_pending()
+
+    assert todo.ctx.drop_parked_pending(CONV_B) == 0            # B has nothing parked
+    assert todo.ctx.has_parked_pending()
+    assert todo.ctx.drop_parked_pending(CONV_A) == 1
+    assert not todo.ctx.has_parked_pending()
+    assert "parked_pending" in _saved(todo.ctx) and not _saved(todo.ctx)["parked_pending"]
+
+    todo.ctx.bind_observability_identity(conversation_id=CONV_A)
+    assert not todo.ctx.awaiting_user                           # nothing is restored for a dropped conversation
+
+
+def test_the_persisted_blob_loses_a_dropped_conversations_parked_state(todo, annotated_library, tmp_path):
+    from fastworkflow.run_fastapi_mcp.utils import drop_parked_pending_for_conversation
+    from fastworkflow.session_state_store import DiskSessionStateStore
+
+    todo.ctx.bind_observability_identity(conversation_id=CONV_A)
+    _ask_aaron(todo)
+    todo.ctx.bind_observability_identity(conversation_id=CONV_B)
+    store = DiskSessionStateStore(str(tmp_path / "state"))
+    store.save("ch-dropped", _saved(todo.ctx))
+    session_manager = SimpleNamespace(session_state_store=store)
+
+    # No loaded runtime: the saved blob is edited directly.
+    assert drop_parked_pending_for_conversation(session_manager, "ch-dropped", CONV_A) == 1
+    assert store.load("ch-dropped")["parked_pending"] == {}
+    assert drop_parked_pending_for_conversation(session_manager, "ch-dropped", CONV_A) == 0
+
+    # A loaded runtime: the live context and the saved blob are both changed through the persist helper.
+    from fastworkflow.run_fastapi_mcp.utils import persist_pending_after_turn
+    store.save("ch-dropped", _saved(todo.ctx))
+    runtime = SimpleNamespace(channel_id="ch-dropped", execution_context=todo.ctx)
+    assert drop_parked_pending_for_conversation(session_manager, "ch-dropped", CONV_A, runtime=runtime) == 1
+    assert not todo.ctx.has_parked_pending()
+    assert store.load("ch-dropped") is None                      # nothing live or parked is left to save
+
+
+# ----------------------------------------------------------------------
+# Parked state is pruned against the observability store (fix-ayez)
+#
+# The store is real (SQLiteTraceSink on a temp DB) and the ids are minted by it. A deleted conversation is a removed
+# conversations row, which is what archive_conversation leaves behind.
+# ----------------------------------------------------------------------
+
+PRUNE_CHANNEL = "ch-prune"
+
+
+@pytest.fixture
+def obs_sink(tmp_path):
+    from fastworkflow.observability.store import SQLiteTraceSink
+
+    sink = SQLiteTraceSink(str(tmp_path / "observability.sqlite3"))
+    try:
+        yield sink
+    finally:
+        sink.close()
+
+
+def _delete_conversation_row(store, channel_id: str, conversation_id: int) -> None:
+    with store._connect() as conn:
+        conn.execute("DELETE FROM conversations WHERE channel_id=? AND conversation_id=?",
+                     (channel_id, conversation_id))
+        conn.commit()
+
+
+def _runtime_for(ctx, store=None):
+    return SimpleNamespace(channel_id=PRUNE_CHANNEL, execution_context=ctx, observability_store=store)
+
+
+def _persisted_blob(runtime, session_state_store):
+    """Save through the real persist helper, as a turn or the New conversation button does, and read the blob back."""
+    from fastworkflow.run_fastapi_mcp.utils import persist_pending_after_turn
+
+    persist_pending_after_turn(SimpleNamespace(session_state_store=session_state_store), runtime, None)
+    return session_state_store.load(PRUNE_CHANNEL)
+
+
+def test_a_deleted_conversations_parked_state_is_pruned_at_the_next_persist(todo, annotated_library, obs_sink, tmp_path):
+    from fastworkflow.session_state_store import DiskSessionStateStore
+
+    store = obs_sink.store
+    todo.ctx.set_trace_sink(obs_sink)
+    conv_a = store.mint_conversation_id(PRUNE_CHANNEL)
+    todo.ctx.bind_observability_identity(conversation_id=conv_a)
+    _ask_aaron(todo)
+    conv_b = store.mint_conversation_id(PRUNE_CHANNEL)
+    todo.ctx.bind_observability_identity(conversation_id=conv_b)
+    assert todo.ctx.parked_conversation_ids() == [conv_a]
+
+    _delete_conversation_row(store, PRUNE_CHANNEL, conv_a)
+    disk = DiskSessionStateStore(str(tmp_path / "state"))
+    disk.save(PRUNE_CHANNEL, _saved(todo.ctx))
+    saved = _persisted_blob(_runtime_for(todo.ctx, store), disk)
+
+    assert not todo.ctx.has_parked_pending()
+    assert saved is None                                        # nothing live or parked is left to save
+
+
+def test_an_existing_conversations_parked_state_stays_through_a_persist(todo, annotated_library, obs_sink, tmp_path):
+    from fastworkflow.session_state_store import DiskSessionStateStore
+
+    store = obs_sink.store
+    todo.ctx.set_trace_sink(obs_sink)
+    conv_a = store.mint_conversation_id(PRUNE_CHANNEL)
+    todo.ctx.bind_observability_identity(conversation_id=conv_a)
+    _ask_aaron(todo)
+    conv_b = store.mint_conversation_id(PRUNE_CHANNEL)
+    todo.ctx.bind_observability_identity(conversation_id=conv_b)
+
+    disk = DiskSessionStateStore(str(tmp_path / "state"))
+    saved = _persisted_blob(_runtime_for(todo.ctx, store), disk)
+
+    assert todo.ctx.parked_conversation_ids() == [conv_a]
+    assert saved is not None and list(saved["parked_pending"]) == [str(conv_a)]
+
+
+def test_unowned_and_none_parked_state_is_never_pruned(todo, annotated_library, obs_sink, tmp_path, monkeypatch):
+    from fastworkflow.session_state_store import DiskSessionStateStore
+
+    store = obs_sink.store
+    # "none": a question asked with no conversation bound (no trace sink, so nothing mints one), parked by the New
+    # conversation button.
+    _ask_aaron(todo)
+    todo.ctx.park_pending_for_new_conversation()
+    assert "none" in todo.ctx._parked_pending
+
+    # "unowned": legacy state with no conversation id, parked on restore.
+    source = _scripted_context(annotated_library, monkeypatch)
+    source.ctx.bind_observability_identity(conversation_id=CONV_A)
+    _ask_aaron(source)
+    state = _saved(source.ctx)
+    del state["conversation_id"]
+    legacy = _scripted_context(annotated_library, monkeypatch)
+    legacy.ctx.set_trace_sink(obs_sink)
+    legacy.ctx.apply_serialized_state(state)
+    conv_a = store.mint_conversation_id(PRUNE_CHANNEL)
+    legacy.ctx.bind_observability_identity(conversation_id=conv_a)
+    assert "unowned" in legacy.ctx._parked_pending
+
+    disk = DiskSessionStateStore(str(tmp_path / "state"))
+    assert _persisted_blob(_runtime_for(todo.ctx, store), disk) is not None
+    assert _prune_check(legacy.ctx, store) == 0
+    assert _prune_check(todo.ctx, store) == 0
+    assert "none" in todo.ctx._parked_pending and "unowned" in legacy.ctx._parked_pending
+
+
+def _prune_check(ctx, store) -> int:
+    from fastworkflow.run_fastapi_mcp.utils import prune_parked_pending
+
+    return prune_parked_pending(_runtime_for(ctx, store))
+
+
+class _UnreadableStore:
+    def existing_conversation_ids(self, channel_id, conversation_ids):
+        raise RuntimeError("database is locked")
+
+
+def test_no_store_or_an_unreadable_store_prunes_nothing_and_raises_nothing(todo, annotated_library, tmp_path):
+    from fastworkflow.session_state_store import DiskSessionStateStore
+
+    todo.ctx.bind_observability_identity(conversation_id=CONV_A)
+    _ask_aaron(todo)
+    todo.ctx.bind_observability_identity(conversation_id=CONV_B)
+    disk = DiskSessionStateStore(str(tmp_path / "state"))
+
+    # No store at all (the runtime has no observability sink).
+    assert _prune_check(todo.ctx, None) == 0
+    saved = _persisted_blob(_runtime_for(todo.ctx, None), disk)
+    assert todo.ctx.parked_conversation_ids() == [CONV_A] and saved["parked_pending"]
+
+    # A store that cannot be read: a save must not fail, and nothing is dropped on a guess.
+    assert _prune_check(todo.ctx, _UnreadableStore()) == 0
+    saved = _persisted_blob(_runtime_for(todo.ctx, _UnreadableStore()), disk)
+    assert todo.ctx.parked_conversation_ids() == [CONV_A] and saved["parked_pending"]
+
+
+def test_a_restored_blob_loses_parked_state_of_deleted_conversations_only(todo, annotated_library, obs_sink, monkeypatch):
+    from fastworkflow.run_fastapi_mcp.utils import _prune_parked_blob
+
+    store = obs_sink.store
+    conv_a = store.mint_conversation_id(PRUNE_CHANNEL)
+    todo.ctx.bind_observability_identity(conversation_id=conv_a)
+    _ask_aaron(todo)
+    conv_b = store.mint_conversation_id(PRUNE_CHANNEL)
+    todo.ctx.bind_observability_identity(conversation_id=conv_b)
+    state = _saved(todo.ctx)
+    _delete_conversation_row(store, PRUNE_CHANNEL, conv_a)
+
+    assert _prune_parked_blob(state, PRUNE_CHANNEL, store, keep=state["conversation_id"]) == 1
+    assert not state["parked_pending"]
+
+    restarted = _scripted_context(annotated_library, monkeypatch)
+    restarted.ctx.apply_serialized_state(state)
+    restarted.ctx.bind_observability_identity(conversation_id=conv_a)
+    assert not restarted.ctx.awaiting_user and not restarted.ctx.has_parked_pending()
+
+
+def test_a_reused_conversation_id_does_not_get_the_old_parked_state(todo, annotated_library, obs_sink):
+    from fastworkflow.run_fastapi_mcp.utils import reserve_conversation_id
+
+    store = obs_sink.store
+    todo.ctx.set_trace_sink(obs_sink)
+    conv_a = store.mint_conversation_id(PRUNE_CHANNEL)
+    todo.ctx.bind_observability_identity(conversation_id=conv_a)
+    _ask_aaron(todo)
+    conv_b = store.mint_conversation_id(PRUNE_CHANNEL)
+    todo.ctx.bind_observability_identity(conversation_id=conv_b)
+    assert todo.ctx.parked_conversation_ids() == [conv_a]
+
+    # The archive cleanup when a channel has no conversations left: the rows and the counter go, so the store mints
+    # from 1 again (the same id as conv_a, which was the channel's first conversation).
+    _delete_conversation_row(store, PRUNE_CHANNEL, conv_a)
+    _delete_conversation_row(store, PRUNE_CHANNEL, conv_b)
+    with store._connect() as conn:
+        conn.execute("DELETE FROM conversation_counters WHERE channel_id=?", (PRUNE_CHANNEL,))
+        conn.commit()
+
+    runtime = _runtime_for(todo.ctx, store)
+    reused = reserve_conversation_id(runtime)
+    assert reused == conv_a                                     # the id really is reused
+    assert todo.ctx.bound_conversation_id() == reused
+    assert not todo.ctx.awaiting_user and not todo.ctx.has_parked_pending()
