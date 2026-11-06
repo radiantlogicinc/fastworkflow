@@ -281,11 +281,14 @@ def command_info_root_of(workflow) -> str:
 def head_answers(workflow, sub_task: str, command_info_root: str | None = None) -> dict[str, dict]:
     """Each gather context's trained head answers *sub_task*: the labels the run gets and the top-k labels and scores
     (``CommandRouter.predict_with_details``: local classifiers, no LLM call). A context with no trained head (no
-    ``threshold.json`` etc. in its folder) answers nothing (3.9)."""
+    ``threshold.json`` etc. in its folder) answers nothing (3.9). Blank text answers nothing either (fix-wfxt): the
+    head's predict refuses empty input, and there is no command in it to route."""
     from fastworkflow.model_pipeline_training import CommandRouter
     from fastworkflow.train.artifact_versioning import context_folder_name
     from fastworkflow.train.score_lookup import HEAD_MARKERS
 
+    if not sub_task.strip():
+        return {}
     root = command_info_root or command_info_root_of(workflow)
     answers: dict[str, dict] = {}
     for context in gather_contexts(workflow):

@@ -376,7 +376,9 @@ class CommandExecutor(CommandExecutorInterface):
         )
         if claim_check is not None:
             claim_check()
-        if not command:
+        # Whitespace-only text is the same empty command (fix-wfxt): it has no command for intent
+        # detection to route, and predict_single_sentence raises on it.
+        if not command or not command.strip():
             return CommandOutput(
                 command_response=
                     fastworkflow.CommandResponse(

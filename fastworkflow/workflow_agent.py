@@ -517,6 +517,7 @@ def _commands_in(command: str, names: set[str]) -> list[str]:
 _NESTED_ARG_KEYS = ("args", "arguments", "params", "parameters", "kwargs")
 _COMMAND_NAME_KEYS = ("command_name", "cmd", "action", "function", "tool")
 _COMMAND_NAME_TOKEN = re.compile(r"[A-Za-z_][\w./-]*")
+_COMMAND_TOOL_NAME = "execute_workflow_query"
 _XML_TAG = re.compile(r"</?[A-Za-z_][\w.-]*>")
 
 
@@ -1191,6 +1192,15 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
                 note_folded_command(scope_for_host(chat_session_obj), folded_alias, command)
             folded_note =(f"\n(Ran as: {command} -- parameters go inside the command string."
                            + (f" Not used: {'; '.join(empty)}." if empty else "") + ")")
+        # A call that names no workflow command is refused before dispatch (fix-wfxt). Blank text
+        # has no command for intent detection to route, and the tool's own name is not a command.
+        named = (command.split() or [""])[0].lstrip("/")
+        if not named:
+            return ("No command was given, so nothing ran. Name a workflow command first, then its "
+                    "parameters after it, e.g. <command_name> <param>value</param>.")
+        if named.lower() == _COMMAND_TOOL_NAME:
+            return (f"{_COMMAND_TOOL_NAME} is this tool, not a workflow command, so nothing ran. "
+                    "Name a workflow command first, then its parameters after it.")
         # The context this command RUNS IN, taken before dispatch: a command that
         # moves the context is evidence about the context it ran in.
         alias = current_execute_alias(chat_session_obj.workflow_tool_agent)
