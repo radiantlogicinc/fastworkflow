@@ -399,7 +399,7 @@ error that names the new form; there is no legacy support, except where an item 
   A rule that fires replaces the step's result with its own text, and the agent
   carries on. Rules that need to know what the user asked for read it from one
   model call per user message (`LLM_POLICY_INTENT`, else `LLM_AGENT`). A workflow
-  without a table runs unchanged. `fw.agent.step` v8 (span contract v37) records which rule fired; the
+  without a table runs unchanged. `fw.agent.step` v8 (span contract v38) records which rule fired; the
   debug UI shows it on the step. Worked example:
   `fastworkflow/examples/retail_workflow/_policy/`.
 - **`fastworkflow policy replay`**: replays a recorded experiment through a policy
@@ -950,6 +950,43 @@ error that names the new form; there is no legacy support, except where an item 
   A folder under `_skills` is not a skill (see the skill-context note above).
 
 ### Changed
+
+- **Drafting is on by default, and a bound sub-task runs with the inputs its review showed** (fix-48np.1).
+  `FW_DRAFT_ARGUMENTS` now defaults to on; `FW_DRAFT_ARGUMENTS=off` (or 0, false, no) restores the previous
+  behaviour exactly. `resolve_inputs` no longer skips drafted inputs. Measured before the flip (24 multi-sub-task
+  requests on the library example and the planning tutorial, 2 fresh unattended runs per arm, Bedrock
+  `nvidia.nemotron-nano-3-30b`, blind-judged): task success on 38/48 against off 35/48, about 2.2x faster (median
+  turn 8.5 s against 18.9 s) at about a quarter of the model cost; shown == run for 80 of 83 bound sub-tasks, the
+  rest an id input drafted with a title (fixed below) and one refusal the agent handled.
+  - The library example and the planning tutorial now declare the format of their id inputs (`open_book.book_uid`,
+    `open_member.member_uid`, and the tutorial's `show_book`, `list_loans` and `list_member_loans`: `pattern`
+    `^b[0-9]+$` / `^m[0-9]+$`, the ids their applications mint). A title drafted into a uid now breaks the
+    field's declared rule, so the draft leaves it unbound and the run finds the id as it did before. No framework
+    change was needed: a declared constraint was already enforced on drafted values (`validate_parameters` for an
+    execution command, `check_input` for a planning command). The validate-command-parameters skill says to
+    declare id formats, and why.
+  - A sub-task bound to a planning command runs its phases with the reviewed inputs (drafted, edited by the user, or
+    `from sub-task N`) as its arguments (`review_proposals.reviewed_arguments`), never extracted again but still
+    checked as a typed planning call checks them (`planning_commands.checked_arguments`: `check_arguments`, the
+    `validate_extracted_parameters` hook, the `Input`'s rules).
+  - A sub-task bound to an execution command runs that command with its reviewed inputs: code runs it as the plan's
+    one step (`planning_phases.CodeSteps`, through the agent's command tool and the CME parameter path and its
+    validation), and the agent only answers from its output. A `from sub-task N` input whose field declares its
+    producer field (`from_("find_book.book_uids")`) takes that field of N's typed output, not the whole output.
+  - Reviewed inputs that are refused, or that leave a required field unbound, are handled as before: the agent runs
+    the sub-task, with the refusal in its context. Only a sub-task the draft never drafted for its means
+    (`SubTask.drafted_means`) has its unbound values drafted at run time, by the draft's own function.
+  - Every bound sub-task's shown and run values are recorded on the turn span as `subtask_bindings` (fw.turn v4,
+    `SPAN_CONTRACT_VERSION` 37), with the reason for any deviation (refused or unbound so the agent ran it, drafted
+    at run time, a value other than the one shown).
+  - The review re-drafts a sub-task's inputs when an edit changes its means (`Proposal.revised`), so it never
+    shows inputs drafted for another command. `drafted_means` is bookkeeping: it is not rendered, not listed in
+    the review's field errors and not editable (`review_engine.shown_fields`, `review_hidden`).
+  - The draft runs the same typed fill fallback as `typed_planning_call` for a planning command whose required
+    value the extractor leaves missing or refused (`planning_commands.typed_fallback_arguments`, one planner call).
+  - Measured latency (Bedrock `nvidia.nemotron-nano-3-30b`, `FW_LM_CACHE=0`, library example): drafting adds a
+    median 1.2 s per sub-task (one extractor call in 19 of 22 drafts), 4.3 s median per request; a sub-task that
+    reaches the typed fill fallback costs three calls, 2.6 to 3.8 s.
 
 - **A planning command's arguments come from the shared parameter extractor, not the planner's typed call** (fix-48np,
   stage 2). `typed_planning_call` now fills a planning command's arguments with `extracted_arguments` (the extractor

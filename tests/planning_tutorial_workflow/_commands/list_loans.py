@@ -11,7 +11,8 @@ class Signature:
     """List the loans of one book: each borrower and the due date."""
 
     class Input(BaseModel):
-        book_uid: str = Field(description="the book's uid, as find_book lists it")
+        book_uid: str = Field(description="the book's uid, as find_book lists it",
+                              pattern=r"^b[0-9]+$")
         start: Optional[int] = Field(default=None, description="the first row of the page")
 
     class Output(BaseModel):
