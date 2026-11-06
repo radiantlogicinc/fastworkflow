@@ -49,8 +49,8 @@ class NoSuspendedAgentStateError(RuntimeError):
 class fastWorkflowReAct(Module):
     # Called after each completed tool step (not on suspension); class default for agents built via __new__.
     on_step_end: Callable[[], None] | None = None
-    # Asked once per run when the agent picks ``finish``: ``(trajectory, iters_left)``
-    # -> a note that replaces the finish observation and sends the agent back to
+    # Asked when the agent picks ``finish``, up to ``FINISH_REVIEWS_PER_RUN`` times per run:
+    # ``(trajectory, iters_left)`` -> a note that replaces the finish observation and sends the agent back to
     # the loop, or None to finish. Set by the caller per run (the finish check).
     finish_reviewer: Callable[[dict[str, Any], int], str | None] | None = None
     # The steps code runs before the loop (``planning_phases.CodeSteps``), for the next
@@ -692,16 +692,18 @@ class fastWorkflowReAct(Module):
         return max(idx + 1, step_floor())
 
     def _review_finish(self, trajectory: dict[str, Any], max_iters: int) -> str | None:
-        """The finish reviewer's note, at most once per run; None on any failure."""
+        """The finish reviewer's note, for the first ``FINISH_REVIEWS_PER_RUN`` finishes of a run; None past
+        the cap, or on any failure."""
         reviewer = getattr(self, "finish_reviewer", None)
         if reviewer is None:
             return None
         run_state = getattr(self, "run_state", None)
         if not isinstance(run_state, dict):
             run_state = self.run_state = {}
-        if run_state.get("finish_reviewed"):
+        reviews = run_state.get("finish_reviews", 0)
+        if reviews >= FINISH_REVIEWS_PER_RUN:
             return None
-        run_state["finish_reviewed"] = True
+        run_state["finish_reviews"] = reviews + 1
         iters_left = max_iters - self.iteration_counter - 1
         try:
             note = reviewer(trajectory, iters_left)
@@ -929,6 +931,10 @@ def _fmt_exc(err: BaseException, *, limit: int = 5) -> str:
 _FIELD_MARKER = re.compile(r"\[\[ ## (\w+) ## \]\]")
 _COMMAND_TOKEN = re.compile(r"[A-Za-z_][\w/]*")
 _COMMAND_TOOL = "execute_workflow_query"
+# Finish reviews per agent run (the finish check, observation_offloading.finish_check): a second finish is
+# reviewed too, so a run whose first note the agent did not act on is reopened once more. Past the cap the
+# run may finish. The review itself still declines when too few iterations are left.
+FINISH_REVIEWS_PER_RUN = 2
 _ARG_KEY = re.compile(r"[A-Za-z_]\w*")
 _TAG_LIKE = re.compile(r"</?[^<>]+>")
 

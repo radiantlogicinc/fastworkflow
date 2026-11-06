@@ -195,7 +195,9 @@ def test_a_run_that_is_not_the_turns_last_is_not_checked_at_finish(monkeypatch):
 
 def test_the_finish_reviewer_speaks_first(monkeypatch):
     agent, ran = _agent()
-    agent.finish_reviewer = lambda trajectory, left: "Step 2 (list_tickets) was not run."
+    # The first finish is reviewed and gets the note; the second is reviewed too and finds nothing.
+    notes = iter(["Step 2 (list_tickets) was not run."])
+    agent.finish_reviewer = lambda trajectory, left: next(notes, None)
     _script(agent, monkeypatch, [("finish", {}), _cmd("list_tickets"),
                                  _cmd("close_ticket T-1"), ("finish", {})],
             answers=("T-1 is closed.",))

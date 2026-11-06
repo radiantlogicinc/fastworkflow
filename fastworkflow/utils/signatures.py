@@ -1,4 +1,5 @@
 import sys
+import contextvars
 import ast
 import html
 import inspect
@@ -1123,7 +1124,9 @@ def fields_not_given(statement: str, model_class: Type[BaseModel], values: dict)
                 return None
 
         with ThreadPoolExecutor(len(checks)) as pool:
-            results = [r for r in pool.map(one, checks) if r is not None]
+            # Each check runs under a copy of this thread's context, so its model call is traced under the turn.
+            futures = [pool.submit(contextvars.copy_context().run, one, check) for check in checks]
+            results = [r for r in (f.result() for f in futures) if r is not None]
         return {name: probability for name, verdict, probability in results
                 if verdict == "not_given" and probability >= FIELD_GIVEN_THRESHOLD}
     except Exception:  # noqa: BLE001

@@ -218,6 +218,7 @@ import json
 import math
 import os
 import re
+import contextvars
 import sys
 from collections import deque
 from pathlib import Path
@@ -3754,8 +3755,23 @@ def check_verdicts(lm, command: PlanningCommandCommand, request: str) -> dict[st
         except Exception:  # noqa: BLE001 - a check is an extra; the planner's argument stands
             logger.warning(f"could not check planning command argument {command.name}.{p.name}", exc_info=True)
             return None
+    # Each check runs under a copy of this thread's context: the observability host (dspy_logger)
+    # and the module frames are ContextVars, unset in a bare worker, so the classifier calls would
+    # leave no fw.llm.call span under the turn. One copy per submission: a Context can be entered
+    # by one thread at a time.
     with ThreadPoolExecutor(len(params)) as pool:
-        return dict(r for r in pool.map(one, params) if r is not None)
+        futures = [pool.submit(contextvars.copy_context().run, one, p) for p in params]
+        return dict(r for r in (f.result() for f in futures) if r is not None)
+
+
+def verdict_notes(verdicts: dict | None) -> list[str]:
+    """One note per verdict read, for the planner span's ``skill_notes`` (sure or not, and the value and
+    probability it had): the verdicts are readable there whether or not an argument changed."""
+    notes = []
+    for name, (value, probability) in (verdicts or {}).items():
+        sure = "sure" if probability >= VERIFY_THRESHOLD else "not sure, not used"
+        notes.append(f"verify {name}={value!r} ({probability:.2f}, {sure})")
+    return notes
 
 
 #: Appended to the request when the planner fills a planning command call again after its rules refused
@@ -3931,7 +3947,7 @@ def typed_planning_call(command: PlanningCommandCommand, request: str, available
         return checked_arguments(command, raw, request, workflow, verdicts)
 
     with ThreadPoolExecutor(1) as pool:
-        checks = pool.submit(check_verdicts, check_lm, command, request)
+        checks = pool.submit(contextvars.copy_context().run, check_verdicts, check_lm, command, request)
         raw = extracted_arguments(command, request, workflow)
         verdicts = checks.result()
     try:
@@ -3954,6 +3970,7 @@ def typed_planning_call(command: PlanningCommandCommand, request: str, available
     after, dropped_after = filter_extra_steps(getattr(prediction, "steps_after", None), steps, names,
                                               command.name, request, notes, texts)
     notes += [f"dropped extra step {s!r}" for s in dropped_before + dropped_after]
+    notes += verdict_notes(verdicts)   # the verdicts read, whether or not they changed an argument
     phases = call_phases(command, args)
     return PlanningCommandCallPlan(plan=number(before + steps + after), args=args, notes=notes, prediction=prediction,
                          phases=phases, steps_before=list(before), steps_after=list(after))

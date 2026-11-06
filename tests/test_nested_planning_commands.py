@@ -1712,6 +1712,9 @@ def test_a_nested_step_naming_a_planning_command_of_another_context_is_refused_b
     nested_book_env.model.run("book_by_title title=Dune")
     nested_book_env.model.finish()
     nested_book_env.model.finish()
+    # The plan's second step never ran, so each of the first two finishes is reviewed and reopens the
+    # loop; the third finish is past the review cap and ends the run.
+    nested_book_env.model.finish()
 
     result = nested_book_env.ctx.process_turn("who has Dune on loan")
 

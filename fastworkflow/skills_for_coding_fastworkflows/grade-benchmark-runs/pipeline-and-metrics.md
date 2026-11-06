@@ -190,8 +190,8 @@ Before blaming the agent for missing a value, check that its observation actuall
 ### 6. Finish check
 
 When the agent picks finish, code checks that every command step of the run's plan ran
-(`fastworkflow/observation_offloading/finish_check.py`). If one did not, the agent is sent back once
-with a note that begins "Finish check: not every plan step is done yet." In the trace this is the
+(`fastworkflow/observation_offloading/finish_check.py`). If one did not, the agent is sent back
+(up to two finish reviews per run) with a note that begins "Finish check: not every plan step is done yet." In the trace this is the
 `observation` of the `fw.agent.step` whose `tool_name` is `finish`, followed by more steps.
 
 Tag every row: `[finish-note:none]` when no note fired, `helped` when the agent ran what the note
