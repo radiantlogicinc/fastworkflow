@@ -509,7 +509,7 @@ class Proposal(BaseModel):
 
     def item_values(self, item: Any) -> dict[str, Any]:
         """The values one item's line is formatted from: each field as text. A subclass adds or replaces entries."""
-        return {name: _value_text(getattr(item, name)) for name in type(item).model_fields}
+        return {name: _value_text(getattr(item, name)) for name in shown_fields(type(item))}
 
     def rendering(self) -> str:
         lines = [f"{self.title}:"]
@@ -521,6 +521,12 @@ class Proposal(BaseModel):
             except (ValueError, AttributeError):
                 lines.append(f"{index}. " + ", ".join(f"{k}={v}" for k, v in values.items() if k != "index"))
         return "\n".join(lines)
+
+    def revised(self, host: Any, before: "Proposal") -> "Proposal":
+        """This proposal after an edit of *before* was applied, as stored and shown: a subclass may bring fields that
+        derive from others up to date (the sub-task review re-drafts the inputs of a sub-task whose means changed).
+        *host* is the session the reply came through. The default changes nothing."""
+        return self
 
     def binding(self) -> dict:
         return {"spec": self.spec, "kind": self.kind,
@@ -707,12 +713,19 @@ def _item_model(proposal: Proposal):
     return model if isinstance(model, type) and issubclass(model, BaseModel) else None
 
 
+def shown_fields(model) -> list[str]:
+    """The fields of an item model a user sees and edits: every field but one marked
+    ``json_schema_extra={"review_hidden": True}`` (framework bookkeeping, fix-48np.1)."""
+    return [name for name, info in model.model_fields.items()
+            if not (isinstance(info.json_schema_extra, dict) and info.json_schema_extra.get("review_hidden"))]
+
+
 def _built_item(model, values: dict[str, str], base: Optional[BaseModel] = None):
     """A new item of *model*: *base*'s fields (if any) with *values* (text) set over them. Refused when it does not validate."""
     data = base.model_dump() if base is not None else {}
     for name, text in values.items():
-        if name not in model.model_fields:
-            raise EditRefused(f"An item has no field {name!r}. Its fields are: {', '.join(model.model_fields)}.")
+        if name not in shown_fields(model):
+            raise EditRefused(f"An item has no field {name!r}. Its fields are: {', '.join(shown_fields(model))}.")
         data[name] = _coerce(model, name, text)
     try:
         return model.model_validate(data)
@@ -771,9 +784,9 @@ def apply_edits(proposal: Proposal, edits: list[Edit]) -> Proposal:
             continue
         position = edit.index - 1
         item_model = type(changed[position])
-        if edit.field not in item_model.model_fields:
+        if edit.field not in shown_fields(item_model):
             raise EditRefused(f"Item {edit.index} has no field {edit.field!r}. Its fields are: "
-                              f"{', '.join(item_model.model_fields)}.")
+                              f"{', '.join(shown_fields(item_model))}.")
         data = changed[position].model_dump()
         data[edit.field] = _coerce(item_model, edit.field, edit.value)
         try:
@@ -992,7 +1005,7 @@ def reply_to_proposal(host: Any, store: ReviewStore, record: ReviewRecord, messa
         propagate(host, store, record, surface=surface)
         return ReviewReply(True, f"Declined. The {record.command} review was not accepted.")
     if decision.verdict is Verdict.EDIT:
-        edited = apply_edits(proposal, list(decision.edits))
+        edited = apply_edits(proposal, list(decision.edits)).revised(host, proposal)
         record.binding = {**record.binding, "items": edited.binding()["items"]}
         record.fingerprint = fingerprint(record.binding)   # the record's fingerprint covers its channel and task too
         record.revision += 1

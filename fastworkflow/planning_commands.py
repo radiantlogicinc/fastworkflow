@@ -3855,6 +3855,26 @@ def _typed_fallback(command: PlanningCommandCommand, request: str, available_com
     return args, notes
 
 
+def checked_arguments(command: PlanningCommandCommand, raw: dict, request: str, workflow=None,
+                      verdicts: dict | None = None) -> tuple[dict, list[str]]:
+    """``(args, notes)``: *raw* through every check a typed planning call runs on its arguments, in order:
+    ``check_arguments`` (the guards, with ``verdicts`` when the call has them), then ``_validate_arguments``
+    (the planning command file's ``validate_extracted_parameters`` hook, the ``Input``'s rules, the roles).
+    Raises PlanningCommandInputError when a check refuses them."""
+    args, notes = check_arguments(command, raw, request, verdicts)
+    return _validate_arguments(command, args, request, workflow, notes), notes
+
+
+def typed_fallback_arguments(command: PlanningCommandCommand, request: str, available_commands: str, raw: dict,
+                             refusal: PlanningCommandInputError, workflow=None) -> tuple[dict, list[str]]:
+    """The typed fill fallback of ``typed_planning_call`` (``_typed_fallback``), for a caller that extracted *raw*
+    itself (fix-48np.1: the sub-task draft): the planner's typed fill gives the required arguments *refusal* leaves
+    missing or refused, and the result goes through ``checked_arguments``. Runs in the caller's dspy context (the
+    planner LM and the adapter that reads ``available_commands``). Raises *refusal* when it fills nothing."""
+    return _typed_fallback(command, request, available_commands, raw, refusal,
+                           lambda filled: checked_arguments(command, filled, request, workflow))
+
+
 def typed_planning_call(command: PlanningCommandCommand, request: str, available_commands: str,
                     check_lm=None, workflow=None) -> PlanningCommandCallPlan:
     """Plan ``request`` as a call of ``command``: its arguments, the guards, the expansion, the extra steps.
@@ -3883,8 +3903,7 @@ def typed_planning_call(command: PlanningCommandCommand, request: str, available
     from fastworkflow.utils.argument_checks import REFUSED_EXTRACTION_NOTE
 
     def checked(raw: dict) -> tuple[dict, list[str]]:
-        args, notes = check_arguments(command, raw, request, verdicts)
-        return _validate_arguments(command, args, request, workflow, notes), notes
+        return checked_arguments(command, raw, request, workflow, verdicts)
 
     with ThreadPoolExecutor(1) as pool:
         checks = pool.submit(check_verdicts, check_lm, command, request)

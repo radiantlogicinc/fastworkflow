@@ -339,6 +339,9 @@ class WorkflowExecutionContext:
         # carries, and the plan the gate built (the accepted one after a review; the draft when no one could answer).
         self._turn_subtask_review: str = "not_applicable"
         self._turn_subtask_plan = None
+        # fix-48np.1: one shown == run record per bound sub-task the turn ran with drafting on (review_proposals.
+        # binding_record); the turn span carries them as ``subtask_bindings``.
+        self._turn_subtask_bindings: list = []
         self._turn_agent_result: Any = None
         self._turn_history_baseline: int = 0
         # turn_key of the newest turn that both completed and contributed a
@@ -724,6 +727,7 @@ class WorkflowExecutionContext:
         self._turn_unattended = bool(unattended)
         self._turn_subtask_review = "not_applicable"
         self._turn_subtask_plan = None
+        self._turn_subtask_bindings = []
         turn_cache.begin_turn()
         self._planning_command_refusal_pending = False
         self._planning_command_refusal_answered = False
@@ -2089,6 +2093,7 @@ class WorkflowExecutionContext:
                 "suspended_ms": turn_result.suspended_ms,
                 "context_mutations": self._compute_context_mutations(),
                 "subtask_review": self._turn_subtask_review,
+                "subtask_bindings": list(getattr(self, "_turn_subtask_bindings", None) or []) or None,
             },
         )
         if not awaiting:
@@ -2480,7 +2485,8 @@ class WorkflowExecutionContext:
             # fast-path planning command goes. Round 1 asks nothing here.
             self._turn_subtask_review = "fast_path"
             return None
-        draft = review_proposals.draft_round1_proposal(workflow, subtasks)
+        draft = review_proposals.draft_round1_proposal(
+            workflow, subtasks, planner_lm=getattr(self, "_current_planner_lm", None))
         self._turn_subtask_plan = draft
         if self._subtask_no_answerer():
             # Owner decision 2: no one can answer, so the draft is recorded as not reviewed and the turn carries on.
@@ -3743,6 +3749,8 @@ class WorkflowExecutionContext:
             query = self._continued_text(query, item, resolved)
         if first and item.means.kind == review_proposals.MEANS_PLANNING:
             return self._run_planning_means(item, query, origin, floor=floor)
+        if first and item.means.kind == review_proposals.MEANS_PLAIN and review_proposals.drafting_on():
+            return self._run_plain_means(item, query, origin, floor=floor)
         bound = item.means.name if item.means.kind == review_proposals.MEANS_PLAIN else None
         self._narrow_to = bound
         try:
@@ -3765,25 +3773,40 @@ class WorkflowExecutionContext:
     def _run_planning_means(self, item, query: str, origin: int, *, floor: int):
         """A sub-task bound to a planning command: its phases run with its inputs (the phase runner, as a planned call's
         phases do; no model plans them). Its arguments are checked as a planned command's are (check_planned_arguments);
-        a refusal, or no command, falls back to the agent with the refusal as a note and the bound command's listing."""
+        a refusal, or no command, falls back to the agent with the refusal as a note and the bound command's listing.
+        With drafting on (fix-48np.1) the reviewed inputs are the arguments (review_proposals.reviewed_arguments), and
+        the run records whether they ran as shown; a refusal still falls back to the agent, recorded as a deviation."""
         from fastworkflow import planning_commands, review_proposals, run_listing
 
         folder = self._app_workflow.folderpath
         name = item.means.name
         command = planning_commands.planning_command(folder, name)
+        presets = review_proposals.drafting_on()
         refusal = None
+        reviewed = None
         if command is None:
             refusal = f"{name} could not be loaded"
         else:
             resolved = review_proposals.resolve_inputs(item, self._answers_by_number())
-            checked = run_listing.check_planned_arguments(command, dict(resolved.named), query,
-                                                          earlier_outputs=list(self._subtask_answers))
+            if presets:
+                reviewed, checked = review_proposals.reviewed_arguments(
+                    self._app_workflow, command, item, resolved, query,
+                    earlier=list(self._turn_subtask_plan.items[:origin]), answers=self._answers_by_number(),
+                    earlier_outputs=tuple(self._subtask_answers),
+                    planner_lm=getattr(self, "_current_planner_lm", None))
+            else:
+                checked = run_listing.check_planned_arguments(command, dict(resolved.named), query,
+                                                              earlier_outputs=list(self._subtask_answers))
             refusal = checked.refusal
             if refusal is None:
                 try:
                     phases = planning_commands.call_phases(command, checked.args)
                 except planning_commands.PlanningCommandCallError as error:
                     refusal = str(error)
+        if presets:
+            self._turn_subtask_bindings.append(review_proposals.binding_record(
+                origin + 1, item, reviewed, None if refusal is not None else checked.args,
+                f"refused, the agent ran it instead: {refusal}" if refusal is not None else None))
         if refusal is not None:
             return self._call_agent_for_query(
                 f"{query}\n\nThe planning command {name} cannot run as planned: {refusal}.",
@@ -3792,6 +3815,66 @@ class WorkflowExecutionContext:
         call = planning_commands.PlanningCommandCallPlan(
             plan="", args=checked.args, notes=list(checked.notes), prediction=None, phases=phases)
         return self._start_planning_command_phases(query, command, call, first_step=self._next_step)
+
+    def _run_plain_means(self, item, query: str, origin: int, *, floor: int):
+        """F1 (fix-48np.1, drafting on): a sub-task bound to an execution command runs that command with its reviewed
+        inputs. Code runs it as the plan's one step (``planning_phases.CodeSteps``: the agent's own command tool, so the
+        CME parameter path and its validation, as a planning command's code steps run), going to the command's context
+        first when code finds a path; the agent then answers from its output. The agent writes no command text for it.
+
+        When a required input is unbound (review_proposals.reviewed_values), the agent handles the sub-task as before
+        (F2). When the CME refuses the values, or code cannot run the step, the agent takes over with the refusal in its
+        trajectory (F2). Either is recorded as a deviation (review_proposals.binding_record)."""
+        from fastworkflow import ModuleType, review_proposals, run_listing
+        from fastworkflow.planning import run as run_step
+
+        name = item.means.name
+        params_class = fastworkflow.RoutingRegistry.get_definition(self._app_workflow.folderpath).get_command_class(
+            name, ModuleType.COMMAND_PARAMETERS_CLASS)
+        required = [field for field, info in (params_class.model_fields.items() if params_class else ())
+                    if info.is_required()]
+        resolved = review_proposals.resolve_inputs(item, self._answers_by_number())
+        reviewed = review_proposals.reviewed_values(
+            self._app_workflow, item, resolved, required, earlier=list(self._turn_subtask_plan.items[:origin]),
+            answers=self._answers_by_number(), planner_lm=getattr(self, "_current_planner_lm", None))
+        self._narrow_to = name
+        try:
+            if reviewed.unbound:
+                self._turn_subtask_bindings.append(review_proposals.binding_record(
+                    origin + 1, item, reviewed, None,
+                    f"unbound {', '.join(reviewed.unbound)}, the agent ran it instead"))
+                return self._call_agent_for_query(
+                    query, query, first_step=self._next_step, template_text=self._original_text(origin),
+                    evidence_floor=floor, bound_command=name)
+            plan_text = f"1. {run_step(name.rsplit('/', 1)[-1], **reviewed.values)}"
+            outputs_before = len(self._turn_outputs)
+            self._initial_plan_text = plan_text
+            self._attach_finish_check(floor, values=True)
+            code = self._phase_code_steps(plan_text, 1, self._phase_command_names(), answers=True)
+            if code is not None:
+                code.done_inputs = {"user_query": (
+                    f"{query}\n\nThis step has run, with the reviewed inputs; answer from its output:\n{plan_text}")}
+            agent = self._workflow_tool_agent
+            listing = run_listing.bound_command_listing(self._app_workflow, name)
+
+            def run_bound():
+                agent.code_steps = code
+                return agent(user_query=f"{query}\n\nExecute these next steps:\n{plan_text}",
+                             available_commands=listing, first_step=self._next_step)
+
+            result = self._call_agent_with_retry(run_bound, trace_input=plan_text)
+            ran = None
+            for output in self._turn_outputs[outputs_before:]:
+                if output.command_name == name and output.command_response.success:
+                    ran = _planning_args(output.command_parameters)
+                    break
+            stop = getattr(code, "stop", None) if code is not None else "no code steps"
+            deviation = None if ran is not None else f"code did not run it ({stop}), the agent ran it instead"
+            self._turn_subtask_bindings.append(review_proposals.binding_record(
+                origin + 1, item, reviewed, ran, deviation))
+            return result
+        finally:
+            self._narrow_to = None
 
     def _original_text(self, origin: int) -> str:
         """The sub-task text an origin was split out as (its first entry, before any hand-off)."""

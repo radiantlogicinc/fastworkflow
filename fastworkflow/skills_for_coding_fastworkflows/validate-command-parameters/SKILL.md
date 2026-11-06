@@ -167,10 +167,34 @@ The hook runs on both the NLU path and the direct-action path, but it is a comma
 of what it needs, not an enforcement layer — a caller reaching the body another way bypasses it.
 Invariants that must hold for correctness or safety belong in the command body as well.
 
+## Declare the format of id inputs
+
+An input that takes an identifier (a uid, a record number, a key) must say what an identifier looks like,
+on the field, with the format the application really mints:
+
+```python
+class Input(BaseModel):
+    book_uid: str = from_("find_book.book_uids", description="the uid of the book to open (b1, b2, ...)",
+                          pattern=r"^b[0-9]+$")
+```
+
+Without it, a `str` id field accepts anything, and a name or title is a valid value. The extractor, given
+"open the book Dune Messiah" and no uid in the text, fills `book_uid="Dune Messiah"`; the sub-task review then
+shows that title as the uid, and the run either fails on it or quietly opens something else. With the pattern,
+the value breaks a declared rule at step 1 above: the draft leaves the field unbound (the review shows no value),
+and the run finds the id the way it would have without a draft (the producer command, or the agent), so what the
+review shows is what runs. The check is the field's own declaration, so it holds on every path: drafted,
+extracted, typed by the user, or written by the agent.
+
+Keep the pattern compatible with the field's producers: every id the `from_` source command returns must match
+it. Match the whole value (`^...$`), and match the ids the application creates, not a guess: read where the
+application mints them. Do not move the format into this hook; a declared `pattern` is checked before it.
+
 ## Authoring checklist
 
 ```
 - [ ] Type, pattern and required-ness are declared on the field, not re-checked here
+- [ ] Every id input declares the format of the application's ids (`pattern`), so a name or title is never a valid id
 - [ ] The hook returns None; it never returns a tuple
 - [ ] Unambiguous values are normalised by assigning to input.<field>, not rejected
 - [ ] Every refusal is raise fastworkflow.Refused(message, field=...); no other exceptions escape

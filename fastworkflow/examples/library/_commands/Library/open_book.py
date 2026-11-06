@@ -10,7 +10,8 @@ class Signature:
     """Open one book by its uid, so that the book's own commands act on it."""
 
     class Input(BaseModel):
-        book_uid: str = from_("find_book.book_uids", description="the uid of the book to open")
+        book_uid: str = from_("find_book.book_uids", description="the uid of the book to open",
+                               pattern=r"^b[0-9]+$")
 
     class Output(BaseModel):
         book_uid: str = Field(description="the uid of the book now open")

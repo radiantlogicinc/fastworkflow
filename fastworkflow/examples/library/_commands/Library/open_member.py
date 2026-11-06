@@ -11,7 +11,8 @@ class Signature:
 
     class Input(BaseModel):
         member_uid: str = from_("find_member.member_uids",
-                                description="the uid of the member to open")
+                                description="the uid of the member to open",
+                                pattern=r"^m[0-9]+$")
 
     class Output(BaseModel):
         member_uid: str = Field(description="the uid of the member now open")

@@ -136,6 +136,11 @@ class SubTask(BaseModel):
     #: What the framework's check said about the means, shown on the line: a refused planning-command argument
     #: (``check_planned_arguments``). Empty when the check passed or no check ran. Not a completion: an advisory note.
     check: str = ""
+    #: The means the draft drafted this sub-task's inputs for (``draft_inputs`` ran on its goal), or "" when it did not
+    #: (drafting off, the draft failed, or the user added the sub-task; a split or merged one keeps its first item's).
+    #: fix-48np.1: a sub-task whose means is still the drafted one is not drafted again at run time
+    #: (``reviewed_arguments``). Not shown.
+    drafted_means: str = Field(default="", json_schema_extra={"review_hidden": True})
 
     @field_validator("inputs", mode="before")
     @classmethod
@@ -159,6 +164,22 @@ class SubTaskProposal(Proposal):
     item_template = "{index}. {goal} (inputs: {inputs}; means: {means}); desired outcome: {outcome}{check}"
     min_items = 1
     items: list[SubTask] = Field(default_factory=list)
+
+    def revised(self, host: Any, before: Proposal) -> "SubTaskProposal":
+        """F3 (fix-48np.1): with drafting on, a sub-task whose means the edit changed (or that the edit added with a
+        means) is drafted again for its new means, so the review never shows inputs drafted for another command. A
+        sub-task the edit left as it was, or whose inputs alone it changed, is kept."""
+        workflow = getattr(host, "_app_workflow", None)
+        if workflow is None or not drafting_on():
+            return self
+        items: list[SubTask] = []
+        for item in self.items:
+            if (item.means.kind != MEANS_FROM_SCRATCH and item.drafted_means != item.means.name
+                    and item not in before.items):
+                item = drafted_item(workflow, item, item.goal, items,
+                                    planner_lm=getattr(host, "_current_planner_lm", None))
+            items.append(item)
+        return self.model_copy(update={"items": items})
 
     def item_values(self, item: Any) -> dict[str, Any]:
         values = super().item_values(item)
@@ -328,7 +349,7 @@ def planning_intent_confirmation(workflow, path: FastPath, sub_task: str) -> Opt
     return None
 
 
-def draft_round1_proposal(workflow, subtasks: list[str]) -> SubTaskProposal:
+def draft_round1_proposal(workflow, subtasks: list[str], planner_lm=None) -> SubTaskProposal:
     """The draft round-1 proposal for a split result, from real candidates (fix-3rsq.plan-review.2.3).
 
     Per sub-task, the candidates are: the heads' planning and execution top-k (``run_listing.head_candidates``), the
@@ -337,8 +358,9 @@ def draft_round1_proposal(workflow, subtasks: list[str]) -> SubTaskProposal:
     the existing matcher (``workflow_agent.match_planning_command``): it runs no model without the key and then leaves the
     distribution empty. ``build_round1_proposal`` picks each sub-task's means (a planning command in the top-k first).
     Each sub-task with a command for its means gets its inputs drafted from its text (``draft_inputs``, fix-48np:
-    the shared parameter extractor; shown, not run). A planning pick's refusal is shown on its line: the drafted
-    values' refusal, or, with no draft, ``check_planned_arguments`` of no arguments.
+    the shared parameter extractor, and for a planning command the typed fill fallback on ``planner_lm``; the values
+    the review shows are the ones the run uses, fix-48np.1). A planning pick's refusal is shown on its line: the
+    drafted values' refusal, or, with no draft, ``check_planned_arguments`` of no arguments.
     """
     from fastworkflow import planning_commands, run_listing
     from fastworkflow.workflow_agent import core_command_names
@@ -366,27 +388,46 @@ def draft_round1_proposal(workflow, subtasks: list[str]) -> SubTaskProposal:
     proposal = build_round1_proposal(subtasks, candidates)
     items: list[SubTask] = []
     for item, sub_task in zip(proposal.items, subtasks):
-        check = ""
-        inputs: list[SubTaskInput] = []
-        drafted = draft_inputs(workflow, item, sub_task, items) if item.means.kind != MEANS_FROM_SCRATCH else None
-        if drafted is not None:
-            inputs = list(drafted.inputs)
-        if item.means.kind == MEANS_PLANNING:
-            command = planning_commands.planning_command(folder, item.means.name)
-            if drafted is not None:
-                check = drafted.refusal or ""
-            elif command is not None:
-                refusal = run_listing.check_planned_arguments(command, {}, sub_task).refusal
-                check = refusal or ""
-        items.append(item.model_copy(update={"check": check, "inputs": inputs}))
+        items.append(drafted_item(workflow, item, sub_task, items, planner_lm=planner_lm))
     return SubTaskProposal(items=items)
 
 
-#: ``FW_DRAFT_ARGUMENTS=on`` (or 1, true) fills a draft's inputs from the shared extractor. Off by default: the drafted
-#: values are shown but the typed planning call still produces the values that run, and the two disagree on about 1
-#: argument in 20 (fix-48np gate 1b), so the review could show a value other than the one that runs. Off leaves the
-#: inputs empty, as before fix-48np.
+def drafted_item(workflow, item: SubTask, sub_task: str, earlier: list[SubTask], planner_lm=None) -> SubTask:
+    """*item* with its inputs drafted from *sub_task* for its means (``draft_inputs``), its planning check, and the means
+    it was drafted for (``drafted_means``). With no draft (drafting off, from scratch, a failed draft) the inputs are
+    empty and a planning pick's check is ``check_planned_arguments`` of no arguments."""
+    from fastworkflow import planning_commands, run_listing
+
+    check = ""
+    inputs: list[SubTaskInput] = []
+    drafted = (draft_inputs(workflow, item, sub_task, earlier, planner_lm=planner_lm)
+               if item.means.kind != MEANS_FROM_SCRATCH else None)
+    if drafted is not None:
+        inputs = list(drafted.inputs)
+    if item.means.kind == MEANS_PLANNING:
+        command = planning_commands.planning_command(workflow.folderpath, item.means.name)
+        if drafted is not None:
+            check = drafted.refusal or ""
+        elif command is not None:
+            refusal = run_listing.check_planned_arguments(command, {}, sub_task).refusal
+            check = refusal or ""
+    return item.model_copy(update={"check": check, "inputs": inputs,
+                                   "drafted_means": item.means.name if drafted is not None else ""})
+
+
+#: ``FW_DRAFT_ARGUMENTS`` (on by default since fix-48np.1): the draft fills each sub-task's inputs from the shared
+#: extractor, and a bound sub-task then runs with the inputs the review shows (``reviewed_values``). ``off`` (or 0,
+#: false, no) leaves the inputs empty and the run as before fix-48np.
 DRAFT_ARGUMENTS_ENV_VAR = "FW_DRAFT_ARGUMENTS"
+
+
+def drafting_on() -> bool:
+    """Whether ``FW_DRAFT_ARGUMENTS`` is on (the default): the draft fills inputs, and the run takes them as its
+    arguments. Only ``off``, ``0``, ``false`` or ``no`` turns it off."""
+    import fastworkflow
+
+    value = fastworkflow.get_env_var(DRAFT_ARGUMENTS_ENV_VAR, default="on")
+    return str(value if value is not None else "on").strip().lower() not in ("off", "0", "false", "no")
 
 
 @dataclass(frozen=True)
@@ -452,20 +493,23 @@ def _given(info: Any, value: Any) -> bool:
     return default is PydanticUndefined or default is None or value != default
 
 
-def draft_inputs(workflow, item: SubTask, sub_task: str, earlier: list[SubTask]) -> Optional[DraftedInputs]:
+def draft_inputs(workflow, item: SubTask, sub_task: str, earlier: list[SubTask],
+                 planner_lm=None) -> Optional[DraftedInputs]:
     """The inputs of *item*'s means drafted from *sub_task* (fix-48np, stage 1), or None when no draft was made.
 
     A field whose declared producer (``from_``) an earlier sub-task runs is ``from sub-task N``, not extracted. The
     other values are the shared extractor's (``parameter_extraction.extract_arguments``: the extractor execution
     commands use, with its checks, and for a planning command ``check_arguments``, the checks the typed planning call
-    runs), each one the extractor gave and the checks kept that is not the field's default. Values that are refused,
-    or a required value that is missing, give the refusal and no values. None when the switch is off
-    (``FW_DRAFT_ARGUMENTS``, off by default) or the extraction fails: the draft is advisory and never fails the turn.
+    runs), each one the extractor gave and the checks kept that is not the field's default. For a planning command
+    whose required value is still missing or refused after the extractor's retry, the typed fill fallback runs, as it
+    does in ``typed_planning_call`` (fix-48np.1: one planner call, on *planner_lm* or LLM_PLANNER; the same checks
+    after it), so the draft and the run follow the same rules. Values that are still refused, or a required value
+    that is still missing, give the refusal and no values. None when the switch is off (``FW_DRAFT_ARGUMENTS=off``; on
+    by default) or the extraction fails: the draft is advisory and never fails the turn.
     """
-    import fastworkflow
     from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import extract_arguments
 
-    if str(fastworkflow.get_env_var(DRAFT_ARGUMENTS_ENV_VAR, default="off")).strip().lower() not in ("on", "1", "true"):
+    if not drafting_on():
         return None
     try:
         from_earlier = _producers(workflow, item.means, earlier)
@@ -480,15 +524,51 @@ def draft_inputs(workflow, item: SubTask, sub_task: str, earlier: list[SubTask])
         return DraftedInputs(inputs=tuple(inputs))
     covered = result.missing and set(result.missing) <= set(from_earlier) and result.refusal is not None \
         and result.refusal.startswith("missing required argument")
-    if not result.valid and not covered:
-        return DraftedInputs(inputs=tuple(inputs), refusal=result.refusal)
     fields = type(result.params).model_fields
+    values = {name: getattr(result.params, name, None) for name in fields}
+    if not result.valid and not covered:
+        filled = _typed_fallback_values(workflow, item, sub_task, values, result.refusal, planner_lm)
+        if filled is None:
+            return DraftedInputs(inputs=tuple(inputs), refusal=result.refusal)
+        values = filled
     for name, info in fields.items():
-        value = getattr(result.params, name, None)
+        value = values.get(name)
         if name in from_earlier or not _given(info, value):
             continue
         inputs.append(SubTaskInput(name=name, value=_input_text(value), drafted=True))
     return DraftedInputs(inputs=tuple(inputs))
+
+
+def _typed_fallback_values(workflow, item: SubTask, sub_task: str, values: dict, refusal: Optional[str],
+                           planner_lm=None) -> Optional[dict]:
+    """The checked arguments of a planning means after the typed fill fallback (``typed_fallback_arguments``, the
+    fallback ``typed_planning_call`` runs), or None when the means is not a planning command, the fallback fills
+    nothing, or the checks still refuse: the extractor's refusal then stands. Never raises: the draft is advisory."""
+    from fastworkflow import planning_commands
+
+    if item.means.kind != MEANS_PLANNING:
+        return None
+    command = planning_commands.planning_command(workflow.folderpath, item.means.name)
+    if command is None or not command.params:
+        return None
+    from fastworkflow.utils import dspy_utils
+    from fastworkflow.workflow_agent import CommandsSystemPreludeAdapter, typed_planner_commands_text
+
+    raw = {p.name: planning_commands._given_or_none(values.get(p.name)) for p in command.params}
+    try:
+        lm = planner_lm if planner_lm is not None else dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+        with dspy.context(lm=lm, adapter=CommandsSystemPreludeAdapter()):
+            args, notes = planning_commands.typed_fallback_arguments(
+                command, sub_task, typed_planner_commands_text(workflow), raw,
+                planning_commands.PlanningCommandInputError(refusal or ""), workflow)
+    except planning_commands.PlanningCommandCallError:
+        return None                                   # still refused (or the hook raised): the refusal stands
+    except Exception as exc:  # noqa: BLE001 - the draft is advisory: the extractor's refusal stands
+        logger.warning("the typed fill fallback of %s failed (%s: %s); the draft shows the refusal",
+                       item.means.name, type(exc).__name__, exc)
+        return None
+    logger.info("drafted %s with the typed fill fallback (%s)", item.means.name, "; ".join(notes))
+    return args
 
 
 def accepted_subtask_proposal(workflow) -> Optional[SubTaskProposal]:
@@ -643,9 +723,7 @@ def resolve_inputs(item: SubTask, answers: Mapping[int, str]) -> ResolvedInputs:
     unnamed: list[str] = []
     missing: list[int] = []
     for each in item.inputs:
-        if each.drafted:
-            # fix-48np stage 1: a drafted input is shown in the review, not yet run
-            continue
+        # A drafted input is resolved as a given one (fix-48np.1): the review showed it, so the run uses it.
         if each.from_subtask is not None:
             if each.from_subtask not in answers:
                 missing.append(each.from_subtask)
@@ -669,3 +747,138 @@ def run_text(item: SubTask, resolved: ResolvedInputs) -> str:
     if item.outcome:
         parts.append(f"desired outcome: {item.outcome}")
     return f"{item.goal} ({'; '.join(parts)})" if parts else item.goal
+
+
+# ----------------------------------------------------------------------
+# The run of a reviewed sub-task (fix-48np.1): the inputs the review showed are the values that run
+# ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ReviewedValues:
+    """A bound sub-task's values at run time: the ones the review showed (``shown``), the ones drafted at run time
+    because the review never drafted the sub-task for its means (``drafted_at_run``), and the required fields still
+    without a value (``unbound``)."""
+
+    shown: dict[str, str] = field(default_factory=dict)
+    drafted_at_run: dict[str, str] = field(default_factory=dict)
+    unbound: tuple[str, ...] = ()
+
+    @property
+    def values(self) -> dict[str, str]:
+        return {**self.drafted_at_run, **self.shown}
+
+
+def reviewed_values(workflow, item: SubTask, resolved: ResolvedInputs, required: list[str], *,
+                    earlier: list[SubTask], answers: Mapping[int, str], planner_lm=None) -> ReviewedValues:
+    """The values a bound sub-task runs with, when drafting is on (fix-48np.1).
+
+    The inputs the review bound (*resolved*: drafted, edited by the user, or ``from sub-task N``) are presets: never
+    extracted again. Only a sub-task the draft did not draft for its current means (``SubTask.drafted_means``: the
+    draft failed, or the user added it) that leaves a *required* field unbound has its unbound fields drafted at run
+    time, from the goal, by the draft's own function (``draft_inputs``: the shared extractor, its retry and the typed
+    fill fallback), so the draft and the run follow the same rules. A sub-task the draft did draft is not drafted again.
+    """
+    shown = dict(resolved.named)
+    shown.update(_produced_fields(workflow, item, answers))
+    found: dict[str, str] = {}
+    if item.drafted_means != item.means.name and any(name not in shown for name in required):
+        drafted = draft_inputs(workflow, item, item.goal, earlier, planner_lm=planner_lm)
+        unbound = [each for each in (drafted.inputs if drafted is not None else ()) if each.name not in shown]
+        found = dict(resolve_inputs(SubTask(goal=item.goal, inputs=unbound), answers).named)
+    values = {**found, **shown}
+    return ReviewedValues(shown=shown, drafted_at_run=found,
+                          unbound=tuple(name for name in required if name not in values))
+
+
+def _produced_fields(workflow, item: SubTask, answers: Mapping[int, str]) -> dict[str, str]:
+    """``{field: value}`` for the ``from sub-task N`` inputs of *item* whose field declares the producer field it takes
+    (``from_("find_book.book_uids")``) and whose sub-task N's output is JSON holding it: that field's value, the one
+    element of a one-element list. Other ``from sub-task N`` inputs keep N's whole output (``resolve_inputs``)."""
+    from fastworkflow import ModuleType, RoutingRegistry
+
+    try:
+        params_class = RoutingRegistry.get_definition(workflow.folderpath).get_command_class(
+            item.means.name, ModuleType.COMMAND_PARAMETERS_CLASS)
+    except Exception:  # noqa: BLE001 - no declared producers: the whole output stands
+        return {}
+    fields = getattr(params_class, "model_fields", {}) or {}
+    out: dict[str, str] = {}
+    for each in item.inputs:
+        if each.from_subtask is None or not each.name or each.name not in fields \
+                or each.from_subtask not in answers:
+            continue
+        extra = fields[each.name].json_schema_extra
+        refs = (extra.get("available_from") or ()) if isinstance(extra, dict) else ()
+        try:
+            output = json.loads(answers[each.from_subtask])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(output, dict):
+            continue
+        for ref in refs:
+            key = str(ref).rpartition(".")[2]
+            if key in output:
+                value = output[key]
+                if isinstance(value, list) and len(value) == 1:
+                    value = value[0]
+                out[each.name] = _input_text(value)
+                break
+    return out
+
+
+def reviewed_arguments(workflow, command, item: SubTask, resolved: ResolvedInputs, request: str, *,
+                       earlier: list[SubTask], answers: Mapping[int, str], earlier_outputs: tuple[str, ...] = (),
+                       planner_lm=None):
+    """``(ReviewedValues, run_listing.ArgumentCheck)`` for a sub-task bound to planning command *command* (fix-48np.1).
+
+    The values (``reviewed_values``) go through the checks a typed planning call runs (``checked_arguments``:
+    ``check_arguments``, ``validate_extracted_parameters``, the ``Input``'s rules) against *request* with the turn's
+    earlier outputs after it. A refusal is returned: the caller hands the sub-task to the agent with it (F2) and records
+    the deviation.
+    """
+    from fastworkflow import planning_commands
+    from fastworkflow.run_listing import ArgumentCheck
+
+    reviewed = reviewed_values(workflow, item, resolved, [p.name for p in command.params if p.required],
+                               earlier=earlier, answers=answers, planner_lm=planner_lm)
+    notes = ([f"drafted at run time (the review bound no value): {', '.join(sorted(reviewed.drafted_at_run))}"]
+             if reviewed.drafted_at_run else [])
+    try:
+        args, more = planning_commands.checked_arguments(
+            command, reviewed.values, "\n\n".join([request, *earlier_outputs]), workflow)
+    except planning_commands.PlanningCommandCallError as refused:
+        return reviewed, ArgumentCheck(refusal=str(refused), notes=tuple(notes))
+    return reviewed, ArgumentCheck(args=args, notes=tuple(notes + more))
+
+
+def _same_value(shown: str, ran: Any) -> bool:
+    """Whether a value that ran is the value the review showed: the same text, ignoring case, surrounding quotes and
+    space (the checks may take the request's own spelling of it)."""
+    def norm(text: str) -> str:
+        return " ".join(str(text).strip().strip("\"'`").split()).casefold()
+
+    return norm(shown) == norm(_input_text(ran) if not isinstance(ran, str) else ran)
+
+
+def binding_record(number: int, item: SubTask, reviewed: Optional[ReviewedValues], ran: Optional[Mapping[str, Any]],
+                   deviation: Optional[str] = None) -> dict:
+    """One sub-task's shown == run record for the turn span's ``subtask_bindings`` (fix-48np.1).
+
+    *ran* is the arguments the bound command ran with (None when it did not run with them). A deviation is recorded
+    when the review's values were refused or left a required field unbound (the agent then handled the sub-task, F2),
+    a value was drafted at run time (it was not shown), or a value that ran is not the one shown.
+    """
+    shown = dict(reviewed.shown) if reviewed is not None else {}
+    reasons = [deviation] if deviation else []
+    if reviewed is not None and reviewed.drafted_at_run:
+        reasons.append(f"drafted at run time: {', '.join(sorted(reviewed.drafted_at_run))}")
+    if ran is None and not reasons:
+        reasons.append("the bound command did not run with the reviewed inputs")
+    if ran is not None:
+        differs = sorted(name for name, value in shown.items() if name not in ran or not _same_value(value, ran[name]))
+        if differs:
+            reasons.append(f"ran a value other than the one shown: {', '.join(differs)}")
+    return {"subtask": number, "means": item.means.render(), "shown": shown,
+            "ran": {name: _input_text(value) for name, value in ran.items()} if ran is not None else None,
+            "match": not reasons, "deviation": "; ".join(reasons) or None}
