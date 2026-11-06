@@ -39,11 +39,14 @@ library/
 In each context folder, a file with a `ResponseGenerator` is an execution command and a file
 with a `PlanGenerator` is a planning command. Every execution command returns its
 `Signature.Output`, except `startup`, which has none and returns text.
+`Record/add_note` is the one command that changes the library, and it says so with `writes =
+True`: inside a planning command's phase it runs only when a step of that phase names it, so
+`note_member` adds its note and a read-only planning command such as `author_books` never does.
 
 | planning command | tutorial page | what it shows |
 |---|---|---|
-| `Library/overdue_summary` | 1 | two phases, no inputs, steps written with `run` |
-| `Library/note_member` | 2 | inputs, `in_request`, `pick`, a call with one phase |
+| `Library/overdue_summary` | 1 | two phases, an optional input, a fact the answer step carries, steps written with `run` |
+| `Library/note_member` | 2 | inputs, `in_request` on a name and on free text, `pick`, a call with one phase |
 | `Library/count_books` | 3 | a phase that hands on a command's `Output`, an answer `__result__` writes |
 | `Library/book_by_title` | 4, 11 | skipping, `pick` from an earlier phase's listing, a `_` helper, a typed `Output` that `__result__` returns with the answer |
 | `Library/member_report` | 6, 9 | `__phases__`, `full_list`, refusing a call |

@@ -2,7 +2,7 @@
 
 # overdue_summary
 
-List the library's branches, then say how many loans are overdue across the library.
+Name the branches, then say how many loans are overdue, in one branch or in all.
 
 Source: `_commands/overdue_summary.py`.
 
@@ -11,7 +11,11 @@ Depth: 1 (lower bound; open steps name no command)
 
 ## Inputs
 
-None: every call runs the same plan.
+| input | type | default | sample | verify | in_request | description |
+|---|---|---|---|---|---|---|
+| `branch` | str | `""` | `<branch>` |  | yes; ignore `the`, `branch` | the branch asked about, if named (such as Central or Riverside); empty for all |
+
+- `branch` must be written in the request (`in_request`).
 
 ## Example requests
 
@@ -22,28 +26,52 @@ None: every call runs the same plan.
 
 | phase | output | runs | fans out |
 |---|---|---|---|
-| `branches` | none | always | no |
-| `overdue` | none | always | no |
+| `branches` | `list_branches`'s `Output` | always | no |
+| `overdue` | none | only when `branches.names` | no |
 
 ## Facts
 
 What each phase's output holds, filled in code from the commands the phase ran.
 
-No phase passes facts on.
+### `branches` -> `list_branches`'s `Output`
+
+| fact | type | from |
+|---|---|---|
+| `names` | `list[str]` | `list_branches`'s `Output` |
+| `total` | `int` | `list_branches`'s `Output` |
 
 ## Plan
 
-One for every call: the planning command takes no inputs.
+For the sample inputs, once for each different plan the inputs that change them give: `branch`. Each is titled by the inputs that decide it.
 
-### Phase 1: `branches`
+### Plan when branch = given
 
-Reads no earlier facts. Output: none.
+#### Phase 1: `branches`
+
+Reads no earlier facts. Output: `Output`.
 
 1. `list_branches`
 
-### Phase 2: `overdue`
+#### Phase 2: `overdue`
 
-Reads no earlier facts. Output: none.
+Reads: `branches`. Output: none. Settings: `when=branches.names`.
+
+_Steps below are rendered with placeholder facts: `<phase.fact>` stands for that fact as read at run time, and 999999 (or 999,999) for a number fact the code converted; values computed from facts (counts, comparisons, matches) are not real._
+
+1. `count_overdue branch=<branch>`
+2. `name the branches (<branches.names[0]>) and the number of overdue loans at <branch>`
+
+### Plan when branch = empty
+
+#### Phase 1: `branches`
+
+As in the plan when branch = given.
+
+#### Phase 2: `overdue`
+
+Reads: `branches`. Output: none. Settings: `when=branches.names`.
+
+_Steps below are rendered with placeholder facts: `<phase.fact>` stands for that fact as read at run time, and 999999 (or 999,999) for a number fact the code converted; values computed from facts (counts, comparisons, matches) are not real._
 
 1. `count_overdue`
-2. `say how many loans are overdue across the library`
+2. `name the branches (<branches.names[0]>) and the number of overdue loans across the library`

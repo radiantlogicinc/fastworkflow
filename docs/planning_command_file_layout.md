@@ -268,6 +268,20 @@ audits each decision but runs the command as before. `off` restores the earlier 
 
 Intent confirmations and plan review are not approvals. Neither one lets an annotated command run.
 
+## Write declaration (`writes`)
+
+An execution command that changes the application's data declares `writes = True` on its
+`ResponseGenerator`. A planning command does not declare it: it writes when one of its steps (directly,
+or through a planning command it calls) runs a command that declares it, and it is read-only otherwise.
+`writes` on a `PlanGenerator`, or a value that is not a bool, is a load error naming the command and its
+file (`fastworkflow.command_writes`).
+
+Inside a planning command's phase, a command that writes runs only when a step of that phase names it.
+The phase's command listing leaves out the other write commands, and a call of one is refused unrun:
+the agent reads that the command changes the application's data and no step of this part of the job
+runs it. Outside a planning command's phase nothing changes. `writes` is independent of `approval`: an
+easy-to-undo write needs no approval, and still declares `writes`.
+
 ## Return values of an execution command
 
 A `ResponseGenerator.__call__(self, workflow, command, input)` may return one of three forms. The

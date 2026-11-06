@@ -101,7 +101,9 @@ with a marker. A `mandatory` command asks before every run, including a run the 
 `delegatable` command asks until a standing approval exists. The reply is bound to the exact
 parameters, is single-use and expires. It does not change navigation, and it is not read/write
 gating: an easy-to-undo write needs no annotation. See `docs/planning_command_file_layout.md`,
-"Approval annotation".
+"Approval annotation". Writing is declared separately, with `writes = True` on the
+`ResponseGenerator` of every command that changes data: inside a planning command's phase such a command
+runs only when a step of the phase names it (the `author-planning-commands` skill, "Commands that write").
 
 ## Rule 2 — cutting the `parent` axis is free; cutting `base` is not
 

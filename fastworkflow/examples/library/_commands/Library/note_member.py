@@ -3,7 +3,9 @@
 One phase, so the call is one plan, run by one executor run. It finds the member, opens
 the one named, and adds the note there.
 """
-from pydantic import BaseModel, Field
+import re
+
+from pydantic import BaseModel, Field, model_validator
 
 from fastworkflow.planning import pick, run
 
@@ -25,7 +27,18 @@ class Signature:
     class Input(BaseModel):
         member: str = Field(description="the member's name",
                             json_schema_extra={"in_request": True})
-        text: str = Field(description="the note to add")
+        text: str = Field(description="what the note says, without the request around it "
+                                      "(to note that someone called: 'someone called')",
+                          json_schema_extra={"in_request": True})
+
+        @model_validator(mode="after")
+        def note_without_the_request(self):
+            # A note on Mia Chen's record does not name Mia Chen: a text that does holds the
+            # request ("Note on Mia Chen's record that ..."), not the note.
+            if re.search(rf"\b{re.escape(self.member)}\b", self.text, re.IGNORECASE):
+                raise ValueError(f"text is {self.text!r}, which holds the member's name: that is the "
+                                 "request around the note; give only the words the note says")
+            return self
 
 
 class PlanGenerator:
