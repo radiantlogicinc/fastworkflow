@@ -213,6 +213,44 @@ class SearchModelRole(unittest.TestCase):
             search_memory('Whose holders?', 'O1', scope=self.scope, selected_archive=self.archive)
         self.assertIn('Account 28c5aeb5 Jane Roe', seen['subject'])
 
+    def test_a_model_that_takes_only_temperature_1_still_searches(self):
+        """fix-z62t: the search's temperature 0 is refused (Bedrock Claude Haiku 5.5 takes only 1), so it is
+        asked again with litellm's drop_params, which leaves the temperature out."""
+        import uuid
+        import warnings
+
+        from dspy.clients.engines.dummy_engine import DummyEngine
+        from dspy.utils import DummyLM
+
+        from fastworkflow.utils import dspy_utils
+
+        calls: list = []
+
+        class Engine(DummyEngine):
+            def complete_legacy(self, lm, request, **context):
+                calls.append((request.get('temperature'), bool(request.get('drop_params'))))
+                if request.get('temperature') not in (None, 1) and not request.get('drop_params'):
+                    raise litellm.UnsupportedParamsError(
+                        message=f"{lm.model} does not support temperature={request.get('temperature')}. "
+                                "Only temperature=1 is supported.", status_code=400)
+                return super().complete_legacy(lm, request, **context)
+
+        class TemperatureOneLM(DummyLM):
+            def copy(self, **kwargs):
+                copied = super().copy(**kwargs)
+                copied._engine_spec = Engine(self)
+                return copied
+
+        lm = TemperatureOneLM([{'answer': 'Ann Lee holds it'}]).copy(temperature=0)
+        lm.model = f'scripted/temperature-one-{uuid.uuid4().hex}'  # its own model: no cached answer
+        with patch('fastworkflow.observation_offloading.search.get_lm', return_value=lm), \
+                patch.object(dspy_utils, '_PARAMS_REJECTED', set()), warnings.catch_warnings():
+            warnings.simplefilter('ignore', DeprecationWarning)
+            result = search_memory('Who holds it?', 'O0', scope=self.scope, selected_archive=self.archive)
+        self.assertIn('Ann Lee holds it', result)
+        self.assertEqual(calls, [(0, False), (0, True)])
+        self.assertEqual(snapshot_events()[-1]['status'], 'answered')
+
     def test_the_archived_observation_is_sent_to_the_model_in_full(self):
         seen: dict = {}
         lm = SimpleNamespace(history=[{'usage': {'completion_tokens': 7}, 'cost': 0.0}],
