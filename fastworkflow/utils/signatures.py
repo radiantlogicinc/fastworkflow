@@ -598,7 +598,8 @@ def is_optional_str_field(field_info: Any) -> bool:
 
 
 def default_unfilled_optional_strs(cmd_parameters: BaseModel, not_found: Optional[str]) -> List[str]:
-    """Give each ``Optional[str]`` field holding ``not_found`` or ``"None"`` its default.
+    """Give each ``Optional[str]`` field, and each ``str`` field that declares a default, holding
+    ``not_found`` or ``"None"`` its default.
 
     Returns the names of the fields changed. The default is the field's declared one
     (a factory is called), or None when it declares none. A required ``str`` field holding
@@ -615,6 +616,11 @@ def default_unfilled_optional_strs(cmd_parameters: BaseModel, not_found: Optiona
         if is_optional_str_field(field_info):
             default = field_info.get_default(call_default_factory=True)
             setattr(cmd_parameters, field_name, None if default is PydanticUndefined else default)
+        elif not field_info.is_required():
+            # A plain ``str`` field that declares a default (``reason: str = "ordered by mistake"``) is
+            # optional too: not given, it takes that default instead of reaching the missing check,
+            # which counts only ``Optional[...]`` fields as optional and would ask the user for it.
+            setattr(cmd_parameters, field_name, field_info.get_default(call_default_factory=True))
         elif value.strip() == "None":
             setattr(cmd_parameters, field_name, None)
         else:
