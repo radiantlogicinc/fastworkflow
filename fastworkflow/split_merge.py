@@ -20,7 +20,12 @@ feed, a control, a tag). The rules, applied in order:
    exactly the same subjects as the sub-task before it, is joined to the one
    before it (a leading subject-less sub-task is joined to the one after it).
    "How risky is Ann Lee?" + "Which findings are driving that?" is one
-   job; "Confirm whether Raj Patel is among its holders" names a person
+   job. The caller may pass ``same_job``, a decision on these two joins (no subject, or the same
+   subjects): ``same_job(earlier, later)`` returns True (join), False (keep apart: "Who wrote Dune?" +
+   "Who has Dune out?" are two questions with two answers) or None (no opinion: join). A limit
+   ("Apply none of them.") is joined without asking. The workflow
+   agent passes Jev's verdict (``workflow_agent._same_request_check``); this module makes no call
+   itself. "Confirm whether Raj Patel is among its holders" names a person
    of its own and stays separate. A name that extends a name of the group
    before it ("Payroll_Approver" after "Payroll": the shorter name
    followed by ``_ - / . :`` or a space) is no new subject either when the
@@ -70,6 +75,7 @@ from __future__ import annotations
 import functools
 import re
 import unicodedata
+from typing import Callable, Optional
 
 __all__ = ["merge_subtasks", "request_subjects", "subjects_in"]
 
@@ -931,19 +937,43 @@ def _carry_limits(user_query: str, texts: list[str], known: list[str],
     return out
 
 
+#: Rule 3's join decision, from the caller: ``(earlier, later) -> True`` (one job), ``False`` (two jobs) or
+#: ``None`` (no opinion: the lexical rule joins them).
+SameJob = Callable[[str, str], Optional[bool]]
+
+
 def merge_subtasks(user_query: str, subtasks: list[str],
-                   identifiers: tuple[re.Pattern, ...] = ()) -> list[str]:
+                   identifiers: tuple[re.Pattern, ...] = (),
+                   same_job: SameJob | None = None, context: str = "") -> list[str]:
     """``subtasks`` with the parts that are not independent jobs joined; ``[user_query]`` when one job is left.
 
-    Pure: no model and no I/O. Fewer than two sub-tasks are returned unchanged. ``identifiers``
+    Pure: no model and no I/O of its own. Fewer than two sub-tasks are returned unchanged. ``identifiers``
     are the workflow's identifier patterns (``identifier_patterns``); each match is a subject.
+    ``same_job`` (optional) decides rule 3's joins of a sub-task naming no subject, or exactly the
+    subjects of the group before it: it gets the group's text so far and the sub-task, and the two are
+    joined unless it returns False. Without it, rule 3 joins them as before.
+    ``context`` (optional) is the earlier turns the splitter was shown: a name or value a sub-task takes from
+    it ("Who has Dune out?" for "Who has it out?" after a turn about Dune) is not an invention (rule 1). It is
+    never the request: ``user_query`` alone is what is returned when one job is left.
     """
+
+    def joins(texts: list[str], text: str) -> bool:
+        # A limit ("Apply none of them.") is never a job of its own: it is joined as before, without asking
+        # (rule 5 carries it to the jobs it limits). Statements were placed by rule 3a already.
+        earlier = _join(texts)
+        if same_job is None or _is_limit(earlier) or _is_limit(text):
+            return True
+        return same_job(earlier, text) is not False
+
     items = [t for t in subtasks if t and t.strip()]
     if len(items) < 2:
         return list(subtasks)
     known = request_subjects(user_query, identifiers)
-    items = [t for t in items if not _is_meta(t) and not _invents_value(t, user_query, known)
-             and not _invents_record(t, user_query, known, identifiers)]
+    # rule 1 reads the request and the earlier turns: what the splitter took from either is not invented
+    source = f"{user_query}\n{context}" if context else user_query
+    given = request_subjects(source, identifiers) if context else known
+    items = [t for t in items if not _is_meta(t) and not _invents_value(t, source, given)
+             and not _invents_record(t, source, given, identifiers)]
     items = _drop_contained(items, known, identifiers)
     if len(items) < 2:
         return [user_query]
@@ -957,14 +987,15 @@ def merge_subtasks(user_query: str, subtasks: list[str],
     groups: list[tuple[list[str], frozenset[str]]] = []
     for text in items:
         subj = subjects_in(text, known, identifiers)
-        if groups and (not subj or subj == groups[-1][1]):
+        if groups and (not subj or subj == groups[-1][1]) and joins(groups[-1][0], text):
             groups[-1][0].append(text)
         elif groups and subj < groups[-1][1] and _observes_change(text):
             groups[-1][0].append(text)
         elif groups and _extends_group(subj, groups[-1][1]) and (
                 _refers_back(text) or _request_refers_back(user_query, subj - groups[-1][1])):
             groups[-1] = (groups[-1][0] + [text], groups[-1][1] | subj)
-        elif groups and not groups[-1][1]:          # a leading subject-less part joins the next one
+        elif groups and not groups[-1][1] and subj and joins(groups[-1][0], text):
+            # a leading subject-less part joins the next one
             groups[-1] = (groups[-1][0] + [text], subj)
         else:
             groups.append(([text], subj))

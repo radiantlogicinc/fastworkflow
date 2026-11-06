@@ -2415,8 +2415,13 @@ class WorkflowExecutionContext:
 
         from fastworkflow.workflow_agent import split_into_subtasks
 
+        # The split's request is the user's new message; the earlier turns go in as the splitter's separate
+        # conversation input, never prepended to the request: the merge returns the request itself as the one job,
+        # so a prepended summary became the sub-task's goal, and its names changed how the request merged
+        # (fix-bydz). An unsplit request still runs on refined_user_query (_run_turn_subtasks).
         subtasks = split_into_subtasks(
-            refined_user_query,
+            message,
+            conversation=self._conversation_context(self.conversation_history),
             planner_lm=getattr(self, "_current_planner_lm", None),
             workflow_folderpath=self._app_workflow.folderpath if self._app_workflow else None,
         )
@@ -4418,11 +4423,9 @@ class WorkflowExecutionContext:
 
         return command_output
 
-    def _refine_user_query(
-        self, user_query: str, conversation_history: dspy.History
-    ) -> str:
-        if not conversation_history.messages:
-            return user_query
+    @staticmethod
+    def _conversation_context(conversation_history: dspy.History) -> str:
+        """The last five turns' summaries, one ``key: value`` line each; "" with no earlier turn."""
         messages = []
         for conv_dict in conversation_history.messages[-5:]:
             messages.extend(
@@ -4430,8 +4433,15 @@ class WorkflowExecutionContext:
                 for k, v in conv_dict.items()
                 if k != "conversation_traces"
             )
-        messages.append(f"new_user_query: {user_query}")
         return "\n".join(messages)
+
+    def _refine_user_query(
+        self, user_query: str, conversation_history: dspy.History
+    ) -> str:
+        if not conversation_history.messages:
+            return user_query
+        context = self._conversation_context(conversation_history)
+        return f"{context}\nnew_user_query: {user_query}" if context else f"new_user_query: {user_query}"
 
     def _extract_conversation_summary(
         self,

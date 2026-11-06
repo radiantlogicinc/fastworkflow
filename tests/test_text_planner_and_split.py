@@ -307,7 +307,7 @@ def test_the_merge_gets_the_workflows_identifier_patterns(tmp_path, monkeypatch)
     _split_file(tmp_path, "import re\nidentifier_patterns = [re.compile(r'\\bcase_[A-Za-z0-9]+')]\n")
     seen = {}
 
-    def merge(user_query, subtasks, identifiers=()):
+    def merge(user_query, subtasks, identifiers=(), **_):
         seen["identifiers"] = [p.pattern for p in identifiers]
         return subtasks
 
@@ -736,3 +736,107 @@ def test_the_plan_template_reaches_the_planner_but_not_the_returned_query(workfl
 
     assert "TEMPLATE TEXT" in _prompt(lm, 0)
     assert "TEMPLATE TEXT" not in result
+
+
+# ------------------------------------------------------------------ rule 3's joins are Jev's call (fix-bydz)
+TUTORIAL = str(Path(__file__).parent.joinpath("planning_tutorial_workflow").resolve())
+DUNE = "Who wrote Dune and who has it out?"
+DUNE_SPLIT = {"reasoning": "r", "subtasks": "1. Who wrote Dune?\n2. Who has Dune out?"}
+
+
+def _scripted_jev(monkeypatch, verdict):
+    """Jev's SameRequest answer scripted (``verdict``: (value, probability), or an exception to raise); other Jev
+    questions (the referent) answer nothing. Returns the inputs each SameRequest call got."""
+    import fastworkflow.workflow_agent as agent
+    from types import SimpleNamespace
+
+    calls: list[dict] = []
+    real_predict = agent.dspy.Predict
+
+    def predict_for(signature):
+        if signature is not agent.SameRequest:
+            return real_predict(signature)
+
+        def predict(**inputs):
+            calls.append(inputs)
+            if isinstance(verdict, Exception):
+                raise verdict
+            value, probability = verdict
+            other = "separate" if value == "one" else "one"
+            return SimpleNamespace(relation=SimpleNamespace(
+                value=value, confidence=probability, probabilities={value: probability, other: 1 - probability}))
+        return predict
+
+    monkeypatch.setattr(agent, "_jev_lm", lambda: DummyLM([]))
+    monkeypatch.setattr(agent.dspy, "Predict", predict_for)
+    monkeypatch.setattr(agent, "_choose_referent", lambda *args: None)
+    return calls
+
+
+def _split_dune():
+    from fastworkflow.workflow_agent import split_into_subtasks
+    return split_into_subtasks(DUNE, planner_lm=DummyLM([DUNE_SPLIT]), workflow_folderpath=TUTORIAL)
+
+
+def test_two_questions_jev_calls_separate_stay_two_sub_tasks(monkeypatch):
+    calls = _scripted_jev(monkeypatch, ("separate", 0.99))
+    assert _split_dune() == ["Who wrote Dune?", "Who has Dune out?"]
+    assert calls == [{"request": DUNE, "earlier": "Who wrote Dune?", "later": "Who has Dune out?"}]
+
+
+def test_steps_jev_calls_one_request_are_joined_into_the_request(monkeypatch):
+    from fastworkflow.workflow_agent import SAME_REQUEST_THRESHOLD, split_into_subtasks
+
+    _scripted_jev(monkeypatch, ("one", SAME_REQUEST_THRESHOLD))
+    assert _split_dune() == [DUNE]
+    query = "Find the member Raj Patel and show his loans."
+    steps = {"reasoning": "r", "subtasks": "1. Find the member Raj Patel.\n2. Show the loans of Raj Patel."}
+    _scripted_jev(monkeypatch, ("one", 0.95))
+    assert split_into_subtasks(query, planner_lm=DummyLM([steps]), workflow_folderpath=TUTORIAL) == [query]
+
+
+def test_one_request_below_the_threshold_is_not_joined(monkeypatch):
+    from fastworkflow.workflow_agent import SAME_REQUEST_THRESHOLD
+
+    _scripted_jev(monkeypatch, ("one", SAME_REQUEST_THRESHOLD - 0.05))
+    assert _split_dune() == ["Who wrote Dune?", "Who has Dune out?"]
+
+
+def test_without_a_jev_key_the_lexical_rule_joins_as_before(monkeypatch):
+    calls = _scripted_jev(monkeypatch, ("separate", 0.99))
+    import fastworkflow.workflow_agent as agent
+
+    monkeypatch.setattr(agent, "_jev_lm", lambda: None)
+    assert _split_dune() == [DUNE]
+    assert calls == []
+
+
+def test_a_failing_jev_call_leaves_the_lexical_rule(monkeypatch):
+    calls = _scripted_jev(monkeypatch, RuntimeError("Jev is down"))
+    assert _split_dune() == [DUNE]
+    assert len(calls) == 1
+
+
+def test_the_conversation_is_a_separate_splitter_input_only_when_there_is_one(monkeypatch):
+    import fastworkflow.workflow_agent as agent
+
+    _scripted_jev(monkeypatch, ("separate", 0.99))
+    query = "Who has it out, and how many loans are overdue?"
+    context = "conversation summary: The user asked who wrote Dune. Dune is by Frank Herbert."
+    answer = {"reasoning": "r", "subtasks": "1. Who has Dune out on loan?\n2. How many loans are overdue?"}
+    lm = DummyLM([answer])
+    assert agent.split_into_subtasks(query, planner_lm=lm, workflow_folderpath=TUTORIAL, conversation=context) == [
+        "Who has Dune out on loan?", "How many loans are overdue?"]
+    prompt = _last_prompt()
+    assert "[[ ## conversation ## ]]" in prompt and context in prompt
+    assert f"[[ ## user_query ## ]]\n{query}" in prompt
+    agent.split_into_subtasks(DUNE, planner_lm=DummyLM([DUNE_SPLIT]), workflow_folderpath=TUTORIAL)
+    assert "## conversation ##" not in _last_prompt()
+
+
+def _last_prompt() -> str:
+    """The messages of the last model call (the splitter calls a copy of the LM, so its own history is empty)."""
+    from dspy.clients.base_lm import GLOBAL_HISTORY
+
+    entry = next(h for h in reversed(GLOBAL_HISTORY) if "subtasks" in str(h.get("messages")))
+    return "\n".join(str(m.get("content", "")) for m in entry["messages"])
