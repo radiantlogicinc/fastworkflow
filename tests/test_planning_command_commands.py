@@ -1525,3 +1525,30 @@ def test_an_enum_joins_only_lines_at_one_place_in_their_branches(tmp_path):
         "<find_k3 or find_k4, by kind> query=<name> (only when kind is k3 or k4)",
         "say done",
     )
+
+
+def test_a_verified_choice_with_duplicate_labels_builds_and_its_check_runs(monkeypatch):
+    """Duplicate option labels used to make ``Choice[...]`` raise, and the check was skipped (fix-variance): the
+    first occurrence of each label is offered, and the check runs."""
+    import dspy
+    from types import SimpleNamespace
+    from fastworkflow import planning_commands as sc
+
+    param = SimpleNamespace(type="choice", name="kind", desc="the kind of record", verify=True, default=None,
+                            values=("group", "feed", "group"), means=(("group", "a group of people"),))
+    assert sc._distinct_labels(sc._check_options(param)) == (
+        ("group", "a group of people"), ("feed", "feed"))
+    seen = {}
+
+    class Predict:
+        def __init__(self, signature):
+            seen["choice"] = signature.output_fields["value"].annotation
+
+        def __call__(self, **inputs):
+            choice = SimpleNamespace(value="group", probabilities={"group": 0.8}, confidence=0.8)
+            return SimpleNamespace(value=choice)
+
+    monkeypatch.setattr(dspy, "Predict", Predict)
+    command = SimpleNamespace(name="show_kind", description="Show a kind of record.")
+    assert sc._check_one(object(), command, param, "show the group") == ("group", 0.8)
+    assert "choice" in seen

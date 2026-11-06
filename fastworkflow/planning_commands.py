@@ -3712,6 +3712,15 @@ def _check_options(p: Param, subjects: list[str] = ()) -> tuple[tuple[str, str],
     return tuple((v, means.get(v, v)) for v in p.values)
 
 
+def _distinct_labels(options: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
+    """The options with one per label (fix-variance): ``Choice[...]`` refuses two options whose values have the
+    same string label, so the first occurrence of each label is kept and the later ones are dropped."""
+    kept: dict[str, tuple[str, str]] = {}
+    for value, description in options:
+        kept.setdefault(str(value), (value, description))
+    return tuple(kept.values())
+
+
 def _check_one(lm, command: PlanningCommandCommand, p: Param, request: str) -> tuple[object, float]:
     import dspy
     from dspy.experimental import Choice
@@ -3724,7 +3733,7 @@ def _check_one(lm, command: PlanningCommandCommand, p: Param, request: str) -> t
         question = f"Which record named in the request is the {p.name}? {p.desc}".strip()
     else:
         question = f"Which {p.name} does the request mean? {p.desc}".strip()
-    options = _check_options(p, _check_subjects(command, request) if p.type == "str" else ())
+    options = _distinct_labels(_check_options(p, _check_subjects(command, request) if p.type == "str" else ()))
     signature = dspy.make_signature({
         "request": (str, dspy.InputField(desc="the user's request")),
         "job": (str, dspy.InputField(desc="the job the request is planned as")),
@@ -3752,8 +3761,9 @@ def check_verdicts(lm, command: PlanningCommandCommand, request: str) -> dict[st
     def one(p):
         try:
             return p.name, _check_one(lm, command, p, request)
-        except Exception:  # noqa: BLE001 - a check is an extra; the planner's argument stands
-            logger.warning(f"could not check planning command argument {command.name}.{p.name}", exc_info=True)
+        except Exception as error:  # noqa: BLE001 - a check is an extra; the planner's argument stands
+            logger.info(f"planning command argument {command.name}.{p.name} not checked, the planner's value stands: "
+                        f"{type(error).__name__}: {error}")
             return None
     # Each check runs under a copy of this thread's context: the observability host (dspy_logger)
     # and the module frames are ContextVars, unset in a bare worker, so the classifier calls would
@@ -3792,6 +3802,9 @@ class PlanningCommandCallPlan:
     phases: list | None = None
     steps_before: list[str] = field(default_factory=list)
     steps_after: list[str] = field(default_factory=list)
+    #: The verify verdicts the call read (``check_verdicts``), kept so a call planned again on a failed first phase
+    #: (``reextracted_arguments``) checks its arguments the same way. None when there were none.
+    verdicts: dict | None = None
 
 
 def no_argument_call(command: PlanningCommandCommand) -> PlanningCommandCallPlan:
@@ -3973,4 +3986,33 @@ def typed_planning_call(command: PlanningCommandCommand, request: str, available
     notes += verdict_notes(verdicts)   # the verdicts read, whether or not they changed an argument
     phases = call_phases(command, args)
     return PlanningCommandCallPlan(plan=number(before + steps + after), args=args, notes=notes, prediction=prediction,
-                         phases=phases, steps_before=list(before), steps_after=list(after))
+                         phases=phases, steps_before=list(before), steps_after=list(after), verdicts=verdicts)
+
+
+def reextracted_arguments(command: PlanningCommandCommand, request: str, observation: str, args: dict,
+                          workflow=None, verdicts: dict | None = None) -> dict | None:
+    """The arguments of a call whose first phase's lookup found nothing, extracted once more (fix-variance):
+    the shared extractor reads *request* with *observation* (what that phase found) after it, as a refusal is
+    put after the request (``argument_checks.PHASE_FAILED_EXTRACTION_NOTE``), and the result goes through the
+    same checks. Returns None when the checks refuse them or they equal *args* (the call is not restarted).
+    Raises what the extractor raises."""
+    from fastworkflow.utils.argument_checks import PHASE_FAILED_EXTRACTION_NOTE
+
+    raw = extracted_arguments(command, f"{request}\n\n{PHASE_FAILED_EXTRACTION_NOTE.format(observation=observation)}",
+                              workflow)
+    try:
+        new_args, _notes = checked_arguments(command, raw, request, workflow, verdicts)
+    except PlanningCommandInputError:
+        return None
+    return None if new_args == args else new_args
+
+
+def replanned_call(command: PlanningCommandCommand, call: PlanningCommandCallPlan, args: dict,
+                   notes: list[str]) -> PlanningCommandCallPlan:
+    """*call* with *args* instead: its steps and phases are read from the new arguments; the extra steps before
+    and after the planning command's own are kept as the call had them."""
+    steps = expand(command, args)
+    before, after = list(call.steps_before), list(call.steps_after)
+    return PlanningCommandCallPlan(plan=number(before + steps + after), args=args, notes=notes,
+                                   prediction=call.prediction, phases=call_phases(command, args),
+                                   steps_before=before, steps_after=after, verdicts=call.verdicts)

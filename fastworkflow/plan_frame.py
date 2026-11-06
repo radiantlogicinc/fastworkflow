@@ -72,6 +72,9 @@ class PlanFrame:
     phase_run: Optional[dict[str, Any]] = None
     phase_live: Optional[tuple[Any, list[Any]]] = None   # not serialised (as today)
     phased_planning_command_call: Any = None        # not serialised (as today)
+    # The planning command call in progress as (command, call): what a restart after a failed first phase plans
+    # again (WorkflowExecutionContext._restart_after_empty_first_phase). Not serialised: no restart after a restore.
+    phase_call: Any = None
     child_step_ranges: list[list[int]] = field(default_factory=list)  # [first, last] per child run
     invoking_step: Optional[int] = None  # the parent step index this frame runs inside
     #: The step number the call's first step takes (its run's range starts here).

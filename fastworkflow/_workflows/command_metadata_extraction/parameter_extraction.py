@@ -140,6 +140,17 @@ def _recorded_slot_binding_uncertainty(span, diagnostics: dict) -> Optional[dict
     return None if uncertainty is None else uncertainty.model_dump(mode="json")
 
 
+#: A backslash before a character that is neither a letter, a digit, a backslash nor a space: an escape a model
+#: writes in a tool call (``name\@domain``), which the value means without (fix-variance).
+_ESCAPED_PUNCTUATION = re.compile(r"\\([^A-Za-z0-9\\\s])")
+
+
+def unescape_punctuation(value: str) -> str:
+    """*value* with each backslash escape of a non-alphanumeric character removed (``\\@`` -> ``@``, ``\\_`` -> ``_``).
+    Other backslashes stay: ``C:\\new`` and a doubled backslash are not escapes of punctuation."""
+    return _ESCAPED_PUNCTUATION.sub(r"\1", value)
+
+
 def _unwrap_optional(field_type):
     """
     Unwrap ``Optional[X]`` / ``Union[X, None]`` to its underlying type.
@@ -903,7 +914,8 @@ class ParameterExtraction:
                         return None
             elif not value:
                 return None
-            raw[match.group(1)] = None if (not was_quoted and value in ("None", "null")) else value
+            raw[match.group(1)] = (None if (not was_quoted and value in ("None", "null"))
+                                   else unescape_punctuation(value))
 
         converted: dict[str, Any] = {}
         for name, value in raw.items():

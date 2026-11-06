@@ -409,6 +409,7 @@ class WorkflowExecutionContext:
     _phase_run = _frame_property("phase_run")
     _phase_live = _frame_property("phase_live")
     _phased_planning_command_call = _frame_property("phased_planning_command_call")
+    _phase_call = _frame_property("phase_call")
     # The ReAct agent of the call in progress: the top frame's agent (the turn frame's, for now).
     _workflow_tool_agent = _frame_property("agent")
 
@@ -2713,11 +2714,13 @@ class WorkflowExecutionContext:
     # Phased planning command calls (fastworkflow.planning_phases)
     # ------------------------------------------------------------------
 
-    def _start_planning_command_phases(self, query: str, command, call, *, first_step: int):
+    def _start_planning_command_phases(self, query: str, command, call, *, first_step: int,
+                                       reextracted: bool = False):
         """Run a phased planning command call's phases, in order; the sub-task's result.
 
         ``call`` is the planning command call (``planning_commands.PlanningCommandCallPlan``) whose ``phases``
-        run. See ``fastworkflow.planning_phases`` for what the runner does and decides.
+        run. ``reextracted``: this call is the restart after a failed first phase (``_restart_after_empty_first_phase``),
+        which a call restarts at most once. See ``fastworkflow.planning_phases`` for what the runner does and decides.
         Extra command steps after the planning command's own that would land in an answer-only last
         phase run in a phase of their own just before it (``planning_phases.extra_steps_phase``).
         The extra steps before the planning command's own run first, in a phase of their own
@@ -2735,8 +2738,13 @@ class WorkflowExecutionContext:
         before = planning_phases.steps_before_phase(phases, call.steps_before)
         phases = planning_phases.with_phase_before(phases, before, 0)
         self._phase_live = (command, phases)
+        self._phase_call = (command, call)
         self._phase_run = {
             "skill": command.name,
+            # Set when a phase's lookup found nothing (the run's MissingFactError), read by the restart rule.
+            "missing_fact": False,
+            # True for the call planned again after a failed first phase: it is not planned again a second time.
+            "reextracted": bool(reextracted),
             "args": json.loads(json.dumps(call.args, default=str)),
             "query": query,
             "phases": [phase.name for phase in phases],
@@ -2907,6 +2915,9 @@ class WorkflowExecutionContext:
                     return value
                 if outcome == "failed":
                     first_step = self._next_step
+                    restarted = self._restart_after_empty_first_phase(phase, value)
+                    if restarted is not None:
+                        return restarted
                     failed = self._phase_failure(phase, value)
                     if failed is not None:
                         return failed
@@ -3044,6 +3055,60 @@ class WorkflowExecutionContext:
             state["before_answer"] = answer
         state["answers"].append(answer)
         state.setdefault("phase_answers", []).append(answer)
+
+    def _restart_after_empty_first_phase(self, phase, observation: str):
+        """The call planned again once, when its first phase's lookup found nothing (fix-variance).
+
+        Applies when the first phase (its first item, if it fans out) fails on a required fact no run holds
+        (``MissingFactError``), the phase is not optional, and the call was not restarted before. No earlier
+        phase exists to have run a command. The failed phase's own steps may have run before its facts failed,
+        so the call is not restarted when those steps name a command that writes (``command_writes``): a restart
+        would write twice. The arguments are extracted once more with the phase's observation after the request
+        (``planning_commands.reextracted_arguments``), and the call runs its phases again from the start. None
+        when it does not apply, or the arguments come out the same or are refused: the failure then stops the
+        job as before.
+        """
+        state = self._phase_run
+        if (state is None or state.get("index") != 0 or state.get("item_index") or state.get("reextracted")
+                or not state.get("missing_fact") or getattr(phase, "optional", False)
+                or self._phase_call is None):
+            return None
+        from fastworkflow import command_writes, planning_commands
+
+        # Read before _phase_run is cleared: the steps of the phase that failed, as its runs were planned.
+        planned = command_writes.phase_planned_commands(self)
+        if planned is None:
+            logger.info("planning command %s: phase %s found nothing, and its planned commands are unknown; "
+                        "the call is not planned again", state["skill"], phase.name)
+            return None
+        writes = {command_writes._plain(name) for name in
+                  command_writes.write_commands(self._app_workflow.folderpath)}
+        writing = sorted(planned & writes)
+        if writing:
+            logger.info("planning command %s: phase %s found nothing, but its steps name a command that writes "
+                        "(%s); the call is not planned again, so nothing is written twice",
+                        state["skill"], phase.name, ", ".join(writing))
+            return None
+
+        command, call = self._phase_call
+        query = state["query"]
+        try:
+            args = planning_commands.reextracted_arguments(
+                command, query, observation, call.args, workflow=self._app_workflow, verdicts=call.verdicts)
+        except Exception as error:  # noqa: BLE001 - the job stops as it would have
+            logger.warning("planning command %s: arguments not extracted again after phase %s found nothing: %s: %s",
+                           state["skill"], phase.name, type(error).__name__, error)
+            return None
+        if args is None:
+            logger.info("planning command %s: phase %s found nothing; the arguments extracted again are the same "
+                        "or refused, so the call is not planned again", state["skill"], phase.name)
+            return None
+        logger.info("planning command %s: phase %s found nothing; planning the call again with arguments %s",
+                    state["skill"], phase.name, args)
+        new_call = planning_commands.replanned_call(command, call, args, notes=list(call.notes or []))
+        self._phase_run = self._phase_live = None
+        return self._start_planning_command_phases(query, command, new_call, first_step=self._next_step or 0,
+                                                   reextracted=True)
 
     def _phase_failure(self, phase, error: str):
         """Phase *phase* failed: the sub-task's result (``_planning_command_phases_failed``), or None
@@ -3402,10 +3467,11 @@ class WorkflowExecutionContext:
         """
         from fastworkflow import planning_phases
         from fastworkflow.planning_commands import number
-        from fastworkflow.observation_offloading.facts import FactsError, fact_sources
+        from fastworkflow.observation_offloading.facts import FactsError, MissingFactError, fact_sources
         from fastworkflow.workflow_agent import _what_can_i_do
 
         state = self._phase_run
+        state["missing_fact"] = False
         index = state["index"]
         phase = phases[index]
         last = index == len(phases) - 1
@@ -3425,6 +3491,7 @@ class WorkflowExecutionContext:
             "step_budget": budget,
             "first_step": first_step,
             "resumed": resumed,
+            "reextracted": True if state.get("reextracted") else None,
         }
         item = None
         others: list[Any] = []
@@ -3641,6 +3708,7 @@ class WorkflowExecutionContext:
 
             message = (str(error) if isinstance(error, (FactsError, ValidationError)) else
                        f"its command runs could not be read ({type(error).__name__}: {error})")
+            state["missing_fact"] = isinstance(error, MissingFactError)
             if phase.fans_out:
                 message = f"item {item}: {message}"
             tracing.end_span(self, span, status=tracing.STATUS_ERROR, attributes={
