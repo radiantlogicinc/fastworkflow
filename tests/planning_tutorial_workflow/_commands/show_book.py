@@ -9,7 +9,8 @@ class Signature:
     """Show one book: its title, author, copies and how many are on loan."""
 
     class Input(BaseModel):
-        book_uid: str = Field(description="the book's uid, as find_book lists it")
+        book_uid: str = Field(description="the book's uid, as find_book lists it",
+                              pattern=r"^b[0-9]+$")
 
     class Output(BaseModel):
         book_uid: str = Field(description="the book's uid")

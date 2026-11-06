@@ -356,7 +356,13 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # `argument_check_refusals_final` (the values still refused after it, treated as not given) and
 # `argument_check_respelled` ({field: value}: the request's or the declared spelling taken). A span
 # recorded before this carries none of them.
-SPAN_CONTRACT_VERSION = 36
+#
+# v37: fw.turn v4 (fix-48np.1) -- `subtask_bindings`: with drafting on (FW_DRAFT_ARGUMENTS), one record per bound
+# sub-task the turn ran: `subtask`, `means`, `shown` (the values the review showed), `ran` (the arguments the bound
+# command ran with, or null), `match` and `deviation` (why the run did not use the shown values: refused or unbound,
+# so the agent ran it; drafted at run time; a value other than the one shown). Null when there is none. A span
+# recorded before this carries no such key.
+SPAN_CONTRACT_VERSION = 37
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -491,8 +497,9 @@ class SpanContract:
 SPAN_CONTRACTS: dict[str, SpanContract] = {
     # v2: `unattended` (the turn ran with no ask_user tool).
     # v3: `subtask_review` (SPAN_CONTRACT_VERSION v35): the sub-task review gate's outcome for the turn.
+    # v4: `subtask_bindings` (SPAN_CONTRACT_VERSION v37): shown == run per bound sub-task (fix-48np.1).
     SPAN_TURN: SpanContract(
-        version=3,
+        version=4,
         attributes=frozenset(
             {
                 "turn_key",
@@ -506,6 +513,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "suspended_ms",
                 "context_mutations",
                 "subtask_review",
+                "subtask_bindings",
             }
         ),
     ),
