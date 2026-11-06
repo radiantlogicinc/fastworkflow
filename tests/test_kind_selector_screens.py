@@ -325,6 +325,34 @@ def test_the_none_marker_in_a_required_field_becomes_absent_and_the_screen_says_
     assert signatures.word_screen_refusals(params, None, frozenset(), "Any/command") == {}
 
 
+class _Reasoned(BaseModel):
+    title: str = Field(description="the title of the book")
+    reason: str = Field(default="ordered by mistake", description="why")
+
+
+@pytest.mark.parametrize("marker", ["NOT_FOUND", "None"])
+def test_a_str_field_with_a_declared_default_takes_it_when_not_given(marker):
+    """A plain ``str`` field with a default is optional: not given, it takes the default rather than
+    being reported missing (which would ask the user); a required field is left to the missing check."""
+    params = _Reasoned.model_construct(title="NOT_FOUND", reason=marker)
+
+    changed = signatures.default_unfilled_optional_strs(params, "NOT_FOUND")
+
+    assert params.reason == "ordered by mistake"
+    assert params.title == "NOT_FOUND"
+    assert changed == ["reason"]
+
+
+def test_a_defaulted_str_field_not_given_is_not_missing_in_validate_parameters(workflow):
+    extraction = InputForParamExtraction(command="cancel it", input_for_param_extraction_class=None)
+    params = _Reasoned.model_construct(title="Dune", reason="NOT_FOUND")
+
+    _, _, _, fields = extraction.validate_parameters(workflow, "show_book", params)
+
+    assert "reason" not in fields
+    assert params.reason == "ordered by mistake"
+
+
 def test_the_none_marker_is_missing_in_validate_parameters(workflow):
     extraction = InputForParamExtraction(command="show the book", input_for_param_extraction_class=None)
     params = _Request.model_construct(title="None", subtitle="None")
