@@ -2035,19 +2035,46 @@ def plan_template_for(text: str, workflow_folderpath: str,
 #: A reply's non-answer intent applies only at or above this Jev probability.
 REPLY_INTENT_THRESHOLD = 0.5
 REPLY_INTENTS = (
-    ("answer", "The reply answers the question or gives direction for the work to go on."),
-    ("stop_asking", "The reply declines to answer or says not to ask again, but does not ask to stop the work."),
+    ("answer", "The reply gives a value or direction for the work to go on, or asks a question back about the "
+               "request (which one, what are the options): the agent answers it and asks again."),
+    ("stop_asking", "The reply explicitly asks the agent to stop asking questions: 'stop asking', 'just do it', "
+                    "'don't ask me again', 'never mind'. A question back or a hesitation is never this."),
     ("abort", "The reply asks to stop, cancel or abort the work."),
-    ("wait", "The reply asks for a moment or says the user is checking; it gives no value and asks nothing."),
+    ("wait", "The reply asks for a moment or says the user is checking, or hesitates ('hmm, not sure', 'let me "
+             "think'); it gives no value and asks nothing."),
+)
+
+#: The explicit requests to stop being asked. stop_asking needs one of these in the reply as well as Jev's
+#: choice (see classify_user_reply): a question back or a hesitation never stops the asking. The patterns are
+#: general families (a verb of stopping + asking/questions/pestering; "no more questions"; "don't ask me
+#: (about) that/this/it (again)"; "did not ask me about that again"), not the wording of any one test set.
+_STOP_ASKING_REQUEST = re.compile(
+    r"\b(?:stop\s+(?:(?:with\s+)?the\s+)?(?:asking|questions?)"
+    r"|(?:quit|stop)\s+(?:with\s+the\s+)?(?:asking|questions?|pestering|bugging|hassling|badgering|nagging)"
+    r"|no\s+(?:more|further)\s+questions?"
+    r"|(?:don'?t|do\s+not|never)\s+ask(?:\s+me)?(?:\s+(?:about\s+)?(?:that|this|it))?"
+    r"(?:\s+(?:again|anymore|any\s+more))?"
+    r"|(?:did\s+not|didn'?t|would\s+not|wouldn'?t|won'?t)\s+ask\s+me(?:\s+about\s+(?:that|this|it))?"
+    r"(?:\s+(?:again|anymore|any\s+more))?"
+    r"|just\s+do\s+it|no\s+need\s+to\s+ask|never\s*mind)\b",
+    re.IGNORECASE,
 )
 
 
 class ClassifyReply(dspy.Signature):
-    """Decide what a user's reply to the agent's clarification request does."""
+    """Decide what a user's reply to the agent's clarification request does.
+
+    Three readings are easy to confuse. A question back ("which one do you mean?", "what are the
+    options?") is "answer": the agent answers it and asks again, so it is not a request to stop asking.
+    A hesitation ("hmm, not sure", "let me think") is "wait". Only an explicit request to stop being
+    asked ("stop asking", "just do it", "don't ask me again", "never mind") is "stop_asking".
+    """
 
     question: str = dspy.InputField(desc="the clarification request the agent asked the user")
     reply: str = dspy.InputField(desc="the user's reply")
-    intent: Choice[REPLY_INTENTS] = dspy.OutputField(desc="What does the reply do?")
+    intent: Choice[REPLY_INTENTS] = dspy.OutputField(
+        desc="What does the reply do? A question back is answer; a hesitation is wait; "
+             "stop_asking only for an explicit request to stop being asked.")
 
 
 def _reply_wait_enabled() -> bool:
@@ -2069,8 +2096,19 @@ def classify_user_reply(reply: str, question: str) -> str:
 
     "wait" is a hesitation ("hold on", "one sec"): the user has not answered yet. Any non-answer
     intent needs Jev to be confident at REPLY_INTENT_THRESHOLD. With FW_JEV_REPLY_WAIT off, "wait"
-    is not offered to Jev at all, so the result is one of the other three. Never raises: without
-    a Jev key, or on a failure, the reply is taken as an answer.
+    is not offered to Jev at all, so the result is one of the other three.
+
+    "stop_asking" is also vetoed by a deterministic guard: it stands only when the reply holds an
+    explicit request to stop being asked (_STOP_ASKING_REQUEST). A question back or a hesitation that
+    Jev reads as stop_asking becomes "answer", so ask_user stays available for the turn. A stop phrase
+    that also carries an answer value still stands as stop_asking: the value check that would have
+    caught it was dropped (fix-jd9o.12, owner decision). Measured on a fresh set, that check vetoed 5
+    of 10 real stops, while without it about 1 in 130 value replies that also say "stop asking" is
+    taken as a stop. A stop only ends asking for that turn, so the trade favours the real stops.
+
+    Never raises: without a Jev key, or on a failure, the reply is taken as an answer. That is the
+    same rule on both paths: stop_asking needs Jev's reading and an explicit request, and without a
+    key there is no reading, so the reply is an answer.
     """
     jev_lm = _jev_lm()
     if jev_lm is None:
@@ -2081,6 +2119,9 @@ def classify_user_reply(reply: str, question: str) -> str:
             choice = predictor(question=question, reply=reply).intent
         value, probability = _choice_value_and_probability(choice)
         logger.info(f"reply intent for {reply!r}: {value} (confidence {probability:.2f})")
+        if value == "stop_asking" and not _STOP_ASKING_REQUEST.search(reply):
+            logger.info(f"reply intent {value!r} vetoed: the reply holds no explicit request to stop asking")
+            return "answer"
         if value != "answer" and probability >= REPLY_INTENT_THRESHOLD:
             return value
         return "answer"

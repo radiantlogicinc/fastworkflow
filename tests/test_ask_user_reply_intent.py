@@ -13,6 +13,7 @@ from fastworkflow import workflow_agent
 from fastworkflow.utils.react import fastWorkflowReAct
 from fastworkflow.workflow_agent import (
     REPLY_INTENTS,
+    ClassifyReply,
     _apply_reply_intent,
     _post_ask_user_response,
     classify_user_reply,
@@ -52,10 +53,14 @@ def _use_predictor(monkeypatch, predict) -> None:
     monkeypatch.setattr(workflow_agent.dspy, "Predict", lambda signature: predict)
 
 
-@pytest.mark.parametrize("value", ["answer", "stop_asking", "abort"])
-def test_a_confident_intent_is_returned(monkeypatch, value):
+@pytest.mark.parametrize("value, reply", [
+    ("answer", "cancel it"),
+    ("stop_asking", "stop asking, just pick one"),   # stop_asking needs an explicit request (fix-jd9o.12)
+    ("abort", "cancel it"),
+])
+def test_a_confident_intent_is_returned(monkeypatch, value, reply):
     _use_predictor(monkeypatch, _fake_intent_predictor(value, 0.9))
-    assert classify_user_reply("cancel it", "Which one?") == value
+    assert classify_user_reply(reply, "Which one?") == value
 
 
 def test_an_unconfident_intent_is_an_answer(monkeypatch):
@@ -175,13 +180,22 @@ def _offered_values(signature) -> tuple[str, ...]:
     return get_args(choice_type.model_fields["value"].annotation)
 
 
-def test_reply_intents_are_the_three_measured_options_plus_wait_with_verbatim_texts():
-    assert REPLY_INTENTS == (
-        ("answer", "The reply answers the question or gives direction for the work to go on."),
-        ("stop_asking", "The reply declines to answer or says not to ask again, but does not ask to stop the work."),
-        ("abort", "The reply asks to stop, cancel or abort the work."),
-        ("wait", "The reply asks for a moment or says the user is checking; it gives no value and asks nothing."),
-    )
+def test_reply_intents_are_the_four_options_with_their_texts():
+    assert [value for value, _ in REPLY_INTENTS] == ["answer", "stop_asking", "abort", "wait"]
+    texts = dict(REPLY_INTENTS)
+    # a question back is an answer (the agent answers it and asks again), a hesitation is a wait,
+    # and stop_asking is only the explicit request to stop being asked
+    assert "question back" in texts["answer"] and "which one" in texts["answer"]
+    assert "hesitates" in texts["wait"] and "not sure" in texts["wait"]
+    assert "explicitly asks the agent to stop asking" in texts["stop_asking"]
+    assert "question back or a hesitation is never this" in texts["stop_asking"]
+
+
+def test_the_classifier_signature_tells_the_model_the_three_readings():
+    doc = ClassifyReply.__doc__
+    assert "question back" in doc and "hesitation" in doc and "explicit request" in doc
+    desc = ClassifyReply.output_fields["intent"].json_schema_extra.get("desc", "")
+    assert "stop_asking only for an explicit request" in desc
 
 
 def test_a_confident_wait_is_returned(monkeypatch):
@@ -272,3 +286,120 @@ def test_real_jev_hesitation_is_wait_and_an_answer_is_answer(jev_env):
     question = "Which repository should I search?"
     assert classify_user_reply("hmm, hold on, let me check", question) == "wait"
     assert classify_user_reply("the billing one", question) == "answer"
+
+
+# ---- stop_asking needs an explicit request to stop being asked (fix-jd9o.12) -----------------------
+# Jev's reading is a stand-in here; the phrase guard that vetoes a question or a hesitation read as stop_asking is real.
+# The rule is patterns only: no check on answer values in the reply (see the trade-off note below).
+
+@pytest.mark.parametrize("reply", [
+    "stop asking, just pick one",
+    "just do it",
+    "don't ask me again",
+    "Dont ask me that again please",
+    "do not ask me anymore",
+    "no need to ask, go with the billing one",
+    "never mind, you choose",
+    "nevermind",
+    # general families (fix-jd9o.12, round 2): stop/quit + pestering, no more questions, don't ask me about that
+    "no more questions",
+    "no further questions on this",
+    "no more questions about that, please",
+    "skip that, no more questions on this",
+    "quit pestering me",
+    "please stop bugging me about it",
+    "stop hassling me",
+    "stop with the questions",
+    "I'm not telling you that, and quit pestering me about it. Figure it out.",
+    "don't ask me about that",
+    "do not ask me about this again",
+    "never ask me about it again",
+    "I'm sorry, but I would rather not say, and I'd be grateful if you did not ask me about that again.",
+    "I'd rather you didn't ask me about that again, thanks",
+])
+def test_an_explicit_request_to_stop_asking_stands(monkeypatch, reply):
+    _use_predictor(monkeypatch, _fake_intent_predictor("stop_asking", 0.9))
+    assert classify_user_reply(reply, "Which repository should I search?") == "stop_asking"
+
+
+# The documented trade-off (fix-jd9o.12, owner decision: patterns only, no value check). The value check
+# vetoed 5 of 10 real stops on a fresh set, while without it about 1 in 130 value replies that also say
+# "stop asking" is taken as a stop. A stop only ends asking for that turn. So a stop phrase that carries an
+# answer value IS stop_asking under this rule. These cases document that cost; they are not a wish list.
+@pytest.mark.parametrize("reply", [
+    "Yes, probably switch to X, I think? Stop asking me this stuff!",   # the leak measured on m6c (ag_03 p3)
+    "stop asking me that, option 2",
+    "quit pestering me, the billing repo",
+    "no more questions, just use the second one",
+    "never mind, switch to the other repo",
+])
+def test_a_stop_phrase_with_an_answer_value_is_stop_asking_by_the_patterns_only_rule(monkeypatch, reply):
+    _use_predictor(monkeypatch, _fake_intent_predictor("stop_asking", 0.96))
+    assert classify_user_reply(reply, "Which repository should I search?") == "stop_asking"
+
+
+@pytest.mark.parametrize("reply, question", [
+    ("please don't ask me about the workspace again", "Which workspace should I use?"),
+    ("I prefer not to answer this one, and do not ask me about the workspace again, thank you for understanding.",
+     "Which workspace should I use?"),
+    ("nah, every single time, stop asking", "Which repository should I search?"),
+])
+def test_a_refusal_that_names_the_questions_topic_is_still_a_stop(monkeypatch, reply, question):
+    """A refusal that names the question's topic is an explicit request to stop asking, by its phrase."""
+    _use_predictor(monkeypatch, _fake_intent_predictor("stop_asking", 0.95))
+    assert classify_user_reply(reply, question) == "stop_asking"
+
+
+def test_naming_one_of_the_options_in_the_question_with_a_stop_phrase_is_stop_asking(monkeypatch):
+    """Patterns-only rule (fix-jd9o.12): the stop phrase stands even when the reply names an option. See above."""
+    _use_predictor(monkeypatch, _fake_intent_predictor("stop_asking", 0.95))
+    assert classify_user_reply("stop asking, DirectoryExplorer", "Which one: DirectoryExplorer or Billing?") == "stop_asking"
+
+
+@pytest.mark.parametrize("reply", [
+    "which one do you mean?",
+    "what are the options?",
+    "do you mean the billing repo or the other one?",
+    "hmm, not sure",
+    "let me think",
+    "hmm, hold on, let me check",
+    "I don't know the answer to that",
+])
+def test_a_question_back_or_a_hesitation_is_never_stop_asking(monkeypatch, reply):
+    """Jev read these as stop_asking at full confidence (the measured misreads); the guard keeps them out."""
+    _use_predictor(monkeypatch, _fake_intent_predictor("stop_asking", 0.99))
+    assert classify_user_reply(reply, "Which repository should I search?") == "answer"
+
+
+def test_a_stop_asking_read_below_the_threshold_is_an_answer_even_with_the_request(monkeypatch):
+    _use_predictor(monkeypatch, _fake_intent_predictor("stop_asking", 0.49))
+    assert classify_user_reply("just do it", "Which repository should I search?") == "answer"
+
+
+def test_a_question_back_read_as_answer_stays_answer(monkeypatch):
+    _use_predictor(monkeypatch, _fake_intent_predictor("answer", 0.95))
+    assert classify_user_reply("which one do you mean?", "Which repository should I search?") == "answer"
+
+
+@pytest.mark.parametrize("reply", ["which one do you mean?", "what are the options?", "hmm, not sure", "let me think"])
+def test_the_hesitation_and_question_reads_are_wait_or_answer_not_stop(monkeypatch, reply):
+    _use_predictor(monkeypatch, _fake_intent_predictor("wait", 0.9))
+    assert classify_user_reply(reply, "Which repository should I search?") == "wait"
+
+
+def test_without_a_key_no_reply_is_stop_asking_even_with_the_request(monkeypatch):
+    monkeypatch.setattr(workflow_agent, "_jev_lm", lambda: None)
+    assert classify_user_reply("stop asking, just do it", "Which one?") == "answer"
+
+
+def test_a_stop_asking_request_disables_ask_user_only_for_its_turn():
+    """The turn boundary: clearing the per-turn state lifts the restriction (the conversation fix keeps it)."""
+    ctx = WorkflowExecutionContext(run_as_agent=True)
+    agent = _agent()
+    ctx._workflow_tool_agent = agent
+    _apply_reply_intent(agent, "stop_asking")
+    assert "ask_user" not in _listed_tools(agent)
+
+    ctx._clear_subtask_state()
+
+    assert "ask_user" in _listed_tools(agent)
