@@ -1319,6 +1319,9 @@ class TestMinting:
             def bind_observability_identity(self, **kwargs):
                 bound.update(kwargs)
 
+            def has_parked_pending(self):
+                return False
+
         runtime = SimpleNamespace(
             execution_context=_Ctx(),
             channel_id=channel_id,
