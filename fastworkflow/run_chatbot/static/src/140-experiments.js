@@ -247,6 +247,14 @@ function showExperiment(experimentId) {
     pair("pass^" + exp.declared_attempts,
          score.reportable ? score.pass_at_k.toFixed(3) : "not reportable");
     pair("verdict sources", (score.outcome_sources || []).join(", "));
+    /* Which arm this run is, and what it was measured against. Shown only when
+       set, so an ordinary run is not padded with two empty rows — but a
+       distillation run has to say so somewhere, and this is the page a reader
+       lands on. */
+    if (exp.arm) { pair("arm", exp.arm); }
+    if (exp.baseline_experiment_id) {
+      pair("distilled against", exp.baseline_experiment_id);
+    }
     card.appendChild(kv);
     /* Collapsed: what this experiment ran under, keys verbatim, with
        "not recorded" where the store holds nothing (fix-aou (c)). */

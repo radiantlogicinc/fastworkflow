@@ -25,6 +25,7 @@ from fastworkflow.skill_commands import SkillCommand, SkillFormatError, plan_ski
 from fastworkflow.split_merge import (
     definite_descriptions, merge_subtasks, request_subjects, subjects_in, unnamed_subjects, with_referent)
 from fastworkflow.utils.logging import logger
+from fastworkflow.policy_runtime import policy_of
 from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
 from fastworkflow.command_metadata_api import CommandMetadataAPI
@@ -694,7 +695,17 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         "parameters": params_dict,
         "response": response_text
     }
-    _append_action_record(chat_session_obj, record)
+    # A command the policy blocked never ran, so it is not an executed action;
+    # what ran is also what the policy remembers (fastworkflow.policy_runtime).
+    if not command_output.command_response.artifacts.get("policy_blocked"):
+        _append_action_record(chat_session_obj, record)
+        if not internal and (policy := policy_of(chat_session_obj.workflow_tool_agent)):
+            policy.record_command(
+                name or (command.split() or [""])[0],
+                params_dict,
+                response_text,
+                bool(command_output.success),
+            )
     _hold_command_run(chat_session_obj, command_output, ran_in_clause, ran_in_name)
 
     # Check workflow context to determine if we're in an error state that needs specialized handling
@@ -764,6 +775,8 @@ def _post_ask_user_response(
     # Complete the pending unanswered ask_user entry with the user's answer.
     # Both topologies route resumes through here.
     _complete_ask_user_entry(chat_session_obj, user_response)
+    if policy := policy_of(chat_session_obj.workflow_tool_agent):
+        policy.observe_reply(clarification_request, user_response)
 
     workflow = chat_session_obj.get_active_workflow()
     if workflow:
@@ -996,6 +1009,10 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         on_step_complete=on_step_complete,
     )
     agent.on_step_end = lambda: _end_repeat_step(chat_session_obj)
+    # The policy verifier (the workflow's _policy/table.py); nothing without one.
+    from fastworkflow.policy_loader import attach_policy
+
+    attach_policy(agent, chat_session_obj)
     return agent
 
 

@@ -56,6 +56,14 @@ class fastWorkflowReAct(Module):
     # The steps code runs before the loop (``skill_phases.CodeSteps``), for the next
     # forward() only: set by the caller per run, taken (and cleared) by forward().
     code_steps: Any = None
+    # The conversation's policy (``fastworkflow.policy_runtime.AgentPolicy``), set by
+    # ``policy_loader.attach_policy`` when the workflow has _policy/table.py; None
+    # otherwise, and then nothing below changes behaviour.
+    policy: Any = None
+    # False while this run is not the last of its user turn (a sub-task or skill
+    # phase with more to come): the finish policy is skipped, since a later run
+    # carries the rest of the request. Set by the caller per run.
+    policy_final_run: bool = True
 
     def __init__(self, signature: type["Signature"], tools: list[Callable], max_iters: int = 10,
                  on_step_complete: Callable[[int, dict], bool] | None = None):
@@ -283,10 +291,45 @@ class fastWorkflowReAct(Module):
             if suspended is not None:
                 return suspended
 
-        extract = self._extract_prediction(self.trajectory, **input_args)
+        extract = self._final_extract(input_args)
         return dspy.Prediction(
             trajectory=self.trajectory, exhausted=self._exhausted_last_run, **extract
         )
+
+    def _final_extract(self, input_args: dict[str, Any]):
+        """The run's answer: the one the finish policy already checked, else extracted now."""
+        run_state = getattr(self, "run_state", None)
+        checked = run_state.pop("policy_extract", None) if isinstance(run_state, dict) else None
+        extract = checked if checked is not None else self._extract_prediction(
+            self.trajectory, **input_args)
+        policy = self.policy
+        if policy is not None and policy.enabled:
+            policy.observe_answer(_answer_text(extract))
+        return extract
+
+    def _policy_finish(self, trajectory: dict[str, Any], input_args: dict[str, Any]):
+        """``(decision, answer)`` for a finish the agent just chose, or ``(None, "")``.
+
+        The answer is extracted here, so the policy can check what it claims
+        against what ran; when no row objects, that extraction is kept
+        (``run_state["policy_extract"]``) and becomes the run's answer, so a
+        passing check costs no extra model call.
+        """
+        policy = self.policy
+        if policy is None or not policy.enabled or not self.policy_final_run:
+            return None, ""
+        try:
+            extract = self._extract_prediction(trajectory, **input_args)
+        except Exception as error:  # noqa: BLE001 - the check never fails a run
+            logger.warning("finish policy skipped: %s: %s", type(error).__name__, error)
+            return None, ""
+        answer = _answer_text(extract)
+        decision = policy.before_finish(answer)
+        if decision is None:
+            if not isinstance(getattr(self, "run_state", None), dict):
+                self.run_state = {}
+            self.run_state["policy_extract"] = extract
+        return decision, answer
 
     def resume(self, observation: str):
         """Resume a suspended run after the user answered an ask_user clarification."""
@@ -315,7 +358,7 @@ class fastWorkflowReAct(Module):
         if suspended is not None:
             return suspended
 
-        extract = self._extract_prediction(self.trajectory, **input_args)
+        extract = self._final_extract(input_args)
         return dspy.Prediction(
             trajectory=self.trajectory, exhausted=self._exhausted_last_run, **extract
         )
@@ -434,9 +477,30 @@ class fastWorkflowReAct(Module):
             if planned is not None:
                 step_attributes["by_code"] = True
 
+            # The policy (fastworkflow.policy_runtime), when one is enabled. A
+            # decision is delivered as the step's observation: the agent reads
+            # it like any result and keeps going.
+            policy = self.policy if self.policy is not None and self.policy.enabled else None
+            decision = None
             try:
                 if pred.next_tool_name in self.disabled_tools:
                     observation = f"{pred.next_tool_name} is not available now."
+                elif (policy is not None and planned is None
+                      and pred.next_tool_name not in (_COMMAND_TOOL, "finish")
+                      and (decision := policy.before_tool(
+                          pred.next_tool_name, pred.next_tool_args)) is not None):
+                    # Checked before it runs: a question to the user, once sent,
+                    # cannot be taken back.
+                    observation = decision.rewrite
+                elif policy is not None and planned is None and pred.next_tool_name == _COMMAND_TOOL:
+                    # Commands are checked at the executor (policy.guard), where
+                    # they exist in canonical form; only the model's own steps.
+                    policy.dispatching, policy.last_block = True, None
+                    try:
+                        observation = self.tools[pred.next_tool_name](**pred.next_tool_args)
+                    finally:
+                        policy.dispatching = False
+                    decision, policy.last_block = policy.last_block, None
                 else:
                     observation = self.tools[pred.next_tool_name](**pred.next_tool_args)
                 if pred.next_tool_name == "finish":
@@ -447,6 +511,26 @@ class fastWorkflowReAct(Module):
                         # contract change): the step's observation is the note,
                         # and the finish_check offload event says why.
                         reopened = True
+                    elif policy is not None and code is None:
+                        trajectory[f"observation_{idx}"] = observation
+                        decision, answer = self._policy_finish(trajectory, input_args)
+                        if decision is not None:
+                            observation = decision.rewrite
+                            reopened = True
+                            step_attributes["answer"] = answer
+                if decision is not None:
+                    step_attributes.update({
+                        "policy_mode": policy.point.mode.value,
+                        "policy_outcome": decision.outcome.value,
+                        "policy_source": decision.source_policy,
+                        "policy_table_version": decision.table_version,
+                        "policy_intent": policy.describe_intent(),
+                        "policy_requests": policy.describe_requests(),
+                        "policy_judgement": (
+                            policy.last_judgement.reason
+                            if pred.next_tool_name == "ask_user"
+                            and policy.last_judgement is not None else None),
+                    })
                 trajectory[f"observation_{idx}"] = observation
                 step_attributes["observation"] = _as_text(observation)
                 # The command text a tool built from arguments passed beside
@@ -732,6 +816,18 @@ def _extract_prompt_tokens() -> int | None:
         return int(tokens) if tokens else None
     except Exception:  # noqa: BLE001 - a measurement must never fail a turn
         return None
+
+
+def _answer_text(extract: Any) -> str:
+    """The final answer out of an ``extract`` prediction, or ""."""
+    for key in ("final_answer", "answer", "output"):
+        try:
+            value = extract.get(key) if hasattr(extract, "get") else getattr(extract, key, None)
+        except Exception:  # noqa: BLE001 - an odd prediction has no answer
+            value = None
+        if value:
+            return str(value)
+    return ""
 
 
 def _as_text(value: Any) -> str:

@@ -338,6 +338,13 @@ function renderHierarchy() {
       row.dataset.experimentId = node.experiment_id;
     }
     summary.appendChild(labelNode);
+    /* The arm is how a reader tells one experiment from another at a glance —
+       a teacher run from the distillation run measured against it. The rail is
+       where experiments are actually browsed, so it belongs here and not only
+       in the flat list. */
+    if (node.kind === "experiment" && node.info && node.info.arm) {
+      summary.appendChild(el("span", "pill armPill", node.info.arm));
+    }
     if (archived) {
       summary.appendChild(el("span", "pill", "Archived"));
     }

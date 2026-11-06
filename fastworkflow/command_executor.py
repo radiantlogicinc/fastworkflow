@@ -60,6 +60,30 @@ def _annotate_exception(exc: BaseException, **fields) -> None:
             pass
 
 
+def _policy_rewrite(chat_session, command_name: str, input_obj) -> Optional[str]:
+    """The policy guard's rewrite for this command, or None to run it.
+
+    The guard belongs to the agent serving the session right now, looked up at
+    each call: distillation swaps agents mid-session, so a reference taken
+    earlier could ask the wrong one. None whenever no policy is enabled.
+    """
+    from fastworkflow.policy_runtime import policy_of
+
+    policy = policy_of(getattr(chat_session, "workflow_tool_agent", None))
+    if policy is None:
+        return None
+    if input_obj is None:
+        params = {}
+    elif hasattr(input_obj, "model_dump"):
+        try:
+            params = input_obj.model_dump()
+        except Exception:  # noqa: BLE001 - the guard is still consulted
+            params = {}
+    else:
+        params = dict(input_obj) if isinstance(input_obj, dict) else {}
+    return policy.guard(command_name, params)
+
+
 def _annotation(exc: BaseException, name: str):
     """Read an annotation without letting a hostile __getattr__ escape.
 
@@ -296,6 +320,27 @@ class CommandExecutor(CommandExecutorInterface):
         raw_user_message = command
         if "raw_user_message" in workflow.context:
             raw_user_message = workflow.context['raw_user_message']
+
+        # The policy verifier's guard (fastworkflow.policy_runtime), consulted
+        # here because only here does the command exist in canonical form: its
+        # real name and validated parameters, whatever wording the agent used.
+        # A block returns the rewrite as a failed output and nothing executes.
+        # All policy logic lives with the guard; this is only the call point.
+        if (rewrite := _policy_rewrite(chat_session, command_name, input_obj)) is not None:
+            blocked = CommandOutput(
+                command_response=fastworkflow.CommandResponse(
+                    response=rewrite,
+                    success=False,
+                    artifacts={"policy_blocked": True},
+                )
+            )
+            blocked.workflow_name = workflow_name
+            blocked.context = context
+            blocked.command_name = command_name
+            blocked.command_parameters = input_obj or None
+            if "is_assistant_mode_command" in chat_session.cme_workflow._context:
+                del chat_session.cme_workflow._context["is_assistant_mode_command"]
+            return blocked
 
         try:
             if command_parameters_class := (

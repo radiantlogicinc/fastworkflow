@@ -4,6 +4,32 @@
 
 ### Added
 
+- **Policy verifiers** (`docs/policy_verifiers_design.md`). A workflow can ship a
+  versioned table of deterministic rules in `_policy/table.py`; a workflow that
+  has one has its rules enforced, with nothing to configure. The rules are checked:
+  - before a command the model chose runs, on its real name and validated
+    parameters;
+  - before a question goes to the user;
+  - before the answer is given.
+
+  A rule that fires replaces the step's result with its own text, and the agent
+  carries on. Rules that need to know what the user asked for read it from one
+  model call per user message (`LLM_POLICY_INTENT`, else `LLM_AGENT`). A workflow
+  without a table runs unchanged. `fw.agent.step` v8 records which rule fired; the
+  debug UI shows it on the step. Worked example:
+  `fastworkflow/examples/retail_workflow/_policy/`.
+- **`fastworkflow policy replay`**: replays a recorded experiment through a policy
+  table and reports every step it would block, with the totals on passing and on
+  failing attempts. This is the audit a table must pass before it is turned on.
+- **`fastworkflow distill --self` and `--pool-students/--pool-teachers`**: distil
+  failing trials against a passing trial of the same model, or against a passing
+  teacher trial when no student trial passed. `--max-pairs-per-task` caps the pairs;
+  `--provenance FILE` writes which pair produced which insights.
+- **Coding skills `distill-policy-verifiers` and `insights-to-failure-modes`**: the
+  end-to-end loop for any workflow, and clustering distilled insights into a
+  failure-mode taxonomy (with a checker).
+
+
 - **Sealed experiments can be selected and acted on together** (Tools → Sealed
   experiments). Select all, or pick rows, to seal complete experiments, delete
   sealed ones, or release invalid ones in one confirmation. A released
@@ -582,6 +608,11 @@
   file over the cap.
 
 ### Fixed
+
+- **Live distillation's student pass no longer starts from the teacher's end
+  state.** The workflow snapshot shared the live context dict, so restoring it
+  restored nothing. The student's commands are also kept off the command-trace
+  queue, so a host reading it sees one trajectory, not two interleaved.
 
 - **A clarification reply fills the field it was asked for** (fix-mbkw).
   When parameter extraction asks for a missing or invalid field, the reply is
