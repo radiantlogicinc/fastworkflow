@@ -560,6 +560,37 @@ def _drop_contained(items: list[str], known: list[str], identifiers: tuple[re.Pa
     return [items[i] for i in keep]
 
 
+#: A run of this many words written twice in one sub-task is a copied clause, not a phrase of the request.
+REPEATED_CLAUSE_WORDS = 8
+
+
+def without_repeated_clauses(text: str, min_words: int = REPEATED_CLAUSE_WORDS) -> str:
+    """``text`` with each clause of ``min_words`` or more words that it already holds cut out at its later copy.
+
+    A model that copies a sub-task can write one clause twice inside it ("A has asked for R: triage it, and A
+    has asked for R: triage it, and ..."). The first copy is kept, the words after the copy continue the
+    sentence, and ``text`` comes back unchanged when no clause repeats (the same object's text, unnormalised).
+    """
+    words = text.split()
+    kept: list[str] = []
+    seen: dict[tuple[str, ...], int] = {}
+    i = 0
+    while i < len(words):
+        key = tuple(words[i:i + min_words])
+        start = seen.get(key) if len(key) == min_words else None
+        if start is None:
+            kept.append(words[i])
+            i += 1
+            if len(kept) >= min_words:
+                seen.setdefault(tuple(kept[-min_words:]), len(kept) - min_words)
+            continue
+        k = 0
+        while i + k < len(words) and start + k < len(kept) and words[i + k] == kept[start + k]:
+            k += 1
+        i += k
+    return text if len(kept) == len(words) else " ".join(kept)
+
+
 def _join(texts: list[str]) -> str:
     out: list[str] = []
     seen: set[str] = set()
@@ -572,7 +603,7 @@ def _join(texts: list[str]) -> str:
             out[-1] += "."
         out.append(t[:1].upper() + t[1:] if out else t)
         seen |= w
-    return " ".join(out)
+    return without_repeated_clauses(" ".join(out))
 
 
 def _sentences(text: str) -> list[str]:
