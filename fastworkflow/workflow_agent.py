@@ -1998,7 +1998,7 @@ def _jev_lm():
     # default="" (not None): get_env_var warns about a variable that is missing and has no default,
     # and the missing key is the INFO line of 3.9, not a warning.
     key = fastworkflow.get_env_var("JEV_API_KEY", default="")
-    return TypeSafe(api_key=key, cache=True) if key else None
+    return TypeSafe(api_key=key, cache=dspy_utils.lm_cache_enabled()) if key else None
 
 
 @functools.lru_cache(maxsize=None)

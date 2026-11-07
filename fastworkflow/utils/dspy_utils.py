@@ -12,6 +12,14 @@ import fastworkflow
 from fastworkflow.utils.logging import logger
 
 
+def lm_cache_enabled() -> bool:
+    """Whether model responses may come from the DSPy response cache: False when ``FW_LM_CACHE`` is 0 or
+    false (the env file ``init`` loaded, else the process environment). Every LM the framework builds asks
+    this, so one switch turns the cache off for all of them (an experiment's repeated attempts must not
+    replay an earlier attempt's answers)."""
+    return fastworkflow.get_env_var("FW_LM_CACHE", default="1") not in ("0", "false", "False")
+
+
 def get_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):
     """
     Get the dspy LM object.
@@ -57,7 +65,7 @@ def get_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):
     # Unset leaves today's behavior exactly as it was. The value is the env file
     # ``init`` loaded, else the process environment (``get_env_var``, fix-hia1.40),
     # so a harness can set ``FW_LM_CACHE=0`` without calling ``init``.
-    if fastworkflow.get_env_var("FW_LM_CACHE", default="1") in ("0", "false", "False"):
+    if not lm_cache_enabled():
         kwargs.setdefault("cache", False)
     # Without one, a provider request that stalls blocks the turn for minutes.
     kwargs.setdefault(

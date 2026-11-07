@@ -1306,6 +1306,8 @@ error that names the new form; there is no legacy support, except where an item 
 
 ### Fixed
 
+- **FW_LM_CACHE=0 also turns off the Jev classifier's response cache** (`dspy_utils.lm_cache_enabled`, `workflow_agent._jev_lm`). Jev's LM was built with `cache=True` regardless, so repeated experiment attempts replayed earlier Jev answers (937 of 1,233 Jev calls in one three-run benchmark were cache hits) and run-to-run variance was understated.
+
 - **A split whose sub-tasks field has no numbered item is retried once, not taken as the request** (fix-variance, `workflow_agent.split_into_subtasks`): a visibly broken reply gets the existing retry at temperature 0.7; two such replies leave the request whole, and a genuine one-item split is still returned verbatim.
 - **A planning command call whose first phase's lookup finds nothing is planned again once** (fix-variance, `workflow_execution_context._restart_after_empty_first_phase`, `planning_commands.reextracted_arguments` / `replanned_call`, `argument_checks.PHASE_FAILED_EXTRACTION_NOTE`): the arguments are extracted again with the phase's observation after the request, and the call restarts only when they differ; the restarted phases carry `reextracted` (span contract v40).
 - **Verify options with duplicate labels build, so the check runs** (fix-variance, `planning_commands._distinct_labels`, `_check_one`): the first option of each label is kept, and a check that is still skipped (`check_verdicts`) is logged at INFO with its reason.
