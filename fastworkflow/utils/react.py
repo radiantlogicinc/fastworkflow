@@ -934,7 +934,8 @@ _COMMAND_TOOL = "execute_workflow_query"
 # Finish reviews per agent run (the finish check, observation_offloading.finish_check): a second finish is
 # reviewed too, so a run whose first note the agent did not act on is reopened once more. Past the cap the
 # run may finish. The review itself still declines when too few iterations are left.
-FINISH_REVIEWS_PER_RUN = 2
+# Was 2 (fix-a67q); back to 1 after benchmark pass 4, where the second review never helped.
+FINISH_REVIEWS_PER_RUN = 1
 _ARG_KEY = re.compile(r"[A-Za-z_]\w*")
 _TAG_LIKE = re.compile(r"</?[^<>]+>")
 

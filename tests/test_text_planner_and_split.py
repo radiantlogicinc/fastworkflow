@@ -554,6 +554,7 @@ _THREE_ITEMS = ("[[ ## reasoning ## ]]\nThree jobs.\n\n[[ ## subtasks ## ]]\n"
                 "[[ ## completed ## ]]")
 
 
+@pytest.mark.skip(reason="fix-kdag disabled after benchmark pass 4")
 def test_a_split_with_no_numbered_item_is_retried_and_the_retry_is_used():
     from fastworkflow.workflow_agent import split_into_subtasks
 
@@ -564,6 +565,7 @@ def test_a_split_with_no_numbered_item_is_retried_and_the_retry_is_used():
     assert lm.finishes == ["stop", "stop"]
 
 
+@pytest.mark.skip(reason="fix-kdag disabled after benchmark pass 4")
 def test_a_split_with_no_numbered_item_twice_leaves_the_request_whole():
     from fastworkflow.workflow_agent import split_into_subtasks
 

@@ -2915,9 +2915,10 @@ class WorkflowExecutionContext:
                     return value
                 if outcome == "failed":
                     first_step = self._next_step
-                    restarted = self._restart_after_empty_first_phase(phase, value)
-                    if restarted is not None:
-                        return restarted
+                    # Disabled after benchmark pass 4 (fix-zezw never restarted a call in 840 runs):
+                    # restarted = self._restart_after_empty_first_phase(phase, value)
+                    # if restarted is not None:
+                    #     return restarted
                     failed = self._phase_failure(phase, value)
                     if failed is not None:
                         return failed

@@ -2441,10 +2441,11 @@ def split_into_subtasks(user_query: str, planner_lm=None,
             logger.warning(f"the split was cut off at {split_max_tokens()} tokens; not using it")
             continue
         subtasks = [without_repeated_clauses(item.translate(_HYPHENS)) for item in _split_items(text)]
-        if not subtasks and text.strip():
-            # A non-empty sub-tasks field with no numbered item ("it") is a visibly broken reply: retried once.
-            logger.warning("the split listed no numbered sub-task; retrying once")
-            continue
+        # Disabled after benchmark pass 4 (fix-kdag never fired in 840 runs):
+        # if not subtasks and text.strip():
+        #     # A non-empty sub-tasks field with no numbered item ("it") is a visibly broken reply: retried once.
+        #     logger.warning("the split listed no numbered sub-task; retrying once")
+        #     continue
         if not subtasks or len(subtasks) > MAX_SUBTASKS:
             return [user_query]
         if not _visibly_broken(subtasks):

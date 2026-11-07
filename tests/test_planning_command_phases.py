@@ -2751,6 +2751,7 @@ def _extraction_stub(phased, monkeypatch, *, extracted, on_extract=None):
     return queries
 
 
+@pytest.mark.skip(reason="fix-zezw disabled after benchmark pass 4")
 def test_a_first_phase_that_finds_nothing_is_extracted_again_and_the_call_restarted_once(phased, monkeypatch):
     phased.args.update(name="Dunne")                       # the first extraction misspelt the title
     phased.script["find"] = dict(EMPTY_FIND)
@@ -2773,6 +2774,7 @@ def test_a_first_phase_that_finds_nothing_is_extracted_again_and_the_call_restar
     assert [s.attributes.get("reextracted") for s in spans[:3]] == [None, True, True]
 
 
+@pytest.mark.skip(reason="fix-zezw disabled after benchmark pass 4")
 def test_a_second_first_phase_failure_stops_the_call(phased, monkeypatch):
     phased.args.update(name="Dunne")
     phased.script["find"] = dict(EMPTY_FIND)
@@ -2787,6 +2789,7 @@ def test_a_second_first_phase_failure_stops_the_call(phased, monkeypatch):
     assert phased.ctx._phase_run is None
 
 
+@pytest.mark.skip(reason="fix-zezw disabled after benchmark pass 4")
 def test_a_failure_after_an_earlier_phase_ran_does_not_restart_the_call(phased, monkeypatch):
     phased.script["book"] = dict(SCRIPT["book"], runs=SCRIPT["book"]["runs"][:1])  # no list_loans
     queries = _extraction_stub(phased, monkeypatch, extracted={"name": "Dune", "notes": False})
@@ -2798,6 +2801,7 @@ def test_a_failure_after_an_earlier_phase_ran_does_not_restart_the_call(phased, 
     assert "stopped at its part 'book'" in result.answer
 
 
+@pytest.mark.skip(reason="fix-zezw disabled after benchmark pass 4")
 def test_a_first_phase_whose_steps_name_a_writing_command_is_not_restarted(phased, monkeypatch):
     # The library's find_book is declared writes = True (stubbed here: the todo workflow declares none). Its
     # step ran before the facts failed, so a restart would write it twice: no re-extraction, no second plan.
@@ -2815,6 +2819,7 @@ def test_a_first_phase_whose_steps_name_a_writing_command_is_not_restarted(phase
     assert "stopped at its part 'find'" in result.answer
 
 
+@pytest.mark.skip(reason="fix-zezw disabled after benchmark pass 4")
 def test_arguments_extracted_again_that_are_the_same_do_not_restart_the_call(phased, monkeypatch):
     phased.script["find"] = dict(EMPTY_FIND)
     queries = _extraction_stub(phased, monkeypatch, extracted={"name": "Dune", "notes": False})

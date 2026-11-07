@@ -3,6 +3,7 @@
 Offline, no model; the fixtures are a neutral library workflow.
 """
 import dspy
+import pytest
 
 from fastworkflow.observation_offloading import finish_check as fc
 from fastworkflow.utils.react import fastWorkflowReAct
@@ -280,6 +281,7 @@ def scripted(agent, monkeypatch, tools):
                         lambda *a, **k: next(replies))
 
 
+@pytest.mark.skip(reason="fix-a67q disabled after benchmark pass 4")
 def test_two_finish_notes_reopen_the_loop_and_a_third_finish_ends_it(monkeypatch):
     agent = fastWorkflowReAct("user_query -> answer", tools=[a_tool], max_iters=10)
     seen = []
@@ -320,16 +322,15 @@ def test_finish_with_arguments_ignores_them_and_is_reviewed(monkeypatch):
     agent = fastWorkflowReAct("user_query -> answer", tools=[a_tool], max_iters=10)
     seen = []
     agent.finish_reviewer = lambda trajectory, left: seen.append(left) or "Step 2 was not run."
+    # One review per run (fix-a67q's second review disabled after benchmark pass 4).
     scripted(agent, monkeypatch, [("finish", {"analysis": "done", "command": ""}),
-                                  ("finish", {"final_answer": "x", "__args__": {}}),
-                                  ("finish", {})])
+                                  ("finish", {"final_answer": "x", "__args__": {}})])
     trajectory = {}
     assert agent._run_loop(trajectory, 0, {}, 10, 0) is None
-    assert seen == [10 - 0 - 1, 10 - 1 - 1]
+    assert seen == [10 - 0 - 1]
     assert trajectory["observation_0"] == "Step 2 was not run."
-    assert trajectory["observation_1"] == "Step 2 was not run."
-    assert trajectory["observation_2"] == "Completed."
-    assert "observation_3" not in trajectory
+    assert trajectory["observation_1"] == "Completed."
+    assert "observation_2" not in trajectory
 
 
 def test_a_failing_reviewer_never_fails_the_run(monkeypatch):

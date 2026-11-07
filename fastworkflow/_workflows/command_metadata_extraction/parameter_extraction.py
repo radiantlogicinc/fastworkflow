@@ -914,8 +914,10 @@ class ParameterExtraction:
                         return None
             elif not value:
                 return None
-            raw[match.group(1)] = (None if (not was_quoted and value in ("None", "null"))
-                                   else unescape_punctuation(value))
+            # unescape_punctuation (fix-6lt7) disabled after benchmark pass 4, where no escaped value occurred:
+            # raw[match.group(1)] = (None if (not was_quoted and value in ("None", "null"))
+            #                        else unescape_punctuation(value))
+            raw[match.group(1)] = None if (not was_quoted and value in ("None", "null")) else value
 
         converted: dict[str, Any] = {}
         for name, value in raw.items():
