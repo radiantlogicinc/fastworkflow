@@ -36,10 +36,10 @@ A preview, in the order of the planning command-file layout (``docs/planning_com
    answer is the agent's. Steps (a phase's, or a flat planning command's, which runs as one phase)
    on a paged command that write no paging value are followed by how many pages each
    reads (``pages_line``), by the runtime's own rule (``planning_phases.step_paging``, which
-   ``CodeSteps`` pages by): "Pages: step 2 reads up to 20 pages; steps 4 and 5 read
-   page 1 only." A step whose note asks for the full list (``FULL_LIST_PHRASES``) reads
-   every page code reads, up to ``planning_phases.CODE_MAX_PAGES``; any other note, or
-   none, page 1 only.
+   ``CodeSteps`` pages by): "Pages: step 2 reads up to 20 pages, then the agent reads on;
+   steps 4 and 5 read page 1 only." A step whose note asks for the full list
+   (``FULL_LIST_PHRASES``) reads every page code reads, up to ``planning_phases.CODE_MAX_PAGES``,
+   then the agent reads on; any other note, or none, page 1 only.
    A run's own additions (the planner's ``steps_after``, extra
    command steps) are not part of the preview, so they may change the mode at run time.
 
@@ -1356,10 +1356,11 @@ def phase_command_names(workflow_folder: str) -> dict[str, Any]:
 def pages_line(steps: list[str], names: Optional[dict]) -> list[str]:
     """``["Pages: ...", ""]`` for a phase whose *steps* code runs on a paged command, read
     as a run reads them (``planning_phases.code_step_pages``, with *names* from
-    ``phase_command_names``): "Pages: step 2 reads up to 20 pages; steps 4 and 5 read
-    page 1 only." A step reads the later pages too, up to ``CODE_MAX_PAGES``, when its
-    note asks for the full list; else page 1 is all it reads. A step that writes a paging value
-    reads that page and is not listed. Else nothing."""
+    ``phase_command_names``): "Pages: step 2 reads up to 20 pages, then the agent reads on;
+    steps 4 and 5 read page 1 only." A step reads the later pages too, up to ``CODE_MAX_PAGES``
+    (then the agent reads on, from the next page), when its note asks for the full list; else
+    page 1 is all it reads. A step that writes a paging value reads that page and is not
+    listed. Else nothing."""
     from fastworkflow.planning_commands import number
     from fastworkflow.planning_phases import CODE_MAX_PAGES, code_step_pages
 
@@ -1367,7 +1368,7 @@ def pages_line(steps: list[str], names: Optional[dict]) -> list[str]:
         return []
     every_page, page_one = code_step_pages(number(steps), names.get("commands", ()),
                                            names.get("core_commands", ()), names["parameters"])
-    up_to = f"up to {CODE_MAX_PAGES} pages"
+    up_to = f"up to {CODE_MAX_PAGES} pages, then the agent reads on"
     parts = [f"{_step_numbers(numbers)} {verb}" for numbers, verb in sorted((
         (every_page, f"reads {up_to}" if len(every_page) == 1 else f"read {up_to}"),
         (page_one, "reads page 1 only" if len(page_one) == 1 else "read page 1 only")))

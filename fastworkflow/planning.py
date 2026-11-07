@@ -207,7 +207,8 @@ def run(command: str, **values: Any) -> Step:
 
 
 def full_list(command: str, **values: Any) -> Step:
-    """A paged command step code reads through every page (up to ``CODE_MAX_PAGES``):
+    """A paged command step code reads through every page (up to ``CODE_MAX_PAGES``, then the
+    agent reads on from the next page):
     ``<command> <k=v ...> (full list)``."""
     return Step(f"{_command_step(command, values)} (full list)", "full_list")
 

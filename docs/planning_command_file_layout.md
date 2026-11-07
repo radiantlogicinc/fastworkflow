@@ -334,10 +334,11 @@ A preview follows the order above:
    phase that runs commands has no such line: the agent writes its answer. Steps on a
    paged command (a paging parameter such as `start`) that write no paging value are
    followed by how many pages each reads, by the rule code pages by
-   (`planning_phases.step_paging`): "Pages: step 2 reads up to 20 pages; steps 4 and 5
-   read page 1 only." Only a note that asks for the full list (`list_parts (full list)`,
-   see `FULL_LIST_PHRASES` in `docs/planning_command_phases.md`) reads later pages, which code reads
-   up to `planning_phases.CODE_MAX_PAGES` (20); any other note
+   (`planning_phases.step_paging`): "Pages: step 2 reads up to 20 pages, then the agent reads
+   on; steps 4 and 5 read page 1 only." Only a note that asks for the full list
+   (`list_parts (full list)`, see `FULL_LIST_PHRASES` in `docs/planning_command_phases.md`) reads
+   later pages, which code reads up to `planning_phases.CODE_MAX_PAGES` (20), then the agent
+   reads on from the next page; any other note
    ("(all of them)") or none reads page 1 only. The paging parameters come from the
    workflow's commands, so a folder without its `_commands` shows no "Pages:" line. Steps
    a run adds (the planner's

@@ -7,6 +7,7 @@ run in code (the workflow ships no trained intent models). Neutral toy names onl
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import dspy
@@ -844,13 +845,65 @@ def test_a_paging_request_in_a_note_reads_every_page_by_code(paged):
     assert _phases(paged.sink)[0].attributes["code_stop"] == "done"
 
 
-def test_code_reads_at_most_code_max_pages_then_goes_on(paged, monkeypatch):
+def test_code_reads_at_most_code_max_pages_then_stops_on_the_step(paged, monkeypatch):
     monkeypatch.setattr(planning_phases, "CODE_MAX_PAGES", 2)
     paged.plan = _plan(Phase("report", lambda: [
         "list_items (full list: next page with start=<n> until complete)", "list_todo_lists"]))
+    paged.model.run("list_items start=20")
+    paged.model.run("list_todo_lists")
+    paged.model.finish()
     paged.turn()
+
+    # Code read the two pages the cap allows, then stopped on the step with rows left: the
+    # pages read are kept, and the agent reads on from start=20, not from page 1.
+    assert paged.workflow.sent == ["list_items", "list_items start=10", "list_items start=20",
+                                   "list_todo_lists"]
+    span = _phases(paged.sink)[0]
+    assert span.attributes["code_stop"] == "open step 1"
+    assert span.attributes["steps_by_code"] == 2
+    query = paged.model.asked[0]["query"]
+    assert "Step 1 is not done: it is a full list, and code read 2 pages of it and stopped there" in query
+    assert "Run its next page, `list_items start=20`" in query
+    assert "Do not run it from page 1 again." in query
+
+
+def _two_pages(command):
+    """Two pages of ten items: the second is the last, so a list of two pages ends at a cap of 2."""
+    start = int((command.split("start=") + ["0"])[1].split()[0]) if "start=" in command else 0
+    more = " Next page: start=10." if start == 0 else ""
+    return f"items {start}-{start + 9}.{more}", {"labels": [f"i{start}"]}
+
+
+def test_a_list_that_ends_at_the_cap_is_done(paged, monkeypatch):
+    monkeypatch.setattr(planning_phases, "CODE_MAX_PAGES", 2)
+    paged.workflow.scripted["list_items"] = _two_pages
+    paged.plan = _plan(Phase("report", lambda: [
+        "list_items (full list: next page with start=<n> until complete)", "list_todo_lists"]))
+    paged.turn()
+
+    # Page 2 names no later page, so no rows remain at the cap: the step is done, and code goes on.
     assert paged.model.asked == []
     assert paged.workflow.sent == ["list_items", "list_items start=10", "list_todo_lists"]
+    assert _phases(paged.sink)[0].attributes["code_stop"] == "done"
+
+
+def test_the_cap_is_logged_with_the_pages_read_and_the_next_start(paged, monkeypatch, caplog):
+    monkeypatch.setattr(planning_phases, "CODE_MAX_PAGES", 2)
+    paged.plan = _plan(Phase("report", lambda: [
+        "list_items (full list: next page with start=<n> until complete)", "list_todo_lists"]))
+    paged.model.run("list_items start=20")
+    paged.model.run("list_todo_lists")
+    paged.model.finish()
+    log = logging.getLogger("fastWorkflow")
+    log.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.INFO, logger="fastWorkflow"):
+            paged.turn()
+    finally:
+        log.removeHandler(caplog.handler)
+
+    assert ("code stopped at step 1 (list_items): 2 pages read and rows remain; "
+            "the agent reads on from start=20") in caplog.text
 
 
 @pytest.mark.parametrize("observation, start, later", [

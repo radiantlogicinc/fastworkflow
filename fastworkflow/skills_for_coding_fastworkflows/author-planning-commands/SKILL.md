@@ -333,7 +333,7 @@ strings work too; the helpers only make the wording exact.
 | Helper | Writes | What it does |
 |---|---|---|
 | `run("cmd", k=v)` | `cmd k=v` | A command step code runs once every required value is given. `run` on another planning command is a nested call (see below). |
-| `full_list("cmd", k=v)` | `cmd k=v (full list)` | A paged command step code reads through every page, up to `CODE_MAX_PAGES` (20). |
+| `full_list("cmd", k=v)` | `cmd k=v (full list)` | A paged command step code reads through every page, up to `CODE_MAX_PAGES` (20); past that the step is open and the agent reads on from the next page. |
 | `when("condition", step)` | `only when condition, step` | A conditional step the agent decides whether to run. |
 | `do_not_run("cmd")` | `do not run cmd` | A negated guard: code passes it over and never holds it to a run. |
 | `pick("cmd", item_uid=uid, named=name)` | `cmd item_uid=<uid>` | Opens one row. With a concrete uid, the uid is written. |
@@ -410,9 +410,10 @@ fastworkflow command preview <workflow_folder> --check    # writes nothing; exit
 3. Read the preview: the inputs, the phases table ("runs" says when each phase runs), the facts with
    their sources, and the steps of each different plan. A step rendered with `<phase.fact>`
    placeholders shows where a value comes from at run time. Under the steps, "Pages: step 2 reads up
-   to 20 pages; step 3 reads page 1 only." says how code pages each step on a paged command
-   (`planning_phases.step_paging`): only a note with a full-list phrase (`FULL_LIST_PHRASES`: "full
-   list", "every page", ...) reads later pages, up to `CODE_MAX_PAGES` (20); "(all of them)" or no
+   to 20 pages, then the agent reads on; step 3 reads page 1 only." says how code pages each step on a
+   paged command (`planning_phases.step_paging`): only a note with a full-list phrase (`FULL_LIST_PHRASES`:
+   "full list", "every page", ...) reads later pages, up to `CODE_MAX_PAGES` (20); past that, with rows
+   left, code stops on the step and the agent reads on from the next page; "(all of them)" or no
    note reads page 1. A step that writes `start=` reads that page and is not listed.
 4. Check each step against the grammar table below: is it run by code, held by the finish check,
    written into the answer as intended?
@@ -443,7 +444,7 @@ it conditional).
 | a required field left out (`find_item` with `query` required) | Open | `planning_phases.py` `_code_step` |
 | `open_x with the uid of the Alpha match`, right after a step code ran (`find_x query=Alpha`) | Pick: code sends `open_x x_uid=<uid>` when exactly one row of that run's Output holds `Alpha` whole, or it has one row; the one unwritten required field must be a uid (`uid`, `id`, `*_uid`, `*_id`). A uid containing `(` or `;` is quoted | `planning_phases.py` `pick_step`, `_is_uid_field`; `planning.py` `pick` |
 | `cmd x_uid=<the Alpha uid> other=v` after the lookup | Pick with the other values sent as written; the uid's must be the only placeholder | `planning_phases.py` `pick_step` |
-| `cmd (full list)`; also `every page`, `all pages`, `until complete`, `page through` (any case) in the note | Code reads page 1, then each later page the output names, as more code-run steps, up to `CODE_MAX_PAGES` (20) pages; then code goes on | `planning_phases.py` `FULL_LIST_PHRASES`, `_paging`, `_next_page`, `CODE_MAX_PAGES` |
+| `cmd (full list)`; also `every page`, `all pages`, `until complete`, `page through` (any case) in the note | Code reads page 1, then each later page the output names, as more code-run steps, up to `CODE_MAX_PAGES` (20) pages; then the step is open and the agent reads on from the next page | `planning_phases.py` `FULL_LIST_PHRASES`, `_paging`, `_next_page`, `CODE_MAX_PAGES` |
 | `cmd start=20` (`start`) | That page only; code never computes a next page | `facts.py` `PAGING_PARAMETERS` |
 | `cmd start=<n>`, or a step `next page with start=<n> until the list is read` | Open: the agent pages | `planning_phases.py` `_code_step` |
 | any other note, or none, on a paged command | Page 1 is what the step wants; code goes on | `planning_phases.py` `_paging` |

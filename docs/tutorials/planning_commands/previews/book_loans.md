@@ -84,7 +84,7 @@ _Steps below are rendered with placeholder facts: `<phase.fact>` stands for that
 
 1. `list_loans book_uid=<book.show.book_uid> (full list)`
 
-Pages: step 1 reads up to 20 pages.
+Pages: step 1 reads up to 20 pages, then the agent reads on.
 
 ## Answer
 

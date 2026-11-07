@@ -646,14 +646,15 @@ then, while the observation names a later page (the largest value of one of the
 command's paging parameters above the page just read, as in `Next page: start=60`;
 `planning_phases._next_page`), runs the same command with that value as another step run
 by code (thought "(its page at start=60)"). It stops at the last page or after
-`planning_phases.CODE_MAX_PAGES` (20) pages, page 1 included, and goes on with the pages
-read; the facts join them and give the list's total. Each page is a step of the
+`planning_phases.CODE_MAX_PAGES` (20) pages, page 1 included, with rows still to read, code
+stops on that step as an open step: the pages read are kept, and the agent reads on from the
+next page. The facts join the pages read and give the list's total. Each page is a step of the
 trajectory but not of the agent's step budget. Before, code stopped after page 1 and the
 agent spent one model step per page, which ran long lists out of the phase budget. Any
 other note, or none: page 1 is what the step wants, and code goes on. The rule is
 `planning_phases.step_paging`; the planning command preview reads each step with it and says, under the
 steps, which read up to 20 pages and which page 1 only ("Pages: step 2 reads up to 20
-pages; step 3 reads page 1 only.", `planning_phases.code_step_pages`), so a note such as
+pages, then the agent reads on; step 3 reads page 1 only.", `planning_phases.code_step_pages`), so a note such as
 "(all of them)" that reads page 1 shows there.
 
 **Always on.** Code-run steps are always on; the temporary switch that once turned them off has
@@ -681,7 +682,8 @@ Nothing changes for the app developer.
 - A note never changes what runs: write a filter as an argument
   (`list_loans status=overdue`), not as a note (`list_loans (only overdue ones)`).
 - For every page, say so in the note with one of the `FULL_LIST_PHRASES`
-  (`list_loans (full list)`), which code pages (up to `CODE_MAX_PAGES` pages), or write
+  (`list_loans (full list)`), which code pages (up to `CODE_MAX_PAGES` pages, then the agent
+  reads on from the next page), or write
   the paging as a step of its own with `start=` (`next page with start=<n> until the
   list is read`), which the agent pages. A note that asks for more pages in other words
   gets page 1.

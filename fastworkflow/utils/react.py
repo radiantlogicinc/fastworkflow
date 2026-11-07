@@ -303,6 +303,11 @@ class fastWorkflowReAct(Module):
             # say every step has run (``source.done_inputs``).
             if source is not None and source.finished:
                 input_args.update(getattr(source, "done_inputs", None) or {})
+            page_hint = getattr(source, "page_hint", "") if source is not None else ""
+            if page_hint and "user_query" in input_args:
+                # Code stopped on a full-list step at its page cap: the agent reads on from the
+                # next page, with the pages code read kept (CodeSteps._page_cap).
+                input_args["user_query"] = f"{input_args['user_query']}\n\n{page_hint}"
             suspended = self._run_loop(
                 self.trajectory, idx, input_args, max_iters, exception_count
             )

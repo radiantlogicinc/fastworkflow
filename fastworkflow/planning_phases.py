@@ -146,10 +146,11 @@ How the runner (``WorkflowExecutionContext``) runs a phased planning command cal
    names its lookup value exactly (or its only row) runs too (``pick_step``).
    It stops at the first open step or a failed step, and the agent does the rest. A
    step whose note asks for the full list (``FULL_LIST_PHRASES``) is paged by code: it
-   runs each later page the output names, up to ``CODE_MAX_PAGES`` pages. A phase run
-   wholly by code makes no model call, except the one answer call of a phase whose
-   answer is shown (the last phase, the extra-steps phase). Never for planner-written
-   steps or on a resume.
+   runs each later page the output names, up to ``CODE_MAX_PAGES`` pages; past that,
+   with rows still to read, code stops on that step (an open step) and the agent reads
+   on from the next page. A phase run wholly by code makes no model call, except the one
+   answer call of a phase whose answer is shown (the last phase, the extra-steps phase).
+   Never for planner-written steps or on a resume.
 
 Each phase run is a ``fw.skill.phase`` span (see ``tracing.SPAN_CONTRACTS``).
 """
@@ -170,6 +171,7 @@ from pydantic import BaseModel
 from fastworkflow.observation_offloading import finish_check
 from fastworkflow.observation_offloading.facts import facts_text
 from fastworkflow.observation_offloading.labels import context_clause
+from fastworkflow.utils.logging import logger
 from fastworkflow.utils.python_utils import type_text
 
 #: The executor step budget of one phase. A module constant: the tests monkeypatch it.
@@ -1768,8 +1770,8 @@ def phase_query(request: str, plan_text: str, *, index: int, count: int, name: s
 # ----------------------------------------------------------------------
 
 #: Words in a step's note (after the chain) that ask for every page of a paged command.
-#: Only then does code read the later pages the output names (up to ``CODE_MAX_PAGES``);
-#: any other note (or none) means page 1 is what the step wants.
+#: Only then does code read the later pages the output names (up to ``CODE_MAX_PAGES``,
+#: then the agent reads on); any other note (or none) means page 1 is what the step wants.
 FULL_LIST_PHRASES = ("full list", "every page", "all pages", "until complete", "page through")
 #: Core commands code runs as a step of their own, written with nothing after them.
 _CODE_NAVIGATION = ("go_up", "reset_context")
@@ -2158,8 +2160,8 @@ def step_paging(step: Any, parameters: Callable[[str], list]) -> tuple[list[str]
     one (then the step reads the page it names). With *paging*, code reads page 1;
     *every_page* says the step's note (from the first "(" or ";" after its command) asks
     for the full list (``FULL_LIST_PHRASES``), so code goes on to each later page the
-    output names, up to ``CODE_MAX_PAGES`` pages (fix-ajir.36). Otherwise page 1 is all
-    the step reads.
+    output names, up to ``CODE_MAX_PAGES`` pages (fix-ajir.36), and stops on the step
+    (an open step) past them with rows left. Otherwise page 1 is all the step reads.
     ``CodeSteps`` and the planning command preview (``code_step_pages``) both read paging here.
     """
     from fastworkflow.observation_offloading.finish_check import step_chain
@@ -2177,10 +2179,10 @@ def code_step_pages(plan_text: str, commands: Iterable[str], core_commands: Iter
                     parameters: Callable[[str], list]) -> tuple[list[int], list[int]]:
     """``(every_page, page_one)``: the numbers of the steps of *plan_text* that run a paged
     command without writing a paging value, split by ``step_paging``: those whose note
-    asks for every page (code reads up to ``CODE_MAX_PAGES`` pages) and those that read
-    page 1 only. A step counts whether ``plan_code_steps`` reads it as run by code or as open
-    (code may still run it: a pick, or a value that is a placeholder in a preview); one
-    code passes over (an answer or negated step) does not."""
+    asks for every page (code reads up to ``CODE_MAX_PAGES`` pages, then the agent reads
+    on) and those that read page 1 only. A step counts whether ``plan_code_steps`` reads it
+    as run by code or as open (code may still run it: a pick, or a value that is a
+    placeholder in a preview); one code passes over (an answer or negated step) does not."""
     every_page: list[int] = []
     page_one: list[int] = []
     for step, command, _ in plan_code_steps(plan_text, commands, core_commands, parameters):
@@ -2193,7 +2195,8 @@ def code_step_pages(plan_text: str, commands: Iterable[str], core_commands: Iter
 
 
 #: The most pages code reads of one full-list step, page 1 included (fix-ajir.36). Past
-#: it code goes on with the pages read: the facts give the total and how many were read.
+#: it, with rows still to read, code stops on that step (an open step) with the pages
+#: read kept, and the agent reads on from the next page (``CodeSteps.ran``).
 CODE_MAX_PAGES = 20
 
 
@@ -2274,8 +2277,9 @@ class CodeSteps:
     the one matching row of the step code ran before it, ``pick_step``, runs), after a step that
     failed. A step on a paged command whose note asks for the full list
     (``FULL_LIST_PHRASES``) runs again for each later page its output names, up to
-    ``CODE_MAX_PAGES`` pages, each a step of its own (fix-ajir.36; code then goes on with
-    the pages read). A step whose command is not available where the workflow is goes
+    ``CODE_MAX_PAGES`` pages, each a step of its own (fix-ajir.36). Past that, with rows
+    still to read, code stops on that step (an open step) and the agent reads on from the
+    next page (``page_hint``). A step whose command is not available where the workflow is goes
     there first when ``context_navigation.code_path`` finds a no-value path; each move is
     a step of its own. Code never fails the phase: it hands over to the agent.
 
@@ -2323,6 +2327,9 @@ class CodeSteps:
         # pages read, and the next page to read (name, value) or None.
         self._paged: Optional[tuple[str, int, int]] = None
         self._next: Optional[tuple[str, int]] = None
+        #: What the agent is told when code stopped on a full-list step at ``CODE_MAX_PAGES``
+        #: pages (``_page_cap``); "" otherwise.
+        self.page_hint = ""
 
     @property
     def runs_any(self) -> bool:
@@ -2378,8 +2385,9 @@ class CodeSteps:
                 + self._picks.get(step.number, "") + ".", command)
 
     def ran(self, step_index: int, observation: Any) -> None:
-        """How the command ``next()`` gave went: a failure, or a page-1 run with more
-        pages, stops code."""
+        """How the command ``next()`` gave went: a failure stops code, and so does a paged
+        step that reaches ``CODE_MAX_PAGES`` pages with rows still to read (an open step);
+        a run with more pages goes on to the next page."""
         step, paging, move = self._current
         self.count += 1
         if not self._succeeded(step_index, observation):
@@ -2387,17 +2395,34 @@ class CodeSteps:
             self.stop = (f"no path for step {step.number}" if refused and not move
                          else f"step {step.number} failed")
         elif paging and self._paged is not None:
-            # Code reads the page the observation names next, up to CODE_MAX_PAGES.
-            _, start, pages = self._paged
+            # Code reads the page the observation names next, up to CODE_MAX_PAGES; at the
+            # cap with rows left, code stops on this step (_page_cap).
+            command, start, pages = self._paged
             later = _next_page(observation, paging, start, run=self._run_of(step_index))
             if later is not None and pages < CODE_MAX_PAGES:
                 self._next = later
+            elif later is not None:
+                self._page_cap(step, command, pages, later)
         if not move:
             more = not paging and _more_pages(
                 observation, _command_paging(self._parameters(step.command)),
                 run=self._run_of(step_index))
             self._step_info[step_index] = (step.number, more)
         self._lookup = None if move else (step, step_index, observation)
+
+    def _page_cap(self, step: Any, command: str, pages: int, later: tuple[str, int]) -> None:
+        """Code stops on full-list *step* after *pages* pages, with rows still to read from
+        *later* (``(name, value)``, the next page). The pages read are kept; the agent is
+        told which page to read next, and that page 1 is not to be read again."""
+        name, value = later
+        self.stop = f"open step {step.number}"
+        self.page_hint = (
+            f"Step {step.number} is not done: it is a full list, and code read {pages} "
+            f"page{'s' if pages != 1 else ''} of it and stopped there. "
+            f"Run its next page, `{command} {name}={value}`, then each later page its output "
+            f"names, then the remaining steps. Do not run it from page 1 again.")
+        logger.info("code stopped at step %d (%s): %d pages read and rows remain; the agent "
+                    "reads on from %s=%d", step.number, command, pages, name, value)
 
     def _call_runs(self) -> list[dict[str, Any]]:
         """The call's own runs so far, in run order, for ``pick_listing``."""
@@ -2479,7 +2504,7 @@ class CodeSteps:
         """The paging parameters (``facts.PAGING_PARAMETERS``) of the step's command when
         the step writes none of them and its note asks for the full list
         (``FULL_LIST_PHRASES``): code reads page 1 and each later page the output names,
-        up to ``CODE_MAX_PAGES`` (``step_paging``)."""
+        up to ``CODE_MAX_PAGES``, then stops on the step (``step_paging``)."""
         paging, every_page = step_paging(step, self._parameters)
         return paging if every_page else []
 
@@ -2870,8 +2895,6 @@ def answer_only_answer(query: str, plan_text: str, outputs: Mapping[str, Any]) -
     try:
         answer = answer_from_steps(plan_text) if by_code else write_answer(query)
     except AdapterParseError as error:
-        from fastworkflow.utils.logging import logger
-
         logger.warning(f"answer-only reply could not be parsed twice; written from the steps: {error}")
         answer = ""
     if is_empty_answer(answer):
@@ -3280,7 +3303,6 @@ def run_call_result(plan_cls: type, input: Any, outputs: Mapping[str, Any], *,
     Returns ``(command_response, fallback_used)``, or ``(None, False)`` for a ``None`` return.
     """
     import fastworkflow
-    from fastworkflow.utils.logging import logger
 
     result_fn = _result_fn_on_class(plan_cls)
     if result_fn is None:
