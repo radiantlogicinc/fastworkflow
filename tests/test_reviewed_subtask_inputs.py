@@ -88,6 +88,12 @@ def _planning_line(record, number: int) -> str:
     return next(text for text in record.rendering.splitlines() if text.startswith(f"{number}. "))
 
 
+def _subtask(record, number: int) -> SubTask:
+    from fastworkflow import review_engine
+
+    return review_engine.proposal_of(record).items[number - 1]
+
+
 def _bindings(gated) -> list:
     """The turn span's ``subtask_bindings`` (the trace record of shown == run), from the last turn span."""
     from fastworkflow import tracing
@@ -110,8 +116,8 @@ def _review(gated, monkeypatch, subtasks):
 def test_an_accepted_draft_runs_the_values_it_shows_with_no_second_extraction(gated, monkeypatch, scripted):
     lm = scripted(EMMA_ANSWER, JOKE_ANSWER)
     record = _review(gated, monkeypatch, [EMMA, JOKE])
-    assert "inputs: title=Emma; means: planning:Library/book_by_title" in _planning_line(record, 1)
-    assert "inputs: member=Ann; means: planning:Library/member_report" in _planning_line(record, 2)
+    assert "(title: Emma)" in _planning_line(record, 1)
+    assert "(member: Ann)" in _planning_line(record, 2)
     drafted = len(lm.prompts)
     assert drafted == 2                                         # one extraction per sub-task, in the draft
 
@@ -130,7 +136,7 @@ def test_a_value_the_user_edits_is_the_value_that_runs(gated, monkeypatch, scrip
     lm = scripted(EMMA_ANSWER, JOKE_ANSWER)
     record = _review(gated, monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn("change 1: inputs=title=Persuasion")
-    assert "inputs: title=Persuasion;" in _planning_line(record, 1)
+    assert "(title: Persuasion)" in _planning_line(record, 1)
     drafted = len(lm.prompts)
 
     gated.script.steps = list(STEPS)
@@ -181,7 +187,7 @@ def test_a_from_sub_task_input_runs_with_that_sub_tasks_output(gated, monkeypatc
     record = _review(gated, monkeypatch, [JOKE, EMMA])
     gated.ctx.process_turn("change 1: means=from_scratch")
     gated.ctx.process_turn("change 2: inputs=title=from sub-task 1")
-    assert "inputs: title=from sub-task 1;" in _planning_line(record, 2)
+    assert "(title: from sub-task 1)" in _planning_line(record, 2)
     drafted = len(lm.prompts)
 
     gated.script.steps = list(STEPS)
@@ -223,10 +229,10 @@ def test_a_means_changed_in_the_review_is_drafted_again_for_its_new_command(gate
     lm = scripted(EMMA_ANSWER, JOKE_ANSWER, {"reasoning": "the title, for count_books", "query": "Emma"})
     record = _review(gated, monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn("change 1: means=planning:Library/count_books")
-    assert "inputs: query=Emma; means: planning:Library/count_books" in _planning_line(record, 1)
-    assert "title=" not in _planning_line(record, 1)
+    assert "(query: Emma)" in _planning_line(record, 1)
+    assert "title:" not in _planning_line(record, 1)
     assert len(lm.prompts) == 3 and EMMA in lm.prompts[2]
-    assert "inputs: member=Ann;" in _planning_line(record, 2)  # the sub-task the edit left alone is not drafted again
+    assert "(member: Ann)" in _planning_line(record, 2)  # the sub-task the edit left alone is not drafted again
 
     gated.script.steps = list(STEPS)
     out = gated.ctx.process_turn("accept")
@@ -242,7 +248,7 @@ def test_an_inputs_edit_is_not_drafted_again(gated, monkeypatch, scripted):
     lm = scripted(EMMA_ANSWER, JOKE_ANSWER)
     record = _review(gated, monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn("change 1: inputs=title=Dune")
-    assert "inputs: title=Dune;" in _planning_line(record, 1) and len(lm.prompts) == 2
+    assert "(title: Dune)" in _planning_line(record, 1) and len(lm.prompts) == 2
 
 
 def test_a_sub_task_the_draft_never_drafted_has_only_its_unbound_values_drafted_at_run_time(gated, scripted):
@@ -269,7 +275,7 @@ def test_a_drafted_sub_task_whose_required_value_is_removed_falls_back_to_the_ag
     lm = scripted(EMMA_ANSWER, JOKE_ANSWER)
     record = _review(gated, monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn("change 1: inputs=none")
-    assert "inputs: none;" in _planning_line(record, 1)
+    assert _subtask(record, 1).inputs == []
 
     gated.script.steps = list(STEPS)
     out = gated.ctx.process_turn("accept")
@@ -288,8 +294,8 @@ def test_a_draft_refusal_accepted_as_shown_falls_back_to_the_agent_with_no_new_e
                   JOKE_ANSWER)
     planner = _planner(gated, {"reasoning": "typed fill", "title": "Persuasion", "steps_before": [], "steps_after": []})
     record = _review(gated, monkeypatch, [EMMA, JOKE])
-    assert "inputs: none;" in _planning_line(record, 1)
-    assert "[check: title='Persuasion' is not written in the request]" in _planning_line(record, 1)
+    assert _subtask(record, 1).inputs == []
+    assert "Persuasion" in _subtask(record, 1).check
 
     gated.script.steps = list(STEPS)
     out = gated.ctx.process_turn("accept")
@@ -311,7 +317,7 @@ def test_an_execution_command_sub_task_runs_its_reviewed_inputs_by_code(gated, m
     lm = scripted(EMMA_ANSWER, JOKE_ANSWER, FIND_ANSWER)
     record = _review(gated, monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn("change 2: means=plain:Library/find_member")       # F3 drafts it for find_member
-    assert "inputs: query=Ann; means: plain:Library/find_member" in _planning_line(record, 2)
+    assert "(query: Ann)" in _planning_line(record, 2)
     drafted = len(lm.prompts)
 
     gated.script.steps = [("finish", {})] * 20                  # the agent only ever finishes: it writes no command
@@ -367,7 +373,7 @@ def test_an_execution_command_input_from_an_earlier_sub_task_takes_the_declared_
     record = _review(gated, monkeypatch, [find_dune, open_it])
     gated.ctx.process_turn("change 1: means=plain:Library/find_book")
     gated.ctx.process_turn("change 2: means=plain:Library/open_book")
-    assert "inputs: book_uid=from sub-task 1; means: plain:Library/open_book" in _planning_line(record, 2)
+    assert "(book_uid: from sub-task 1)" in _planning_line(record, 2)
 
     gated.script.steps = [("finish", {})] * 20
     out = gated.ctx.process_turn("accept")
@@ -410,7 +416,7 @@ def test_an_id_the_review_left_unbound_is_found_at_run_time_and_recorded(gated, 
     scripted(*[TITLE_AS_UID] * 12)
     record = _review(gated, monkeypatch, [OPEN_DUNE_MESSIAH, JOKE])
     gated.ctx.process_turn("change 1: means=plain:Library/open_book")
-    assert "inputs: none; means: plain:Library/open_book" in _planning_line(record, 1)
+    assert _subtask(record, 1).inputs == [] and "Library/open_book" in _subtask(record, 1).means.name
 
     gated.script.steps = ([("finish", {}),
                            ("execute_workflow_query", {"command": "find_book query=Dune Messiah"}),
@@ -464,7 +470,7 @@ def test_the_draft_runs_the_typed_fill_fallback_and_the_run_uses_its_value(gated
     plan = gated.ctx._turn_subtask_plan
     assert plan.items[0].means == Means(kind="planning", name=AUTHOR_BOOKS)
     assert plan.items[0].inputs == [SubTaskInput(name="author", value="Austen", drafted=True)]
-    assert "[check:" not in _planning_line(record, 1)
+    assert not _subtask(record, 1).check
     drafted = len(lm.prompts)
     assert drafted == 3 and len(planner.prompts) == 1 and austen in planner.prompts[0]
 
@@ -508,8 +514,7 @@ def test_with_drafting_off_the_run_is_unchanged(gated, monkeypatch, scripted):
 
     monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", planner)
     record = _review(gated, monkeypatch, [EMMA, JOKE])
-    assert "inputs: none;" in _planning_line(record, 1) and "[check: missing required argument title]" in \
-        _planning_line(record, 1)
+    assert _subtask(record, 1).inputs == [] and "missing required argument title" in _subtask(record, 1).check
 
     # The review frame used to take its own finish step. Its result-driven last phase now
     # takes none, so only the agent for each sub-task needs one.

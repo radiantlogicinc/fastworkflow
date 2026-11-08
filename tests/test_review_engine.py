@@ -344,11 +344,11 @@ def test_text_the_reader_cannot_parse_is_refused_with_a_message(text):
 
 
 @pytest.mark.parametrize("text, expected", [
-    ("change 9: goal=x", "There is no item 9; the proposal has 2 item(s)."),
+    ("change 9: goal=x", "There are only 2 steps."),
     ("change 1: nosuch=1", "Item 1 has no field 'nosuch'."),
     ("change 1: count=abc", "count of item 1 is not valid"),
     ("drop 1; drop 2", "The proposal needs at least 1 item(s)."),
-    ("change 0: goal=x", "There is no item 0"),
+    ("change 0: goal=x", "There are only 2 steps."),
 ])
 def test_an_edit_that_does_not_validate_is_refused_with_a_message_and_nothing_changes(text, expected):
     store = _store()

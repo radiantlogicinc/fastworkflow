@@ -768,66 +768,75 @@ def _trains_the_fastworkflow_package(workflow_path: str) -> bool:
     the CME check for every workflow inside a checkout named ``fastworkflow``; that made the
     CME unretrainable through ``fastworkflow train <app>`` there.
     """
-    from fastworkflow.model_pipeline_training import is_internal_cme_folder
+    from fastworkflow.model_pipeline_training import (
+        is_internal_cme_folder,
+        is_internal_consultation_folder,
+    )
 
     package = os.path.realpath(fastworkflow.get_fastworkflow_package_path())
-    return os.path.realpath(workflow_path) == package or is_internal_cme_folder(workflow_path)
-
-
-def is_fast_workflow_trained(fastworkflow_folderpath: str):
-    # Check the artifacts for exactly the contexts that the CME trainer produces.
-    cme_workflow_folderpath = os.path.join(
-        fastworkflow_folderpath,
-        '_workflows',
-        'command_metadata_extraction',
+    real = os.path.realpath(workflow_path)
+    return (
+        real == package
+        or is_internal_cme_folder(workflow_path)
+        or is_internal_consultation_folder(workflow_path)
     )
+
+
+def _internal_workflow_trained(
+    fastworkflow_folderpath: str,
+    internal_name: str,
+) -> bool:
+    workflow_folderpath = os.path.join(
+        fastworkflow_folderpath,
+        "_workflows",
+        internal_name,
+    )
+    if not os.path.isdir(workflow_folderpath):
+        return False
     try:
         trained_contexts = set(
-            selective_training.contexts_for_training(cme_workflow_folderpath)
+            selective_training.contexts_for_training(workflow_folderpath)
         )
     except (AttributeError, KeyError, OSError, TypeError, ValueError) as exc:
         logger.warning(
-            "Could not discover trainable CME contexts for "
-            f"{cme_workflow_folderpath}: {exc}"
+            "Could not discover trainable contexts for "
+            f"{workflow_folderpath}: {exc}"
         )
         return False
 
-    required_artifact_paths = []
     for context_name in trained_contexts:
         context_folder = (
             GLOBAL_CONTEXT_FOLDER if context_name == "*" else context_name
         )
         context_artifact_dir = os.path.join(
-            cme_workflow_folderpath, "___command_info", context_folder
+            workflow_folderpath, "___command_info", context_folder
         )
         for artifact_name in selective_training.REQUIRED_CONTEXT_ARTIFACTS:
-            artifact_path = os.path.join(context_artifact_dir, artifact_name)
-            if not os.path.exists(artifact_path):
+            if not os.path.exists(os.path.join(context_artifact_dir, artifact_name)):
                 return False
-            required_artifact_paths.append(artifact_path)
 
-    if not required_artifact_paths:
+    if artifact_versioning.construction_record_problem(workflow_folderpath) is not None:
         return False
 
-    # An artifact without the not-here construction record is refused at load, so it is not
-    # "trained" here either: the CME retrains even though its command sources are unchanged.
-    if artifact_versioning.construction_record_problem(cme_workflow_folderpath) is not None:
-        return False
-
-    # Stale means a command's source or seed utterances changed since the
-    # recorded training, by content. Modification times are not evidence: a
-    # checkout or pull rewrites them and used to buy a paid CME retrain
-    # (fix-a7r7). Global inputs are deliberately not compared here; the CME
-    # trainer itself judges those once it is asked to run.
     signature = selective_training.load_training_signature(
-        cme_workflow_folderpath,
-        artifact_versioning.resolve_current_version(cme_workflow_folderpath),
+        workflow_folderpath,
+        artifact_versioning.resolve_current_version(workflow_folderpath),
     )
     if signature is None:
         return False
     return not selective_training.changed_commands(
         signature.command_fingerprints,
-        selective_training.compute_command_fingerprints(cme_workflow_folderpath),
+        selective_training.compute_command_fingerprints(workflow_folderpath),
+    )
+
+
+def is_fast_workflow_trained(fastworkflow_folderpath: str):
+    """True when shipped internal workflows have fresh, complete training artifacts."""
+    return (
+        _internal_workflow_trained(
+            fastworkflow_folderpath, "command_metadata_extraction"
+        )
+        and _internal_workflow_trained(fastworkflow_folderpath, "consultation")
     )
 
 

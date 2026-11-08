@@ -239,10 +239,12 @@ class ParameterExtraction:
                 self.command_name, ModuleType.COMMAND_PARAMETERS_CLASS
             )
         )
-        if not command_parameters_class:
-            return self.Output(parameters_are_valid=True)
-
         stored_params = self._get_stored_parameters(self.cme_workflow)
+        if not command_parameters_class:
+            if stored_params is not None:
+                command_parameters_class = type(stored_params)
+            else:
+                return self.Output(parameters_are_valid=True)
 
         # The caller prefixes "<command_name>: " (wildcard.py). Strip exactly that,
         # so the parsers below see the text as sent ("cmd k=v", not ": cmd k=v")

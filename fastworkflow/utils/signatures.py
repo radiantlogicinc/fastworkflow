@@ -1702,6 +1702,11 @@ Today's date is {today}.
                                         with suppress(Exception):
                                             return True, expected_type(**val)
                                     return False, None
+                                # list[T] inner types like dict[str, Any] (not valid for isinstance)
+                                if get_origin(expected_type) is dict:
+                                    if isinstance(val, dict):
+                                        return True, val
+                                    return False, None
                                 # Unknown: accept if already instance
                                 return (True, val) if isinstance(val, expected_type) else (False, None)
 

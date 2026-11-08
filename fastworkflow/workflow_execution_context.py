@@ -183,7 +183,7 @@ _PARKED_PENDING_KEYS = (
     "skill_refusal_answered", "subtasks", "subtask_origins", "subtask_index", "subtask_answers",
     "subtask_outputs", "subtask_exhausted", "subtask_review_open", "subtask_plan", "next_step",
     "skill_phase_run", "react", "frames", "frame_react", "turn_child_step_ranges", "turn_steps_used", "nlu_stage",
-    "turn", "cme",
+    "turn", "cme", "consultation_nlu_stage", "consultation_cme",
 )
 
 
@@ -362,6 +362,8 @@ class WorkflowExecutionContext:
         from fastworkflow.train.artifact_versioning import require_construction_record
         require_construction_record(
             fastworkflow.get_internal_workflow_path("command_metadata_extraction"))
+        require_construction_record(
+            fastworkflow.get_internal_workflow_path("consultation"))
 
         cme_id = (
             f"cme_{session_key}"
@@ -373,6 +375,45 @@ class WorkflowExecutionContext:
             workflow_id_str=cme_id,
             workflow_context={
                 "NLU_Pipeline_Stage": fastworkflow.NLUPipelineStage.INTENT_DETECTION,
+            },
+        )
+
+        consultation_id = (
+            f"consultation_{session_key}"
+            if session_key
+            else f"consultation_{uuid.uuid4().hex}"
+        )
+        consultation_path = fastworkflow.get_internal_workflow_path("consultation")
+        self._consultation_workflow = fastworkflow.Workflow.create(
+            consultation_path,
+            workflow_id_str=consultation_id,
+        )
+        from fastworkflow.utils import python_utils
+
+        proposal_review_cb = python_utils.get_module(
+            os.path.join(
+                consultation_path,
+                "_commands",
+                "ProposalReview",
+                "_ProposalReview.py",
+            ),
+            consultation_path,
+        )
+        self._consultation_workflow.current_command_context = (
+            proposal_review_cb.ProposalReview()
+        )
+
+        consultation_cme_id = (
+            f"consultation_cme_{session_key}"
+            if session_key
+            else f"consultation_cme_{uuid.uuid4().hex}"
+        )
+        self._consultation_cme = fastworkflow.Workflow.create(
+            fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
+            workflow_id_str=consultation_cme_id,
+            workflow_context={
+                "NLU_Pipeline_Stage": fastworkflow.NLUPipelineStage.INTENT_DETECTION,
+                "app_workflow": self._consultation_workflow,
             },
         )
 
@@ -1065,7 +1106,9 @@ class WorkflowExecutionContext:
             "agent_result": agent_result,
         }
 
-    def _serialize_cme_continuation(self) -> Optional[dict[str, Any]]:
+    def _serialize_cme_continuation(
+        self, cme_workflow: Optional[fastworkflow.Workflow] = None,
+    ) -> Optional[dict[str, Any]]:
         """Project the in-flight CME command, or None when none is in flight.
 
         Restoring nlu_stage alone is not enough and is actively unsafe: at
@@ -1075,21 +1118,23 @@ class WorkflowExecutionContext:
         either raises KeyError or silently discards every parameter collected
         so far and re-extracts from the answer text alone.
         """
-        if self._cme_workflow is None:
+        if cme_workflow is None:
+            cme_workflow = self._cme_workflow
+        if cme_workflow is None:
             # close() treats this as reachable, and has_open_command() runs
             # after every turn rather than only suspensions, so a missing CME
             # workflow must read as "nothing in flight" instead of raising in
             # the post-turn persist path.
             return None
 
-        ctx = self._cme_workflow.context
+        ctx = cme_workflow.context
         stored = ctx.get("stored_parameters")
 
         # command_name is deliberately NOT part of this test. Unlike command and
         # stored_parameters, end_command_processing() leaves it behind, so a
         # session that merely ran a command once would look mid-extraction
         # forever and its state would be written on every completed turn.
-        if stored is None and not self._is_extracting_parameters():
+        if stored is None and not self._is_extracting_parameters(cme_workflow):
             return None
 
         command_name = ctx.get("command_name")
@@ -1101,21 +1146,29 @@ class WorkflowExecutionContext:
             # NOT_FOUND sentinels), so dump without validating on the way out.
             stored_dump = stored.model_dump(mode="json")
 
-        return {
+        payload: dict[str, Any] = {
             "command": command,
             "command_name": command_name,
             "stored_parameters": stored_dump,
         }
+        missing_value_question = ctx.get("missing_value_question")
+        if missing_value_question is not None:
+            payload["missing_value_question"] = missing_value_question
+        return payload
 
-    def _is_extracting_parameters(self) -> bool:
+    def _is_extracting_parameters(
+        self, cme_workflow: Optional[fastworkflow.Workflow] = None,
+    ) -> bool:
         """True when the NLU pipeline is parked at parameter extraction.
 
         The stage survives serialization as a raw value, so compare on value
         rather than on enum identity.
         """
-        if self._cme_workflow is None:
+        if cme_workflow is None:
+            cme_workflow = self._cme_workflow
+        if cme_workflow is None:
             return False
-        stage = self._cme_workflow.context.get("NLU_Pipeline_Stage")
+        stage = cme_workflow.context.get("NLU_Pipeline_Stage")
         target = fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION
         return stage == target or getattr(stage, "value", stage) == target.value
 
@@ -1175,12 +1228,19 @@ class WorkflowExecutionContext:
             self._reset_agent_suspension()
         return cancelled
 
-    def _clear_cme_continuation(self) -> None:
+    def _clear_cme_continuation(
+        self, cme_workflow: Optional[fastworkflow.Workflow] = None,
+    ) -> None:
         """Drop the CME command in flight, as end_command_processing does (its command_name is kept there, not here)."""
-        context = self._cme_workflow.context
+        if cme_workflow is None:
+            cme_workflow = self._cme_workflow
+        if cme_workflow is None:
+            return
+        context = cme_workflow.context
         context.pop("command", None)
         context.pop("command_name", None)
         context.pop("stored_parameters", None)
+        context.pop("missing_value_question", None)
         context["NLU_Pipeline_Stage"] = fastworkflow.NLUPipelineStage.INTENT_DETECTION
 
     def _clear_live_pending(self) -> None:
@@ -1195,6 +1255,9 @@ class WorkflowExecutionContext:
         self._turn_suspended_ms = 0
         if self.has_open_command():
             self._clear_cme_continuation()
+        consultation_cme = getattr(self, "_consultation_cme", None)
+        if consultation_cme is not None:
+            self._clear_cme_continuation(consultation_cme)
 
     def _pending_snapshot(self, owner) -> dict[str, Any]:
         """The live pending state as a parked snapshot, tagged with its owner."""
@@ -1319,6 +1382,15 @@ class WorkflowExecutionContext:
         elif nlu_stage is not None:
             nlu_stage = str(nlu_stage)
 
+        consultation_nlu_stage = None
+        consultation_cme = getattr(self, "_consultation_cme", None)
+        if consultation_cme is not None:
+            consultation_nlu_stage = consultation_cme.context.get("NLU_Pipeline_Stage")
+            if hasattr(consultation_nlu_stage, "value"):
+                consultation_nlu_stage = consultation_nlu_stage.value
+            elif consultation_nlu_stage is not None:
+                consultation_nlu_stage = str(consultation_nlu_stage)
+
         current_context_name = None
         if self._app_workflow and self._app_workflow.current_command_context is not None:
             current_context_name = self._app_workflow.current_command_context_name
@@ -1367,6 +1439,12 @@ class WorkflowExecutionContext:
             "nlu_stage": nlu_stage,
             "turn": self._serialize_turn_accumulator(),
             "cme": self._serialize_cme_continuation(),
+            "consultation_nlu_stage": consultation_nlu_stage,
+            "consultation_cme": (
+                self._serialize_cme_continuation(consultation_cme)
+                if consultation_cme is not None
+                else None
+            ),
             "current_command_context_name": current_context_name,
             "action_log": list(self._action_log),
             "conversation_history_turns": extract_turns_from_history(
@@ -1460,7 +1538,17 @@ class WorkflowExecutionContext:
             turn.subtask_plan = SubTaskProposal.model_validate(plan)
         else:
             turn.subtask_plan = None
-        if turn.subtask_review_open:
+        from fastworkflow.review_engine import KIND_SUB_TASKS
+
+        active = (
+            approval_binding.active_record(self._app_workflow)
+            if self._app_workflow is not None
+            else None
+        )
+        subtask_review_active = bool(turn.subtask_review_open) or (
+            active is not None and active.kind == KIND_SUB_TASKS
+        )
+        if subtask_review_active:
             # The restored review keeps its free-text reader (set by the gate of the turn that opened it).
             self._give_review_reader()
         self._next_step = int(state.get("next_step") or 0)
@@ -1512,6 +1600,23 @@ class WorkflowExecutionContext:
                 self._cme_workflow.context["NLU_Pipeline_Stage"] = nlu_stage
 
         self._apply_cme_continuation(state.get("cme"))
+        consultation_cme = getattr(self, "_consultation_cme", None)
+        if consultation_cme is not None:
+            self._clear_cme_continuation(consultation_cme)
+            if subtask_review_active:
+                consultation_nlu_stage = state.get("consultation_nlu_stage")
+                if consultation_nlu_stage is not None:
+                    try:
+                        consultation_cme.context["NLU_Pipeline_Stage"] = (
+                            fastworkflow.NLUPipelineStage(consultation_nlu_stage)
+                        )
+                    except (ValueError, TypeError):
+                        consultation_cme.context["NLU_Pipeline_Stage"] = consultation_nlu_stage
+                self._apply_cme_continuation(
+                    state.get("consultation_cme"),
+                    cme_workflow=consultation_cme,
+                    subject_workflow=self._consultation_workflow,
+                )
         self._apply_turn_accumulator(state.get("turn"))
 
         # Restore the turn agent with the turn frame on top: _workflow_tool_agent reads the top frame.
@@ -1590,7 +1695,13 @@ class WorkflowExecutionContext:
                 exhausted=bool(agent_result.get("exhausted"))
             )
 
-    def _apply_cme_continuation(self, cme: Optional[dict[str, Any]]) -> None:
+    def _apply_cme_continuation(
+        self,
+        cme: Optional[dict[str, Any]],
+        *,
+        cme_workflow: Optional[fastworkflow.Workflow] = None,
+        subject_workflow: Optional[fastworkflow.Workflow] = None,
+    ) -> None:
         """Restore the in-flight CME command so the next message continues it.
 
         stored_parameters is rebuilt through model_construct rather than
@@ -1601,19 +1712,28 @@ class WorkflowExecutionContext:
         if not cme:
             return
 
-        context = self._cme_workflow.context
+        if cme_workflow is None:
+            cme_workflow = self._cme_workflow
+        if cme_workflow is None:
+            return
+
+        context = cme_workflow.context
         command_name = cme.get("command_name")
 
         if cme.get("command") is not None:
             context["command"] = cme["command"]
         if command_name is not None:
             context["command_name"] = command_name
+        if cme.get("missing_value_question") is not None:
+            context["missing_value_question"] = cme["missing_value_question"]
 
         stored = cme.get("stored_parameters")
         if stored is None or command_name is None:
             return
 
-        params_class = self._command_parameters_class(command_name)
+        params_class = self._command_parameters_class(
+            command_name, subject_workflow=subject_workflow,
+        )
         if params_class is None:
             # Losing the partial parameters is bad, but resuming into a command
             # whose parameter class no longer exists is worse. Reset to intent
@@ -1630,17 +1750,33 @@ class WorkflowExecutionContext:
 
         context["stored_parameters"] = params_class.model_construct(**stored)
 
-    def _command_parameters_class(self, command_name: str):
+    def _command_parameters_class(
+        self,
+        command_name: str,
+        *,
+        subject_workflow: Optional[fastworkflow.Workflow] = None,
+    ):
         """The Input class for a command name, or None if it cannot be resolved."""
-        if self._app_workflow is None:
+        if subject_workflow is None:
+            subject_workflow = self._app_workflow
+        if subject_workflow is None:
             return None
         try:
             routing = fastworkflow.RoutingRegistry.get_definition(
-                self._app_workflow.folderpath
+                subject_workflow.folderpath
             )
-            return routing.get_command_class(
+            params_class = routing.get_command_class(
                 command_name, fastworkflow.ModuleType.COMMAND_PARAMETERS_CLASS
             )
+            if params_class is None:
+                sig_cls = routing.get_command_class(
+                    command_name,
+                    fastworkflow.ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS,
+                )
+                slot_input = getattr(sig_cls, "SlotInput", None) if sig_cls else None
+                if slot_input is not None:
+                    params_class = slot_input
+            return params_class
         except Exception:
             return None
 
@@ -1743,6 +1879,11 @@ class WorkflowExecutionContext:
         """
         self._app_workflow = workflow
         self._cme_workflow.context["app_workflow"] = workflow
+        consultation_cme = getattr(self, "_consultation_cme", None)
+        if consultation_cme is not None and workflow is not None:
+            consultation_cme.context["convo_path"] = os.path.join(
+                workflow.folderpath, "___convo_info"
+            )
         # getattr: a context built through ``__new__`` without ``__init__`` has
         # no flag, and is treated as having chosen its sink.
         if not getattr(self, "_trace_sink_supplied", True):
@@ -1766,6 +1907,19 @@ class WorkflowExecutionContext:
                 return
         _refresh_agent_available_commands(self)
 
+    def _close_workflow_safely(self, workflow: Optional[fastworkflow.Workflow]) -> bool:
+        if workflow is None:
+            return True
+        try:
+            return workflow.close()
+        except ValueError:
+            # Child workflows should not occur; ignore if mis-invoked.
+            logger.debug(
+                "WorkflowExecutionContext.close: workflow %s is not a root session",
+                getattr(workflow, "id", workflow),
+            )
+            return False
+
     def close(self) -> bool:
         """
         Release the cme_workflow speedict session store.
@@ -1778,14 +1932,15 @@ class WorkflowExecutionContext:
             self._app_workflow.remove_context_change_listener(listener)
             self._context_change_listener = None
 
-        if self._cme_workflow is None:
-            return True
-        try:
-            return self._cme_workflow.close()
-        except ValueError:
-            # Child cme workflows should not occur; ignore if mis-invoked.
-            logger.debug("WorkflowExecutionContext.close: cme_workflow is not a root session")
-            return False
+        ok = True
+        ok = self._close_workflow_safely(self._cme_workflow) and ok
+        ok = self._close_workflow_safely(
+            getattr(self, "_consultation_cme", None),
+        ) and ok
+        ok = self._close_workflow_safely(
+            getattr(self, "_consultation_workflow", None),
+        ) and ok
+        return ok
 
     # ------------------------------------------------------------------
     # Active workflow stack (contextvar)
@@ -2542,6 +2697,8 @@ class WorkflowExecutionContext:
         # The planner's LM is read when a reply comes, not when the review opens: the turn's planner LM is the one in place then.
         store.edit_reader = review_proposals.model_edit_reader(
             planner_lm=lambda: getattr(self, "_current_planner_lm", None), planning_names=names)
+        store.consultation_cme = getattr(self, "_consultation_cme", None)
+        store.consultation_workflow = getattr(self, "_consultation_workflow", None)
 
     def _accept_subtask_review(self, agent_result):
         """The gate's review was accepted: its frame finishes with the accepted proposal, which is stored for the
@@ -2552,6 +2709,9 @@ class WorkflowExecutionContext:
         turn = self._turn_frame()
         turn.subtask_review_open = False
         turn.framework_entry = False
+        consultation_cme = getattr(self, "_consultation_cme", None)
+        if consultation_cme is not None:
+            self._clear_cme_continuation(consultation_cme)
         self._finish_framework_call(agent_result)
         accepted = review_proposals.accepted_subtask_proposal(self._app_workflow)
         if accepted is None:
@@ -2569,6 +2729,9 @@ class WorkflowExecutionContext:
         turn = self._turn_frame()
         turn.subtask_review_open = False
         turn.framework_entry = False
+        consultation_cme = getattr(self, "_consultation_cme", None)
+        if consultation_cme is not None:
+            self._clear_cme_continuation(consultation_cme)
         self._pop_frame(self._top_frame())
         declined = state == review_engine.DECLINED
         self._turn_subtask_review = "declined" if declined else "expired"

@@ -89,10 +89,12 @@ def cme_copy(tmp_path: Path, setup_test_environment):
     with _FASTWORKFLOW_GLOBAL_STATE_LOCK:
         package_root = Path(fastworkflow.__file__).parent
         source = package_root / "_workflows" / "command_metadata_extraction"
+        consultation_source = package_root / "_workflows" / "consultation"
         copied_package_root = tmp_path / "fastworkflow"
         destination = (
             copied_package_root / "_workflows" / "command_metadata_extraction"
         )
+        consultation_destination = copied_package_root / "_workflows" / "consultation"
         destination.parent.mkdir(parents=True)
         shutil.copytree(
             source,
@@ -104,6 +106,19 @@ def cme_copy(tmp_path: Path, setup_test_environment):
                 "__pycache__",
             ),
         )
+        if consultation_source.is_dir():
+            shutil.copytree(
+                consultation_source,
+                consultation_destination,
+                ignore=shutil.ignore_patterns(
+                    "___command_info",
+                    "___workflow_contexts",
+                    "___convo_info",
+                    "__pycache__",
+                ),
+            )
+            RoutingDefinition.build(str(consultation_destination))
+            CommandDirectory.load(str(consultation_destination)).save()
         RoutingRegistry.clear_registry()
         RoutingDefinition.build(str(destination))
         CommandDirectory.load(str(destination)).save()
@@ -176,6 +191,35 @@ def test_missing_training_report_refuses_publication_with_training_data_error():
         train_orchestration._require_publishable_training_report(None)
 
 
+def _stamp_internal_workflow_trained(workflow: Path) -> None:
+    trainable_contexts = selective_training.contexts_for_training(str(workflow))
+    command_info = workflow / "___command_info"
+    for context_name in trainable_contexts:
+        context_folder = (
+            train_orchestration.GLOBAL_CONTEXT_FOLDER
+            if context_name == "*"
+            else context_name
+        )
+        context_dir = command_info / context_folder
+        context_dir.mkdir(parents=True, exist_ok=True)
+        for artifact_name in selective_training.REQUIRED_CONTEXT_ARTIFACTS:
+            artifact_path = context_dir / artifact_name
+            if artifact_name.endswith(".pth"):
+                artifact_path.mkdir()
+            else:
+                artifact_path.write_text("{}", encoding="utf-8")
+    version_id = av.new_version_id()
+    signature, _ = selective_training.compute_training_signature(
+        str(workflow), trainable_contexts
+    )
+    selective_training.save_training_signature(str(workflow), version_id, signature)
+    av._write_pointer(str(workflow), version_id, "test")
+    record_fields, _ = model_pipeline_training.construction_records(
+        folderpath=str(workflow)
+    )
+    av.write_manifest(str(workflow), version_id, **record_fields)
+
+
 def test_cme_readiness_checks_only_contexts_the_trainer_produces(cme_copy):
     package_root, cme_workflow = cme_copy
     trainable_contexts = selective_training.contexts_for_training(str(cme_workflow))
@@ -215,6 +259,10 @@ def test_cme_readiness_checks_only_contexts_the_trainer_produces(cme_copy):
         folderpath=str(cme_workflow)
     )
     av.write_manifest(str(cme_workflow), version_id, **record_fields)
+
+    consultation_workflow = package_root / "_workflows" / "consultation"
+    if consultation_workflow.is_dir():
+        _stamp_internal_workflow_trained(consultation_workflow)
 
     assert train_orchestration.is_fast_workflow_trained(str(package_root))
     assert not (command_info / "ErrorCorrection").exists()
@@ -329,6 +377,9 @@ def test_trains_the_fastworkflow_package_is_a_path_test_not_a_substring_test(tmp
     )
     assert train_orchestration._trains_the_fastworkflow_package(
         fastworkflow.get_internal_workflow_path("command_metadata_extraction")
+    )
+    assert train_orchestration._trains_the_fastworkflow_package(
+        fastworkflow.get_internal_workflow_path("consultation")
     )
 
 

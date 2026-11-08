@@ -109,7 +109,7 @@ def test_a_free_text_drop_is_read_and_the_confirmed_edit_applies(gated, monkeypa
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     record = _open_review(gated)
     gated.ctx._current_planner_lm = _reply_lm({"op": "drop", "index": 2})
-    out = gated.ctx.process_turn("drop the last part")
+    out = gated.ctx.process_turn("we do not need the joke")
     assert "I read your reply as these edits" in (out.answer or "")
     assert record.state == REVISED and [item["goal"] for item in record.binding["items"]] == [EMMA]
     gated.script.steps = [("finish", {})] * 2
@@ -144,7 +144,7 @@ def test_a_reply_the_reader_cannot_read_asks_again_and_counts_toward_the_cap(gat
         out = gated.ctx.process_turn("make it better somehow")
         assert out.status is TurnStatus.AWAITING_USER
         assert record.state == AWAITING and record.revision == 0
-        assert "I could not read that as an edit" in (out.answer or "")
+        assert "I couldn't tell what to change" in (out.answer or "")
     assert record.turns_seen == record.ttl_turns and garbage.calls >= record.ttl_turns
     out = gated.ctx.process_turn("make it better somehow")  # the reply past the cap: the review has expired
     assert record.state == EXPIRED

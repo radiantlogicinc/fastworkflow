@@ -39,6 +39,7 @@ class Signature:
         cmd_parameters: Optional[Any] = Field(default=None, exclude=True)
         ran_on_context_name: Optional[str] = None
         ran_on_context_clause: Optional[str] = None
+        reply_intent: Optional[str] = None
         # The nested command's Output, when a CME command answered (the handled path only).
         output: Optional[Any] = Field(default=None, exclude=True)
 
@@ -135,7 +136,9 @@ def _missing_value_reply_intent(workflow, app_workflow, command_name: str,
             return "answer", []
         fields = pending_missing_fields(
             app_workflow, command_name, stored_params, workflow.context.get("command", command))
-        intent = classify_missing_value_reply(missing_value_question(command_name, fields), command)
+        question = (workflow.context.get("missing_value_question")
+                    or missing_value_question(command_name, fields))
+        intent = classify_missing_value_reply(question, command)
         return intent, fields
     except Exception:  # noqa: BLE001 - a failed check is an answer, as before this check existed
         logger.warning("missing-value reply check failed; treating the reply as an answer", exc_info=True)
@@ -330,21 +333,28 @@ class ResponseGenerator:
                     return Signature.Output(
                         handled=False,
                         routed=False,
+                        reply_intent="wait",
                         response="\n".join(
                             ["OK, take your time.",
                              f"{MISSING_INFORMATION_ERRMSG}{', '.join(missing_fields)}"]),
                     )
                 if intent in ("abort", "misunderstood"):
-                    return _run_cme_command(
+                    routed = _run_cme_command(
                         workflow, command,
                         "ErrorCorrection/abort" if intent == "abort"
                         else "ErrorCorrection/you_misunderstood",
                         nlu_pipeline_stage)
+                    routed.reply_intent = intent
+                    return routed
                 if intent == "different_command":
                     # The pending command is left: the stored parameters go with it
                     # (end_command_processing), and the reply runs as a fresh request in INTENT_DETECTION.
+                    workflow.context.pop("missing_value_question", None)
                     workflow.end_command_processing()
-                    return self(workflow, command, input)
+                    out = self(workflow, command, input)
+                    if out.reply_intent is None:
+                        out.reply_intent = "different_command"
+                    return out
                 # An answer to the pending round: what gets merged is this text,
                 # not the stored command it answers.
                 extraction_text = f'{command_name}: {command}'
@@ -357,12 +367,14 @@ class ResponseGenerator:
             return Signature.Output(
                 handled=False,
                 routed=False,
+                reply_intent="answer",
                 response=(
                     f"PARAMETER EXTRACTION ERROR FOR COMMAND '{command_name}'\n"
                     f"{pe_output.error_msg}"
                 ),
             )
 
+        workflow.context.pop("missing_value_question", None)
         workflow.end_command_processing()
 
         # The walk bound an enclosing record: the command runs on that record, so it is
@@ -377,13 +389,15 @@ class ResponseGenerator:
             ran_on_clause = (
                 context_clause(ran_on_name, ran_on_label) if ran_on is not None else "")
 
+        reply_intent = "answer" if nlu_pipeline_stage == NLUPipelineStage.PARAMETER_EXTRACTION else None
         return Signature.Output(
             handled=False,
             routed=True,
+            reply_intent=reply_intent,
             response="",
             command=preserved_command,
             command_name=command_name,
             cmd_parameters=pe_output.cmd_parameters,
             ran_on_context_name=ran_on_name,
             ran_on_context_clause=ran_on_clause,
-        ) 
+        )

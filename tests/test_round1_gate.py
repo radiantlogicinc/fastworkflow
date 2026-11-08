@@ -16,7 +16,7 @@ import fastworkflow
 from fastworkflow import review_proposals, tracing, workflow_agent
 from fastworkflow.approval_binding import Surface
 from fastworkflow.planning_commands import planning_command
-from fastworkflow.review_engine import AWAITING, CONFIRMED, DECLINED, EXPIRED, PROPOSAL_TTL_SECONDS
+from fastworkflow.review_engine import AWAITING, CONFIRMED, DECLINED, EXPIRED, PROPOSAL_TTL_SECONDS, proposal_of
 from fastworkflow.review_proposals import SubTaskProposal
 from fastworkflow.run_listing import check_planned_arguments
 from fastworkflow.turn import TurnStatus
@@ -122,7 +122,9 @@ def test_a_multi_sub_task_request_opens_the_review_with_the_proposed_means(gated
     # A planning command in the sub-task's top-k is preferred; a sub-task no command fits is built from scratch, and
     # the framework's own commands (go_up, reset_context, ...) are never offered as means.
     assert items[0]["means"] == {"kind": "planning", "name": "Library/book_by_title"}
-    assert "means: planning:Library/book_by_title" in record.rendering
+    assert "means:" not in record.rendering
+    assert "1. who wrote Emma and how many copies do we have" in record.rendering
+    assert "means: planning:Library/book_by_title" in proposal_of(record).model_rendering()
     assert _marker(gated) == "open"
 
 
@@ -140,8 +142,9 @@ def test_a_refused_planning_argument_is_shown_on_its_line(gated, monkeypatch):
     record = _open_review(gated)
     refusal = check_planned_arguments(planning_command(gated.wf.folderpath, "Library/book_by_title"), {}, EMMA).refusal
     assert refusal, "the planning command refuses an empty argument set, so the check has something to show"
-    line = next(text for text in record.rendering.splitlines() if text.startswith("1. "))
-    assert f"[check: {refusal}]" in line
+    assert proposal_of(record).items[0].check == refusal
+    model_line = next(text for text in proposal_of(record).model_rendering().splitlines() if text.startswith("1. "))
+    assert f"[check: {refusal}]" in model_line
 
 
 def test_the_draft_round_trips_through_the_review_as_json(gated, monkeypatch):

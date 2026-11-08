@@ -1235,7 +1235,10 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         """
         Only as the last resort, request clarification for missing information from the human user. Ask at most once about the same thing.
         The clarification_request must be plain text without any formatting.
-        Note that using the wrong command name can produce missing information errors. Double-check with the what_can_i_do tool to verify that the correct command name is being used 
+        Questions to the user must use domain words only; never include command names, context names, or record uids.
+        When asking for a name that may contain 'and' or several words, ask the user to wrap the full name in single
+        or double quotes.
+        Note that using the wrong command name can produce missing information errors. Double-check with the what_can_i_do tool to verify that the correct command name is being used
         """
         _clear_blocked_command(chat_session_obj)
         # reset iteration counter, everytime we ask the user

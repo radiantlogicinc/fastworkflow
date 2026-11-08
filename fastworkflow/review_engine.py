@@ -35,7 +35,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, fields
 from enum import Enum
-from typing import Any, Callable, ClassVar, Optional, Union
+from typing import Any, Callable, ClassVar, Optional, Sequence, Union
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -278,6 +278,8 @@ class ReviewStore:
     #: Set by the sub-task gate for the turn that opens the review; never serialised (a restored review has none
     #: until the gate of its turn sets it again).
     edit_reader: Optional[Callable[[str, "Proposal"], list]] = None
+    consultation_cme: Any = None
+    consultation_workflow: Any = None
 
     def active(self) -> Optional[ReviewRecord]:
         for record in self.records:
@@ -315,7 +317,15 @@ def store_for(workflow: Any) -> Optional[ReviewStore]:
             workflow._approval_store = store
         except AttributeError:
             return None
+    store._workflow = workflow
     return store
+
+
+def _prompt_workflow(host: Any, store: ReviewStore) -> Any:
+    """The app workflow used to render a sub-task review (writes badges); not persisted on the store."""
+    return (getattr(host, "_app_workflow", None)
+            or (host if hasattr(host, "folderpath") else None)
+            or getattr(store, "_workflow", None))
 
 
 def active_record(workflow: Any) -> Optional[ReviewRecord]:
@@ -609,9 +619,103 @@ def ttl_for_kind(kind: str) -> tuple[int, int]:
 PROMPT_HINT = ("Reply accept to confirm, no to decline, or edit with 'change N: field=value' or 'drop N' "
                "(N is the number shown; separate several edits with ';').")
 
+SUB_TASK_PROMPT_HINT = (
+    "Reply yes to run this, or tell me what to change "
+    "(put single or double quotes around multi-word names, e.g. 'Henderson Ramirez and Lewis and Sons')."
+)
 
-def prompt_for(proposal: Proposal) -> str:
+SUB_TASK_UNREADABLE_REPLY = (
+    "I couldn't tell what to change. Say which step and what it should be "
+    "(put single or double quotes around multi-word names), or reply yes to run it as shown."
+)
+
+SUB_TASK_STRUCTURED_PROMPT_HINT = (
+    "Reply accept to confirm, no to decline, or edit with "
+    "'change N: inputs=key=value', 'change N: goal=text', or 'drop N' "
+    "(N is the step number and key is a field name shown in parentheses; separate several edits with ';')."
+)
+
+SUB_TASK_STRUCTURED_UNREADABLE_REPLY = (
+    f"I couldn't tell what to change. {SUB_TASK_STRUCTURED_PROMPT_HINT}"
+)
+
+_KNOWN_SUBTASK_INPUT_KEYS = frozenset({
+    "name", "kind", "fact", "tag", "action", "right", "person", "person_a", "person_b",
+    "unit", "control", "family", "scope", "explain", "include_risk", "with_login_only",
+    "open_first", "open_first_person", "whole_list", "people", "application", "feed",
+    "group", "login", "query", "title", "author", "member", "book", "branch",
+})
+
+
+def _step_count_message(count: int) -> str:
+    label = "step" if count == 1 else "steps"
+    return f"There are only {count} {label}."
+
+
+def prompt_for(proposal: Proposal, workflow: Any = None, *, structured: bool = False) -> str:
+    from fastworkflow.review_proposals import SubTaskProposal
+
+    folder = getattr(workflow, "folderpath", None) if workflow is not None else None
+    if isinstance(proposal, SubTaskProposal):
+        hint = SUB_TASK_STRUCTURED_PROMPT_HINT if structured else SUB_TASK_PROMPT_HINT
+        return f"{proposal.user_rendering(folder)}\n{hint}"
     return f"{proposal.rendering()}\n{PROMPT_HINT}"
+
+
+def _structured_error_prompt(proposal: Proposal, workflow: Any = None, message: str = "") -> str:
+    from fastworkflow.review_proposals import SubTaskProposal
+
+    if isinstance(proposal, SubTaskProposal):
+        if not message or message in (SUB_TASK_UNREADABLE_REPLY, SUB_TASK_STRUCTURED_UNREADABLE_REPLY):
+            header = "I couldn't tell what to change."
+        else:
+            header = message
+        folder = getattr(workflow, "folderpath", None) if workflow is not None else None
+        current_steps = proposal.user_rendering(folder).replace("Sub-tasks:", "Current steps:", 1)
+        return f"{header}\n{current_steps}\n{SUB_TASK_STRUCTURED_PROMPT_HINT}"
+    return message or PROMPT_HINT
+
+
+def _normalize_parsed_subtask_edits(proposal: Proposal, edits: list[Edit]) -> list[Edit]:
+    from fastworkflow.review_proposals import SubTaskProposal, merge_subtask_input_edit
+
+    if not isinstance(proposal, SubTaskProposal):
+        return edits
+    normalized: list[Edit] = []
+    for edit in edits:
+        if isinstance(edit, Change) and edit.field not in (
+                "goal", "outcome", "inputs", "means", "check", "drafted_means"):
+            on_item = (
+                1 <= edit.index <= len(proposal.items)
+                and any(inp.name == edit.field for inp in proposal.items[edit.index - 1].inputs)
+            )
+            if on_item or edit.field in _KNOWN_SUBTASK_INPUT_KEYS:
+                normalized.append(
+                    Change(index=edit.index, field="inputs", value=f"{edit.field}={edit.value}"))
+            else:
+                normalized.append(edit)
+        else:
+            normalized.append(edit)
+    inputs_positions: dict[int, list[int]] = {}
+    for position, edit in enumerate(normalized):
+        if isinstance(edit, Change) and edit.field == "inputs":
+            inputs_positions.setdefault(edit.index, []).append(position)
+    to_remove: set[int] = set()
+    for index, positions in inputs_positions.items():
+        if len(positions) <= 1:
+            continue
+        merged_inputs = list(proposal.items[index - 1].inputs)
+        for position in positions:
+            merged_inputs = merge_subtask_input_edit(merged_inputs, normalized[position].value)
+        normalized[positions[0]] = Change(
+            index=index,
+            field="inputs",
+            value=", ".join(item.render() for item in merged_inputs),
+        )
+        to_remove.update(positions[1:])
+    if not to_remove:
+        return normalized
+    return [edit for position, edit in enumerate(normalized) if position not in to_remove]
 
 
 # ----------------------------------------------------------------------
@@ -668,7 +772,14 @@ class Split(BaseModel):
     parts: list[dict[str, str]]
 
 
-Edit = Union[Change, Drop, Add, Merge, Split]
+class LookUp(BaseModel):
+    """Re-draft item ``index`` for look_up (goal-preserving; applied in ``SubTaskProposal.revised``). ``index`` is 1-based."""
+
+    model_config = ConfigDict(extra="forbid")
+    index: int
+
+
+Edit = Union[Change, Drop, Add, Merge, Split, LookUp]
 
 _CHANGE = re.compile(r"^change\s+(\d+)\s*:?\s*([A-Za-z_]\w*)\s*=\s*(.*)$", re.IGNORECASE | re.DOTALL)
 _DROP = re.compile(r"^drop\s+(\d+)$", re.IGNORECASE)
@@ -745,39 +856,87 @@ def apply_edits(proposal: Proposal, edits: list[Edit]) -> Proposal:
     model = _item_model(proposal)
 
     def number_ok(number: int, low: int = 1) -> None:
-        if not low <= number <= count:
-            raise EditRefused(f"There is no item {number}; the proposal has {count} item(s).")
+        if number == 0 or not low <= number <= count:
+            raise EditRefused(_step_count_message(count))
 
-    touched: dict[int, str] = {}
+    whole_item: set[int] = set()
+    field_change: dict[tuple[int, str], str] = {}
 
-    def claim(number: int, kind: str) -> None:
-        if number in touched:
-            raise EditRefused(f"Item {number} is named by more than one edit ({touched[number]} and {kind}).")
-        touched[number] = kind
+    def claim_whole(number: int) -> None:
+        if number in whole_item or any(index == number for index, _ in field_change):
+            raise EditRefused(f"Item {number} is named by more than one edit.")
+
+    def claim_field(number: int, field_name: str) -> None:
+        if number in whole_item:
+            raise EditRefused(f"Item {number} is named by more than one edit.")
+        key = (number, field_name)
+        if key in field_change:
+            raise EditRefused(f"Item {number}'s {field_name!r} is named by more than one edit.")
+        field_change[key] = "change"
+
+    def _inputs_claim_keys(number: int, value: str) -> list[str]:
+        from fastworkflow.review_proposals import SubTaskInput, _input_edit_parts
+
+        stripped = value.strip()
+        if stripped.lower() == "none":
+            return ["inputs"]
+        parts = _input_edit_parts(stripped)
+        names = [SubTaskInput.from_text(part).name for part in parts]
+        if names and all(names):
+            return [f"inputs:{name}" for name in names]
+        return ["inputs"]
+
+    def claim_inputs(number: int, value: str) -> None:
+        if number in whole_item:
+            raise EditRefused(f"Item {number} is named by more than one edit.")
+        for claim in _inputs_claim_keys(number, value):
+            if claim == "inputs":
+                for key in field_change:
+                    if key[0] == number and (key[1] == "inputs" or key[1].startswith("inputs:")):
+                        raise EditRefused(f"Item {number}'s inputs are named by more than one edit.")
+                field_change[(number, "inputs")] = "change"
+                return
+            if (number, "inputs") in field_change:
+                raise EditRefused(f"Item {number}'s inputs are named by more than one edit.")
+            key = (number, claim)
+            if key in field_change:
+                label = claim.split(":", 1)[1]
+                raise EditRefused(f"Item {number}'s input {label!r} is named by more than one edit.")
+            field_change[key] = "change"
 
     for edit in edits:
         if isinstance(edit, Change):
             number_ok(edit.index)
-            claim(edit.index, "change")
+            if edit.field == "inputs" and model is not None and model.__name__ == "SubTask":
+                claim_inputs(edit.index, edit.value)
+            else:
+                claim_field(edit.index, edit.field)
         elif isinstance(edit, Drop):
             number_ok(edit.index)
-            claim(edit.index, "drop")
+            claim_whole(edit.index)
+            whole_item.add(edit.index)
         elif isinstance(edit, Merge):
             if len(edit.indexes) < 2 or len(set(edit.indexes)) != len(edit.indexes):
                 raise EditRefused("A merge joins at least two different items.")
             for number in edit.indexes:
                 number_ok(number)
-                claim(number, "merge")
+                claim_whole(number)
+            whole_item.update(edit.indexes)
         elif isinstance(edit, Split):
             number_ok(edit.index)
             if not edit.parts:
                 raise EditRefused(f"Item {edit.index} cannot be split into no parts.")
-            claim(edit.index, "split")
+            claim_whole(edit.index)
+            whole_item.add(edit.index)
+        elif isinstance(edit, LookUp):
+            number_ok(edit.index)
+            claim_field(edit.index, "look_up")
         elif isinstance(edit, Add):
             number_ok(edit.after, low=0)
             if model is None:
                 raise EditRefused("This proposal takes no added items.")
 
+    look_up_at = {edit.index for edit in edits if isinstance(edit, LookUp)}
     changed = list(items)
     for edit in edits:
         if not isinstance(edit, Change):
@@ -788,7 +947,29 @@ def apply_edits(proposal: Proposal, edits: list[Edit]) -> Proposal:
             raise EditRefused(f"Item {edit.index} has no field {edit.field!r}. Its fields are: "
                               f"{', '.join(shown_fields(item_model))}.")
         data = changed[position].model_dump()
-        data[edit.field] = _coerce(item_model, edit.field, edit.value)
+        if edit.field == "inputs" and item_model.__name__ == "SubTask":
+            from fastworkflow.review_proposals import merge_subtask_input_edit
+
+            before_named = {
+                each.name: each.value for each in changed[position].inputs if each.name
+            }
+            data["inputs"] = merge_subtask_input_edit(changed[position].inputs, edit.value)
+            after_named = {
+                each.name: each.value for each in data["inputs"] if each.name
+            }
+            old_name = before_named.get("name")
+            new_name = after_named.get("name")
+            goal_text = data.get("goal", changed[position].goal)
+            if (
+                old_name
+                and new_name
+                and old_name != new_name
+                and old_name in goal_text
+                and new_name not in goal_text
+            ):
+                data["goal"] = goal_text.replace(old_name, new_name)
+        else:
+            data[edit.field] = _coerce(item_model, edit.field, edit.value)
         try:
             changed[position] = item_model.model_validate(data)
         except ValidationError as exc:
@@ -811,22 +992,41 @@ def apply_edits(proposal: Proposal, edits: list[Edit]) -> Proposal:
         if isinstance(edit, Add):
             after.setdefault(edit.after, []).append(_built_item(model, edit.values))
 
-    result: list[Any] = list(after.get(0, []))
+    result: list[Any] = []
+    provenance: list[tuple[Any, Any, bool]] = []
+    for new_item in after.get(0, []):
+        result.append(new_item)
+        provenance.append((new_item, None, False))
     for number in range(1, count + 1):
         if number not in dropped:
+            look_up = number in look_up_at
             if number in split:
-                result.extend(split[number])
+                for part in split[number]:
+                    result.append(part)
+                    provenance.append((part, items[number - 1], look_up))
             elif number in merged:
                 result.append(merged[number])
+                provenance.append((merged[number], items[number - 1], look_up))
             else:
                 result.append(changed[number - 1])
-        result.extend(after.get(number, []))
+                provenance.append((changed[number - 1], items[number - 1], look_up))
+        for new_item in after.get(number, []):
+            result.append(new_item)
+            provenance.append((new_item, None, False))
     if len(result) < type(proposal).min_items:
         raise EditRefused(f"The proposal needs at least {type(proposal).min_items} item(s).")
     try:
-        return type(proposal).model_validate({"items": result})
+        edited = type(proposal).model_validate({"items": result})
     except ValidationError as exc:
         raise EditRefused(f"The edited proposal is not valid: {exc.errors()[0]['msg']}.") from exc
+    if model is not None and model.__name__ == "SubTask":
+        from fastworkflow.review_proposals import SubTask
+
+        for item, (_, before, look_up) in zip(edited.items, provenance):
+            if isinstance(item, SubTask):
+                item._before_item = before
+                item._look_up = look_up
+    return edited
 
 
 # ----------------------------------------------------------------------
@@ -882,6 +1082,170 @@ class ActionReplyPolicy:
 READ_REASON = "edits read from the reply"
 
 
+def _consultation_planning_names(app_workflow: Any) -> tuple[str, ...]:
+    if app_workflow is None:
+        return ()
+    folder = getattr(app_workflow, "folderpath", None)
+    if not folder:
+        return ()
+    from fastworkflow import planning_commands
+
+    return tuple(sorted(planning_commands.resolve_field_sources(folder).planning_commands))
+
+
+def _slot_question(proposal: Proposal) -> str:
+    return f"Which of the {len(proposal.items)} steps do you mean?"
+
+
+def _clear_consultation_cme_continuation(cme: Any) -> None:
+    cme.end_command_processing()
+    context = cme.context
+    context["NLU_Pipeline_Stage"] = fastworkflow.NLUPipelineStage.INTENT_DETECTION
+    for key in ("command", "command_name", "stored_parameters", "missing_value_question"):
+        context.pop(key, None)
+    cme.context = context
+
+
+def _prepare_consultation_workflow(policy: "ProposalReplyPolicy", proposal: Proposal) -> None:
+    from fastworkflow._workflows.consultation._commands.ProposalReview._ProposalReview import ProposalReview
+
+    workflow = policy._consultation_workflow
+    if workflow.current_command_context_name != "ProposalReview":
+        workflow.current_command_context = ProposalReview()
+    workflow.context["consultation_proposal"] = proposal
+    workflow.context["consultation_model_rendering"] = proposal.model_rendering()
+    workflow.context["consultation_planning_names"] = _consultation_planning_names(policy._app_workflow)
+    reader = policy._interpreter or _model_interpreter
+    if reader is not None:
+        workflow.context["consultation_edit_reader"] = reader
+    else:
+        workflow.context.pop("consultation_edit_reader", None)
+
+
+def _validate_edits_decision(
+    proposal: Proposal,
+    edits: tuple,
+    *,
+    reason: str,
+    text: str | None = None,
+) -> ReplyDecision:
+    try:
+        edited = apply_edits(proposal, list(edits))
+    except EditRefused as refused:
+        return ReplyDecision(Verdict.REFUSE, "edits refused", message=str(refused))
+    if reason == READ_REASON and edited.binding() == proposal.binding():
+        if text and _affirmative_accept_cue(text):
+            return ReplyDecision(Verdict.CONFIRM, "accepted")
+        return ReplyDecision(Verdict.REPROMPT, "not read as edits", message=SUB_TASK_UNREADABLE_REPLY)
+    return ReplyDecision(Verdict.EDIT, reason, edits=edits)
+
+
+_AFFIRMATIVE_ACCEPT_PREFIX = re.compile(
+    r"^\s*(?:yes|yep|yeah|sure|ok|okay|accept|approve|go\s+ahead|sounds\s+good|looks\s+good)\b",
+    re.I,
+)
+_AFFIRMATIVE_UNROUTED_PREFIX = re.compile(
+    r"^\s*(?:yes|yep|yeah|accept|approve|go\s+ahead|sounds\s+good|looks\s+good)\b",
+    re.I,
+)
+_CONFIRM_CORRECTIVE = re.compile(
+    r"\b(?:"
+    r"but\s+(?:in\s+step|for\s+step|step\s+\d+|also|instead|change|make|use|set|drop|remove|add|only|"
+    r"do\s+not|don'?t|not\s+just|not\s+only)|"
+    r"except|however|though|although|instead|also|not\s+just|not\s+only|only\s+want|"
+    r"change|drop|"
+    r"add\s+(?:a\s+)?(?:step|item|sub-?task|another)|"
+    r"remove\s+(?:step|item|sub-?task|the\s+(?:first|second|third|fourth|fifth|last)|#\d+|\d+\b)|"
+    r"replace|update|delete|skip|omit|"
+    r"in\s+step\s+\d+|for\s+step\s+\d+|step\s+\d+\s+should)\b",
+    re.I,
+)
+_BENIGN_BUT_NOT_APPLIED = re.compile(
+    r"\b(?:shown|listed|available)\s+but\s+not\s+applied\b",
+    re.I,
+)
+_SLOT_WHOLE_PLAN_CONFIRM = re.compile(
+    r"\b(?:confirm(?:ing)?\s+(?:the\s+)?(?:whole\s+|entire\s+)?plan|"
+    r"not\s+changing\s+(?:either|any)|run\s+it\s+as\s+shown|accept\s+(?:the\s+)?(?:whole\s+)?plan)\b",
+    re.I,
+)
+_AFFIRMATIVE_PARAPHRASE = re.compile(
+    r"\b(?:run\s+it\s+as\s+shown|keep\s+it\s+as\s+(?:is|shown)|that\s+is\s+right|"
+    r"that\s+matches\s+what\s+i\s+want)\b",
+    re.I,
+)
+
+
+def _scrub_benign_confirm_phrases(text: str) -> str:
+    return _BENIGN_BUT_NOT_APPLIED.sub("", text or "")
+
+
+def _affirmative_accept_cue(text: str) -> bool:
+    scrubbed = _scrub_benign_confirm_phrases(text)
+    if _AFFIRMATIVE_PARAPHRASE.search(scrubbed):
+        return True
+    if _CONFIRM_CORRECTIVE.search(scrubbed):
+        return False
+    if _AFFIRMATIVE_ACCEPT_PREFIX.match(scrubbed):
+        return True
+    return False
+
+
+def _affirmative_unrouted_confirm(text: str) -> bool:
+    scrubbed = _scrub_benign_confirm_phrases(text)
+    return bool(_AFFIRMATIVE_UNROUTED_PREFIX.match(scrubbed)) and not _CONFIRM_CORRECTIVE.search(scrubbed)
+
+
+def _slot_whole_plan_confirm(text: str) -> bool:
+    scrubbed = _scrub_benign_confirm_phrases(text)
+    return bool(_SLOT_WHOLE_PLAN_CONFIRM.search(scrubbed)) or _affirmative_accept_cue(text)
+
+
+def _unrouted_consultation_confirm(text: str) -> bool:
+    """Accept on an unrouted turn when the reply opens with yes and has no corrective clause.
+
+    Covers the case where the ProposalReview head ranks ``confirm`` first but does not route
+    because it is not confident (domain wording in the rest of the sentence).
+    """
+    return _affirmative_unrouted_confirm(text)
+_DECLINE_CORRECTIVE = re.compile(
+    r"\b(?:not\s+just|not\s+only|not\s+quite|instead|i\s+asked|i\s+want|i\s+meant|"
+    r"give\s+me|please|should\s+be|is\s+a|use\s+your\s+best\s+judgment|change|look\s+up|report)\b",
+    re.I,
+)
+_LOOK_UP_CUE = re.compile(
+    r"\b(?:look\s+(?:it\s+|that\s+|step\s+)?up|lookup|what\s+does\s+step|explain\s+step|"
+    r"details\s+on\s+step|do\s+not\s+(?:record|change|write|modify)|don'?t\s+(?:record|change|write|modify)|"
+    r"change\s+nothing|record\s+nothing|read\s+it|only\s+check|just\s+check)\b",
+    re.I,
+)
+_DROP_CUE = re.compile(
+    r"\b(?:drop|remove|delete|skip|cut|omit|leave\s+out|take\s+out|get\s+rid|without|"
+    r"don'?t\s+(?:need|do)|do\s+not\s+(?:need|do))\b",
+    re.I,
+)
+_EDIT_ALONGSIDE_DROP = re.compile(
+    r"\b(?:change|make|set|update|replace|rename|modify|merge|combine|is\s+one|is\s+a)\b",
+    re.I,
+)
+_STEP_NUM_IN_REPLY = re.compile(r"\b(?:step|item)\s+#?(\d+)\b", re.I)
+
+
+def _compound_drop_edit(text: str, routed_items: Optional[Sequence[Any]] = None) -> bool:
+    if not _DROP_CUE.search(text):
+        return False
+    if ";" in text:
+        return True
+    if _EDIT_ALONGSIDE_DROP.search(text):
+        return True
+    if routed_items:
+        routed_set = {str(item).strip() for item in routed_items}
+        mentioned = _STEP_NUM_IN_REPLY.findall(text)
+        if any(num not in routed_set for num in mentioned):
+            return True
+    return False
+
+
 class ProposalReplyPolicy:
     """The sub_tasks and plan kinds: accept, no, or typed edits (deterministic first, then the reader).
 
@@ -889,47 +1253,405 @@ class ProposalReplyPolicy:
     reply the reader cannot read as edits asks again (REPROMPT); the record stays open and the reply counts toward its cap.
     """
 
-    def __init__(self, interpreter: Optional[EditInterpreter] = None):
+    def __init__(
+        self,
+        interpreter: Optional[EditInterpreter] = None,
+        *,
+        consultation_cme: Any = None,
+        consultation_workflow: Any = None,
+        app_workflow: Any = None,
+        structured_fallback: bool = False,
+    ):
         self._interpreter = interpreter
+        self._consultation_cme = consultation_cme
+        self._consultation_workflow = consultation_workflow
+        self._app_workflow = app_workflow
+        self._structured_fallback = structured_fallback
 
     def decide(self, proposal: Proposal, message: str) -> ReplyDecision:
+        from fastworkflow.review_proposals import SubTaskProposal
+
         text = (message or "").strip()
         word = text.lower()
+        sub_task_review = isinstance(proposal, SubTaskProposal)
+        if (self._consultation_cme is not None and self._consultation_workflow is not None
+                and sub_task_review):
+            return self._decide_with_consultation(proposal, text, word)
         if word in ("accept", "yes"):
+            return ReplyDecision(Verdict.CONFIRM, "accepted")
+        if _affirmative_accept_cue(text):
             return ReplyDecision(Verdict.CONFIRM, "accepted")
         if word in ("no", "decline"):
             return ReplyDecision(Verdict.DECLINE, "declined")
         try:
             edits = parse_edits(text)
+            edits = _normalize_parsed_subtask_edits(proposal, edits)
         except EditParseError as exc:
             reader = self._interpreter or _model_interpreter
             if reader is None:
+                if sub_task_review:
+                    return ReplyDecision(Verdict.REPROMPT, "not read as edits", message=SUB_TASK_UNREADABLE_REPLY)
                 return ReplyDecision(Verdict.REPROMPT, "not read as edits", message=f"{exc} {PROMPT_HINT}")
             try:
                 edits = list(reader(text, proposal))
+            except EditRefused as refused:
+                return ReplyDecision(Verdict.REFUSE, "edits refused", message=str(refused))
             except EditParseError as inner:
-                return ReplyDecision(Verdict.REPROMPT, "not read as edits", message=f"{inner} {PROMPT_HINT}")
+                unreadable = SUB_TASK_UNREADABLE_REPLY if sub_task_review else f"{inner} {PROMPT_HINT}"
+                return ReplyDecision(Verdict.REPROMPT, "not read as edits", message=unreadable)
             if not edits:
-                return ReplyDecision(Verdict.REPROMPT, "not read as edits",
-                                     message=f"I could not read that as an edit. {PROMPT_HINT}")
+                unreadable = SUB_TASK_UNREADABLE_REPLY if sub_task_review else f"I could not read that as an edit. {PROMPT_HINT}"
+                return ReplyDecision(Verdict.REPROMPT, "not read as edits", message=unreadable)
             try:
                 apply_edits(proposal, edits)
             except EditRefused as refused:
                 return ReplyDecision(Verdict.REFUSE, "edits refused", message=str(refused))
-            return ReplyDecision(Verdict.EDIT, READ_REASON, edits=tuple(edits))
+            return _validate_edits_decision(proposal, tuple(edits), reason=READ_REASON, text=text)
         try:
             apply_edits(proposal, edits)           # validate only; the caller applies
         except EditRefused as exc:
             return ReplyDecision(Verdict.REFUSE, "edits refused", message=str(exc))
         return ReplyDecision(Verdict.EDIT, "typed edits", edits=tuple(edits))
 
+    def _in_consultation_slot(self) -> bool:
+        cme = self._consultation_cme
+        stage = cme.context.get("NLU_Pipeline_Stage")
+        return (stage == fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION
+                or cme.context.get("stored_parameters") is not None)
 
-def reply_policy(kind: str, interpreter: Optional[EditInterpreter] = None):
+    def _decide_with_consultation(self, proposal: Proposal, text: str, word: str) -> ReplyDecision:
+        if self._structured_fallback and self._consultation_cme is not None:
+            _clear_consultation_cme_continuation(self._consultation_cme)
+        was_in_slot = self._in_consultation_slot()
+        if not was_in_slot:
+            if word in ("accept", "yes"):
+                return ReplyDecision(Verdict.CONFIRM, "accepted")
+            if _affirmative_accept_cue(text):
+                return ReplyDecision(Verdict.CONFIRM, "accepted")
+            if word in ("no", "decline"):
+                return ReplyDecision(Verdict.DECLINE, "declined")
+            try:
+                edits = parse_edits(text)
+                edits = _normalize_parsed_subtask_edits(proposal, edits)
+            except EditParseError:
+                pass
+            else:
+                try:
+                    apply_edits(proposal, edits)
+                except EditRefused as refused:
+                    return ReplyDecision(Verdict.REFUSE, "edits refused", message=str(refused))
+                return ReplyDecision(Verdict.EDIT, "typed edits", edits=tuple(edits))
+
+        decision = self._consultation_turn(proposal, text, was_in_slot=was_in_slot, initial_word=word)
+        if (self._structured_fallback
+                and decision.reason in ("item slot", "slot wait", "slot retry")):
+            if self._consultation_cme is not None:
+                _clear_consultation_cme_continuation(self._consultation_cme)
+            return ReplyDecision(
+                Verdict.REPROMPT, "not read as edits", message=SUB_TASK_STRUCTURED_UNREADABLE_REPLY)
+        return decision
+
+    def _wildcard_route_from_cme(self, cme_out: Any) -> Any:
+        """The CME wildcard's routing ``Signature.Output`` (fix-3rsq.12.3 framing).
+
+        ``_wildcard_command_output`` copies routing fields into ``artifacts`` and sets
+        ``CommandResponse.output`` to the nested command output only (handled paths). Consultation
+        policy needs the routing record itself.
+        """
+        from fastworkflow._workflows.command_metadata_extraction._commands.wildcard import (
+            Signature as WildcardSignature,
+        )
+
+        out = getattr(cme_out.command_response, "output", None)
+        if out is not None and hasattr(out, "routed"):
+            return out
+        arts = getattr(cme_out.command_response, "artifacts", None) or {}
+        return WildcardSignature.Output(
+            handled=arts.get("command_handled") is True,
+            routed=bool(cme_out.success),
+            response=getattr(cme_out.command_response, "response", "") or "",
+            command=arts.get("command"),
+            command_name=arts.get("command_name"),
+            cmd_parameters=arts.get("cmd_parameters"),
+            ran_on_context_name=arts.get("ran_on_context_name"),
+            ran_on_context_clause=arts.get("ran_on_context_clause"),
+            reply_intent=arts.get("reply_intent"),
+            output=out if out is not None and not hasattr(out, "routed") else None,
+        )
+
+    def _consultation_turn(
+        self,
+        proposal: Proposal,
+        text: str,
+        *,
+        was_in_slot: bool,
+        initial_word: str,
+    ) -> ReplyDecision:
+        from fastworkflow.command_executor import CommandExecutor
+        from fastworkflow._workflows.consultation._item_validation import explicit_out_of_range_step
+
+        _prepare_consultation_workflow(self, proposal)
+        slot_question = _slot_question(proposal)
+        cme_out = CommandExecutor.perform_action(
+            self._consultation_cme,
+            fastworkflow.Action(command_name="wildcard", command=text),
+        )
+        w_out = self._wildcard_route_from_cme(cme_out)
+        if w_out is None:
+            return self._edit_fallback(proposal, text, slot_question)
+
+        if was_in_slot:
+            handled = self._handle_slot_wildcard(proposal, text, w_out, slot_question, initial_word)
+            if handled is not None:
+                return handled
+            was_in_slot = False
+
+        if getattr(w_out, "routed", False):
+            return self._handle_routed_consultation(proposal, text, w_out, slot_question)
+
+        pending_name = self._consultation_cme.context.get("command_name")
+        pending_stage = self._consultation_cme.context.get("NLU_Pipeline_Stage")
+        if (pending_stage == fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION
+                and pending_name in ("ProposalReview/drop", "ProposalReview/look_up")):
+            count = len(proposal.items)
+            if explicit_out_of_range_step(text, count):
+                _clear_consultation_cme_continuation(self._consultation_cme)
+                return ReplyDecision(Verdict.REFUSE, "edits refused", message=_step_count_message(count))
+            if pending_name.endswith("/look_up") and not _LOOK_UP_CUE.search(text):
+                return self._edit_fallback(proposal, text, slot_question)
+            if pending_name.endswith("/drop") and (
+                count == 1 or not _DROP_CUE.search(text) or _compound_drop_edit(text)
+            ):
+                return self._edit_fallback(proposal, text, slot_question)
+            if count == 1:
+                _clear_consultation_cme_continuation(self._consultation_cme)
+                edit = Drop(index=1) if pending_name.endswith("/drop") else LookUp(index=1)
+                return _validate_edits_decision(proposal, (edit,), reason="typed edits")
+            self._consultation_cme.context["missing_value_question"] = slot_question
+            return ReplyDecision(Verdict.REPROMPT, "item slot", message=slot_question)
+
+        if (
+            not was_in_slot
+            and not getattr(w_out, "routed", False)
+            and _unrouted_consultation_confirm(text)
+        ):
+            _clear_consultation_cme_continuation(self._consultation_cme)
+            return ReplyDecision(Verdict.CONFIRM, "accepted")
+
+        return self._edit_fallback(proposal, text, slot_question)
+
+    def _handle_slot_wildcard(
+        self,
+        proposal: Proposal,
+        text: str,
+        w_out: Any,
+        slot_question: str,
+        initial_word: str,
+    ) -> Optional[ReplyDecision]:
+        if _slot_whole_plan_confirm(text):
+            _clear_consultation_cme_continuation(self._consultation_cme)
+            return ReplyDecision(Verdict.CONFIRM, "accepted")
+        intent = getattr(w_out, "reply_intent", None)
+        if intent == "wait":
+            self._consultation_cme.context["missing_value_question"] = slot_question
+            return ReplyDecision(Verdict.REPROMPT, "slot wait", message=slot_question)
+        if intent == "abort":
+            _clear_consultation_cme_continuation(self._consultation_cme)
+            return ReplyDecision(
+                Verdict.REPROMPT,
+                "slot aborted",
+                message=f"OK, nothing changed.\n{prompt_for(proposal, self._app_workflow)}",
+            )
+        if intent == "misunderstood":
+            _clear_consultation_cme_continuation(self._consultation_cme)
+            return self._edit_fallback(proposal, text, slot_question)
+        if intent == "answer" and not getattr(w_out, "routed", False):
+            self._consultation_cme.context["missing_value_question"] = slot_question
+            return ReplyDecision(Verdict.REPROMPT, "slot retry", message=slot_question)
+        if intent == "different_command":
+            if getattr(w_out, "routed", False):
+                return self._handle_routed_consultation(proposal, text, w_out, slot_question)
+            if initial_word in ("accept", "yes"):
+                return ReplyDecision(Verdict.CONFIRM, "accepted")
+            if initial_word in ("no", "decline"):
+                return ReplyDecision(Verdict.DECLINE, "declined")
+            return None
+        return None
+
+    def _consultation_action_parameters(self, cmd_parameters: Any) -> dict:
+        if cmd_parameters is None:
+            return {}
+        if hasattr(cmd_parameters, "model_dump"):
+            return cmd_parameters.model_dump()
+        if isinstance(cmd_parameters, dict):
+            return cmd_parameters
+        return {}
+
+    def _park_edit_item_slot(self, text: str, slot_question: str, pending_proposed: list) -> None:
+        from fastworkflow.utils.signatures import NOT_FOUND
+        from fastworkflow._workflows.consultation._commands.ProposalReview.edit import Signature as EditSignature
+
+        pending = EditSignature.SlotInput.model_construct(
+            item=NOT_FOUND,
+            edits=list(pending_proposed),
+        )
+        ctx = self._consultation_cme.context
+        ctx["NLU_Pipeline_Stage"] = fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION
+        ctx["command"] = text
+        ctx["command_name"] = "ProposalReview/edit"
+        ctx["stored_parameters"] = pending
+        ctx["missing_value_question"] = slot_question
+        self._consultation_cme.context = ctx
+
+    def _reply_from_edit_output(
+        self,
+        proposal: Proposal,
+        text: str,
+        routed: Any,
+        slot_question: str,
+    ) -> ReplyDecision:
+        if getattr(routed, "refusal", None):
+            _clear_consultation_cme_continuation(self._consultation_cme)
+            return ReplyDecision(Verdict.REFUSE, "edits refused", message=routed.refusal)
+        pending = list(getattr(routed, "pending_proposed", None) or [])
+        if pending:
+            self._park_edit_item_slot(text, slot_question, pending)
+            return ReplyDecision(Verdict.REPROMPT, "item slot", message=slot_question)
+        edits = tuple(getattr(routed, "edits", None) or [])
+        if not edits:
+            _clear_consultation_cme_continuation(self._consultation_cme)
+            return ReplyDecision(Verdict.REPROMPT, "not read as edits", message=SUB_TASK_UNREADABLE_REPLY)
+        _clear_consultation_cme_continuation(self._consultation_cme)
+        return _validate_edits_decision(proposal, edits, reason=READ_REASON, text=text)
+
+    def _perform_consultation_command(self, command_name: str, command: str, input_obj: Any) -> Any:
+        from fastworkflow.command_executor import call_response_generator
+        from fastworkflow.command_routing import ModuleType
+
+        definition = fastworkflow.RoutingRegistry.get_definition(self._consultation_workflow.folderpath)
+        response_class = definition.get_command_class(command_name, ModuleType.RESPONSE_GENERATION_INFERENCE)
+        if not response_class:
+            raise ValueError(f"Response generation class not found for command name {command_name!r}")
+        return call_response_generator(
+            response_class(),
+            self._consultation_workflow,
+            command,
+            input_obj,
+            command_name=command_name,
+        )
+
+    def _handle_routed_consultation(
+        self,
+        proposal: Proposal,
+        text: str,
+        w_out: Any,
+        slot_question: str,
+    ) -> ReplyDecision:
+        from fastworkflow.command_executor import CommandExecutor
+
+        name = w_out.command_name or ""
+        cmd_parameters = w_out.cmd_parameters
+        if isinstance(cmd_parameters, BaseModel):
+            cmd_out = self._perform_consultation_command(name, text, cmd_parameters)
+        else:
+            cmd_out = CommandExecutor.perform_action(
+                self._consultation_workflow,
+                fastworkflow.Action(
+                    command_name=name,
+                    command=text,
+                    parameters=self._consultation_action_parameters(cmd_parameters),
+                ),
+            )
+        routed = getattr(cmd_out.command_response, "output", None)
+        if routed is None:
+            return self._edit_fallback(proposal, text, slot_question)
+        if name.endswith("/confirm"):
+            if _CONFIRM_CORRECTIVE.search(_scrub_benign_confirm_phrases(text)):
+                return self._edit_fallback(proposal, text, slot_question)
+            _clear_consultation_cme_continuation(self._consultation_cme)
+            return ReplyDecision(Verdict.CONFIRM, "accepted")
+        if name.endswith("/decline"):
+            if _DECLINE_CORRECTIVE.search(text) or _DROP_CUE.search(text):
+                return self._edit_fallback(proposal, text, slot_question)
+            _clear_consultation_cme_continuation(self._consultation_cme)
+            return ReplyDecision(Verdict.DECLINE, "declined")
+        if name.endswith("/drop"):
+            drop_items = list(getattr(routed, "items", None) or [])
+            if _compound_drop_edit(text, drop_items):
+                return self._edit_fallback(
+                    proposal, text, slot_question, preserve_drop_items=drop_items or None
+                )
+            _clear_consultation_cme_continuation(self._consultation_cme)
+            edits = tuple(Drop(index=int(item)) for item in routed.items)
+            return _validate_edits_decision(proposal, edits, reason="typed edits")
+        if name.endswith("/add"):
+            _clear_consultation_cme_continuation(self._consultation_cme)
+            after = len(proposal.items) if routed.after is None else int(routed.after)
+            edit = Add(after=after, values={"goal": routed.goal})
+            return _validate_edits_decision(proposal, (edit,), reason="typed edits")
+        if name.endswith("/look_up"):
+            _clear_consultation_cme_continuation(self._consultation_cme)
+            edit = LookUp(index=int(routed.item))
+            return _validate_edits_decision(proposal, (edit,), reason="typed edits")
+        if name.endswith("/edit"):
+            return self._reply_from_edit_output(proposal, text, routed, slot_question)
+        _clear_consultation_cme_continuation(self._consultation_cme)
+        return self._edit_fallback(proposal, text, slot_question)
+
+    def _edit_fallback(
+        self,
+        proposal: Proposal,
+        text: str,
+        slot_question: str,
+        *,
+        preserve_drop_items: list[str] | None = None,
+    ) -> ReplyDecision:
+        from fastworkflow.command_executor import CommandExecutor
+
+        _clear_consultation_cme_continuation(self._consultation_cme)
+        _prepare_consultation_workflow(self, proposal)
+        cmd_out = CommandExecutor.perform_action(
+            self._consultation_workflow,
+            fastworkflow.Action(command_name="ProposalReview/edit", command=text),
+        )
+        routed = getattr(cmd_out.command_response, "output", None)
+        if routed is None:
+            if preserve_drop_items:
+                _clear_consultation_cme_continuation(self._consultation_cme)
+                edits = tuple(Drop(index=int(item)) for item in preserve_drop_items)
+                return _validate_edits_decision(proposal, edits, reason="typed edits")
+            return ReplyDecision(Verdict.REPROMPT, "not read as edits", message=SUB_TASK_UNREADABLE_REPLY)
+        decision = self._reply_from_edit_output(proposal, text, routed, slot_question)
+        if preserve_drop_items and (
+            decision.reason == "item slot"
+            or (decision.verdict == Verdict.REPROMPT and decision.reason == "not read as edits")
+        ):
+            _clear_consultation_cme_continuation(self._consultation_cme)
+            edits = tuple(Drop(index=int(item)) for item in preserve_drop_items)
+            return _validate_edits_decision(proposal, edits, reason="typed edits")
+        return decision
+
+
+def reply_policy(
+    kind: str,
+    interpreter: Optional[EditInterpreter] = None,
+    *,
+    consultation_cme: Any = None,
+    consultation_workflow: Any = None,
+    app_workflow: Any = None,
+    structured_fallback: bool = False,
+):
     """The reply policy for a kind (the policy decision point for replies); *interpreter* is the proposal reader."""
     if kind == KIND_ACTION:
         return ActionReplyPolicy()
     if kind in (KIND_SUB_TASKS, KIND_PLAN):
-        return ProposalReplyPolicy(interpreter)
+        return ProposalReplyPolicy(
+            interpreter,
+            consultation_cme=consultation_cme,
+            consultation_workflow=consultation_workflow,
+            app_workflow=app_workflow,
+            structured_fallback=structured_fallback,
+        )
     raise ValueError(f"unknown review kind {kind!r}")
 
 
@@ -962,7 +1684,7 @@ def open_review(host: Any, store: ReviewStore, proposal: Proposal, *, surface: S
     # items_text: the request's items as the planning step passed them. The accepted run re-executes with the
     # same text, so the run the phase archives carries the step's own parameters (the finish check matches them).
     binding = {**proposal.binding(), "channel": store.channel, "task": store.task, "items_text": items_text}
-    text = prompt_for(proposal)
+    text = prompt_for(proposal, _prompt_workflow(host, store))
     ttl_turns, ttl_seconds = ttl_for_kind(proposal.kind)
     record = ReviewRecord(
         id=uuid.uuid4().hex, token_hash="", command=proposal.spec, annotation=None, raw_command="",
@@ -986,11 +1708,33 @@ def open_review(host: Any, store: ReviewStore, proposal: Proposal, *, surface: S
     return record
 
 
-def reply_to_proposal(host: Any, store: ReviewStore, record: ReviewRecord, message: str) -> ReviewReply:
+def reply_to_proposal(
+    host: Any,
+    store: ReviewStore,
+    record: ReviewRecord,
+    message: str,
+    *,
+    cap_turn: bool = False,
+) -> ReviewReply:
     """Resolve one reply on an open proposal record. Callers have already checked TTL and identity."""
     proposal = proposal_of(record)
     surface = store.surface
-    decision = reply_policy(record.kind, store.edit_reader).decide(proposal, message)
+    answering_q3_or_later = record.turns_seen >= 2
+    producing_q3_or_later = record.turns_seen >= 1
+    decision = reply_policy(
+        record.kind,
+        store.edit_reader,
+        consultation_cme=getattr(store, "consultation_cme", None),
+        consultation_workflow=getattr(store, "consultation_workflow", None),
+        app_workflow=_prompt_workflow(host, store),
+        structured_fallback=answering_q3_or_later,
+    ).decide(proposal, message)
+    if cap_turn and decision.verdict not in (Verdict.CONFIRM, Verdict.DECLINE):
+        transition(host, store, record, EXPIRED, reason="ttl", surface=surface, outcome="expired")
+        propagate(host, store, record, surface=surface)
+        from fastworkflow.approval_binding import MSG_EXPIRED
+
+        return ReviewReply(True, MSG_EXPIRED.format(command=record.command))
     if decision.verdict is Verdict.CONFIRM:
         stale = stale_upstream(store, record)
         if stale is not None:
@@ -1005,11 +1749,14 @@ def reply_to_proposal(host: Any, store: ReviewStore, record: ReviewRecord, messa
         propagate(host, store, record, surface=surface)
         return ReviewReply(True, f"Declined. The {record.command} review was not accepted.")
     if decision.verdict is Verdict.EDIT:
+        if producing_q3_or_later and getattr(store, "consultation_cme", None) is not None:
+            _clear_consultation_cme_continuation(store.consultation_cme)
         edited = apply_edits(proposal, list(decision.edits)).revised(host, proposal)
         record.binding = {**record.binding, "items": edited.binding()["items"]}
         record.fingerprint = fingerprint(record.binding)   # the record's fingerprint covers its channel and task too
         record.revision += 1
-        record.rendering = prompt_for(edited)
+        record.rendering = prompt_for(
+            edited, _prompt_workflow(host, store), structured=producing_q3_or_later)
         record.rendering_hash = rendering_hash(record.rendering)
         transition(host, store, record, REVISED, reason=f"revision {record.revision}: {decision.reason}",
                    surface=surface, outcome="revised")
@@ -1020,4 +1767,18 @@ def reply_to_proposal(host: Any, store: ReviewStore, record: ReviewRecord, messa
                                       f"edits.\n{record.rendering}")
         return ReviewReply(False, record.rendering)
     # REFUSE or REPROMPT: nothing changes, and the user is asked again.
+    if producing_q3_or_later:
+        if getattr(store, "consultation_cme", None) is not None:
+            _clear_consultation_cme_continuation(store.consultation_cme)
+        from fastworkflow.review_proposals import SubTaskProposal
+
+        if isinstance(proposal, SubTaskProposal):
+            return ReviewReply(
+                False,
+                _structured_error_prompt(
+                    proposal,
+                    _prompt_workflow(host, store),
+                    decision.message or SUB_TASK_UNREADABLE_REPLY,
+                ),
+            )
     return ReviewReply(False, decision.message or PROMPT_HINT)

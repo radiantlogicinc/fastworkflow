@@ -1543,6 +1543,13 @@ def is_internal_cme_folder(folderpath: str) -> bool:
     return real == cme or real.startswith(cme + os.sep)
 
 
+def is_internal_consultation_folder(folderpath: str) -> bool:
+    """True when *folderpath* is the internal consultation workflow (or inside it)."""
+    consultation = os.path.realpath(fastworkflow.get_internal_workflow_path("consultation"))
+    real = os.path.realpath(folderpath)
+    return real == consultation or real.startswith(consultation + os.sep)
+
+
 def arm_for_workflow(folderpath: Optional[str], explicit: Optional[str] = None) -> str:
     """The reserved-class arm a workflow trains under.
 

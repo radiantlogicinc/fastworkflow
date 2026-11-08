@@ -1,0 +1,36 @@
+{"text": "all good, proceed", "label": "confirm"}
+{"text": "I'm happy with that", "label": "confirm"}
+{"text": "let's do it", "label": "confirm"}
+{"text": "that plan works", "label": "confirm"}
+{"text": "go for it", "label": "confirm"}
+{"text": "I accept the plan as written", "label": "confirm"}
+{"text": "I'd rather not", "label": "decline"}
+{"text": "not this time", "label": "decline"}
+{"text": "hold off on that", "label": "decline"}
+{"text": "scratch that plan", "label": "decline"}
+{"text": "please don't run this", "label": "decline"}
+{"text": "I'll pass", "label": "decline"}
+{"text": "lose step 4", "label": "drop"}
+{"text": "step 1 shouldn't be there", "label": "drop"}
+{"text": "pull step 3 from the list", "label": "drop"}
+{"text": "I want step 2 gone", "label": "drop"}
+{"text": "strike the middle step", "label": "drop"}
+{"text": "remove step 5 entirely", "label": "drop"}
+{"text": "could you explain step 4", "label": "look_up"}
+{"text": "refresh step 1 for me", "label": "look_up"}
+{"text": "tell me what step 3 is for", "label": "look_up"}
+{"text": "pull up details on step 2", "label": "look_up"}
+{"text": "show the current plan for step 1", "label": "look_up"}
+{"text": "clarify what step 2 means", "label": "look_up"}
+{"text": "slot in a verification step after 3", "label": "add"}
+{"text": "need a follow-up step for paperwork", "label": "add"}
+{"text": "stick another task after the second step", "label": "add"}
+{"text": "add sending an email at the end", "label": "add"}
+{"text": "one more thing: confirm the ID", "label": "add"}
+{"text": "append verifying the signature", "label": "add"}
+{"text": "the branch should be Westside on step 1", "label": "edit"}
+{"text": "swap Emma for Olivia on step 2", "label": "edit"}
+{"text": "make the deadline next Friday", "label": "edit"}
+{"text": "correction: the copy is large print", "label": "edit"}
+{"text": "fix step 3 so it uses email not phone", "label": "edit"}
+{"text": "change step 1 goal to renew the card", "label": "edit"}

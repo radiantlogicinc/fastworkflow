@@ -313,7 +313,9 @@ class CommandDirectory(BaseModel):
         # core commands) do not take the global planning commands: their trained artifacts predate them.
         import fastworkflow  # inline: the module is imported before the package is ready
         if os.path.abspath(command_directory.workflow_folderpath) in {
-                os.path.abspath(fastworkflow.get_internal_workflow_path("command_metadata_extraction"))}:
+                os.path.abspath(fastworkflow.get_internal_workflow_path("command_metadata_extraction")),
+                os.path.abspath(fastworkflow.get_internal_workflow_path("consultation")),
+        }:
             return
         for item_path in sorted(root.glob("*.py")):
             if item_path.is_file() and not item_path.name.startswith("_"):
@@ -516,6 +518,13 @@ class CommandDirectory(BaseModel):
         1.  Core commands come from *all* python modules inside the internal
             ``command_metadata_extraction/_commands`` tree (recursively).
         """
+        import fastworkflow  # inline: matches other internal-workflow guards in this module
+
+        if os.path.abspath(command_directory.workflow_folderpath) == os.path.abspath(
+                fastworkflow.get_internal_workflow_path("consultation")):
+            command_directory.core_command_names.clear()
+            return
+
         # Clear any previously populated list first
         command_directory.core_command_names.clear()
 

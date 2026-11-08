@@ -16,11 +16,12 @@ import pytest
 import fastworkflow
 from fastworkflow.command_directory import CommandDirectory
 from fastworkflow import planning_commands as pc
-from fastworkflow.review_engine import AWAITING, CONFIRMED, EXPIRED, REVISED
+from fastworkflow.review_engine import AWAITING, CONFIRMED, EXPIRED, REVISED, open_review
 from fastworkflow.review_proposals import (Candidate, PlanProposal, SubTaskProposal, build_round1_proposal)
 from fastworkflow.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the library copy, and the guards
     _added, _ask, _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
+from tests.test_review_engine import _tasks  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
@@ -91,7 +92,7 @@ def test_review_subtasks_runs_end_to_end_with_scripted_replies_and_returns_the_a
     assert "1. book a flight" in record.rendering and "2. tell Ann" in record.rendering
 
     edited = todo.ctx.process_turn("change 2: inputs=Ann Lee")
-    assert "2. tell Ann (inputs: Ann Lee" in edited.answer
+    assert "2. tell Ann (Ann Lee)" in edited.answer
     assert record.state == REVISED
 
     todo.script.steps = _finish()                  # the agent's finish after the accepted step (scripted)
@@ -164,12 +165,18 @@ def test_a_sub_task_round_trips_through_json_with_its_goal_outcome_inputs_and_me
     assert rebuilt.items[2].means.kind == "from_scratch"
 
 
-def test_the_rendering_shows_each_sub_task_its_inputs_means_and_outcome():
+def test_the_rendering_shows_each_sub_task_its_goal_and_inputs():
     text = _sample_proposal().rendering()
-    assert "1. book a loan for Ann (inputs: title=Dune; means: planning:Library/book_loans); " \
-           "desired outcome: Ann holds a loan on Dune" in text
-    assert "2. tell Ann (inputs: from sub-task 1; means: plain:Library/notify)" in text
-    assert "3. summarise the week (inputs: none; means: from_scratch); desired outcome: a summary exists" in text
+    assert "1. book a loan for Ann (title: Dune)" in text
+    assert "2. tell Ann (from sub-task 1)" in text
+    assert "3. summarise the week" in text
+    assert "means:" not in text and "desired outcome" not in text
+
+
+def test_the_model_rendering_keeps_means_outcome_and_input_keys():
+    text = _sample_proposal().model_rendering()
+    assert "means: planning:Library/book_loans" in text
+    assert "desired outcome: Ann holds a loan on Dune" in text
 
 
 def test_the_text_forms_of_means_and_inputs_are_read_and_bad_ones_refused():
@@ -229,19 +236,26 @@ def test_the_round_one_builder_prefers_a_planning_command_then_a_plain_one_then_
 
 
 def test_a_proposal_review_accepts_more_than_two_replies_and_expires_at_its_cap(todo):
-    """fix-3rsq.plan-review.2.5: a proposal review takes its edits as replies (the cap is 8, not the approval's 2).
-    Eight edits keep it open and the ninth reply, even an accept, finds it expired (nothing is confirmed)."""
-    todo.wf.current_command_context = todo.library
-    todo.ctx.run_framework_planning_command("review_subtasks", {"subtasks": "book a flight; tell Ann"},
-                                            "review the sub-tasks")
-    record = todo.store.active()
-    assert record is not None and record.ttl_turns == 8
+    """fix-3rsq.plan-review.2.5 / fix-kk46.4: eight unresolved edits fill the cap; accept on that turn is honoured;
+    a further unresolved reply expires without applying."""
+    store = todo.store
+    store.records.clear()
+    record = open_review(todo.ctx, store, _tasks("book a flight", "tell Ann"), surface=store.surface)
+    assert record.ttl_turns == 8
     for number in range(8):
-        todo.ctx.process_turn(f"change 2: inputs=Ann {number}")
+        todo.ctx.process_turn(f"change 2: count={number + 2}")
     assert record.turns_seen == 8 and record.state == REVISED
-    todo.script.steps = _finish()                    # the agent is told the review expired, and finishes
-    todo.ctx.process_turn("accept")                  # the ninth reply: over the cap
-    assert record.state == EXPIRED
+    todo.script.steps = _finish()
+    todo.ctx.process_turn("accept")
+    assert record.state == CONFIRMED and record.turns_seen == 8
+
+    store.records.clear()
+    record = open_review(todo.ctx, store, _tasks("book a flight", "tell Ann"), surface=store.surface)
+    for number in range(8):
+        todo.ctx.process_turn(f"change 2: count={number + 2}")
+    assert record.turns_seen == 8
+    todo.ctx.process_turn("change 2: count=99")
+    assert record.state == EXPIRED and record.turns_seen == 8
     assert not [r for r in todo.store.records if r.state == CONFIRMED]
 
 
@@ -250,7 +264,8 @@ def test_a_proposal_review_with_three_replies_is_still_open_and_accepts(todo):
     todo.ctx.run_framework_planning_command("review_subtasks", {"subtasks": "book a flight; tell Ann"},
                                             "review the sub-tasks")
     record = todo.store.active()
-    for text in ("change 2: inputs=Ann Lee", "change 1: inputs=Dune", "change 2: inputs=Ann Lee, Dune"):
+    for text in ("change 2: inputs=query=Ann Lee", "change 1: inputs=title=Dune",
+                 "change 2: inputs=query=Ann Lee, Dune"):
         todo.ctx.process_turn(text)
     assert record.turns_seen == 3 and record.state == REVISED
     todo.script.steps = _finish()

@@ -197,7 +197,8 @@ def test_the_draft_shows_the_extracted_planning_arguments(library_heads, scripte
     assert first.means == Means(kind="planning", name="Library/book_by_title")
     assert first.inputs == [SubTaskInput(name="title", value="Emma", drafted=True)]
     assert first.check == ""
-    assert "inputs: title=Emma" in draft.rendering()
+    assert "(title: Emma)" in draft.rendering()
+    assert "inputs: title=Emma" in draft.model_rendering()
     assert EMMA in lm.prompts[0]                  # each sub-task's means is extracted from its own text
 
 

@@ -567,21 +567,41 @@ def contexts_for_training(workflow_folderpath: str) -> set[str]:
     a version does not contain -- so the disagreement would present as part of a
     workflow silently becoming untrained.
 
-    The internal ``command_metadata_extraction`` contexts are excluded from an app
-    workflow because their models live in the internal workflow, and the global
-    wildcard context ``"*"`` is always included.
+    The internal ``command_metadata_extraction`` and ``consultation`` contexts are
+    excluded from an app workflow because their models live in those internal
+    workflows, and the global wildcard context ``"*"`` is always included.
     """
     crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
-    internal_wf_path = fastworkflow.get_internal_workflow_path(
-        "command_metadata_extraction")
-    internal_contexts = set(
-        fastworkflow.CommandContextModel.load(internal_wf_path)._command_contexts.keys()
-    )
+    cme_path = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
+    consultation_path = fastworkflow.get_internal_workflow_path("consultation")
+    internal_contexts: set[str] = set()
+    for internal_path in (cme_path, consultation_path):
+        if os.path.isdir(internal_path):
+            internal_contexts |= set(
+                fastworkflow.CommandContextModel.load(internal_path)._command_contexts.keys()
+            )
 
-    if "command_metadata_extraction" in workflow_folderpath:
+    def _targets_internal_workflow(name: str, internal_path: str) -> bool:
+        real = os.path.realpath(workflow_folderpath)
+        resolved = os.path.realpath(internal_path)
+        marker = os.path.join("_workflows", name)
+        return (
+            real == resolved
+            or real.startswith(resolved + os.sep)
+            or marker in workflow_folderpath
+        )
+
+    if _targets_internal_workflow("command_metadata_extraction", cme_path):
+        cme_contexts = set(
+            fastworkflow.CommandContextModel.load(cme_path)._command_contexts.keys()
+        )
         # `ErrorCorrection` is excluded because the internal workflow declares it as a
         # context but trains no classifier for it.
-        return set(internal_contexts) - {'ErrorCorrection'}
+        return set(cme_contexts) - {'ErrorCorrection'}
+    if _targets_internal_workflow("consultation", consultation_path):
+        return set(
+            fastworkflow.CommandContextModel.load(consultation_path)._command_contexts.keys()
+        )
     return (set(crd.contexts.keys()) - internal_contexts) | {'*'}
 
 

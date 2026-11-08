@@ -25,12 +25,12 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Optional
 
 import dspy
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from fastworkflow import turn_cache
 from fastworkflow.review_engine import (
-    KIND_PLAN, KIND_SUB_TASKS, PROPOSAL_SPECS, Add, Change, Drop, EditParseError, Merge, Proposal, Split,
-    register_proposal)
+    KIND_PLAN, KIND_SUB_TASKS, PROPOSAL_SPECS, Add, Change, Drop, EditParseError, EditRefused, Merge, Proposal,
+    Split, _SafeValues, register_proposal)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,8 @@ class Means(BaseModel):
 
 _FROM_SUBTASK = re.compile(r"^(?:(?P<name>[A-Za-z_]\w*)\s*=\s*)?from sub-task\s+(?P<number>\d+)$", re.IGNORECASE)
 _NAMED_VALUE = re.compile(r"^(?P<name>[A-Za-z_]\w*)\s*=\s*(?P<value>.*)$", re.DOTALL)
+_NAMED_COLON = re.compile(r"^(?P<name>[A-Za-z_]\w*)\s*:\s*(?P<value>.*)$", re.DOTALL)
+_ENTITY_INPUT_KEYS = frozenset({"name", "unit", "person", "right", "group", "application", "feed", "control"})
 
 
 class SubTaskInput(BaseModel):
@@ -112,8 +114,10 @@ class SubTaskInput(BaseModel):
         if match := _FROM_SUBTASK.match(text):
             return cls(name=match.group("name") or "", from_subtask=int(match.group("number")))
         if match := _NAMED_VALUE.match(text):
-            return cls(name=match.group("name"), value=match.group("value").strip())
-        return cls(value=text)
+            return cls(name=match.group("name"), value=_strip_outer_quotes(match.group("value")))
+        if match := _NAMED_COLON.match(text):
+            return cls(name=match.group("name"), value=_strip_outer_quotes(match.group("value")))
+        return cls(value=_strip_outer_quotes(text))
 
 
 class SubTask(BaseModel):
@@ -141,6 +145,10 @@ class SubTask(BaseModel):
     #: fix-48np.1: a sub-task whose means is still the drafted one is not drafted again at run time
     #: (``reviewed_arguments``). Not shown.
     drafted_means: str = Field(default="", json_schema_extra={"review_hidden": True})
+    #: The item this one came from before this reply (set by ``apply_edits``; not serialized).
+    _before_item: Optional["SubTask"] = PrivateAttr(default=None)
+    #: This reply asked for look_up on this item (set by ``apply_edits``; not serialized).
+    _look_up: bool = PrivateAttr(default=False)
 
     @field_validator("inputs", mode="before")
     @classmethod
@@ -156,6 +164,179 @@ class SubTask(BaseModel):
         return Means.from_text(value) if isinstance(value, str) else value
 
 
+_MULTI_INPUT_SPLIT = re.compile(
+    r"(?:[,;]|\s+and\s+)\s*(?=[A-Za-z_]\w*\s*[=:]|from sub-task\s+\d+)",
+    re.IGNORECASE,
+)
+_META_INPUT_KEYS = frozenset({"means", "goal", "outcome", "desired_outcome", "check"})
+
+
+def _strip_outer_quotes(value: str) -> str:
+    stripped = (value or "").strip()
+    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in "\"'":
+        return stripped[1:-1].strip()
+    return stripped
+
+
+def extract_quoted_names(text: str) -> list[str]:
+    """Literal entity names the user wrapped in quotes (not contractions like don't)."""
+    if not text:
+        return []
+    found: list[str] = []
+    for match in re.finditer(r'"([^"\n]{2,})"', text):
+        name = match.group(1).strip()
+        if name and name not in found:
+            found.append(name)
+    for match in re.finditer(r"(?<![A-Za-z0-9])'([^'\n]{2,})'(?![A-Za-z0-9])", text):
+        name = match.group(1).strip()
+        if name and name not in found:
+            found.append(name)
+    return found
+
+
+def _split_input_assignments(stripped: str) -> list[str]:
+    """Split key=value fragments without breaking quoted values."""
+    if not (_NAMED_VALUE.match(stripped) or _NAMED_COLON.match(stripped) or _FROM_SUBTASK.match(stripped)):
+        return [stripped]
+    pieces: list[str] = []
+    start = 0
+    in_quote: Optional[str] = None
+    index = 0
+    while index < len(stripped):
+        char = stripped[index]
+        if in_quote:
+            if char == in_quote:
+                in_quote = None
+            index += 1
+            continue
+        if char in "\"'":
+            in_quote = char
+            index += 1
+            continue
+        if char in ",;":
+            rest = stripped[index + 1 :]
+            if re.match(r"\s*(?=[A-Za-z_]\w*\s*[=:]|from sub-task\s+\d+)", rest, re.I):
+                piece = stripped[start:index].strip()
+                if piece:
+                    pieces.append(piece)
+                start = index + 1
+            index += 1
+            continue
+        match = re.match(r"\s+and\s+(?=[A-Za-z_]\w*\s*[=:])", stripped[index:], re.I)
+        if match:
+            piece = stripped[start:index].strip()
+            if piece:
+                pieces.append(piece)
+            start = index + match.end()
+            index = start
+            continue
+        index += 1
+    tail = stripped[start:].strip()
+    if tail:
+        pieces.append(tail)
+    return pieces if pieces else [stripped]
+
+
+def _input_edit_part_key(part: str) -> Optional[str]:
+    stripped = (part or "").strip()
+    if match := _NAMED_VALUE.match(stripped):
+        return match.group("name").lower()
+    if match := _NAMED_COLON.match(stripped):
+        return match.group("name").lower()
+    return None
+
+
+def _input_edit_parts(stripped: str) -> list[str]:
+    """Split an ``inputs`` edit into separate key=value pieces; commas inside values stay intact."""
+    if _NAMED_VALUE.match(stripped) or _NAMED_COLON.match(stripped) or _FROM_SUBTASK.match(stripped):
+        parts = _split_input_assignments(stripped)
+        if len(parts) > 1:
+            kept: list[str] = []
+            for part in parts:
+                text = part.strip()
+                if not text:
+                    continue
+                key = _input_edit_part_key(text)
+                if key and key in _META_INPUT_KEYS:
+                    continue
+                kept.append(text)
+            return kept if kept else [stripped]
+    return [stripped]
+
+
+def _merge_one_subtask_input(existing: list[SubTaskInput], text: str) -> list[SubTaskInput]:
+    """Update or add one input by name and keep the item's other inputs."""
+    new_input = SubTaskInput.from_text(text)
+    result = list(existing)
+    if new_input.name:
+        for position, each in enumerate(result):
+            if each.name == new_input.name:
+                result[position] = new_input
+                return result
+        result.append(new_input)
+        return result
+    for position, each in enumerate(result):
+        if not each.name:
+            result[position] = new_input
+            return result
+    result.append(new_input)
+    return result
+
+
+def merge_subtask_input_edit(existing: list[SubTaskInput], text: str) -> list[SubTaskInput]:
+    """One ``inputs`` change: update or add inputs and keep the item's other inputs (commas stay in values)."""
+    stripped = (text or "").strip()
+    if stripped.lower() == "none":
+        return []
+    result = list(existing)
+    for part in _input_edit_parts(stripped):
+        result = _merge_one_subtask_input(result, part)
+    return result
+
+
+def _inputs_user_kept(before: SubTask | None, after: SubTask) -> list[SubTaskInput]:
+    """Inputs *after* carries that differ from *before* (set in the same reply as a goal or means change)."""
+    if before is None:
+        return list(after.inputs)
+    before_named = {each.name: each for each in before.inputs if each.name}
+    kept: list[SubTaskInput] = []
+    for each in after.inputs:
+        if each.name:
+            if each.name not in before_named or each != before_named[each.name]:
+                kept.append(each)
+        else:
+            unnamed_before = [inp for inp in before.inputs if not inp.name]
+            if not unnamed_before or each != unnamed_before[0]:
+                kept.append(each)
+    return kept
+
+
+def _overlay_inputs(
+    drafted: SubTask,
+    kept: list[SubTaskInput],
+    fallback_existing: Optional[list[SubTaskInput]] = None,
+) -> SubTask:
+    if fallback_existing and kept:
+        merged = list(fallback_existing)
+        for each in kept:
+            merged = merge_subtask_input_edit(merged, each.render())
+        return drafted.model_copy(update={"inputs": merged})
+    if not kept:
+        return drafted
+    merged = merge_subtask_input_edit(drafted.inputs, kept[0].render())
+    for each in kept[1:]:
+        merged = merge_subtask_input_edit(merged, each.render())
+    return drafted.model_copy(update={"inputs": merged})
+
+
+def _input_user_line(inp: SubTaskInput) -> str:
+    if inp.from_subtask is not None:
+        text = f"from sub-task {inp.from_subtask}"
+    else:
+        text = inp.value or ""
+    return f"{inp.name}: {text}" if inp.name else text
+
+
 @register_proposal
 class SubTaskProposal(Proposal):
     kind = KIND_SUB_TASKS
@@ -165,19 +346,78 @@ class SubTaskProposal(Proposal):
     min_items = 1
     items: list[SubTask] = Field(default_factory=list)
 
+    def user_rendering(self, workflow_folderpath: Optional[str] = None) -> str:
+        from fastworkflow.command_writes import write_commands
+
+        writes = write_commands(workflow_folderpath) if workflow_folderpath else frozenset()
+        lines = [f"{self.title}:"]
+        for index, item in enumerate(self.items, 1):
+            input_bits = [_input_user_line(each) for each in item.inputs]
+            suffix = f" ({', '.join(input_bits)})" if input_bits else ""
+            write_badge = ""
+            if item.means.kind != MEANS_FROM_SCRATCH and item.means.name in writes:
+                write_badge = " - changes data"
+            lines.append(f"{index}. {item.goal}{suffix}{write_badge}")
+        return "\n".join(lines)
+
+    def model_rendering(self) -> str:
+        import string
+
+        lines = [f"{self.title}:"]
+        for index, item in enumerate(self.items, 1):
+            values = self.item_values(item)
+            values["index"] = index
+            try:
+                lines.append(string.Formatter().vformat(self.item_template, (), _SafeValues(values)))
+            except (ValueError, AttributeError):
+                lines.append(f"{index}. " + ", ".join(f"{k}={v}" for k, v in values.items() if k != "index"))
+        return "\n".join(lines)
+
+    def rendering(self) -> str:
+        return self.user_rendering()
+
     def revised(self, host: Any, before: Proposal) -> "SubTaskProposal":
-        """F3 (fix-48np.1): with drafting on, a sub-task whose means the edit changed (or that the edit added with a
-        means) is drafted again for its new means, so the review never shows inputs drafted for another command. A
-        sub-task the edit left as it was, or whose inputs alone it changed, is kept."""
+        """With drafting on, re-draft a sub-task when its goal, means, add or look_up changed (fix-48np.1, fix-kk46.3).
+
+        Inputs the user set in the same reply are kept: re-draft, then overlay those inputs.
+        """
         workflow = getattr(host, "_app_workflow", None)
         if workflow is None or not drafting_on():
             return self
+        before_items = list(before.items) if isinstance(before, SubTaskProposal) else []
+        planner_lm = getattr(host, "_current_planner_lm", None)
         items: list[SubTask] = []
-        for item in self.items:
-            if (item.means.kind != MEANS_FROM_SCRATCH and item.drafted_means != item.means.name
-                    and item not in before.items):
-                item = drafted_item(workflow, item, item.goal, items,
-                                    planner_lm=getattr(host, "_current_planner_lm", None))
+        for position, item in enumerate(self.items):
+            before_item = getattr(item, "_before_item", None)
+            if before_item is None and before_items:
+                if item in before_items:
+                    before_item = before_items[before_items.index(item)]
+                elif len(self.items) == len(before_items):
+                    before_item = before_items[position]
+            kept = _inputs_user_kept(before_item, item)
+            if getattr(item, "_look_up", False):
+                item = redraft_for_look_up(workflow, item, items, planner_lm=planner_lm)
+                item = _overlay_inputs(item, kept)
+            elif before_item is None and item.means.kind == MEANS_FROM_SCRATCH:
+                picked = build_round1_proposal(
+                    [item.goal], {1: _candidates_for_subtask(workflow, item.goal)}).items[0].means
+                item = item.model_copy(update={"means": picked})
+                if item.means.kind != MEANS_FROM_SCRATCH:
+                    item = drafted_item(workflow, item, item.goal, items, planner_lm=planner_lm)
+                    item = _overlay_inputs(item, kept)
+            elif (before_item is not None and item.goal != before_item.goal
+                  and item.means == before_item.means):
+                picked = build_round1_proposal(
+                    [item.goal], {1: _candidates_for_subtask(workflow, item.goal)}).items[0].means
+                if picked.kind != MEANS_FROM_SCRATCH:
+                    item = item.model_copy(update={"means": picked})
+                item = drafted_item(workflow, item, item.goal, items, planner_lm=planner_lm)
+                overlay_fallback = before_item.inputs if kept else None
+                item = _overlay_inputs(item, kept, fallback_existing=overlay_fallback)
+            elif (before_item is not None and item.means.kind != MEANS_FROM_SCRATCH
+                  and (item.means != before_item.means or item.drafted_means != item.means.name)):
+                item = drafted_item(workflow, item, item.goal, items, planner_lm=planner_lm)
+                item = _overlay_inputs(item, kept)
             items.append(item)
         return self.model_copy(update={"items": items})
 
@@ -349,6 +589,29 @@ def planning_intent_confirmation(workflow, path: FastPath, sub_task: str) -> Opt
     return None
 
 
+def _candidates_for_subtask(workflow, sub_task: str, *, exclude: Optional[set[str]] = None) -> list[Candidate]:
+    """Per-sub-task candidate means for the round-1 builder (``draft_round1_proposal``, look_up, add)."""
+    from fastworkflow import planning_commands, run_listing
+    from fastworkflow.workflow_agent import core_command_names
+
+    folder = workflow.folderpath
+    planning = set(planning_commands.resolve_field_sources(folder).planning_commands)
+    core = core_command_names()
+    excluded = exclude or set()
+    heads = run_listing.head_candidates(workflow, sub_task)
+    _, _, probabilities = planning_match(workflow, sub_task)
+    scores = {**heads.execution_scores, **heads.planning_scores}
+    for name, probability in probabilities.items():
+        scores[name] = max(scores.get(name, 0.0), probability)
+    named = run_listing.gather(workflow, sub_task)
+    names = (run_listing.gather(workflow, sub_task, probabilities or None) | heads.labels
+             | heads.planning_scores.keys() | heads.execution_scores.keys())
+    return [Candidate(name, is_planning=name in planning, score=scores.get(name, 0.0))
+            for name in sorted(names)
+            if name not in core and name not in excluded
+            and (name in named or scores.get(name, 0.0) >= run_listing.UNSURE_CANDIDATE_FLOOR)]
+
+
 def draft_round1_proposal(workflow, subtasks: list[str], planner_lm=None) -> SubTaskProposal:
     """The draft round-1 proposal for a split result, from real candidates (fix-3rsq.plan-review.2.3).
 
@@ -362,29 +625,8 @@ def draft_round1_proposal(workflow, subtasks: list[str], planner_lm=None) -> Sub
     the review shows are the ones the run uses, fix-48np.1). A planning pick's refusal is shown on its line: the
     drafted values' refusal, or, with no draft, ``check_planned_arguments`` of no arguments.
     """
-    from fastworkflow import planning_commands, run_listing
-    from fastworkflow.workflow_agent import core_command_names
-
-    folder = workflow.folderpath
-    planning = set(planning_commands.resolve_field_sources(folder).planning_commands)
-    # The framework's own commands (IntentDetection, ErrorCorrection: go_up, reset_context, ...) are not means for a job.
-    core = core_command_names()
-    candidates: dict[int, list[Candidate]] = {}
-    for number, sub_task in enumerate(subtasks, 1):
-        heads = run_listing.head_candidates(workflow, sub_task)
-        _, _, probabilities = planning_match(workflow, sub_task)
-        scores = {**heads.execution_scores, **heads.planning_scores}
-        for name, probability in probabilities.items():
-            scores[name] = max(scores.get(name, 0.0), probability)
-        named = run_listing.gather(workflow, sub_task)        # the commands the sub-task writes by name
-        names = (run_listing.gather(workflow, sub_task, probabilities or None) | heads.labels
-                 | heads.planning_scores.keys() | heads.execution_scores.keys())
-        # A candidate is offered when the sub-task names it, or its score reaches the unsure floor (run_listing's, the
-        # band the listing already offers): a head's top-k entry below the floor is noise, not a means.
-        candidates[number] = [Candidate(name, is_planning=name in planning, score=scores.get(name, 0.0))
-                              for name in sorted(names)
-                              if name not in core and (name in named
-                                                       or scores.get(name, 0.0) >= run_listing.UNSURE_CANDIDATE_FLOOR)]
+    candidates = {number: _candidates_for_subtask(workflow, sub_task)
+                    for number, sub_task in enumerate(subtasks, 1)}
     proposal = build_round1_proposal(subtasks, candidates)
     items: list[SubTask] = []
     for item, sub_task in zip(proposal.items, subtasks):
@@ -595,22 +837,61 @@ def accepted_subtask_proposal(workflow) -> Optional[SubTaskProposal]:
 # ----------------------------------------------------------------------
 
 
-def planning_match(workflow, text: str) -> tuple[str, Any, dict[str, float]]:
+def planning_match(workflow, text: str, exclude: Optional[set[str]] = None
+                    ) -> tuple[str, Any, dict[str, float]]:
     """``(template, command, distribution)`` of the planning-command match for *text*: the same call the turn's planner
     makes (``workflow_agent.planner_planning_command_for``), memoised for the turn so the fast-path check, the draft and
-    the sub-task's run share one Jev call. The distribution is the match's options (empty without JEV_API_KEY)."""
+    the sub-task's run share one Jev call. The distribution is the match's options (empty without JEV_API_KEY).
+
+    *exclude* is a set of command names left out of the match (included in the turn-cache key; fix-kk46.3 look_up).
+    """
     from fastworkflow import workflow_agent
+    from fastworkflow.workflow_agent import PLANNING_COMMAND_MATCH_THRESHOLD, load_planning_command_map
 
     folder = workflow.folderpath
+    excluded = frozenset(exclude or ())
 
     def compute():
         distribution: dict[str, float] = {}
         template, command = workflow_agent.planner_planning_command_for(
             text, folder, scopes=workflow_agent.planning_scopes(workflow), distribution=distribution)
+        if excluded and command is not None and command.name in excluded:
+            candidates = [(name, score) for name, score in distribution.items()
+                          if name not in excluded and name != "none"]
+            command = None
+            template = ""
+            if candidates:
+                name, score = max(candidates, key=lambda pair: pair[1])
+                if score >= PLANNING_COMMAND_MATCH_THRESHOLD:
+                    command = load_planning_command_map(folder).get(name)
+                    if command is not None:
+                        template = workflow_agent._template_text(command.template)
         return template, command, distribution
 
-    template, command, distribution = turn_cache.memo(("planning_match", folder, text), compute)
-    return template, command, dict(distribution)
+    template, command, distribution = turn_cache.memo(("planning_match", folder, text, excluded), compute)
+    filtered = {name: score for name, score in distribution.items() if name not in excluded}
+    return template, command, filtered
+
+
+def redraft_for_look_up(workflow, item: SubTask, earlier: list[SubTask], *, planner_lm=None) -> SubTask:
+    """Goal-preserving re-draft for ``look_up`` (fix-kk46.3): write commands re-match with writes excluded; read-only
+    commands keep the means and re-draft inputs from the goal."""
+    from fastworkflow.command_writes import write_commands
+
+    writes = write_commands(workflow.folderpath)
+    if item.means.kind != MEANS_FROM_SCRATCH and item.means.name in writes:
+        exclude = set(writes)
+        _, command, _ = planning_match(workflow, item.goal, exclude=exclude)
+        if command is not None:
+            item = item.model_copy(update={"means": Means(kind=MEANS_PLANNING, name=command.name)})
+            return drafted_item(workflow, item, item.goal, earlier, planner_lm=planner_lm)
+        new_means = build_round1_proposal(
+            [item.goal], {1: _candidates_for_subtask(workflow, item.goal, exclude=exclude)}).items[0].means
+        if new_means.kind == MEANS_FROM_SCRATCH:
+            return item.model_copy(update={"means": new_means, "inputs": [], "drafted_means": "", "check": ""})
+        item = item.model_copy(update={"means": new_means})
+        return drafted_item(workflow, item, item.goal, earlier, planner_lm=planner_lm)
+    return drafted_item(workflow, item, item.goal, earlier, planner_lm=planner_lm)
 
 
 # ----------------------------------------------------------------------
@@ -628,19 +909,51 @@ class ProposedEdit(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     op: Literal["change", "drop", "add", "merge", "split"]
-    index: int = 0
+    index: Optional[int] = None
     indexes: list[int] = Field(default_factory=list)
-    after: int = 0
+    after: Optional[int] = None
     field: str = ""
     value: str = ""
     parts: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def _normalize_llm_output(self) -> "ProposedEdit":
+        if self.index == 0:
+            self.index = None
+        if (self.index is None and self.op in ("change", "drop", "split")
+                and len(self.indexes) == 1 and self.indexes[0] >= 1):
+            self.index = self.indexes[0]
+        if self.op == "merge" and 0 in self.indexes:
+            self.indexes = [each + 1 for each in self.indexes]
+        if self.op == "add" and not self.value.strip() and self.parts:
+            self.value = self.parts[0].strip()
+        return self
+
+
+class PendingItemSlot(EditRefused):
+    """Edits parsed from free text that need an item index on a multi-item proposal."""
+
+    def __init__(self, message: str, proposed: list[ProposedEdit]):
+        super().__init__(message)
+        self.proposed = list(proposed)
+
 
 class ReadSubTaskEdits(dspy.Signature):
     """Read the user's reply on a numbered list of sub-tasks as edits to that list. Give only the edits the reply asks
-    for: change a sub-task's means (a planning command, written planning:NAME from the list given), its inputs (name=value
-    or a value), its desired outcome or its goal; drop one; add one; merge several into one; or split one into parts.
-    A reply that asks for none of these gives an empty list."""
+    for: change a sub-task's means (a planning command written planning:NAME from the list given, or from_scratch when
+    no single planning command fits), its inputs (name=value, or none to clear wrong drafted inputs), its desired
+    outcome (field='outcome') or its goal (field='goal'); drop one; add one; merge several into one (when two sub-tasks
+    are really one record or one job); or split one into parts. When the user says 'yes, but also ...' or 'not just X,
+    I want ...' or says a drafted input/kind is wrong or unknown ('use your best judgment'), return the corresponding
+    change/add/merge edit rather than an empty list. A reply that asks for no change at all gives an empty list. When
+    the user says 'Step N should be NAME as the KIND, not ...' on a sub-task that has inputs name and kind, return
+    change edits setting name=NAME and kind=KIND on step N rather than rewriting the goal to a different task. When the
+    user asks to split one combined step into separate steps (one per person or item named) or to replace steps with an
+    explicit list of steps, use op='split' with 'parts' containing the full goal sentence for each step, or op='change'/
+    'add' with the full goal sentence, never short 2-word placeholders. Any text wrapped in single or double quotes in
+    the user's reply (e.g. 'Henderson Ramirez and Lewis and Sons' or "Mcclain Miller and Henderson and Sons 1") is a
+    single literal entity name: copy the entire quoted name verbatim into the input or goal and never split it on 'and'
+    or commas or shorten it."""
 
     proposal: str = dspy.InputField(desc="the sub-tasks as shown to the user, numbered from 1")
     planning_commands: str = dspy.InputField(desc="the planning commands a means can name, one per line")
@@ -648,24 +961,564 @@ class ReadSubTaskEdits(dspy.Signature):
     edits: list[ProposedEdit] = dspy.OutputField(desc="the edits the reply asks for, in order; empty when it asks for none")
 
 
-def _engine_edit(edit: ProposedEdit):
+def _resolve_proposed_item(proposal: Proposal, index: Optional[int]) -> int:
+    count = len(proposal.items)
+    if index is None:
+        if count == 1:
+            return 1
+        raise EditRefused(f"Which of the {count} steps do you mean?")
+    return index
+
+
+_MODEL_LINE_SUFFIX = re.compile(
+    r"^\s*(?:(?:\d+)\.\s+)?(?P<goal>.*?)\s*"
+    r"\(\s*inputs:\s*(?P<inputs>[^;)]*?)\s*;\s*means:\s*(?P<means>[^)]*?)\s*\)"
+    r"(?:\s*;\s*desired outcome:\s*(?P<outcome>.*?))?(?:\s*\[check:.*\])?\s*$",
+    re.I | re.S,
+)
+
+
+def _strip_leading_step_number(goal: str) -> str:
+    return re.sub(r"^\s*\d+\.\s+", "", (goal or "").strip()).strip()
+
+
+def _clean_goal_value(text: str) -> tuple[str, list[str], Optional[str], Optional[str]]:
+    """Strip a copied ``model_rendering()`` line down to the goal phrase only."""
+    raw = (text or "").strip()
+    match = _MODEL_LINE_SUFFIX.match(raw)
+    if match:
+        goal = _strip_leading_step_number(match.group("goal"))
+        inputs_raw = match.group("inputs") or ""
+        inputs_parts = [piece.strip() for piece in inputs_raw.split(",") if piece.strip()]
+        means = (match.group("means") or "").strip() or None
+        outcome = (match.group("outcome") or "").strip() or None
+        return goal, inputs_parts, means, outcome
+    return _strip_leading_step_number(raw), [], None, None
+
+
+_FUNCTION_CALL_EDIT = re.compile(
+    r"^(?:planning:)?(?P<cmd>[A-Za-z_/]\w*)\s*\((?P<args>.+)\)\s*$",
+    re.DOTALL,
+)
+_FUNCTION_CALL_ARG = re.compile(
+    r"(\w+)\s*=\s*(?:'([^']*)'|\"([^\"]*)\"|([^,\s)]+))",
+)
+
+
+def _parse_function_call_args(args: str) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for match in _FUNCTION_CALL_ARG.finditer(args):
+        value = match.group(2) or match.group(3) or match.group(4) or ""
+        pairs.append((match.group(1), value.strip()))
+    return pairs
+
+
+def _split_function_call_edit(edit: ProposedEdit) -> list[ProposedEdit]:
+    field = (edit.field or "").strip().lower()
+    if edit.op != "change" or field not in ("goal", "means", "inputs"):
+        return [edit]
+    value = (edit.value or "").strip()
+    match = _FUNCTION_CALL_EDIT.match(value)
+    if not match:
+        return [edit]
+    pairs = _parse_function_call_args(match.group("args"))
+    if not pairs:
+        return [edit]
+    inputs_value = ", ".join(f"{key}={val}" for key, val in pairs)
+    return [edit.model_copy(update={"field": "inputs", "value": inputs_value})]
+
+
+def _clean_proposed_edit(edit: ProposedEdit) -> ProposedEdit:
+    field = (edit.field or "").strip().lower()
+    if edit.op == "change" and field == "goal" and edit.value.strip():
+        return edit.model_copy(update={"value": _clean_goal_value(edit.value)[0]})
+    if edit.op in ("add", "merge") and edit.value.strip():
+        return edit.model_copy(update={"value": _clean_goal_value(edit.value)[0]})
+    if edit.op == "split" and edit.parts:
+        cleaned = [_clean_goal_value(part)[0] for part in edit.parts if (part or "").strip()]
+        if cleaned:
+            return edit.model_copy(update={"parts": cleaned})
+    return edit
+
+
+_STEP_FINE_CLAUSE = re.compile(
+    r"\bsteps?\s+\d+(?:\s*(?:and|to|through|[-–—])\s*\d+)?\s+(?:look|are|is)\s+(?:fine|good|ok|okay|right)\b",
+    re.I,
+)
+_CLAUSE_SPLIT = re.compile(r"(?:[.;!\n]|\s+[—–-]\s+)")
+_READER_DROP_CUE = re.compile(r"\b(?:drop|remove|delete|skip|omit)\b", re.I)
+
+
+def _reply_clauses(reply_text: str) -> list[str]:
+    cleaned = _STEP_FINE_CLAUSE.sub("", reply_text or "")
+    parts = [piece.strip() for piece in _CLAUSE_SPLIT.split(cleaned) if piece.strip()]
+    return parts if parts else ([cleaned.strip()] if cleaned.strip() else [])
+
+
+def _extract_step_numbers(segment: str, count: int) -> list[int]:
+    from fastworkflow._workflows.consultation import _item_validation
+
+    return _item_validation.extract_step_numbers(segment, count)
+
+
+def _clause_edit_overlap(clause: str, edit: ProposedEdit) -> bool:
+    words = {word for word in re.findall(r"[a-z0-9]+", clause.lower()) if len(word) > 2}
+    blob = f"{edit.field} {edit.value}".lower()
+    edit_words = {word for word in re.findall(r"[a-z0-9]+", blob) if len(word) > 2}
+    return bool(words & edit_words)
+
+
+def _explicit_drop_in_reply(reply_text: Optional[str], step: int, count: int) -> bool:
+    if not reply_text:
+        return False
+    for clause in _reply_clauses(reply_text):
+        if _READER_DROP_CUE.search(clause) and step in _extract_step_numbers(clause, count):
+            return True
+    return False
+
+
+def _expand_edit_to_steps(edit: ProposedEdit, steps: list[int]) -> list[ProposedEdit]:
+    if not steps:
+        return [edit]
+    return [edit.model_copy(update={"index": step, "indexes": []}) for step in steps]
+
+
+def _infer_missing_indexes_from_reply(
+    proposal: Proposal,
+    proposed: list[ProposedEdit],
+    reply_text: Optional[str],
+) -> list[ProposedEdit]:
+    if not reply_text:
+        return proposed
+    count = len(proposal.items)
+    if count <= 1:
+        return proposed
+    if not any(edit.op in ("change", "drop", "split") and edit.index is None for edit in proposed):
+        return proposed
+
+    clauses = _reply_clauses(reply_text)
+    drop_steps: set[int] = set()
+    expanded: list[ProposedEdit] = []
+
+    for edit in proposed:
+        if edit.index is not None:
+            expanded.append(edit)
+            continue
+        if edit.op == "drop":
+            steps: list[int] = []
+            for clause in clauses:
+                if _READER_DROP_CUE.search(clause):
+                    steps.extend(_extract_step_numbers(clause, count))
+            if not steps and edit.indexes:
+                steps = [idx for idx in edit.indexes if 1 <= idx <= count]
+            steps = [step for step in dict.fromkeys(steps)]
+            if steps:
+                drop_steps.update(steps)
+                expanded.extend(_expand_edit_to_steps(edit, steps))
+            else:
+                expanded.append(edit)
+            continue
+        expanded.append(edit)
+
+    pending_changes = [edit for edit in expanded if edit.op == "change" and edit.index is None]
+    resolved_changes: list[ProposedEdit] = []
+    for edit in pending_changes:
+        matched_steps: list[int] = []
+        for clause in clauses:
+            if _READER_DROP_CUE.search(clause):
+                continue
+            clause_steps = _extract_step_numbers(clause, count)
+            if clause_steps and _clause_edit_overlap(clause, edit):
+                matched_steps = clause_steps
+                break
+        if not matched_steps:
+            for clause in clauses:
+                if _READER_DROP_CUE.search(clause):
+                    continue
+                clause_steps = [
+                    step for step in _extract_step_numbers(clause, count) if step not in drop_steps
+                ]
+                if clause_steps:
+                    matched_steps = clause_steps
+        matched_steps = [step for step in dict.fromkeys(matched_steps) if step not in drop_steps]
+        if matched_steps:
+            resolved_changes.extend(_expand_edit_to_steps(edit, matched_steps))
+        else:
+            resolved_changes.append(edit)
+
+    result = [
+        edit for edit in expanded
+        if not (edit.op == "change" and edit.index is None)
+    ] + resolved_changes
+    for edit in expanded:
+        if edit.op != "split" or edit.index is not None:
+            continue
+        nums = [
+            step for step in dict.fromkeys(_extract_step_numbers(reply_text, count))
+            if step not in drop_steps
+        ]
+        if len(nums) == 1:
+            result.append(edit.model_copy(update={"index": nums[0], "indexes": []}))
+        elif len(nums) > 1:
+            result.extend(_expand_edit_to_steps(edit, nums))
+        else:
+            result.append(edit)
+    return result
+
+
+def _dedupe_proposed_edits(proposed: list[ProposedEdit]) -> list[ProposedEdit]:
+    seen: set[tuple] = set()
+    kept: list[ProposedEdit] = []
+    for edit in proposed:
+        if edit.op == "change":
+            field = (edit.field or "").strip().lower()
+            key = (edit.index, field, edit.value)
+            if key in seen:
+                continue
+            seen.add(key)
+        kept.append(edit)
+    return kept
+
+
+def _dedupe_engine_edits(
+    edits: list,
+    *,
+    reply_text: Optional[str] = None,
+    proposal: Optional[Proposal] = None,
+) -> list:
+    from collections import defaultdict
+
+    count = len(proposal.items) if proposal is not None else 0
+    drop_by_index: dict[int, Drop] = {}
+    split_indexes: set[int] = set()
+    merge_indexes: set[int] = set()
+    changes: list[Change] = []
+    others: list = []
+
+    for edit in edits:
+        if isinstance(edit, Drop):
+            drop_by_index[edit.index] = edit
+        elif isinstance(edit, Split):
+            split_indexes.add(edit.index)
+            others.append(edit)
+        elif isinstance(edit, Merge):
+            merge_indexes.update(edit.indexes)
+            others.append(edit)
+        elif isinstance(edit, Change):
+            changes.append(edit)
+        else:
+            others.append(edit)
+
+    whole_indexes = split_indexes | merge_indexes
+    skip_drop: set[int] = set()
+    skip_change: set[int] = set()
+    for index in set(drop_by_index) & {change.index for change in changes}:
+        if _explicit_drop_in_reply(reply_text, index, count):
+            skip_change.add(index)
+        else:
+            skip_drop.add(index)
+    skip_change |= whole_indexes
+
+    surviving_changes: list[Change] = [
+        change for change in changes
+        if change.index not in skip_change
+    ]
+    surviving_drops = [
+        drop for index, drop in drop_by_index.items()
+        if index not in skip_drop
+    ]
+
+    by_index_field: dict[tuple[int, str], list[Change]] = defaultdict(list)
+    for change in surviving_changes:
+        by_index_field[(change.index, change.field)].append(change)
+
+    merged_changes: list[Change] = []
+    for (index, field), field_edits in by_index_field.items():
+        if field == "inputs":
+            merged_inputs: list[SubTaskInput] = []
+            for field_edit in field_edits:
+                merged_inputs = merge_subtask_input_edit(merged_inputs, field_edit.value)
+            merged_changes.append(
+                Change(
+                    index=index,
+                    field="inputs",
+                    value=", ".join(item.render() for item in merged_inputs),
+                )
+            )
+        else:
+            merged_changes.append(field_edits[-1])
+
+    return others + surviving_drops + merged_changes
+
+
+def _normalize_reader_edits(proposal: Proposal, proposed: list[ProposedEdit]) -> list[ProposedEdit]:
+    count = len(proposal.items)
+    normalized: list[ProposedEdit] = []
+    for edit in proposed:
+        if edit.op == "merge" and (count < 2 or len(set(edit.indexes)) < 2):
+            if edit.value.strip() and count == 1:
+                normalized.append(
+                    _clean_proposed_edit(
+                        ProposedEdit(
+                            op="change",
+                            index=1,
+                            field="goal",
+                            value=_clean_goal_value(edit.value.strip())[0],
+                        )
+                    )
+                )
+            continue
+        if edit.op in ("change", "drop", "split") and edit.index is None and len(edit.indexes) >= 2:
+            for idx in edit.indexes:
+                if 1 <= idx <= count:
+                    normalized.append(
+                        _clean_proposed_edit(edit.model_copy(update={"index": idx, "indexes": []}))
+                    )
+            continue
+        if edit.op == "drop" and count == 1 and len(proposed) == 1:
+            raise EditParseError("I could not read that as an edit.")
+        for piece in _split_function_call_edit(_clean_proposed_edit(edit)):
+            normalized.append(piece)
+    if not normalized:
+        raise EditParseError("I could not read that as an edit.")
+    return normalized
+
+
+def _token_overlap(left: str, right: str) -> int:
+    left_tokens = set(re.findall(r"[a-z0-9]+", (left or "").lower()))
+    right_tokens = set(re.findall(r"[a-z0-9]+", (right or "").lower()))
+    return len(left_tokens & right_tokens)
+
+
+def _is_truncated_match(partial: str, full: str) -> bool:
+    if not partial or partial.lower() == full.lower():
+        return False
+    if partial.lower() in full.lower():
+        return True
+    return _token_overlap(partial, full) >= 2
+
+
+def _best_quoted_match(value: str, quoted: list[str]) -> Optional[str]:
+    for name in quoted:
+        if value.lower() == name.lower():
+            return name
+        if _is_truncated_match(value, name):
+            return name
+    return None
+
+
+def _repair_change_inputs_value(value: str, quoted: list[str]) -> str:
+    parts = _split_input_assignments(value)
+    if len(parts) <= 1:
+        match = _best_quoted_match(_strip_outer_quotes(value), quoted)
+        if match and "=" in value:
+            name, _, _rest = value.partition("=")
+            return f"{name.strip()}={match}"
+        return value
+    repaired: list[str] = []
+    for part in parts:
+        inp = SubTaskInput.from_text(part)
+        if inp.name and inp.value:
+            match = _best_quoted_match(inp.value, quoted)
+            if match:
+                inp = inp.model_copy(update={"value": match})
+            repaired.append(inp.render())
+        else:
+            repaired.append(part)
+    return ", ".join(repaired)
+
+
+def _repair_goal_value(value: str, quoted: list[str]) -> str:
+    result = value
+    for name in sorted(quoted, key=len, reverse=True):
+        if name in result:
+            continue
+        for match in re.finditer(r"[A-Za-z][A-Za-z0-9\s&'\-.,]*", result):
+            span = match.group(0).strip(" ,.")
+            if span and _is_truncated_match(span, name):
+                result = result.replace(match.group(0), name, 1)
+                break
+    return result
+
+
+def _clause_containing_quote(reply_text: str, quoted_name: str) -> str:
+    for clause in _reply_clauses(reply_text):
+        if quoted_name in clause or quoted_name.lower() in clause.lower():
+            return clause
+    return reply_text
+
+
+def _infer_kind_from_clause(clause: str) -> Optional[str]:
+    lowered = clause.lower()
+    if re.search(r"\b(?:unit|organization|organisation|department)\b", lowered):
+        return "unit"
+    if re.search(r"\bgroup\b", lowered):
+        return "group"
+    if re.search(r"\b(?:right|permission)\b", lowered):
+        return "right"
+    if re.search(r"\bapplication\b", lowered):
+        return "application"
+    if re.search(r"\bfeed\b", lowered):
+        return "feed"
+    if re.search(r"\b(?:person|identity)\b", lowered):
+        return "person"
+    if re.search(r"\b(?:login|account)\b", lowered):
+        return "login"
+    return None
+
+
+def _quoted_already_in_edits(edits: list, quoted_name: str) -> bool:
+    for edit in edits:
+        if not isinstance(edit, Change) or edit.field != "inputs":
+            continue
+        for part in _split_input_assignments(edit.value):
+            inp = SubTaskInput.from_text(part)
+            if inp.value and (inp.value.lower() == quoted_name.lower()
+                              or quoted_name.lower() in inp.value.lower()):
+                return True
+    return False
+
+
+def _target_index_for_quoted(
+    proposal: SubTaskProposal,
+    reply_text: str,
+    quoted_name: str,
+    dropped_indexes: set[int],
+) -> Optional[int]:
+    clause = _clause_containing_quote(reply_text, quoted_name)
+    steps = [
+        step for step in _extract_step_numbers(clause, len(proposal.items))
+        if step not in dropped_indexes
+    ]
+    if len(steps) == 1:
+        return steps[0]
+    surviving = [
+        index for index in range(1, len(proposal.items) + 1) if index not in dropped_indexes
+    ]
+    if len(surviving) == 1:
+        return surviving[0]
+    for index, item in enumerate(proposal.items, 1):
+        if index in dropped_indexes:
+            continue
+        for inp in item.inputs:
+            if inp.name in _ENTITY_INPUT_KEYS and inp.value and inp.value.lower() in quoted_name.lower():
+                return index
+    return None
+
+
+def _primary_entity_key(item: SubTask) -> Optional[str]:
+    names = [inp.name for inp in item.inputs if inp.name in _ENTITY_INPUT_KEYS]
+    if "name" in names:
+        return "name"
+    return names[0] if names else None
+
+
+def _apply_quoted_names_from_reply(
+    proposal: SubTaskProposal,
+    edits: list,
+    reply_text: str,
+    quoted: list[str],
+) -> list:
+    repaired: list = []
+    for edit in edits:
+        if isinstance(edit, Change) and edit.field == "inputs":
+            repaired.append(
+                edit.model_copy(update={"value": _repair_change_inputs_value(edit.value, quoted)})
+            )
+        elif isinstance(edit, Change) and edit.field == "goal":
+            repaired.append(
+                edit.model_copy(update={"value": _repair_goal_value(edit.value, quoted)})
+            )
+        else:
+            repaired.append(edit)
+
+    dropped_indexes = {edit.index for edit in repaired if isinstance(edit, Drop)}
+    for quoted_name in quoted:
+        if _quoted_already_in_edits(repaired, quoted_name):
+            continue
+        target_index = _target_index_for_quoted(proposal, reply_text, quoted_name, dropped_indexes)
+        if target_index is None:
+            continue
+        target_item = proposal.items[target_index - 1]
+        primary_key = _primary_entity_key(target_item)
+        if not primary_key:
+            continue
+        clause = _clause_containing_quote(reply_text, quoted_name)
+        kv = [f"{primary_key}={quoted_name}"]
+        inferred_kind = _infer_kind_from_clause(clause)
+        has_kind = any(inp.name == "kind" for inp in target_item.inputs)
+        if inferred_kind and has_kind:
+            kv.append(f"kind={inferred_kind}")
+        repaired.append(Change(index=target_index, field="inputs", value=", ".join(kv)))
+    return repaired
+
+
+def _proposed_edits_to_engine(
+    proposal: Proposal,
+    proposed: list[ProposedEdit],
+    *,
+    reply_text: Optional[str] = None,
+) -> list:
+    proposed = _normalize_reader_edits(proposal, proposed)
+    proposed = _infer_missing_indexes_from_reply(proposal, proposed, reply_text)
+    proposed = _dedupe_proposed_edits(proposed)
+    count = len(proposal.items)
+    if count > 1 and any(
+        edit.op in ("change", "drop", "split") and edit.index is None for edit in proposed
+    ):
+        raise PendingItemSlot(f"Which of the {count} steps do you mean?", proposed)
+    resolved: list = []
+    for edit in proposed:
+        if edit.op == "change":
+            if not edit.field:
+                raise EditParseError("An edit names no field to change.")
+            resolved.append(_engine_edit(edit, _resolve_proposed_item(proposal, edit.index), proposal))
+        elif edit.op == "drop":
+            resolved.append(_engine_edit(edit, _resolve_proposed_item(proposal, edit.index), proposal))
+        elif edit.op == "split":
+            resolved.append(_engine_edit(edit, _resolve_proposed_item(proposal, edit.index), proposal))
+        else:
+            resolved.append(_engine_edit(edit, edit.index, proposal))
+    resolved = _dedupe_engine_edits(resolved, reply_text=reply_text, proposal=proposal)
+    if reply_text and isinstance(proposal, SubTaskProposal):
+        quoted = extract_quoted_names(reply_text)
+        if quoted:
+            resolved = _apply_quoted_names_from_reply(proposal, resolved, reply_text, quoted)
+            resolved = _dedupe_engine_edits(resolved, reply_text=reply_text, proposal=proposal)
+    return resolved
+
+
+def _engine_edit(edit: ProposedEdit, index: Optional[int] = None, proposal: Optional[Proposal] = None):
     """The review engine's typed edit for one read edit (the same edits the deterministic reader makes)."""
+    number = edit.index if index is None else index
     if edit.op == "change":
         if not edit.field:
             raise EditParseError("An edit names no field to change.")
-        return Change(index=edit.index, field=edit.field, value=edit.value)
+        field = edit.field.strip()
+        field_key = field.lower().replace("_", " ")
+        if field_key in ("desired outcome", "desired_outcome"):
+            field = "outcome"
+        elif field_key in ("title", "step title", "description", "summary", "prompt"):
+            field = "goal"
+        value = edit.value
+        if isinstance(proposal, SubTaskProposal) and field not in ("goal", "outcome", "inputs", "means", "check"):
+            if not value.strip().startswith(f"{field}="):
+                value = f"{field}={edit.value}"
+            field = "inputs"
+        return Change(index=number, field=field, value=value)
     if edit.op == "drop":
-        return Drop(index=edit.index)
+        return Drop(index=number)
     if edit.op == "add":
         if not edit.value.strip():
             raise EditParseError("An added sub-task needs its goal.")
-        return Add(after=edit.after, values={"goal": edit.value})
+        after = 0 if edit.after is None else edit.after
+        return Add(after=after, values={"goal": edit.value})
     if edit.op == "merge":
         return Merge(indexes=list(edit.indexes), values={"goal": edit.value} if edit.value.strip() else {})
     parts = [part for part in edit.parts if part.strip()]
     if not parts:
         raise EditParseError("A split needs at least one part.")
-    return Split(index=edit.index, parts=[{"goal": part} for part in parts])
+    return Split(index=number, parts=[{"goal": part} for part in parts])
 
 
 def model_edit_reader(planner_lm=None, planning_names: tuple[str, ...] = ()):
@@ -684,10 +1537,11 @@ def model_edit_reader(planner_lm=None, planning_names: tuple[str, ...] = ()):
         lm = planner_lm() if callable(planner_lm) and not isinstance(planner_lm, dspy.BaseLM) else planner_lm
         if lm is None:
             lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+        shown = proposal.model_rendering() if isinstance(proposal, SubTaskProposal) else proposal.rendering()
         try:
             with dspy.context(lm=lm):
                 prediction = dspy.Predict(ReadSubTaskEdits)(
-                    proposal=proposal.rendering(),
+                    proposal=shown,
                     planning_commands="\n".join(f"planning:{name}" for name in planning_names) or "none",
                     reply=text)
             proposed = list(prediction.edits or [])
@@ -696,7 +1550,7 @@ def model_edit_reader(planner_lm=None, planning_names: tuple[str, ...] = ()):
             raise EditParseError("I could not read that as an edit.") from exc
         if not proposed:
             raise EditParseError("I could not read that as an edit.")
-        return [_engine_edit(edit) for edit in proposed]
+        return _proposed_edits_to_engine(proposal, proposed, reply_text=text)
 
     return read
 

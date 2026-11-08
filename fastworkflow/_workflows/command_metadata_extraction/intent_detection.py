@@ -417,7 +417,10 @@ class CommandNamePrediction:
         self.app_workflow_folderpath = self.app_workflow.folderpath
         self.app_workflow_id = self.app_workflow.id
 
-        self.convo_path = os.path.join(self.app_workflow_folderpath, "___convo_info")
+        self.convo_path = (
+            cme_workflow.context.get("convo_path")
+            or os.path.join(self.app_workflow_folderpath, "___convo_info")
+        )
         self.cache_path = self._get_cache_path(self.app_workflow_id, self.convo_path)
         self.path = self._get_cache_path_cache(self.convo_path, self.app_workflow_id)
         # Built once per predictor and reused across the parent-chain walk,

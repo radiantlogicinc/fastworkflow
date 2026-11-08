@@ -149,6 +149,8 @@ def _wildcard_command_output(framed: CommandOutput) -> CommandOutput:
     if route.ran_on_context_clause is not None:
         artifacts["ran_on_context_name"] = route.ran_on_context_name
         artifacts["ran_on_context_clause"] = route.ran_on_context_clause
+    if route.reply_intent is not None:
+        artifacts["reply_intent"] = route.reply_intent
     return CommandOutput(
         command_response=fastworkflow.CommandResponse(
             response=route.response,

@@ -66,6 +66,8 @@ from fastworkflow.review_engine import (  # noqa: F401
     fingerprint,
     new_token,
     propagate,
+    proposal_of,
+    reply_policy,
     reply_to_proposal,
     render,
     rendering_hash,
@@ -459,8 +461,17 @@ def resolve_reply(chat_session: Any, workflow: Any, message: str) -> Optional[Re
         propagate(chat_session, store, record, surface=surface)
         return Resolution(True, MSG_CANCELLED.format(command=cmd))
 
-    if record.time_expired(time.time()) or record.turns_expired(turn_seq=store.turn_seq) \
-            or record.turns_seen >= record.ttl_turns:
+    if record.time_expired(time.time()):
+        _transition(chat_session, store, record, EXPIRED, reason="ttl", surface=surface, outcome="expired")
+        propagate(chat_session, store, record, surface=surface)
+        return Resolution(True, MSG_EXPIRED.format(command=cmd))
+
+    if record.kind == KIND_ACTION:
+        if record.turns_expired(turn_seq=store.turn_seq) or record.turns_seen >= record.ttl_turns:
+            _transition(chat_session, store, record, EXPIRED, reason="ttl", surface=surface, outcome="expired")
+            propagate(chat_session, store, record, surface=surface)
+            return Resolution(True, MSG_EXPIRED.format(command=cmd))
+    elif record.queued and record.turns_expired(turn_seq=store.turn_seq):
         _transition(chat_session, store, record, EXPIRED, reason="ttl", surface=surface, outcome="expired")
         propagate(chat_session, store, record, surface=surface)
         return Resolution(True, MSG_EXPIRED.format(command=cmd))
@@ -471,10 +482,11 @@ def resolve_reply(chat_session: Any, workflow: Any, message: str) -> Optional[Re
         if not surface.satisfies_end_user():
             return Resolution(False, MSG_IDENTITY)
 
-    record.turns_seen += 1
     if record.kind != KIND_ACTION:
-        # A proposal (sub_tasks, plan): typed edits, accept or decline, through the review engine.
-        review = reply_to_proposal(chat_session, store, record, message)
+        # Proposals: the reply cap counts unresolved replies only. On the cap turn (turns_seen already at the
+        # limit), confirm or decline is still honoured; any other reply expires without applying an edit.
+        cap_turn = record.turns_seen >= record.ttl_turns
+        review = reply_to_proposal(chat_session, store, record, message, cap_turn=cap_turn)
         if review.done and review.proposal is not None:
             from fastworkflow.review_proposals import PROPOSAL_KINDS
 
@@ -485,8 +497,11 @@ def resolve_reply(chat_session: Any, workflow: Any, message: str) -> Optional[Re
                 return Resolution(True, output.command_response.response or review.text, output, review.proposal)
             # Any other proposal (a caller's own spec): the accepted proposal is the result.
             return Resolution(True, review.text, None, review.proposal)
+        if not review.done:
+            record.turns_seen += 1
         return Resolution(review.done, review.text, None, review.proposal)
 
+    record.turns_seen += 1
     verdict = ActionReplyPolicy().classify(message)
     if verdict is Verdict.REPROMPT:
         return Resolution(False, MSG_REPLY)
