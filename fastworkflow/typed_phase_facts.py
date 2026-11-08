@@ -248,6 +248,11 @@ def _command_qname_from_class(cls: type) -> str | None:
     if cls.__name__ not in ("Input", "Output"):
         return None
     mod = getattr(cls, "__module__", "")
+    framework = "fastworkflow._framework_commands."
+    if mod.startswith(framework):
+        # A framework command (global scope, no context): its routing name is its plain module name.
+        name = mod[len(framework):]
+        return name if name and "." not in name else None
     marker = "._commands."
     if marker not in mod:
         return None

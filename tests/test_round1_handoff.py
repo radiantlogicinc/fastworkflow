@@ -256,8 +256,8 @@ def test_a_goal_whose_command_succeeded_but_whose_finish_check_fails_is_not_comp
         return note
 
     monkeypatch.setattr(finish_check, "review_finish", spy)
-    gated.script.steps = [("finish", {}),                                   # the review frame
-                          ("execute_workflow_query", {"command": "list_branches"}),
+    # The review frame's result-driven last phase takes no finish of its own.
+    gated.script.steps = [("execute_workflow_query", {"command": "list_branches"}),
                           ("finish", {}),                                   # refused: find_member has not run
                           ("execute_workflow_query", {"command": FIND_TEXT}),
                           ("finish", {}),                                   # accepted: the plan is met

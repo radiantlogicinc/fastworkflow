@@ -511,7 +511,9 @@ def test_with_drafting_off_the_run_is_unchanged(gated, monkeypatch, scripted):
     assert "inputs: none;" in _planning_line(record, 1) and "[check: missing required argument title]" in \
         _planning_line(record, 1)
 
-    gated.script.steps = [("finish", {})] * 3                   # the review frame, then the agent for each sub-task
+    # The review frame used to take its own finish step. Its result-driven last phase now
+    # takes none, so only the agent for each sub-task needs one.
+    gated.script.steps = [("finish", {})] * 2
     out = gated.ctx.process_turn("accept")
 
     assert out.status is TurnStatus.COMPLETED and gated.script.steps == []    # exactly as before: the agent runs both

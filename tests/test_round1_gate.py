@@ -189,7 +189,9 @@ def test_an_accepted_review_is_stored_for_the_hand_off_and_the_turn_runs_its_goa
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     gated.ctx.process_turn("change 2: inputs=Ann Lee")
-    gated.script.steps = [("finish", {})] * 3              # the review frame's finish, then the two sub-tasks
+    # The review frame used to take its own finish. Its result-driven last phase now takes
+    # none, so only the two sub-tasks need one.
+    gated.script.steps = [("finish", {})] * 2
     out = gated.ctx.process_turn("accept")
     assert out.status is TurnStatus.COMPLETED
     assert gated.script.steps == []

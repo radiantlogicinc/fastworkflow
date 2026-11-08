@@ -3592,14 +3592,16 @@ class WorkflowExecutionContext:
                     # still the run's: its count and where it stopped are the phase's.
                     code = getattr(self._workflow_tool_agent, "last_code", None)
                 else:
-                    # Code runs the leading mechanical steps first (planning_phases.CodeSteps).
-                    code = self._phase_code_steps(
-                        plan_text, own_steps, names,
-                        answers=last or phase.name == state.get("extra_phase"))
-                    # A phase other than the last sees only its own steps, never the request.
                     # A phased command with __result__ gets its answer from __result__ (or, when that
                     # returns None, from the deferred model call): its last phase's agent only runs steps.
                     result_driven = bool(uses_result and last and not state.get("flat"))
+                    # Code runs the leading mechanical steps first (planning_phases.CodeSteps).
+                    # A framework command's result-driven last phase takes no model step after code's steps.
+                    code = self._phase_code_steps(
+                        plan_text, own_steps, names,
+                        answers=(last or phase.name == state.get("extra_phase"))
+                        and not (result_driven and planning_commands.is_framework_planning_command(command)))
+                    # A phase other than the last sees only its own steps, never the request.
                     user_query = planning_phases.phase_query(
                         state["query"], plan_text, index=index, count=len(phases),
                         name=phase.name, item=item_frame,
