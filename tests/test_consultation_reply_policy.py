@@ -636,6 +636,26 @@ def test_q3_reprompt_uses_structured_fallback_and_clears_slot(gated, monkeypatch
     assert gated.ctx._consultation_cme.context.get("stored_parameters") is None
 
 
+def test_q3_add_after_and_change_without_planner(gated, monkeypatch):
+    from fastworkflow.review_engine import reply_to_proposal
+
+    record = _open_review_two_step(gated, monkeypatch)
+    gated.ctx._current_planner_lm = _PlannerLM([{"edits": "must not run"}])
+    for text in ("unclear one", "unclear two"):
+        reply_to_proposal(gated.ctx, gated.store, record, text)
+        record.turns_seen += 1
+    review = reply_to_proposal(
+        gated.ctx,
+        gated.store,
+        record,
+        "add after 1: goal=tell a story; change 1: goal=find Persuasion",
+    )
+    assert record.state == REVISED
+    items = re_.proposal_of(record).items
+    assert [item.goal for item in items] == ["find Persuasion", "tell a story", JOKE]
+    assert "must not run" not in str(review.text or record.rendering)
+
+
 def test_q3_answer_structured_edit_without_planner(gated, monkeypatch):
     from fastworkflow.review_engine import reply_to_proposal
 

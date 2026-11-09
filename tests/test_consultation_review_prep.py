@@ -8,7 +8,7 @@ from dspy.utils import DummyLM
 from fastworkflow import review_engine as re
 from fastworkflow import review_proposals
 from fastworkflow.command_writes import write_commands
-from fastworkflow.review_engine import Change, apply_edits, reply_policy
+from fastworkflow.review_engine import Add, Change, Drop, PROPOSAL_TTL_SECONDS, apply_edits, parse_edits, reply_policy
 from fastworkflow.review_proposals import (
     Means, PendingItemSlot, ProposedEdit, SubTask, SubTaskInput, SubTaskProposal, merge_subtask_input_edit,
     model_edit_reader, planning_match, redraft_for_look_up)
@@ -209,6 +209,11 @@ def test_function_call_goal_becomes_inputs_preserves_untouched_inputs(todo, monk
         ],
         means=Means(kind="planning", name="Library/record_fact"),
     )
+
+    def _stub_round1(subtasks, candidates, **kw):
+        return SubTaskProposal(items=[SubTask(goal=subtasks[0], means=before_item.means)])
+
+    monkeypatch.setattr(review_proposals, "build_round1_proposal", _stub_round1)
     proposal = SubTaskProposal(items=[before_item])
     edits = review_proposals._proposed_edits_to_engine(
         proposal,
@@ -423,6 +428,33 @@ def test_two_fields_of_one_item_in_one_reply_both_apply():
     assert edited.items[0].goal == "alpha" and edited.items[0].outcome == "done"
 
 
+def test_merge_on_swap_reply_swaps_two_steps_without_dropping():
+    proposal = SubTaskProposal(items=[
+        SubTask(goal="step one"),
+        SubTask(goal="step two"),
+        SubTask(
+            goal="List contractor-related control findings",
+            means=Means(kind="planning", name="Library/list_controls"),
+            inputs=[SubTaskInput(name="kind", value="contractor")],
+        ),
+        SubTask(
+            goal="Walk every person in IT Operations",
+            means=Means(kind="planning", name="Library/walk_unit"),
+            inputs=[SubTaskInput(name="unit", value="IT Operations")],
+        ),
+    ])
+    reply = "Swap steps 3 and 4—walk 'IT Operations' before the contractor control finding"
+    edits = review_proposals._proposed_edits_to_engine(
+        proposal,
+        [ProposedEdit(op="merge", indexes=[3, 4], value="combined step")],
+        reply_text=reply,
+    )
+    applied = apply_edits(proposal, edits)
+    assert len(applied.items) == 4
+    assert applied.items[2].goal == "Walk every person in IT Operations"
+    assert applied.items[3].goal == "List contractor-related control findings"
+
+
 def test_two_changes_to_the_same_field_still_conflict():
     proposal = _tasks("a")
     with pytest.raises(re.EditRefused, match="more than one edit"):
@@ -601,6 +633,48 @@ def test_tag_action_remove_paraphrase_confirms_not_corrective():
         "Yes, go ahead and remove the audit-scope tag from the HR feed",
     )
     assert decision.verdict is re.Verdict.CONFIRM
+
+
+def test_parse_edits_bare_assign_after_change_or_add():
+    assert parse_edits(
+        "change 6: goal=Elizabeth; inputs=person=Elizabeth; "
+        "change 7: goal=GitLab; inputs=name=GitLab,kind=group"
+    ) == [
+        Change(index=6, field="goal", value="Elizabeth"),
+        Change(index=6, field="inputs", value="person=Elizabeth"),
+        Change(index=7, field="goal", value="GitLab"),
+        Change(index=7, field="inputs", value="name=GitLab,kind=group"),
+    ]
+    assert parse_edits(
+        "drop 2; add after 6: goal=Work the finding; inputs=control=X,family=identity"
+    ) == [
+        Drop(index=2),
+        Add(after=6, values={"goal": "Work the finding"}),
+    ]
+
+
+def test_parse_edits_add_after_goal_forms():
+    assert parse_edits("add after 2: goal=Work the contractor finding") == [
+        Add(after=2, values={"goal": "Work the contractor finding"}),
+    ]
+    assert parse_edits("add after 0: goal=First step") == [
+        Add(after=0, values={"goal": "First step"}),
+    ]
+
+
+def test_apply_edits_add_after_zero_inserts_before_first():
+    proposal = _tasks("existing step")
+    applied = apply_edits(proposal, parse_edits("add after 0: goal=First step"))
+    assert [item.goal for item in applied.items] == ["First step", "existing step"]
+    assert parse_edits("add 1: Check holders") == [
+        Add(after=1, values={"goal": "Check holders"}),
+    ]
+    with pytest.raises(re.EditParseError, match="An added sub-task needs its goal"):
+        parse_edits("add after 1:   ")
+
+
+def test_proposal_ttl_seconds_is_thirty_minutes():
+    assert PROPOSAL_TTL_SECONDS == 1800
 
 
 def test_tag_action_add_paraphrase_confirms_not_corrective():

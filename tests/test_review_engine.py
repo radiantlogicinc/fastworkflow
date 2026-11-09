@@ -482,10 +482,10 @@ def test_the_approval_binding_names_are_the_engine_names():
 
 
 def test_a_proposal_review_gets_its_own_reply_cap_and_an_approval_keeps_two():
-    """fix-3rsq.plan-review.2.5: the proposal kinds admit about 8 replies or 15 minutes; the approval (action) kind
+    """fix-3rsq.plan-review.2.5: the proposal kinds admit about 8 replies or 30 minutes; the approval (action) kind
     keeps TTL_TURNS=2 and TTL_SECONDS. Each open record carries the cap its kind is given."""
     assert re_.ttl_for_kind(KIND_ACTION) == (re_.TTL_TURNS, re_.TTL_SECONDS) == (2, 900)
-    assert re_.ttl_for_kind(KIND_SUB_TASKS) == re_.ttl_for_kind(KIND_PLAN) == (8, 15 * 60)
+    assert re_.ttl_for_kind(KIND_SUB_TASKS) == re_.ttl_for_kind(KIND_PLAN) == (8, re_.PROPOSAL_TTL_SECONDS)
     store = _store()
     record = open_review(None, store, _tasks("a"), surface=store.surface)
-    assert (record.ttl_turns, record.ttl_seconds) == (8, 15 * 60)
+    assert (record.ttl_turns, record.ttl_seconds) == (8, re_.PROPOSAL_TTL_SECONDS)

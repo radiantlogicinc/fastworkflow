@@ -392,8 +392,16 @@ class SubTaskProposal(Proposal):
             if before_item is None and before_items:
                 if item in before_items:
                     before_item = before_items[before_items.index(item)]
-                elif len(self.items) == len(before_items):
-                    before_item = before_items[position]
+                else:
+                    matched_swapped = next(
+                        (b for b in before_items if (b.goal, b.means, b.inputs) == (item.goal, item.means, item.inputs)),
+                        None,
+                    )
+                    if matched_swapped is not None:
+                        item = matched_swapped.model_copy()
+                        before_item = matched_swapped
+                    elif len(self.items) == len(before_items):
+                        before_item = before_items[position]
             kept = _inputs_user_kept(before_item, item)
             if getattr(item, "_look_up", False):
                 item = redraft_for_look_up(workflow, item, items, planner_lm=planner_lm)
@@ -412,7 +420,11 @@ class SubTaskProposal(Proposal):
                 if picked.kind != MEANS_FROM_SCRATCH:
                     item = item.model_copy(update={"means": picked})
                 item = drafted_item(workflow, item, item.goal, items, planner_lm=planner_lm)
-                overlay_fallback = before_item.inputs if kept else None
+                overlay_fallback = (
+                    before_item.inputs
+                    if (kept and item.means == before_item.means)
+                    else None
+                )
                 item = _overlay_inputs(item, kept, fallback_existing=overlay_fallback)
             elif (before_item is not None and item.means.kind != MEANS_FROM_SCRATCH
                   and (item.means != before_item.means or item.drafted_means != item.means.name)):
@@ -1251,10 +1263,40 @@ def _dedupe_engine_edits(
     return others + surviving_drops + merged_changes
 
 
-def _normalize_reader_edits(proposal: Proposal, proposed: list[ProposedEdit]) -> list[ProposedEdit]:
+def _normalize_reader_edits(
+    proposal: Proposal,
+    proposed: list[ProposedEdit],
+    *,
+    reply_text: Optional[str] = None,
+) -> list[ProposedEdit]:
     count = len(proposal.items)
     normalized: list[ProposedEdit] = []
     for edit in proposed:
+        if (
+            edit.op == "merge"
+            and isinstance(proposal, SubTaskProposal)
+            and len(edit.indexes) == 2
+            and reply_text
+            and re.search(r"\b(?:swap|switch|reorder)\b", reply_text, re.I)
+            and not re.search(r"\b(?:merge|combine|join|drop|remove|delete|skip|omit)\b", reply_text, re.I)
+        ):
+            idx_a, idx_b = edit.indexes[0], edit.indexes[1]
+            if 1 <= idx_a <= count and 1 <= idx_b <= count and idx_a != idx_b:
+                for src_idx, dst_idx in ((idx_a, idx_b), (idx_b, idx_a)):
+                    src_item = proposal.items[src_idx - 1]
+                    normalized.append(ProposedEdit(op="change", index=dst_idx, field="goal", value=src_item.goal))
+                    normalized.append(
+                        ProposedEdit(op="change", index=dst_idx, field="means", value=src_item.means.render())
+                    )
+                    normalized.append(
+                        ProposedEdit(
+                            op="change",
+                            index=dst_idx,
+                            field="inputs",
+                            value=", ".join(inp.render() for inp in src_item.inputs) or "none",
+                        )
+                    )
+                continue
         if edit.op == "merge" and (count < 2 or len(set(edit.indexes)) < 2):
             if edit.value.strip() and count == 1:
                 normalized.append(
@@ -1459,7 +1501,7 @@ def _proposed_edits_to_engine(
     *,
     reply_text: Optional[str] = None,
 ) -> list:
-    proposed = _normalize_reader_edits(proposal, proposed)
+    proposed = _normalize_reader_edits(proposal, proposed, reply_text=reply_text)
     proposed = _infer_missing_indexes_from_reply(proposal, proposed, reply_text)
     proposed = _dedupe_proposed_edits(proposed)
     count = len(proposal.items)

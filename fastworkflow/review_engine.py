@@ -58,9 +58,9 @@ DEFAULT_MODE = MODE_ENFORCE
 #: An approval (action) record's reply cap and wall-clock TTL: two replies, or 15 minutes.
 TTL_TURNS = 2
 TTL_SECONDS = 900
-#: A proposal review (sub_tasks, plan) is a dialog of edits: about 8 replies, or 15 minutes (fix-3rsq.plan-review.2.5).
+#: A proposal review (sub_tasks, plan) is a dialog of edits: about 8 replies, or 30 minutes (fix-3rsq.plan-review.2.5).
 PROPOSAL_TTL_TURNS = 8
-PROPOSAL_TTL_SECONDS = 15 * 60
+PROPOSAL_TTL_SECONDS = 30 * 60
 MAX_HISTORY = 100
 
 # ----------------------------------------------------------------------
@@ -631,8 +631,9 @@ SUB_TASK_UNREADABLE_REPLY = (
 
 SUB_TASK_STRUCTURED_PROMPT_HINT = (
     "Reply accept to confirm, no to decline, or edit with "
-    "'change N: inputs=key=value', 'change N: goal=text', or 'drop N' "
-    "(N is the step number and key is a field name shown in parentheses; separate several edits with ';')."
+    "'change N: inputs=key=value', 'change N: goal=text', 'add after N: goal=text', or 'drop N' "
+    "(N is the step number, 0 to add before step 1, and key is a field name shown in parentheses; "
+    "separate several edits with ';')."
 )
 
 SUB_TASK_STRUCTURED_UNREADABLE_REPLY = (
@@ -783,6 +784,11 @@ Edit = Union[Change, Drop, Add, Merge, Split, LookUp]
 
 _CHANGE = re.compile(r"^change\s+(\d+)\s*:?\s*([A-Za-z_]\w*)\s*=\s*(.*)$", re.IGNORECASE | re.DOTALL)
 _DROP = re.compile(r"^drop\s+(\d+)$", re.IGNORECASE)
+_ADD = re.compile(
+    r"^add\s+(?:after\s+)?(\d+)\s*:?\s*(?:goal\s*=\s*)?(.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_BARE_ASSIGN = re.compile(r"^([A-Za-z_]\w*)\s*=\s*(.*)$", re.DOTALL)
 
 
 def parse_edits(text: str) -> list[Edit]:
@@ -794,11 +800,29 @@ def parse_edits(text: str) -> list[Edit]:
     if not pieces:
         raise EditParseError("The reply was empty.")
     edits: list[Edit] = []
+    last_index: Optional[int] = None
+    last_was_add = False
     for piece in pieces:
         if match := _CHANGE.match(piece):
-            edits.append(Change(index=int(match.group(1)), field=match.group(2), value=match.group(3).strip()))
+            last_index = int(match.group(1))
+            last_was_add = False
+            edits.append(Change(index=last_index, field=match.group(2), value=match.group(3).strip()))
         elif match := _DROP.match(piece):
+            last_index = None
+            last_was_add = False
             edits.append(Drop(index=int(match.group(1))))
+        elif match := _ADD.match(piece):
+            last_index = None
+            last_was_add = True
+            goal_value = match.group(2).strip()
+            if not goal_value:
+                raise EditParseError("An added sub-task needs its goal.")
+            edits.append(Add(after=int(match.group(1)), values={"goal": goal_value}))
+        elif (match := _BARE_ASSIGN.match(piece)) and (last_index is not None or last_was_add):
+            if last_index is not None:
+                edits.append(Change(index=last_index, field=match.group(1), value=match.group(2).strip()))
+            elif match.group(1).lower() == "goal" and edits and isinstance(edits[-1], Add):
+                edits[-1] = Add(after=edits[-1].after, values={"goal": match.group(2).strip()})
         else:
             raise EditParseError(f"I cannot read {piece!r}. Write 'change N: field=value' or 'drop N'.")
     return edits
@@ -856,7 +880,7 @@ def apply_edits(proposal: Proposal, edits: list[Edit]) -> Proposal:
     model = _item_model(proposal)
 
     def number_ok(number: int, low: int = 1) -> None:
-        if number == 0 or not low <= number <= count:
+        if not low <= number <= count:
             raise EditRefused(_step_count_message(count))
 
     whole_item: set[int] = set()
