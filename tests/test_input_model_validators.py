@@ -356,3 +356,60 @@ def test_a_write_a_validator_makes_before_refusing_is_kept_on_the_execution_path
     assert message == "refused after the rewrite"
     assert instance.name == "REFUSE"
     assert diagnostics["validation_hook"]["changed_fields"] == ["name"]
+
+
+class Signature:
+    """A command's Signature shape, so its Input is recognised as a command Input (qualname Signature.Input)."""
+
+    class Input(BaseModel):
+        uid: str
+        size: int = 1
+
+        @model_validator(mode="after")
+        def reads_the_command_text(self, info):
+            assert "show" in info.context["command_text"]
+            return self
+
+
+class StoredFacts(BaseModel):
+    """A phase's facts model holding a command Input, as a planning command's phase output does."""
+    called_with: Signature.Input
+    count: int
+    earlier: list[Signature.Input] = []
+
+
+def test_a_stored_phase_output_holding_a_command_input_is_rebuilt_without_its_validators():
+    """Regression (pass 8 benchmark): a phase's stored output was re-validated with no context, so the
+    Input's validator read info.context["command_text"] on None and the whole turn failed."""
+    from fastworkflow.typed_phase_facts import validate_phase_output_value
+
+    stored = {"called_with": {"uid": "u1", "size": "2"}, "count": "3", "earlier": [{"uid": "u0"}]}
+    facts = validate_phase_output_value(StoredFacts, stored)
+    assert isinstance(facts.called_with, Signature.Input)
+    assert (facts.called_with.uid, facts.called_with.size, facts.count) == ("u1", 2, 3)
+    assert [e.uid for e in facts.earlier] == ["u0"]
+
+
+def test_a_stored_command_input_still_has_its_fields_checked():
+    from pydantic import ValidationError
+
+    from fastworkflow.utils.input_validation import stored_value
+
+    with pytest.raises(ValidationError):
+        stored_value(StoredFacts, {"called_with": {"uid": "u1", "size": "big"}, "count": 1})
+    with pytest.raises(ValidationError):
+        stored_value(StoredFacts, {"called_with": {"uid": "u1"}, "count": "many"})
+
+
+def test_a_stored_model_holding_no_command_input_is_validated_as_before():
+    from fastworkflow.utils.input_validation import stored_value
+
+    class Plain(BaseModel):
+        n: int
+
+        @model_validator(mode="after")
+        def doubles(self):
+            self.n = self.n * 2
+            return self
+
+    assert stored_value(Plain, {"n": "2"}).n == 4

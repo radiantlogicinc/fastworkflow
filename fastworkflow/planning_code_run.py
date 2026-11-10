@@ -22,6 +22,8 @@ import os
 import uuid
 from typing import Any, Callable, Iterable, Optional
 
+from fastworkflow.utils.input_validation import stored_value
+
 CORE = ["go_up", "reset_context"]
 
 
@@ -338,7 +340,7 @@ class _Walk:
             if isinstance(value, phase.output):
                 return value
             try:
-                return phase.output.model_validate(value.model_dump())
+                return stored_value(phase.output, value.model_dump())
             except ValidationError:
                 pass
         ended_on = self.clause()

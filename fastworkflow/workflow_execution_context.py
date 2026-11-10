@@ -45,6 +45,7 @@ from fastworkflow.observability.execution_recorder import ExecutionRecorder, rec
 from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_logger, dspy_utils
+from fastworkflow.utils.input_validation import stored_value
 from fastworkflow.utils.react import AskUserSuspend, NoSuspendedAgentStateError
 
 #: A sub-task that hits the ReAct step cap is continued by a fresh executor at most this many times.
@@ -2985,8 +2986,8 @@ class WorkflowExecutionContext:
             if p.output is None or p.name not in state["outputs"]:
                 continue
             value = state["outputs"][p.name]
-            outputs[p.name] = ([p.output.model_validate(v) for v in value] if p.fans_out
-                               else p.output.model_validate(value))
+            outputs[p.name] = ([stored_value(p.output, v) for v in value] if p.fans_out
+                               else stored_value(p.output, value))
         return outputs
 
     def _run_planning_command_phases(self, first_step: Optional[int] = None, *,

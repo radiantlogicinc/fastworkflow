@@ -16,6 +16,8 @@ are the paths that run none:
   validation, but no model validator can refuse a binding (those run later, with the context).
 - ``fields_validated`` builds a model from data already checked where it was produced (an archived run's
   output), with each field checked and no model validator run.
+- ``stored_value`` rebuilds stored data (a phase's output, a nested call's Output) as its declared type,
+  validating models as usual but each command ``Input`` inside with ``fields_validated``.
 - ``validation_class`` is the model with ``validate_assignment`` off. ``validate_input`` (used by ``check_input``)
   builds its instance from it, so an assignment a validator makes to ``self`` does not re-run the validators
   without their context. ``validate_input`` runs the model validators itself, one by one, so the writes a
@@ -29,6 +31,8 @@ from __future__ import annotations
 import dataclasses
 import functools
 import inspect
+import types
+import typing
 from types import SimpleNamespace
 from typing import Any, Type
 
@@ -128,6 +132,108 @@ def fields_validated(model_class: Type[BaseModel], data: Any) -> BaseModel:
     fill). Raises ``pydantic.ValidationError`` as the plain constructor does."""
     checked = field_checked_class(model_class).model_validate(data)
     return model_class.model_construct(**{name: getattr(checked, name) for name in model_class.model_fields})
+
+
+def is_command_input(model_class: Any) -> bool:
+    """True for a command's ``Signature.Input`` class (its model validators need the command context)."""
+    return is_pydantic_model(model_class) and model_class.__qualname__.endswith("Signature.Input")
+
+
+def _holds_model(annotation: Any) -> bool:
+    if is_pydantic_model(annotation):
+        return True
+    return any(_holds_model(arg) for arg in typing.get_args(annotation))
+
+
+def _holds_command_input(annotation: Any, _seen: frozenset = frozenset()) -> bool:
+    if is_command_input(annotation):
+        return True
+    if is_pydantic_model(annotation):
+        if annotation in _seen:
+            return False
+        seen = _seen | {annotation}
+        return any(_holds_command_input(info.annotation, seen) for info in annotation.model_fields.values())
+    return any(_holds_command_input(arg, _seen) for arg in typing.get_args(annotation))
+
+
+@functools.lru_cache(maxsize=None)
+def _outer_checked_class(model_class: Type[BaseModel], input_fields: frozenset) -> Type[BaseModel]:
+    """*model_class*'s fields other than *input_fields*, with their field validators and no model validators."""
+    field_validators = {}
+    for attr, decorator in model_class.__pydantic_decorators__.field_validators.items():
+        info = decorator.info
+        names = tuple(n for n in info.fields if n not in input_fields)
+        if names:
+            field_validators[attr] = field_validator(*names, mode=info.mode,
+                                                     check_fields=False)(decorator.func)
+    fields = {name: (info.annotation, info) for name, info in model_class.model_fields.items()
+              if name not in input_fields}
+    return create_model(model_class.__name__, __module__=model_class.__module__,
+                        __config__=ConfigDict(**model_class.model_config),
+                        __validators__=field_validators, **fields)
+
+
+def stored_value(annotation: Any, value: Any) -> Any:
+    """*value*, data already validated where it was produced (a phase's stored output, a nested call's
+    Output), rebuilt as *annotation*'s types. Models are validated as usual, except that a command
+    ``Input`` anywhere inside gets only its fields checked (``fields_validated``): its model validators
+    read the command context, which stored data does not have, and they ran when the command ran.
+    Raises ``pydantic.ValidationError`` as a plain validation does."""
+    if value is None or not _holds_model(annotation):
+        return value
+    if is_pydantic_model(annotation):
+        if isinstance(value, annotation):
+            return value
+        if isinstance(value, BaseModel):
+            value = value.model_dump()
+        if not isinstance(value, dict):
+            return annotation.model_validate(value)
+        data = dict(value)
+        for name, info in annotation.model_fields.items():
+            key = name if name in data else info.alias if info.alias in data else None
+            if key is not None:
+                data[key] = stored_value(info.annotation, data[key])
+        if is_command_input(annotation):
+            return fields_validated(annotation, data)
+        if not _holds_command_input(annotation):
+            return annotation.model_validate(data)
+        # Pydantic runs a nested model's after-validators even on an instance, so a model holding a command
+        # Input is built as the typed fill builds one: its other fields checked, then model_construct.
+        input_fields = {name for name, info in annotation.model_fields.items()
+                        if _holds_command_input(info.annotation)}
+        given = {k: v for k, v in data.items() if k not in input_fields}
+        checked = _outer_checked_class(annotation, frozenset(input_fields)).model_validate(given)
+        values = {name: getattr(checked, name) for name in annotation.model_fields if name not in input_fields}
+        for name in input_fields:
+            info = annotation.model_fields[name]
+            key = name if name in data else info.alias if info.alias in data else None
+            if key is not None:
+                values[name] = data[key]
+            elif not info.is_required():
+                values[name] = info.get_default(call_default_factory=True)
+        return annotation.model_construct(**values)
+    origin, args = typing.get_origin(annotation), typing.get_args(annotation)
+    if origin in (typing.Union, types.UnionType):
+        members = [arg for arg in args if arg is not type(None)]
+        if any(is_pydantic_model(m) and isinstance(value, m) for m in members):
+            return value
+        last_error = None
+        for member in members:
+            if not _holds_model(member):
+                continue
+            try:
+                return stored_value(member, value)
+            except ValidationError as error:
+                last_error = error
+        if last_error is not None:
+            raise last_error
+        return value
+    if origin in (list, tuple, set, frozenset) and isinstance(value, (list, tuple, set, frozenset)):
+        inner = args[0] if args else Any
+        return [stored_value(inner, item) for item in value]
+    if origin is dict and isinstance(value, dict) and len(args) == 2:
+        return {key: stored_value(args[1], item) for key, item in value.items()}
+    return value
 
 
 @dataclasses.dataclass

@@ -10,9 +10,9 @@ from dataclasses import dataclass
 from types import UnionType
 from typing import Any, Iterable, Mapping, Optional, Sequence, Union, get_args, get_origin
 
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, ValidationError
 
-from fastworkflow.utils.input_validation import fields_validated
+from fastworkflow.utils.input_validation import fields_validated, stored_value
 from fastworkflow.observation_offloading.facts import (
     FactsError,
     MissingFactError,
@@ -481,10 +481,9 @@ def fill_typed_phase_output(
 def validate_phase_output_value(model: Any, value: Any) -> BaseModel:
     """Validate one phase output dict or model for ``__result__`` binding."""
     members = union_members(model)
-    if members is not None:
-        return TypeAdapter(model).validate_python(value)
-    if inspect.isclass(model) and issubclass(model, BaseModel):
-        return model.model_validate(value)
+    if members is not None or (inspect.isclass(model) and issubclass(model, BaseModel)):
+        # Stored phase output: a command Input inside is rebuilt without its model validators (stored_value).
+        return stored_value(model, value)
     raise TypeError(type(model).__name__)
 
 
