@@ -12,7 +12,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence, Union, get_args, 
 
 from pydantic import BaseModel, ValidationError
 
-from fastworkflow.utils.input_validation import fields_validated, stored_value
+from fastworkflow.utils.input_validation import stored_value
 from fastworkflow.observation_offloading.facts import (
     FactsError,
     MissingFactError,
@@ -423,7 +423,7 @@ def fill_typed_phase_output(
                 if blob is None:
                     continue
                 try:
-                    return fields_validated(member, blob)
+                    return stored_value(member, blob)
                 except ValidationError as error:
                     raise FactsError(
                         f"{member.__name__}: the values found do not fit the model: {error}"
@@ -446,7 +446,7 @@ def fill_typed_phase_output(
                 f"{model.__name__}: no successful run of {spec.command!r} fills the phase output"
             )
         try:
-            return fields_validated(model, blob)
+            return stored_value(model, blob)
         except ValidationError as error:
             raise FactsError(
                 f"{model.__name__}: the values found do not fit the model: {error}"
@@ -468,14 +468,19 @@ def fill_typed_phase_output(
             continue
         inner = _strip_optional(model.model_fields[spec.field].annotation)
         try:
-            values[spec.field] = fields_validated(inner, blob)
+            values[spec.field] = stored_value(inner, blob)
         except ValidationError as error:
             raise FactsError(
                 f"{model.__name__}.{spec.field}: the values found do not fit: {error}"
             ) from error
-    # Each value was checked above (fields_validated); the outer model is built from them without
-    # re-validating its Input-typed fields, whose model validators need the command context.
-    return model.model_construct(**values)
+    # As before the design-idiom change, the facts model's own validators run (an empty find fails the
+    # phase); only a command Input inside is rebuilt without its model validators (stored_value).
+    try:
+        return stored_value(model, values)
+    except ValidationError as error:
+        raise FactsError(
+            f"{model.__name__}: the values found do not fit the model: {error}"
+        ) from error
 
 
 def validate_phase_output_value(model: Any, value: Any) -> BaseModel:

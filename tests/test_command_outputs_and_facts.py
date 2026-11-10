@@ -12,7 +12,7 @@ from typing import Optional
 
 import dspy
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse, tracing
@@ -689,3 +689,26 @@ def test_facts_text_renders_a_facts_model_as_compact_field_value_text():
     assert facts_text([Inner(code="A", hits=1), Inner(code="B", hits=0)]) == \
         "(code: A; hits: 1), (code: B; hits: 0)"
     assert facts_text([]) == "none"
+
+
+class FoundSome(BaseModel):
+    """A facts model whose own validator refuses an empty listing, as an app's match facts do."""
+
+    listed: ListBooks.Output
+
+    @model_validator(mode="after")
+    def lists_something(self):
+        if not self.listed.book_uids:
+            raise ValueError("book_uids lists nothing; the listing must list at least one row")
+        return self
+
+
+def test_a_facts_models_own_validator_still_fails_the_fill():
+    """Regression (pass 8 benchmark): the fill skipped the facts model's own validators, so an empty
+    listing passed the phase and failed the turn later. A facts model's validators run in the fill;
+    only a command Input inside is rebuilt without its model validators."""
+    from fastworkflow.observation_offloading.facts import FactsError
+
+    with pytest.raises(FactsError, match="lists nothing"):
+        fill(FoundSome, [page([], total=0)])
+    assert fill(FoundSome, [page(["b1"], total=1)]).listed.book_uids == ["b1"]
