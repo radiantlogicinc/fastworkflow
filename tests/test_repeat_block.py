@@ -86,8 +86,8 @@ def test_different_output_is_not_a_repeat(session, agent, responses):
 
 def test_same_command_in_a_different_context_is_not_a_repeat(session, agent, responses, monkeypatch):
     workflow = session.get_active_workflow()
-    context = {"name": workflow.current_command_context_name}
-    monkeypatch.setattr(type(workflow), "current_command_context_name",
+    context = {"name": workflow._current_command_context_name}
+    monkeypatch.setattr(type(workflow), "_current_command_context_name",
                         property(lambda self: context["name"]))
     run_step(session, agent, COMMAND)
     context["name"] = "TodoListManager"

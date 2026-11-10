@@ -108,7 +108,7 @@ def _run_one_real_turn(todo_workflow_path: str, tmp_path, sink=None):
     )
     ctx = WorkflowExecutionContext(run_as_agent=False, trace_sink=sink)
     ctx.bind_app_workflow(workflow)
-    workflow.root_command_context = TodoListManager(str(tmp_path / "todo_list.json"))
+    workflow.root = TodoListManager(str(tmp_path / "todo_list.json"))
     try:
         turn_output = ctx.process_action_turn(
             fastworkflow.Action(command_name=LIST_COMMAND, command="list them")

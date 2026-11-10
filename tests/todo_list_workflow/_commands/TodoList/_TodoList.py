@@ -4,5 +4,5 @@ from ...application.todo_manager import TodoListManager
 
 class Context:
     @classmethod
-    def get_parent(cls, command_context_object: TodoList) -> Optional[TodoListManager]:
-        return command_context_object.parent 
+    def get_parent(cls, record: TodoList) -> Optional[TodoListManager]:
+        return record.parent 

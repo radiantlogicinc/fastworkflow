@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from fastworkflow import cli, planning_commands, command_preview
 
@@ -38,9 +38,9 @@ class Signature:
 
     class Input(BaseModel):
         name: str = Field(description="the item's name",
-                          json_schema_extra={"in_request": "subject"})
+                          json_schema_extra={"record_named_in_command_text": True})
         checks: bool = Field(default=False, description="the request asks about its open checks",
-                             json_schema_extra={"verify": True})
+                             json_schema_extra={"classifier_confirms": True})
 
 
 class ItemMatch(BaseModel):
@@ -108,7 +108,7 @@ from typing import Literal
 
 import fastworkflow
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 FIND = {"item": "find_item", "kit": "find_kit"}
 
@@ -119,17 +119,17 @@ class Signature:
     class Input(BaseModel):
         name: str = Field(description="the record's name | as written")
         kind: Literal["item", "kit"] = Field(default="item", description="what the request is about",
-                                             json_schema_extra={"verify": {"item": "one item",
-                                                                           "kit": "a set of items"}})
+                                             json_schema_extra={"classifier_confirms": {"meanings": {"item": "one item",
+                                                                           "kit": "a set of items"}}})
         supplier: str = Field(default="", description="one supplier to keep; empty for all")
         detail: bool = Field(default=False, description="never changes the steps")
         count: int = Field(default=2, description="how many parts to open")
 
-    @staticmethod
-    def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
-        if cmd_parameters.kind == "kit" and cmd_parameters.supplier:
-            raise fastworkflow.Refused("a kit is listed for every supplier")
-        return None
+        @model_validator(mode="after")
+        def kit_has_no_supplier(self, info):
+            if self.kind == "kit" and self.supplier:
+                raise fastworkflow.Refused("a kit is listed for every supplier")
+            return self
 
 
 class PlanGenerator:
@@ -246,7 +246,7 @@ def test_every_planning_command_renders_one_preview(workflow):
 def test_phased_preview_shows_each_phase_its_facts_and_the_condition_both_ways(workflow):
     text = command_preview.render_previews(workflow)["show_item.md"]
     assert "Source: `_commands/show_item.py`.\n" in text and "Kind:" not in text
-    assert "| `name` | str | required | `<name>` |  | subject | the item's name |" in text
+    assert "| `name` | str | required | `<name>` |  | record named | the item's name |" in text
     assert "| `checks` | bool | false | false | yes |  | the request asks about its open checks |" in text
     assert "- what parts does the Alpha item have" in text
     # the phases, and when each runs
@@ -337,6 +337,38 @@ def test_check_passes_on_fresh_output_and_fails_on_an_edited_missing_or_extra_on
     (out / "notes.md").write_text("hand-written\n", encoding="utf-8")
     assert command_preview.check_previews(workflow, str(out)) == [
         "missing: close_out.md", "stale: show_item.md", "extra: notes.md"]
+
+
+def _library_copy(tmp_path, name: str) -> str:
+    """A copy of the library example (planning commands in Book/ and Library/ context folders)."""
+    src = Path(__file__).resolve().parent.parent / "fastworkflow" / "examples" / "library"
+    folder = tmp_path / name / "library"
+    shutil.copytree(src, folder, ignore=shutil.ignore_patterns("__pycache__", "___*"))
+    return str(folder)
+
+
+def test_two_workflows_sharing_a_preview_folder_both_pass_check(workflow, tmp_path):
+    """Files in another workflow's context folders (and its root previews, when this workflow
+    renders none at root) are not this workflow's extras."""
+    shared = tmp_path / "shared_previews"
+    library = _library_copy(tmp_path, "lib")
+    command_preview.write_previews(library, str(shared))
+    own = tmp_path / "catalog_out"
+    command_preview.write_previews(workflow, str(own))
+    shutil.copytree(own, shared, dirs_exist_ok=True)
+
+    assert command_preview.check_previews(library, str(shared)) == []
+    assert command_preview.check_previews(workflow, str(shared)) == []
+
+
+def test_a_deleted_command_preview_in_its_own_context_folder_is_reported_extra(tmp_path):
+    out = tmp_path / "previews"
+    library = _library_copy(tmp_path, "lib")
+    command_preview.write_previews(library, str(out))
+    gone = out / "Library" / "deleted_command.md"
+    gone.write_text(command_preview.MARKER.format(source="_commands/Library/deleted_command.py") + "\n",
+                    encoding="utf-8")
+    assert command_preview.check_previews(library, str(out)) == ["extra: Library/deleted_command.md"]
 
 
 def test_write_removes_stale_generated_previews_and_keeps_other_files(workflow, tmp_path):
@@ -555,7 +587,7 @@ WALK_BOXES = '''
 """walk_boxes: one shelf's boxes, every box or only the named ones, each opened and weighed."""
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from fastworkflow.planning import phase
 
@@ -574,13 +606,13 @@ class Signature:
         second: str = Field(default="", description="a second box named")
         boxes: int = Field(default=0, ge=0, description="how many boxes to take; 0 for every box")
 
-    @staticmethod
-    def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
-        if cmd_parameters.scope != "named":
-            cmd_parameters.first = ""
-        if not cmd_parameters.first:
-            cmd_parameters.second = ""
-        return None
+        @model_validator(mode="after")
+        def named_boxes_only(self, info):
+            if self.scope != "named":
+                self.first = ""
+            if not self.first:
+                self.second = ""
+            return self
 
 
 class Box(BaseModel):
@@ -1124,7 +1156,7 @@ class Signature:
     """Close out a visit, then say what one named item is."""
 
     class Input(BaseModel):
-        name: str = Field(description="the item's name", json_schema_extra={"in_request": True})
+        name: str = Field(description="the item's name", json_schema_extra={"copied_from_command_text": True})
 
 
 class PlanGenerator:
@@ -1226,11 +1258,11 @@ def test_the_command_group_replaces_planning_command_with_no_alias(tmp_path, mon
 UNION_CONTEXT = '''
 class Context:
     @classmethod
-    def get_parent(cls, command_context_object) -> None:
+    def get_parent(cls, record) -> None:
         return None
 
     @classmethod
-    def get_displayname(cls, command_context_object) -> str:
+    def get_displayname(cls, record) -> str:
         return "Lib"
 '''
 
@@ -1588,3 +1620,49 @@ def test_the_kind_list_warning_alone_leaves_preview_check_at_exit_zero(kind_list
     printed = capsys.readouterr().out
     assert "warning: file_request input 'resource_type'" in printed
     assert "are current" in printed
+
+
+def test_a_command_file_that_does_not_import_is_a_listed_problem_not_a_raise(tmp_path, monkeypatch, capsys):
+    """Building the routing definition imports every command file; a file that does not import is a
+    problem line (the line HEAD printed for it), so run, train and the server print it instead of crashing."""
+    library = _library_copy(tmp_path, "lib")
+    with open(os.path.join(library, "_commands", "Library", "author_books.py"), "a", encoding="utf-8") as handle:
+        handle.write("\nimport nonexistent_module_xyz_123\n")
+    problems = command_preview.load_problems(library)
+    assert len(problems) == 1, problems
+    assert problems[0].startswith("Library/author_books: ImportError: Could not import module from path: ")
+    assert problems[0].endswith("Error: No module named 'nonexistent_module_xyz_123'")
+    assert _run_cli(monkeypatch, "command", "preview", library, "--check") == 1
+    out = capsys.readouterr().out
+    assert "  Library/author_books: ImportError:" in out and "Traceback" not in out
+
+
+def test_a_retired_declaration_is_a_listed_problem_not_a_raise(tmp_path, monkeypatch, capsys):
+    """An execution command written with the retired approval spelling fails the routing definition's
+    checks; load_problems lists it as ``<file>: CommandDeclarationError: <command>: <message>``."""
+    library = _library_copy(tmp_path, "lib")
+    startup = os.path.join(library, "_commands", "startup.py")
+    text = open(startup, encoding="utf-8").read()
+    text = text.replace("class ResponseGenerator:\n", 'class ResponseGenerator:\n    approval = "mandatory"\n\n', 1)
+    open(startup, "w", encoding="utf-8").write(text)
+    problems = command_preview.load_problems(library)
+    assert problems == [problem for problem in problems if problem.startswith("_commands/startup.py: "
+                                                                             "CommandDeclarationError: startup: ")]
+    assert len(problems) == 1 and 'approval = "mandatory" is removed' in problems[0], problems
+    assert _run_cli(monkeypatch, "command", "preview", library, "--check") == 1
+    out = capsys.readouterr().out
+    assert "  _commands/startup.py: CommandDeclarationError: startup: approval" in out and "Traceback" not in out
+
+
+def test_a_retired_context_declaration_is_a_listed_problem_not_a_raise(tmp_path):
+    """A context class with the removed instance_label classmethod is a problem line, not a raise."""
+    folder = tmp_path / "todo_copy"
+    source = Path(__file__).resolve().parent / "todo_list_workflow"
+    shutil.copytree(source, folder, ignore=shutil.ignore_patterns("__pycache__", "*.json", "___*"))
+    item_path = folder / "_commands" / "TodoItem" / "_TodoItem.py"
+    item_path.write_text(item_path.read_text(encoding="utf-8").replace(
+        "    @classmethod\n    def get_parent",
+        "    @classmethod\n    def instance_label(cls, record):\n"
+        "        return str(record.id)\n\n    @classmethod\n    def get_parent", 1), encoding="utf-8")
+    problems = command_preview.load_problems(str(folder))
+    assert problems and "instance_label is removed" in problems[0], problems

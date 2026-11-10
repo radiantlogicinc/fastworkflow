@@ -33,7 +33,7 @@ class ResponseGenerator:  # noqa: D101
     ) -> str:
         app_workflow = workflow.context["app_workflow"]
         current_context = (
-            'global' if app_workflow.current_command_context_name == '*'
-            else app_workflow.current_command_context_name
+            'global' if app_workflow._current_command_context_name == '*'
+            else app_workflow._current_command_context_name
         )
         return f"Current context is '{current_context}'"

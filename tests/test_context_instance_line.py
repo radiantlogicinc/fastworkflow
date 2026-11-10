@@ -41,21 +41,30 @@ from fastworkflow.workflow_agent import initialize_workflow_tool_agent
 # Fixture context callback classes: exactly what a workflow may declare.
 # --------------------------------------------------------------------------
 
-class AccountContext:
-    """Declares the hook as a classmethod (the form real workflows use)."""
+class LabelledRecord:
+    """A record whose identity is computed: a property on the object."""
 
-    @classmethod
-    def instance_label(cls, command_context_object):
-        obj = command_context_object
-        uid = getattr(obj, "uid", None) or ""
-        label = getattr(obj, "label", None) or ""
+    def __init__(self, uid=None, label=None):
+        self.uid = uid
+        self.label = label
+
+    @property
+    def instance_label(self):
+        uid = self.uid or ""
+        label = self.label or ""
         if uid and label:
             return f"{uid} ({label})"
         return str(uid or label or "")
 
 
+class AccountContext:
+    """Names the property of the record that holds the identity."""
+
+    instance_label_attr = "instance_label"
+
+
 class GroupContext:
-    """Declares the attribute form instead of a method."""
+    """Names a plain attribute of the record."""
 
     instance_label_attr = "uid"
 
@@ -64,10 +73,14 @@ class ItemExplorerContext:
     """A workspace: navigable, but not an instance of anything."""
 
 
+class BrokenRecord:
+    @property
+    def broken(self):
+        raise RuntimeError("a workflow's property may be broken")
+
+
 class RaisingContext:
-    @classmethod
-    def instance_label(cls, command_context_object):
-        raise RuntimeError("a workflow's hook may be broken")
+    instance_label_attr = "broken"
 
 
 class FakeWorkflow:
@@ -80,15 +93,15 @@ class FakeWorkflow:
         self.context: dict = {}
 
     @property
-    def is_current_command_context_root(self):
+    def _is_current_command_context_root(self):
         return self._root
 
     @property
-    def current_command_context_name(self):
+    def _current_command_context_name(self):
         return self._name
 
     @property
-    def current_command_context(self):
+    def _current_command_context(self):
         return self._obj
 
 
@@ -188,14 +201,14 @@ class ContextClauseFormat(unittest.TestCase):
 
 
 class DeclaredInstanceIdentity(unittest.TestCase):
-    """The generic hook on the context callback class."""
+    """The identity a context declares with instance_label_attr."""
 
-    def test_classmethod_hook(self) -> None:
+    def test_a_property_named_by_the_attribute(self) -> None:
         self.assertEqual(
-            declared_instance_label(AccountContext, _entity("28c5aeb5", "Jane Roe")),
+            declared_instance_label(AccountContext, LabelledRecord("28c5aeb5", "Jane Roe")),
             "28c5aeb5 (Jane Roe)")
 
-    def test_attribute_hook(self) -> None:
+    def test_a_plain_attribute_named_by_the_attribute(self) -> None:
         self.assertEqual(
             declared_instance_label(GroupContext, _entity("g-1")), "g-1")
 
@@ -203,13 +216,13 @@ class DeclaredInstanceIdentity(unittest.TestCase):
         self.assertEqual(
             declared_instance_label(ItemExplorerContext, _entity("x")), "")
 
-    def test_a_broken_hook_yields_nothing_rather_than_raising(self) -> None:
-        self.assertEqual(declared_instance_label(RaisingContext, _entity("x")), "")
+    def test_a_raising_property_yields_nothing_rather_than_raising(self) -> None:
+        self.assertEqual(declared_instance_label(RaisingContext, BrokenRecord()), "")
 
     def test_an_absent_identity_is_never_invented(self) -> None:
         # The object carries no uid and no label: the context name stands alone.
-        self.assertEqual(declared_instance_label(AccountContext, _entity()), "")
-        workflow = FakeWorkflow("Account", _entity())
+        self.assertEqual(declared_instance_label(AccountContext, LabelledRecord()), "")
+        workflow = FakeWorkflow("Account", LabelledRecord())
         self.assertEqual(context_identity(workflow), ("Account", ""))
         self.assertEqual(context_clause_for(workflow), "Account")
 
@@ -241,7 +254,7 @@ class ExecuteStepPrintsTheContextItRanIn(unittest.TestCase):
         self.session = SimpleNamespace(
             workflow_tool_agent=SimpleNamespace(trajectory=self.trajectory, iteration_counter=0),
             get_active_workflow=lambda: self.workflow)
-        self.moves = {"open_account_by_uid": ("Account", _entity("28c5aeb5", "Jane Roe"))}
+        self.moves = {"open_account_by_uid": ("Account", LabelledRecord("28c5aeb5", "Jane Roe"))}
         self.dispatched: list[str] = []
 
         def dispatch(command, chat_session_obj):

@@ -61,7 +61,7 @@ def ctx(todo_workflow_path, tmp_path, monkeypatch):
     context.bind_app_workflow(workflow)
     context.push_active_workflow(workflow)
     manager = TodoListManager(str(tmp_path / "todo_list.json"))
-    workflow.root_command_context = manager
+    workflow.root = manager
     context.manager = manager
 
     from tests.todo_list_workflow._commands.TodoListManager.create_todo_list import Signature
@@ -73,7 +73,7 @@ def ctx(todo_workflow_path, tmp_path, monkeypatch):
             return real_perform_action(wf, action)
         description = action.command.split("<description>")[-1].split("</description>")[0]
         # As the real wildcard step does before it hands the command on.
-        workflow.command_context_for_response_generation = workflow.current_command_context
+        workflow._command_context_for_response_generation = workflow._current_command_context
         return fastworkflow.CommandOutput(command_response=fastworkflow.CommandResponse(
             response="",
             artifacts={"command_name": CREATE,

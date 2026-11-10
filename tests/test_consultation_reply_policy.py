@@ -401,7 +401,7 @@ def test_compound_drop_edit_is_one_organization_triggers_edit_reader(
 
     class _WildOut:
         command_name = DROP
-        cmd_parameters = DropSignature.Input(items=["2"])
+        cmd_parameters = DropSignature.Input.model_construct(items=["2"])
 
     text = "Drop step 2; Henderson Ramirez and Lewis and Sons is one organization in step 1."
     decision = policy._handle_routed_consultation(
@@ -477,7 +477,7 @@ def test_drop_fallback_keeps_valid_extraction_when_edit_reader_opens_slot(
 
     class _WildOut:
         command_name = DROP
-        cmd_parameters = DropSignature.Input(items=["2"])
+        cmd_parameters = DropSignature.Input.model_construct(items=["2"])
 
     text = "Drop step 2; step 1 alone should return how many logins arrive on the RLIQA feed."
     monkeypatch.setattr(re_, "_compound_drop_edit", lambda _t, _items=None: True)

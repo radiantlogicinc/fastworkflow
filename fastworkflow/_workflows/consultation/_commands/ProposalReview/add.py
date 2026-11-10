@@ -7,7 +7,7 @@ from typing import Optional
 import fastworkflow
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from fastworkflow.workflow import Workflow
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Signature:
@@ -20,6 +20,20 @@ class Signature:
             default=None,
             description="insert after this step number, or at the end when omitted",
         )
+
+        @model_validator(mode="after")
+        def after_within_the_proposal(self, info):
+            workflow = info.context.get("workflow")
+            proposal = workflow.context.get("consultation_proposal")
+            if proposal is None or self.after is None:
+                return self
+            count = len(proposal.items)
+            if not (0 <= self.after <= count):
+                raise fastworkflow.Refused(
+                    f"There are only {count} step(s)." if count != 1 else "There is only 1 step.",
+                    fields=["after"],
+                )
+            return self
 
     class Output(BaseModel):
         model_config = ConfigDict(extra="forbid")
@@ -46,20 +60,6 @@ class Signature:
         return [
             command_name.split("/")[-1].lower().replace("_", " ")
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
-
-    @staticmethod
-    def validate_extracted_parameters(workflow, command, cmd_parameters) -> None:
-        proposal = workflow.context.get("consultation_proposal")
-        if proposal is None or cmd_parameters.after is None:
-            return None
-        count = len(proposal.items)
-        if not (0 <= cmd_parameters.after <= count):
-            raise fastworkflow.Refused(
-                f"There are only {count} step(s)." if count != 1 else "There is only 1 step.",
-                fields=["after"],
-            )
-        return None
-
 
 class ResponseGenerator:
     def __call__(

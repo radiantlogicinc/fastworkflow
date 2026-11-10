@@ -64,7 +64,7 @@ class Signature:
 
     class Input(BaseModel):
         query: str = Field(description="the words that name the entity",
-                           json_schema_extra={"in_request": True})
+                           json_schema_extra={"copied_from_command_text": True})
 
 
 class PlanGenerator:
@@ -284,7 +284,7 @@ def test_a_planning_name_typed_to_the_executor_runs_as_a_planning_command(
     # The root ('*') context, where the live `inspect_entity` is owned. The library copy's
     # root object is Library, so the parent walk never reaches '*' from there; the walk is
     # covered at the matcher level above.
-    planning_name_env.wf.current_command_context = None
+    planning_name_env.wf.record = None
     out = CommandExecutor.invoke_command(ctx, f"{ROOT_PLANNING} query=Jesse Rodgers-ADM")
 
     assert classifier_consulted == []

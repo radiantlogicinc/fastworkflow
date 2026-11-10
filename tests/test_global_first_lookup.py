@@ -112,22 +112,22 @@ def messaging_on_a_user(tmp_path, initialized_fastworkflow, monkeypatch):
         parent_workflow_id=app.id,
         workflow_context={"app_workflow": app},
     )
-    if app.root_command_context is None:
-        app.root_command_context = ChatRoom()
-    root = app.root_command_context
+    if app.root is None:
+        app.root = ChatRoom()
+    root = app.root
     user = User(root, "alice")
     root.add_user(user)
-    app.current_command_context = user
+    app.record = user
     return app, cme, root, user
 
 
 def _root_library(app):
     """The workflow's root Library: the one its startup action made, or a fresh one when none was set."""
-    if app.root_command_context is None:
+    if app.root is None:
         from fastworkflow.examples.library.application.library import Library
 
-        app.root_command_context = Library()
-    return app.root_command_context
+        app.root = Library()
+    return app.root
 
 
 def _copy_trained_library(tmp_path, *, drop_global_head: bool = False) -> str:
@@ -153,7 +153,7 @@ def library_on_a_book(tmp_path, initialized_fastworkflow, monkeypatch):
         workflow_context={"app_workflow": app},
     )
     library = _root_library(app)
-    app.current_command_context = library.books["b1"]
+    app.record = library.books["b1"]
     return app, cme, library
 
 
@@ -206,10 +206,10 @@ def test_a_global_command_is_run_from_a_user_record_bound_to_the_root_when_the_g
     assert asked[0] == "*"
     artifacts = out.command_response.artifacts
     assert artifacts["command_name"].split("/")[-1] == "set_root_context"
-    assert app.command_context_for_response_generation is root
+    assert app.record is root
     assert artifacts["ran_on_context_name"] == "ChatRoom"
-    assert app.current_command_context is user
-    assert app.root_command_context is root
+    assert app._current_command_context is user
+    assert app.root is root
 
 
 def test_an_own_command_phrasing_from_the_book_still_routes_to_the_book_command(
@@ -229,7 +229,7 @@ def test_an_own_command_phrasing_from_the_book_still_routes_to_the_book_command(
     assert asked[0] == "*"
     assert out.command_response.artifacts["command_name"] == expected
     assert "ran_on_context_name" not in out.command_response.artifacts
-    assert app.command_context_for_response_generation is app.current_command_context
+    assert app.record is app._current_command_context
 
 
 def test_a_phrasing_the_global_head_is_unsure_about_falls_through_to_todays_flow(
@@ -261,7 +261,7 @@ def test_without_a_trained_global_head_the_global_ask_is_skipped_silently(
         workflow_context={"app_workflow": app},
     )
     library = _root_library(app)
-    app.current_command_context = library.books["b1"]
+    app.record = library.books["b1"]
     assert wildcard._global_head_trained(app) is False
     asked = _heads_asked(monkeypatch)
 
@@ -287,7 +287,7 @@ def test_an_exact_name_from_the_book_is_answered_nearest_first_and_skips_the_glo
     out = _route(cme, "list_branches")
     assert out.command_response.artifacts["command_name"] == "Library/list_branches"
     assert out.command_response.artifacts["ran_on_context_name"] == "Library"
-    assert app.command_context_for_response_generation is library
+    assert app.record is library
     # Its scope's own head answers the exact name (3.9); the global-first ask is not made.
     assert asked == ["Library"]
 

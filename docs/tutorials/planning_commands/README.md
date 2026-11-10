@@ -1,7 +1,7 @@
 # Writing commands at every granularity: a tutorial
 
 > **Status.** This tutorial describes planning commands as fastWorkflow implements them: one
-> `_commands/` tree, `from_`, `__result__`, check options on any command's `Input` fields,
+> `_commands/` tree, `from_command_output`, `__result__`, field options on any command's `Input` fields,
 > nested planning commands, scoped lookup, commands that return their `Output`, facts typed by
 > the commands that produce them, steps written with helpers, adapting a planning command to
 > a request, and code checking the plan. Its sample workflow,
@@ -23,7 +23,7 @@ the same `Signature`: a docstring that says what the command does, an `Input` it
 `Output` it returns. The class name is the only switch between them. Everything else on these
 pages works the same for both kinds: where a command lives, how a request finds it, how its
 arguments are filled, checked (the options of its `Input` fields) and asked for when one is
-missing, how a field names another command's `Output` field (`from_`), what a command returns
+missing, how a field names another command's `Output` field (`from_command_output`), what a command returns
 (a `str`, its `Output`, or both), and that every command leaves the workflow where it ends.
 
 These pages build planning commands step by step, one new idea per page, on a small library
@@ -76,19 +76,20 @@ of their context: eight in `_commands/Library/` and two in `_commands/Book/`.
    `Output`, and `PlanGenerator`, each method a phase, steps written with `run`, the
    preview, a run, and which kind to write.
 2. [An input](02-an-input.md): `Input` fields, how their values are filled, the
-   `in_request` option, a call with one phase.
+   `copied_from_command_text` option, a call with one phase.
 3. [A fact passed on, and an answer written in code](03-a-fact.md): a phase that hands on a
    command's `Output`, reading a phase by its name, `__result__`.
 4. [Skipping a phase, picking a row](04-skipping-and-picking.md): `return []`, a skipped
-   phase as `None`, `pick(...)` from an earlier phase's listing, a `_` helper.
+   phase as `None`, `run(..., named=...)` from an earlier phase's listing, a `_` helper.
 5. [Where a command leaves the workflow](05-where-a-command-leaves-the-workflow.md): a
-   navigation command and its `descends_to`, a producer `from_`, the record a call ends on.
+   navigation command and its `@descends_to`, a producer `from_command_output`, the record a call
+   ends on.
 6. [The shape of a call](06-the-shape-of-a-call.md): `__phases__`.
-7. [Words the runtime reads](07-answer-wording.md): the step helpers (`run`, `full_list`,
-   `pick`, `when`, `do_not_run`), notes, paging, and the answer helpers (`listed`, `count`,
-   `num`).
+7. [Words the runtime reads](07-answer-wording.md): the step helpers (`run`, with `all_pages=`
+   or `named=`, `when`, `do_not_run`), notes, paging, and the answer helpers (`count_and_names_read`,
+   `count`).
 8. [Once per item](08-fan-out.md): `@phase(over=...)`.
-9. [Refusing a call](09-refusing-a-call.md): the check options, `validate_extracted_parameters`,
+9. [Refusing a call](09-refusing-a-call.md): the field options, the `Input`'s model validators,
    `fastworkflow.Refused`, and a missing argument.
 10. [Facts from more than one command](10-a-facts-model-per-input.md): a union of `Output`s,
     and a facts model with one field per command.
@@ -137,10 +138,10 @@ fastworkflow run fastworkflow/examples/library
 
 `command preview` renders one markdown page per planning command, which is the quickest way
 to see what the agent will plan from; add `--check` in CI to fail when a committed preview is
-stale or a `from_` does not resolve. Planning commands run only in agent mode, the default
+stale or a `from_command_output` does not resolve. Planning commands run only in agent mode, the default
 of `fastworkflow run`: `--assistant` runs deterministic mode and refuses a planning command
 (page 14). `JEV_API_KEY` in `fastworkflow.passwords.env` is optional: without it no request
-matches a planning command, so the planner plans from each one's template, and the `verify`
+matches a planning command, so the planner plans from each one's template, and the `classifier_confirms`
 option checks nothing (pages 9 and 14).
 
 The *runs* shown on these pages are what `fastworkflow command run-code` prints for the call,

@@ -3,9 +3,10 @@ from typing import Optional
 import fastworkflow
 from fastworkflow.utils.signatures import NOT_FOUND
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from ...application.workitem import WorkItem
+from ._WorkItem import Context as WorkItemContext
 
 
 class Signature:
@@ -34,6 +35,39 @@ class Signature:
             examples=["1", "2", "3"]
         )
 
+        @model_validator(mode="after")
+        def path_from_workitem_type(self, info):
+            workflow = info.context.get("workflow")
+            if self.path == NOT_FOUND:
+                self.path = None
+            if self.workitem_type == NOT_FOUND:
+                self.workitem_type = None
+            if self.id == NOT_FOUND:
+                self.id = None
+            if self.index == -sys.maxsize:
+                self.index = None
+
+            if not self.path:
+                if not self.workitem_type:
+                    raise fastworkflow.Refused("Provide the absolute path or the child workitem type and optionally its id or index")
+
+                current_workitem: WorkItem = workflow.record
+                absolute_path_of_current_workitem = current_workitem.get_absolute_path()
+                if self.id:
+                    self.path = f'{absolute_path_of_current_workitem}/{self.workitem_type}[id={self.id}]'
+                elif self.index:
+                    self.index -= 1   # python indexes are 0 based
+                    self.path = f'{absolute_path_of_current_workitem}/{self.workitem_type}[index={self.index}]'
+                else:
+                    self.path = f'{absolute_path_of_current_workitem}/{self.workitem_type}'
+                    self.path = self.path.replace('//', '/')
+
+            self.workitem_type = None
+            self.id = None
+            self.index = None
+
+            return self
+
     class Output(BaseModel):
         current_workitem_has_changed: bool = Field(
             description="Whether the move caused the current workitem to change")
@@ -53,46 +87,13 @@ class Signature:
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
-    @staticmethod
-    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> None:
-        if cmd_parameters.path == NOT_FOUND:
-            cmd_parameters.path = None
-        if cmd_parameters.workitem_type == NOT_FOUND:
-            cmd_parameters.workitem_type = None
-        if cmd_parameters.id == NOT_FOUND:
-            cmd_parameters.id = None
-        if cmd_parameters.index == -sys.maxsize:
-            cmd_parameters.index = None
-
-        if not cmd_parameters.path:
-            if not cmd_parameters.workitem_type:
-                raise fastworkflow.Refused("Provide the absolute path or the child workitem type and optionally its id or index")
-
-            current_workitem: WorkItem = workflow.command_context_for_response_generation
-            absolute_path_of_current_workitem = current_workitem.get_absolute_path()
-            if cmd_parameters.id:
-                cmd_parameters.path = f'{absolute_path_of_current_workitem}/{cmd_parameters.workitem_type}[id={cmd_parameters.id}]'
-            elif cmd_parameters.index:
-                cmd_parameters.index -= 1   # python indexes are 0 based
-                cmd_parameters.path = f'{absolute_path_of_current_workitem}/{cmd_parameters.workitem_type}[index={cmd_parameters.index}]'
-            else:
-                cmd_parameters.path = f'{absolute_path_of_current_workitem}/{cmd_parameters.workitem_type}'
-                cmd_parameters.path = cmd_parameters.path.replace('//', '/')
-
-        cmd_parameters.workitem_type = None
-        cmd_parameters.id = None
-        cmd_parameters.index = None
-
-        return None
-
-
 class ResponseGenerator:
     """Handle command execution and craft the textual response."""
 
     def _process_command(self, 
                          workflow: fastworkflow.Workflow, 
                          input: Signature.Input) -> Signature.Output:
-        current_workitem: WorkItem = workflow.command_context_for_response_generation
+        current_workitem: WorkItem = workflow.record
         
         # Get the target work item by absolute path
         target_workitem = current_workitem.get_workitem(input.path)
@@ -101,9 +102,9 @@ class ResponseGenerator:
         current_workitem_has_changed = False
         if target_workitem and target_workitem is not current_workitem:
             # Change the current context to the first work item
-            workflow.current_command_context = target_workitem
+            workflow.record = target_workitem
             current_workitem_has_changed = True
-            new_context = workflow.current_command_context_displayname
+            new_context = WorkItemContext.get_displayname(target_workitem)
 
         return Signature.Output(
             current_workitem_has_changed = current_workitem_has_changed,

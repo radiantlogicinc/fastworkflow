@@ -1,5 +1,5 @@
 from typing import Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 import fastworkflow
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
@@ -15,6 +15,20 @@ class Signature:
             examples=['John', 'Jane Doe'],
         )
 
+        @model_validator(mode="after")
+        def user_name_is_in_the_room(self, info):
+            workflow = info.context.get("workflow")
+            chatroom: ChatRoom = workflow.record
+            key_values = chatroom.list_users()
+            matched, corrected_value, suggestions = DatabaseValidator.fuzzy_match(self.user_name, key_values)
+            if matched:
+                self.user_name = corrected_value
+            elif suggestions:
+                raise fastworkflow.Refused(
+                    f"No user named '{self.user_name}' in this chat room. Did you mean {', '.join(suggestions)}?",
+                    field="user_name")
+            return self
+
     class Output(BaseModel):
         user_found: bool = Field(
             description="Whether we found the user",
@@ -23,20 +37,6 @@ class Signature:
     plain_utterances = [
         "Set Fred as the current user",
     ]
-
-    @staticmethod
-    def validate_extracted_parameters(workflow: fastworkflow.Workflow,
-                                      command: str,
-                                      input: "Signature.Input") -> None:
-        chatroom: ChatRoom = workflow.command_context_for_response_generation
-        key_values = chatroom.list_users()
-        matched, corrected_value, suggestions = DatabaseValidator.fuzzy_match(input.user_name, key_values)
-        if matched:
-            input.user_name = corrected_value
-        elif suggestions:
-            raise fastworkflow.Refused(
-                f"No user named '{input.user_name}' in this chat room. Did you mean {', '.join(suggestions)}?",
-                field="user_name")
 
     @staticmethod
     def generate_utterances(workflow: fastworkflow.Workflow, command_name: str) -> list[str]:
@@ -50,7 +50,7 @@ class ResponseGenerator:
     """Call the User.send_message instance method."""
 
     def _process_command(self, workflow: fastworkflow.Workflow, input: Signature.Input) -> Signature.Output:
-        chatroom: ChatRoom = workflow.command_context_for_response_generation
+        chatroom: ChatRoom = workflow.record
 
         if input.user_name not in chatroom.list_users():
             return Signature.Output(user_found=False)
@@ -62,7 +62,7 @@ class ResponseGenerator:
         chatroom.current_user = user
 
         # lets change the current context to this user
-        workflow.current_command_context = user
+        workflow.record = user
 
         return Signature.Output(user_found=True)
 

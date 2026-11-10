@@ -207,15 +207,26 @@ class RoutingDefinition(BaseModel):
             from fastworkflow.planning_commands import option_params
             input_model = getattr(cls_obj, "Input", None)
             if isinstance(input_model, type) and issubclass(input_model, BaseModel):
-                option_params(input_model, f"{module_file_path}: {command_name}")
+                option_params(input_model, f"{module_file_path}: {command_name}",
+                              planning=bool(command_metadata.is_planning))
                 self._check_paged_output(command_name, input_model, str(module_file_path))
                 if not command_metadata.is_planning:
                     self._warn_default_not_found(command_name, input_model, str(module_file_path))
-            # the retired db_lookup is a load error naming the hook (fix-3rsq.one-hook)
-            from fastworkflow.utils.signatures import reject_retired_db_lookup
+            # the retired db_lookup is a load error naming the hook (fix-3rsq.one-hook); so is the removed
+            # Signature.validate_extracted_parameters (spec 3.1), which names the Input's validator
+            from fastworkflow.utils.signatures import reject_retired_db_lookup, removed_validate_hook_message
             reject_retired_db_lookup(
                 cls_obj, input_model if isinstance(input_model, type) else None,
                 f"{module_file_path}: {command_name}")
+            if message := removed_validate_hook_message(cls_obj, f"{module_file_path}: {command_name}"):
+                raise ValueError(message)
+            # an Input validator that reads info.context says what it needs when built with no context
+            if isinstance(input_model, type) and issubclass(input_model, BaseModel):
+                from fastworkflow.planning import reserved_input_name_message
+                from fastworkflow.utils.input_validation import guard_input_validators
+                if message := reserved_input_name_message(input_model, f"{module_file_path}: {command_name}"):
+                    raise ValueError(message)
+                guard_input_validators(input_model, f"{module_file_path}: {command_name}")
         elif module_type == ModuleType.RESPONSE_GENERATION_INFERENCE and not command_metadata.is_planning:
             check_response_call_arity(cls_obj, f"{module_file_path}: {command_name}")
         return cls_obj
@@ -240,8 +251,8 @@ class RoutingDefinition(BaseModel):
 
     def _check_paged_output(self, command_name: str, input_model: type, where: str) -> None:
         """A load error for a paged command (design 2.49, 3.14) whose ``Signature.Output`` does not
-        declare ``total: int``. A paged command is one whose Input has an int ``start``, ``offset`` or
-        ``skip``; the message also says to rename the field when it is not a page."""
+        declare ``total: int``. A paged command is one whose Input has an int ``start``
+        (``facts.PAGING_PARAMETERS``); the message also says to rename the field when it is not a page."""
         from fastworkflow.observation_offloading.facts import paging_parameters
         from fastworkflow.planning_commands import PlanningCommandFormatError
 
@@ -452,11 +463,14 @@ class RoutingDefinition(BaseModel):
 
 
 def _check_approval_annotations(workflow_folderpath: str, definition: "RoutingDefinition") -> None:
-    """Validate and snapshot each command's ``approval`` annotation, and validate its ``writes`` declaration
-    (imported lazily: approval_annotations imports this module)."""
+    """Reject retired or hand-written command declarations, then validate and snapshot each command's
+    approval annotation and its ``writes`` declaration (imported lazily: approval_annotations imports this
+    module)."""
     from fastworkflow.approval_annotations import check_approval_annotations
+    from fastworkflow.command_declarations import check_command_spellings
     from fastworkflow.command_writes import check_write_declarations
 
+    check_command_spellings(workflow_folderpath, definition)
     check_approval_annotations(workflow_folderpath, definition)
     check_write_declarations(workflow_folderpath, definition)
 

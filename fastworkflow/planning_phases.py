@@ -191,22 +191,6 @@ _REFERENCE_RE = re.compile(
     r"^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)$")
 
 
-class _FromStr(str):
-    """A ``from_`` source string: behaves identically to ``str``, while allowing
-    load-time resolution to distinguish ``from_(...)`` from a hand-written
-    ``json_schema_extra={"from": ...}`` on a facts model (a load error since Phase 15)."""
-
-
-class _FromList(list):
-    """A ``from_`` source list: behaves identically to ``list[str]``, while allowing
-    load-time resolution to distinguish ``from_(...)`` from a copy written by hand."""
-
-
-def is_from_source(value: Any) -> bool:
-    """Whether *value* was constructed by :func:`from_`."""
-    return isinstance(value, (_FromStr, _FromList))
-
-
 def output_members(annotation: Any) -> tuple[type[BaseModel], ...]:
     """The pydantic models a phase output annotation stands for, in order.
 
@@ -349,25 +333,6 @@ def over_values(phase: "Phase", models: Sequence[Any], path: Sequence[str]) -> l
             current = found
         values.extend(current)
     return values
-
-
-def from_(source: str | Sequence[str], **field_kwargs: Any) -> Any:
-    """Declare a producer edge on a command's ``Signature.Input`` field: ``Field(**field_kwargs)``
-    with ``{"from": source}`` merged into the caller's ``json_schema_extra`` (other keys kept).
-
-    ``book_uid: str = from_("find_book.book_uids", description="the uid of the book to open")``
-    """
-    from pydantic import Field
-
-    marked: Any
-    if isinstance(source, str):
-        marked = _FromStr(source)
-    elif isinstance(source, Sequence):
-        marked = _FromList(_FromStr(s) if isinstance(s, str) else s for s in source)
-    else:
-        marked = source
-    extra = {**(field_kwargs.pop("json_schema_extra", None) or {}), "from": marked}
-    return Field(json_schema_extra=extra, **field_kwargs)
 
 
 @dataclass(frozen=True)
@@ -1933,7 +1898,7 @@ def _producer_sources(parameters_classes: Sequence[Any],
         extra = getattr(info, "json_schema_extra", None)
         if not isinstance(extra, Mapping):
             continue
-        for key in ("available_from", "from"):
+        for key in ("available_from", "from_command_output"):
             raw = extra.get(key) or ()
             for entry in ([raw] if isinstance(raw, str) else raw):
                 if isinstance(entry, str) and "." in entry:
@@ -2033,7 +1998,7 @@ def pick_step(step: Any, lookup: Any, output: Any,
     """``(command, reason)`` for an open *step* that opens one row of a listing.
 
     *lookup* is the listing step or run (a ``finish_check.PlanStep`` or a command-run
-    mapping) and *output* its Output (pages joined when read with ``full_list``,
+    mapping) and *output* its Output (pages joined when read with ``all_pages=True``,
     ``pick_listing``). Code runs *step* as ``command P=<uid>`` only when:
 
     - *step* is a command step whose first word is its command, and its command has the
@@ -3351,9 +3316,7 @@ __all__ = [
     "fan_out_items",
     "fan_out_note",
     "fill_output",
-    "from_",
     "is_answer_only",
-    "is_from_source",
     "parameter_classes",
     "phase_steps",
     "plan_code_steps",

@@ -55,10 +55,10 @@ _commands/Library/member_report.py: PlanGenerator defines __call__; rename it to
 command that enters it:
 
 ```text
-_commands/Book/_Book.py: Context.enter_command is no longer read; declare descends_to = "Book" on open_book's ResponseGenerator
+_commands/Book/_Book.py: Context.enter_command is no longer read; declare @descends_to("Book") on open_book's ResponseGenerator
 ```
 
-**Fix:** move it to the command as `descends_to` (page 5), and delete it from the context
+**Fix:** move it to the command as `@descends_to` (page 5), and delete it from the context
 class.
 
 ## Outputs
@@ -72,26 +72,28 @@ _commands/Book/list_loans.py: Input.start makes list_loans a paged command, but 
 
 ## Checks on the arguments
 
-**A check option on a type it does not apply to.** `in_request` applies to a `str` or an
-`int` only (page 9); a `bool` takes `verify` instead:
+**A check option on a type it does not apply to.** `copied_from_command_text` applies to a `str`,
+an `int` or a `list[str]` only (page 9); a `bool` takes `classifier_confirms` instead:
 
 ```python
 class Input(BaseModel):
     loans: bool = Field(default=False, description="whether to name the books on loan",
-                        json_schema_extra={"in_request": True})
+                        json_schema_extra={"copied_from_command_text": True})
 ```
 
 ```text
-_commands/Library/member_report.py: option in_request does not apply to field 'loans' of type bool (it takes a str, an int or a list[str])
+_commands/Library/member_report.py: option copied_from_command_text does not apply to field 'loans' of type bool (it takes a str, an int or a list[str])
 ```
 
-**Fix:** drop the option, or use one that applies: `verify` decides a `bool` again from the
-request (with `JEV_API_KEY`).
+**Fix:** drop the option, or use one that applies: `classifier_confirms` decides a `bool` again from the
+command text (with `JEV_API_KEY`).
 
-**A retired option.** The check options are two now: `in_request` and `verify`. `subject`,
-`means` and `strip` fail the load and name the new spelling. Write `in_request: "subject"` for a
-record name, `verify: {value: meaning, ...}` for an enum's meanings, and `in_request: {"ignore": [...]}`
-for the words `strip` removed from a value's ends (page 9).
+**A retired option.** The spellings `in_request`, `verify`, `positional`, `from`, `subject`, `means`
+and `strip` are gone, and so are the helpers and attributes below. Each fails the load and names its
+replacement, and each entry shows the load error the author gets. Write
+`record_named_in_command_text: True` for a record name, `classifier_confirms: {"meanings": {value: meaning, ...}}`
+for an enum's meanings, and `copied_from_command_text: {"ignore": [...]}` for the words `strip` removed
+from a value's ends (page 9).
 
 <!-- broken: retired_subject -->
 ```python
@@ -113,46 +115,503 @@ class PlanGenerator:
 
 <!-- load-error -->
 ```text
-PlanningCommandFormatError: _commands/retired_subject.py: field 'title': option subject is retired: write in_request: "subject"
+PlanningCommandFormatError: _commands/retired_subject.py: field 'title': subject: True is removed: write "record_named_in_command_text": True
 ```
 
-## `from_`
+**`in_request`.** `in_request: True` is `copied_from_command_text: True` (page 2), and the dict form
+`{"ignore": [...]}` keeps its words as `copied_from_command_text: {"ignore": [...]}`:
 
-**A hand-written `available_from`.** It was the producer hint before `from_`:
+<!-- broken: retired_in_request -->
+```python
+from pydantic import BaseModel, Field
+from fastworkflow.planning import run
+
+
+class Signature:
+    """Show the thing."""
+
+    class Input(BaseModel):
+        title: str = Field(description="the title", json_schema_extra={"in_request": True})
+
+
+class PlanGenerator:
+    def find(self, input):
+        return [run("list_branches")]
+```
+
+<!-- load-error -->
+```text
+PlanningCommandFormatError: _commands/retired_in_request.py: field 'title': in_request: True is removed: write "copied_from_command_text": True
+```
+
+**`in_request: "subject"`** is `record_named_in_command_text: True`. A `subject` beside an `ignore` list
+is `record_named_in_command_text: {"ignore": [...]}`:
+
+<!-- broken: retired_in_request_subject -->
+```python
+from pydantic import BaseModel, Field
+from fastworkflow.planning import run
+
+
+class Signature:
+    """Show the thing."""
+
+    class Input(BaseModel):
+        title: str = Field(description="the title", json_schema_extra={"in_request": "subject"})
+
+
+class PlanGenerator:
+    def find(self, input):
+        return [run("list_branches")]
+```
+
+<!-- load-error -->
+```text
+PlanningCommandFormatError: _commands/retired_in_request_subject.py: field 'title': in_request: "subject" is removed: write "record_named_in_command_text": True
+```
+
+**`verify`.** `verify: True` is `classifier_confirms: True` on a `bool`, a `Literal`, or a `str` with
+`record_named_in_command_text` alongside. `verify: "alone"` is `classifier_decides: True` on a `bool`.
+`verify: {value: meaning}` is `classifier_confirms: {"meanings": {value: meaning}}`:
+
+<!-- broken: retired_verify -->
+```python
+from pydantic import BaseModel, Field
+from fastworkflow.planning import run
+
+
+class Signature:
+    """Show the thing."""
+
+    class Input(BaseModel):
+        loans: bool = Field(default=False, description="whether to name the loans",
+                            json_schema_extra={"verify": True})
+
+
+class PlanGenerator:
+    def find(self, input):
+        return [run("list_branches")]
+```
+
+<!-- load-error -->
+```text
+PlanningCommandFormatError: _commands/retired_verify.py: field 'loans': verify: True is removed: write "classifier_confirms": True
+```
+
+**`positional`** is `command_text_after_command_name: True`, at most one on an execution command's `Input`:
+
+<!-- broken: retired_positional -->
+```python
+from pydantic import BaseModel, Field
+from fastworkflow.planning import run
+
+
+class Signature:
+    """Show the thing."""
+
+    class Input(BaseModel):
+        title: str = Field(description="the title", json_schema_extra={"positional": True})
+
+
+class PlanGenerator:
+    def find(self, input):
+        return [run("list_branches")]
+```
+
+<!-- load-error -->
+```text
+PlanningCommandFormatError: _commands/retired_positional.py: field 'title': positional: True is removed: write "command_text_after_command_name": True
+```
+
+**`from`**, the producer key, is `from_command_output`, with the same `"cmd.field"` value (page 5):
+
+<!-- broken: retired_from_key -->
+```python
+from pydantic import BaseModel, Field
+from fastworkflow.planning import run
+
+
+class Signature:
+    """Show the thing."""
+
+    class Input(BaseModel):
+        book_uid: str = Field(description="the uid", json_schema_extra={"from": "find_book.book_uids"})
+
+
+class PlanGenerator:
+    def find(self, input):
+        return [run("list_branches")]
+```
+
+<!-- load-error -->
+```text
+PlanningCommandFormatError: _commands/retired_from_key.py: field 'book_uid': from: "find_book.book_uids" is removed: write "from_command_output": "find_book.book_uids"
+```
+
+**`from_`**, the helper import. Its producer edge is the `from_command_output` key above. Importing the
+helper fails the load with the message that names its replacement:
+
+<!-- broken: retired_from_import -->
+```python
+from pydantic import BaseModel, Field
+from fastworkflow.planning import from_
+
+
+class Signature:
+    """Show the book."""
+
+    class Input(BaseModel):
+        title: str = Field(description="the title", json_schema_extra={"copied_from_command_text": True})
+
+
+class PlanGenerator:
+    def find(self, input):
+        return [run("find_book", title=from_("find_book.book_uids"))]
+```
+
+<!-- load-error -->
+```text
+ImportError: Could not import module from path: _commands/retired_from_import.py. Error: from_ is removed: write json_schema_extra={"from_command_output": "<command>.<field>"} on the Input field
+```
+
+**`validate_extracted_parameters`** is removed. Its checks are a `@model_validator(mode="after")` on the
+`Input` (page 9), which reads `info.context` (the command text, the workflow and the command):
+
+<!-- broken: retired_validate_hook -->
+```python
+from pydantic import BaseModel, Field
+from fastworkflow.planning import run
+
+
+class Signature:
+    """Show the thing."""
+
+    class Input(BaseModel):
+        title: str = Field(description="the title", json_schema_extra={"copied_from_command_text": True})
+
+    @staticmethod
+    def validate_extracted_parameters(workflow, command, input, command_text=None):
+        return None
+
+
+class PlanGenerator:
+    def find(self, input):
+        return [run("list_branches")]
+```
+
+<!-- load-error -->
+```text
+PlanningCommandFormatError: _commands/retired_validate_hook.py: validate_extracted_parameters is removed: write @model_validator(mode="after") on Input (read info.context["command_text"], ["workflow"], ["command"])
+```
+
+**`approval`** on an execution command's class is a decorator now. A file that sets it fails the load
+with the message below. The decorator is `@user_approval_for_execution` (see the
+[planning command file layout](../../planning_command_file_layout.md), "Approval annotation"):
+
+```text
+CommandDeclarationError: _commands/retired_approval.py: retired_approval: approval = "mandatory" is removed: write @user_approval_for_execution(UserApproval.REQUIRED_ALWAYS)
+```
+
+**`writes = True`** is `@writes` on the `ResponseGenerator` (execution commands only):
+
+```text
+CommandDeclarationError: _commands/retired_writes.py: retired_writes: writes = True is removed: write @writes on the ResponseGenerator (execution commands only)
+```
+
+**`descends_to = "Book"`** is `@descends_to("Book")` on the `ResponseGenerator` (page 5), and
+**`descend_parameter = "title"`** is `when_parameter` on the same decorator:
+
+```text
+CommandDeclarationError: _commands/retired_descends_to.py: retired_descends_to: descends_to = "Book" is removed: write @descends_to("Book") on the ResponseGenerator
+CommandDeclarationError: _commands/descend_parameter_only.py: descend_parameter_only: descend_parameter = "title" is removed: write @descends_to("<Context>", when_parameter="title") on the ResponseGenerator
+```
+
+**A private attribute written by hand**, such as `__fw_writes__ = True`, fails the load: the decorators
+store the mark themselves, so declare the decorator instead:
+
+```text
+CommandDeclarationError: _commands/retired_private_mark.py: retired_private_mark: __fw_writes__ is written by hand; declare it with @writes instead
+```
+
+**`pick`, `full_list`, `listed` and `num`** are removed helpers. Importing one fails the load with the
+message that names its replacement. `pick` is `run(command, named=...)` (page 4):
+
+<!-- broken: retired_pick_import -->
+```python
+from pydantic import BaseModel, Field
+from fastworkflow.planning import pick
+
+
+class Signature:
+    """Show the thing."""
+
+    class Input(BaseModel):
+        title: str = Field(description="the title", json_schema_extra={"copied_from_command_text": True})
+
+
+class PlanGenerator:
+    def find(self, input):
+        return [pick("list_branches", named=input.title)]
+```
+
+<!-- load-error -->
+```text
+ImportError: Could not import module from path: _commands/retired_pick_import.py. Error: pick is removed: write run(command, named=<name>, <id input>=<value>), e.g. run("open_book", named=input.title)
+```
+
+`full_list` is `run(command, ..., all_pages=True)` (page 7):
+
+<!-- broken: retired_full_list_import -->
+```python
+from pydantic import BaseModel, Field
+from fastworkflow.planning import full_list, run
+
+
+class Signature:
+    """Show the thing."""
+
+    class Input(BaseModel):
+        title: str = Field(description="the title", json_schema_extra={"copied_from_command_text": True})
+
+
+class PlanGenerator:
+    def find(self, input):
+        return [run("list_branches")]
+```
+
+<!-- load-error -->
+```text
+ImportError: Could not import module from path: _commands/retired_full_list_import.py. Error: full_list is removed: write run(command, ..., all_pages=True)
+```
+
+`listed` is `count_and_names_read(names, total, noun)` (page 7):
+
+<!-- broken: retired_listed_import -->
+```python
+from pydantic import BaseModel, Field
+from fastworkflow.planning import listed, run
+
+
+class Signature:
+    """Show the thing."""
+
+    class Input(BaseModel):
+        title: str = Field(description="the title", json_schema_extra={"copied_from_command_text": True})
+
+
+class PlanGenerator:
+    def find(self, input):
+        return [run("list_branches")]
+```
+
+<!-- load-error -->
+```text
+ImportError: Could not import module from path: _commands/retired_listed_import.py. Error: listed is removed: write count_and_names_read(names, total, noun)
+```
+
+`num` is removed: write the number inline (page 7):
+
+<!-- broken: retired_num_import -->
+```python
+from pydantic import BaseModel, Field
+from fastworkflow.planning import num, run
+
+
+class Signature:
+    """Show the thing."""
+
+    class Input(BaseModel):
+        title: str = Field(description="the title", json_schema_extra={"copied_from_command_text": True})
+
+
+class PlanGenerator:
+    def find(self, input):
+        return [run("list_branches")]
+```
+
+<!-- load-error -->
+```text
+ImportError: Could not import module from path: _commands/retired_num_import.py. Error: num is removed: write the number inline, e.g. f"{value}" (see the planning command docs)
+```
+
+**`named` and `all_pages` as `Input` field names.** Both are keywords of `run`, so no command can be
+passed a field of either name, and the load refuses the field:
+
+<!-- broken: retired_named_field -->
+```python
+from pydantic import BaseModel, Field
+from fastworkflow.planning import run
+
+
+class Signature:
+    """Show the thing."""
+
+    class Input(BaseModel):
+        named: str = Field(description="the name", json_schema_extra={"copied_from_command_text": True})
+
+
+class PlanGenerator:
+    def find(self, input):
+        return [run("list_branches")]
+```
+
+<!-- load-error -->
+```text
+PlanningCommandFormatError: _commands/retired_named_field.py: Input field 'named' is reserved: run() takes named= as its own keyword, so no command call can pass a field of that name; rename the field
+```
+
+The same rule holds for `all_pages`:
+
+<!-- broken: retired_all_pages_field -->
+```python
+from pydantic import BaseModel, Field
+from fastworkflow.planning import run
+
+
+class Signature:
+    """Show the thing."""
+
+    class Input(BaseModel):
+        all_pages: bool = Field(default=False, description="every page")
+
+
+class PlanGenerator:
+    def find(self, input):
+        return [run("list_branches")]
+```
+
+<!-- load-error -->
+```text
+PlanningCommandFormatError: _commands/retired_all_pages_field.py: Input field 'all_pages' is reserved: run() takes all_pages= as its own keyword, so no command call can pass a field of that name; rename the field
+```
+
+**`run` with `named=` and `all_pages=True` together.** `named=` opens one row and `all_pages=True` reads
+every page, so a step with both fails while the template is built. Choose one (page 7):
+
+<!-- broken: retired_named_all_pages -->
+```python
+from pydantic import BaseModel, Field
+from fastworkflow.planning import run
+
+
+class Signature:
+    """Show the thing."""
+
+    class Input(BaseModel):
+        title: str = Field(description="the title", json_schema_extra={"copied_from_command_text": True})
+
+
+class PlanGenerator:
+    def find(self, input):
+        return [run("list_loans", named=input.title, all_pages=True)]
+```
+
+<!-- load-error -->
+```text
+PlanningCommandFormatError: _commands/retired_named_all_pages.py: steps() fails on placeholder inputs (StepFormError: run('list_loans'): named= opens one row and all_pages=True reads every page; give one of them); declare Signature.template
+```
+
+**`named=` on a command with no row id.** A `named=` step needs an id input to open the row with: the
+field declared with `from_command_output`, else the command's one required `str` field. A command with
+neither fails the load:
+
+```text
+_commands/named_no_row.py: a step opens a row of 'list_branches' by named=, but 'list_branches' declares no row id input (a field from_command_output, or its one required str field): pass the id input explicitly
+```
+
+**`command_context_object`**, a parameter of a `Context` classmethod, is `record` (page 5):
+
+```python
+import fastworkflow
+
+
+class Context:
+    @classmethod
+    def get_parent(cls, command_context_object):
+        return None
+```
+
+```text
+CommandContextModelError: context 'Book' does not load: get_parent: parameter "command_context_object" is removed: name it "record"
+```
+
+**`instance_label`**, a classmethod of a `Context`, is removed. A computed identity is a property of the
+record, named by `instance_label_attr`:
+
+```python
+class Context:
+    @classmethod
+    def instance_label(cls, record):
+        return record.uid
+```
+
+```text
+CommandContextModelError: context 'Book' does not load: instance_label is removed: make the label a property on the record object and name it with instance_label_attr = "<property name>" (e.g. "instance_label")
+```
+
+**`command_context_for_response_generation`, `current_command_context` and `root_command_context`** are
+gone from the `Workflow`. Reading or assigning one raises an `AttributeError` that names the replacement:
+
+```text
+AttributeError: Workflow.command_context_for_response_generation is removed: use workflow.record
+AttributeError: Workflow.current_command_context is removed: use workflow.record (assigning it moves the workflow)
+AttributeError: Workflow.root_command_context is removed: use workflow.root
+```
+
+**An `Input` built directly without a context.** A validator that reads `info.context` needs the context the
+framework passes. Built as `Signature.Input(title="Dune")` in a test or a script, the error below names the
+validator. Build it with `Signature.Input.model_validate(values, context={"command_text": ..., "workflow": None,
+"command": ...})`, or with `Signature.Input.model_construct(...)` when the check is not the point:
+
+```text
+Value error, _commands/needs_context.py: Input.must_be_in_text needs the validation context (command_text, workflow, command): validate through the framework, or build the Input with Signature.Input.model_construct(...) in tests (it raised TypeError: 'NoneType' object is not subscriptable)
+```
+
+**`info.context["request"]`** is `info.context["command_text"]`. A validator that still reads the old key (or calls
+`.get("request")`, which raises too) fails the call with the removed-key message, which names the replacement:
+
+```text
+validate_extracted_parameters raised KeyError: "'request' is removed from the validation context: read info.context['command_text']"
+```
+
+
+## `from_command_output`
+
+**A hand-written `available_from`.** It was the producer hint before `from_command_output`:
 
 ```python
 order_id: str = Field(json_schema_extra={"available_from": ["find_order"]})
 ```
 
 ```text
-_commands/Library/get_order.py: Input.order_id: available_from is written by from_; write from_("find_order") or from_("find_order.<field>")
+_commands/Library/get_order.py: Input.order_id: available_from is written by from_command_output; write "from_command_output": "find_order" or "from_command_output": "find_order.<field>"
 ```
 
-**Fix:** `order_id: str = from_("find_order.order_ids")`. Prose that used to sit in the hint
+**Fix:** `order_id: str = Field(json_schema_extra={"from_command_output": "find_order.order_ids"}, ...)`. Prose that used to sit in the hint
 ("in the current context") belongs in the field's description.
 
-**A `from_` anywhere but an `Input` field.** An `Output` is built by code, and a facts
+**A `from_command_output` anywhere but an `Input` field.** An `Output` is built by code, and a facts
 model's fields are typed with the commands they come from (page 10), so neither carries one:
 
 ```text
-_commands/Library/book_by_title.py: Signature.Output.author: an Output field cannot declare from_; build the value in __result__
+_commands/Library/book_by_title.py: Signature.Output.author: an Output field cannot declare from_command_output; build the value in __result__
 ```
 
 ```text
-_commands/Book/shelf_report.py: Shelf.branch (from 'show_book.branch'): from_ is only for a command's Input field; type the field with the command's Output instead
+_commands/Book/shelf_report.py: Shelf.branch (from_command_output 'show_book.branch'): from_command_output is only for a command's Input field; type the field with the command's Output instead
 ```
 
 **Fix:** for a facts model, `book: ShowBook.Output`, and read `shelf.book.branch`.
 
-**A `from_` on an `Input` field that names an `Input` field.** `from_` names the `Output`
+**A `from_command_output` on an `Input` field that names an `Input` field.** It names the `Output`
 field a value comes from. It does not borrow another command's description:
 
 ```python
-query: str = from_("find_book.query")       # in _commands/Library/count_books.py
+query: str = Field(json_schema_extra={"from_command_output": "find_book.query"})       # in _commands/Library/count_books.py
 ```
 
 ```text
-_commands/Library/count_books.py: Input.query (from 'find_book.query'): find_book's query is an Input field; from_ names the Output field a value comes from. To describe the value, write Field(description=...); the preview shows find_book.query's description beside it
+_commands/Library/count_books.py: Input.query (from 'find_book.query'): find_book's query is an Input field; from_command_output names the Output field a value comes from. To describe the value, write Field(description=...); the preview shows find_book.query's description beside it
 ```
 
 **An unqualified name off the path.** An `Input` field's unqualified name is looked up in the
@@ -160,14 +619,14 @@ declaring context, its bases, then the global commands. A producer in a context 
 this one is qualified, since which records enclose a record is known only at run time:
 
 ```python
-member_uid: str = from_("find_member.member_uids")   # in _commands/Book/reserve_for.py
+member_uid: str = Field(json_schema_extra={"from_command_output": "find_member.member_uids"})   # in _commands/Book/reserve_for.py
 ```
 
 ```text
 _commands/Book/reserve_for.py: Input.member_uid (from 'find_member.member_uids'): no command find_member in Book, its bases or the global commands; qualify it (Library/find_member)
 ```
 
-**Fix:** `from_("Library/find_member.member_uids")`. When the name matches commands in two
+**Fix:** `"from_command_output": "Library/find_member.member_uids"`. When the name matches commands in two
 scopes the message lists both, qualified; pick one.
 
 **A type that does not match.** A producer's type must equal its target's, `Optional` aside,
@@ -274,8 +733,8 @@ _commands/Library/count_books.py: phase 'find', step 'find_book query=<title>': 
 
 **Fix:** `run("find_book", query=input.title)`. A value from the request can hold what the
 step parser reads otherwise: written by hand, `add_note text=prefers email (not phone)` adds
-the note "prefers email". The same warning names `full_list`, `when`, `do_not_run` or `pick`
-for their words typed by hand.
+the note "prefers email". The same warning names `run(..., all_pages=True)`, `run(..., named=...)`,
+`when(...)` or `do_not_run(...)` for their words typed by hand.
 
 **A note that holds a condition.** It loads and runs; `preview --check` warns without
 failing. Code never reads a note, so a condition written in one does not stop the step.
@@ -293,13 +752,6 @@ _commands/Library/bad_note.py: phase 'note', step 'add_note text=<text> (only wh
 
 **Fix:** `when("the member asked", run("add_note", text=input.text))`, or decide in code
 with `if`.
-
-**`pick` with the wrong parameter.** `pick` takes a `named=` name, and at most one
-`..._uid=` parameter, for a uid your own rule chose:
-
-```text
-_commands/Library/bad_pick.py: phase 'book' fails while its template is built (every fact unknown): StepFormError: pick('open_book'): named= is the name the row is picked by
-```
 
 **A phase decided at run time.** While the template is built every fact is a placeholder,
 which stands in for most of what code does with a value: attributes, indexes, tests,
@@ -366,7 +818,7 @@ These are warnings, and one note, each logged once per command (or once per work
 process.
 
 **A command returned no `Output`.** `book_by_title declares an Output but returned none;
-phases and from_ references cannot read it` means a command that declares a
+phases and from_command_output references cannot read it` means a command that declares a
 `Signature.Output` returned only text. Return the `Output` on every path: an execution
 command returns it from `__call__` (page 1), and a planning command from `__result__`, saying
 "not found" in a field when it found nothing (page 11).
@@ -375,15 +827,15 @@ command returns it from `__call__` (page 1), and a planning command from `__resu
 its command's `Output` or a `CommandResponse`, keeps the call: a model writes the answer from
 the phases' runs, `output` is `None`, and the warning names the command and the exception.
 
-**`verify` checks nothing.** `library: planning commands are matched by intent detection; without
-JEV_API_KEY, Jev's planning-match candidates and the verify checks of <fields> are off.`, logged
+**`classifier_confirms` checks nothing.** `library: planning commands are matched by intent detection; without
+JEV_API_KEY, Jev's planning-match candidates and the classifier checks of <fields> are off.`, logged
 once at load, means the workflow has no `JEV_API_KEY`. Planning commands are ordinary intent labels,
 so intent detection still matches them. Without the key, the Jev matcher does not run, and the
-fields the line names carry a `verify` option that checks nothing (page 9).
+fields the line names carry a `classifier_confirms` option that checks nothing (page 9).
 
-**A navigation command without `descends_to`.** `open_shelf moved the workflow into Shelf but
-declares no descends_to; declare descends_to = "Shelf" so plans can reach Shelf's commands`
-means a command set `workflow.current_command_context` to a record of a context it does not
+**A navigation command without `@descends_to`.** `open_shelf moved the workflow into Shelf but
+declares no @descends_to; declare @descends_to("Shelf") so plans can reach Shelf's commands`
+means a command moved the workflow (by setting `workflow.record`) into a context it does not
 name. Declare it on the command (page 5).
 
 **A planning command is refused.** `member_report is a planning command; it runs in agent
@@ -391,7 +843,8 @@ mode.` means it was called by a direct API or MCP call, or it was named in assis
 needs the agent. A refusal in assistant mode lists the reasons, each naming the step and what to
 change. Run the request in agent mode, or change the step the reason names.
 
-**An approval prompt does not run the command.** A command with `approval = "mandatory"` asks
+**An approval prompt does not run the command.** A command decorated with
+`@user_approval_for_execution(UserApproval.REQUIRED_ALWAYS)` asks
 before it runs. Reply `yes` to run it, `no` to decline, or `always` to approve it from now on for
 that user, workflow and command. An approval expires after 2 turns or 15 minutes, and any change to
 its parameters cancels it. `/approvals` lists the standing approvals, `/revoke_approval <command>`
@@ -498,7 +951,7 @@ class PlanGenerator:
 
 <!-- load-error -->
 ```text
-PlanningCommandFormatError: _commands/bad_option.py: field 'title' json_schema_extra has unknown key(s) strip_words
+PlanningCommandFormatError: _commands/bad_option.py: field 'title': unknown option 'strip_words'; its options are copied_from_command_text, record_named_in_command_text, classifier_confirms, classifier_decides, command_text_after_command_name, from_command_output, converted_from_command_text
 ```
 
 <!-- broken: fan_out_param -->

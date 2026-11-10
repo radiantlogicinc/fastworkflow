@@ -12,6 +12,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence, Union, get_args, 
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from fastworkflow.utils.input_validation import fields_validated
 from fastworkflow.observation_offloading.facts import (
     FactsError,
     MissingFactError,
@@ -21,7 +22,8 @@ from fastworkflow.observation_offloading.facts import (
     _page_key,
     _scalar_of_pages,
 )
-from fastworkflow.planning_phases import FULL_LIST_PHRASES, is_from_source
+from fastworkflow.field_options import FROM_COMMAND_OUTPUT
+from fastworkflow.planning_phases import FULL_LIST_PHRASES
 from fastworkflow.utils.python_utils import type_text
 
 
@@ -66,11 +68,9 @@ def _type_label(annotation: Any) -> str:
 
 
 def carries_copy_field(info: Any) -> bool:
-    """Whether a facts field still uses a copy edge (``fact_from`` / plain ``\"from\"``)."""
+    """Whether a facts field still uses a copy edge (``fact_from`` / a plain ``"from"`` key, now retired)."""
     extra = info.json_schema_extra
-    if not isinstance(extra, Mapping) or "from" not in extra:
-        return False
-    return not is_from_source(extra["from"])
+    return isinstance(extra, Mapping) and "from" in extra
 
 
 #: The load error's tail for a field that still copies (Phase 15, design 3.12).
@@ -113,8 +113,8 @@ def _facts_field_type_errors(model: type[BaseModel], model_to_command: Mapping[t
     errors: list[str] = []
     for name, info in model.model_fields.items():
         extra = info.json_schema_extra if isinstance(info.json_schema_extra, Mapping) else {}
-        if "from" in extra and is_from_source(extra["from"]):
-            # ``from_`` on facts fields is validated in ``resolve_field_sources`` (3.3).
+        if FROM_COMMAND_OUTPUT in extra:
+            # ``from_command_output`` on facts fields is validated in ``resolve_field_sources`` (3.3).
             continue
         inner = _strip_optional(info.annotation)
         optional_none = (
@@ -137,7 +137,7 @@ def typed_field_specs(model: type[BaseModel], model_to_command: Mapping[type, st
     specs: list[TypedFieldSpec] = []
     for name, info in model.model_fields.items():
         extra = info.json_schema_extra if isinstance(info.json_schema_extra, Mapping) else {}
-        if "from" in extra and is_from_source(extra["from"]):
+        if FROM_COMMAND_OUTPUT in extra:
             continue
         inner = _strip_optional(info.annotation)
         optional = not info.is_required() or (
@@ -423,7 +423,7 @@ def fill_typed_phase_output(
                 if blob is None:
                     continue
                 try:
-                    return member.model_validate(blob)
+                    return fields_validated(member, blob)
                 except ValidationError as error:
                     raise FactsError(
                         f"{member.__name__}: the values found do not fit the model: {error}"
@@ -446,7 +446,7 @@ def fill_typed_phase_output(
                 f"{model.__name__}: no successful run of {spec.command!r} fills the phase output"
             )
         try:
-            return model.model_validate(blob)
+            return fields_validated(model, blob)
         except ValidationError as error:
             raise FactsError(
                 f"{model.__name__}: the values found do not fit the model: {error}"
@@ -468,17 +468,14 @@ def fill_typed_phase_output(
             continue
         inner = _strip_optional(model.model_fields[spec.field].annotation)
         try:
-            values[spec.field] = inner.model_validate(blob)
+            values[spec.field] = fields_validated(inner, blob)
         except ValidationError as error:
             raise FactsError(
                 f"{model.__name__}.{spec.field}: the values found do not fit: {error}"
             ) from error
-    try:
-        return model.model_validate(values)
-    except ValidationError as error:
-        raise FactsError(
-            f"{model.__name__}: the values found do not fit the model: {error}"
-        ) from error
+    # Each value was checked above (fields_validated); the outer model is built from them without
+    # re-validating its Input-typed fields, whose model validators need the command context.
+    return model.model_construct(**values)
 
 
 def validate_phase_output_value(model: Any, value: Any) -> BaseModel:

@@ -33,8 +33,9 @@ class CommandMetadata(BaseModel):
     # Loaded and callable by name through the executor and loader, but never listed to the planner, the agent or
     # the user, never a head label, and never counted by the artifact construction check.
     framework: bool = False
-    # The command's ``approval`` annotation ("mandatory" | "delegatable"), set from its class when the
-    # routing definition loads (approval_annotations). None is agent discretion and is not serialised.
+    # The command's ``@user_approval_for_execution`` value ("required_always" | "required_until_delegated"),
+    # set from its class when the routing definition loads (approval_annotations). None is agent discretion
+    # and is not serialised.
     approval: Optional[str] = None
 
     @model_serializer(mode="wrap")

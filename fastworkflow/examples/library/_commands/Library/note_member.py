@@ -7,7 +7,7 @@ import re
 
 from pydantic import BaseModel, Field, model_validator
 
-from fastworkflow.planning import pick, run
+from fastworkflow.planning import run
 
 
 class Signature:
@@ -26,10 +26,10 @@ class Signature:
 
     class Input(BaseModel):
         member: str = Field(description="the member's name",
-                            json_schema_extra={"in_request": True})
+                            json_schema_extra={"copied_from_command_text": True})
         text: str = Field(description="what the note says, without the request around it "
                                       "(to note that someone called: 'someone called')",
-                          json_schema_extra={"in_request": True})
+                          json_schema_extra={"copied_from_command_text": True})
 
         @model_validator(mode="after")
         def note_without_the_request(self):
@@ -44,6 +44,6 @@ class Signature:
 class PlanGenerator:
     def note(self, input):
         return [run("find_member", query=input.member),
-                pick("open_member", named=input.member),
+                run("open_member", named=input.member),
                 run("add_note", text=input.text),
                 "say whose record the note was added to"]

@@ -5,7 +5,7 @@ from __future__ import annotations
 import fastworkflow
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from fastworkflow.workflow import Workflow
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from fastworkflow._workflows.consultation import _item_validation
 
@@ -19,6 +19,16 @@ class Signature:
             description="step number or goal phrase to look up",
             examples=["2", "the renewal step", "first step"],
         )
+
+        @model_validator(mode="after")
+        def item_names_a_proposal_step(self, info):
+            workflow = info.context.get("workflow")
+            proposal = workflow.context.get("consultation_proposal")
+            if proposal is None:
+                return self
+            self.item = _item_validation.resolve_proposal_step(
+                proposal, str(self.item), field_name="item", slot_retry=True)
+            return self
 
     class Output(BaseModel):
         model_config = ConfigDict(extra="forbid")
@@ -44,16 +54,6 @@ class Signature:
         return [
             command_name.split("/")[-1].lower().replace("_", " ")
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
-
-    @staticmethod
-    def validate_extracted_parameters(workflow, command, cmd_parameters) -> None:
-        proposal = workflow.context.get("consultation_proposal")
-        if proposal is None:
-            return None
-        cmd_parameters.item = _item_validation.resolve_proposal_step(
-            proposal, str(cmd_parameters.item), field_name="item", slot_retry=True)
-        return None
-
 
 class ResponseGenerator:
     def __call__(

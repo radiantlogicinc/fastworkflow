@@ -30,7 +30,8 @@ from typing import Any, Optional
 
 import fastworkflow
 from fastworkflow import approval_grants, review_engine, state_paths
-from fastworkflow.approval_annotations import APPROVAL_VALUES, command_approval
+from fastworkflow.approval_annotations import (APPROVAL_VALUES, REQUIRED_ALWAYS,
+                                               REQUIRED_UNTIL_DELEGATED, command_approval)
 from fastworkflow.context_identity import context_identity
 # The engine's public names, re-exported: the approval surface the gate, the hosts and the tests use.
 from fastworkflow.review_engine import (  # noqa: F401
@@ -211,7 +212,7 @@ def decide(annotation: Optional[str], *, origin: Origin, surface: Surface, unatt
     del consequence, uncertainty  # reserved; see docstring
     if annotation not in APPROVAL_VALUES:
         return Decision(Outcome.RUN, "unannotated")
-    if origin is Origin.USER and annotation == "delegatable":
+    if origin is Origin.USER and annotation == REQUIRED_UNTIL_DELEGATED:
         return Decision(Outcome.RUN, "delegatable, and the user's own instruction")
     if surface.required_identity == IDENTITY_END_USER and not surface.satisfies_end_user():
         return Decision(Outcome.REFUSE, "end_user identity required and not verifiable")
@@ -221,7 +222,7 @@ def decide(annotation: Optional[str], *, origin: Origin, surface: Surface, unatt
         return Decision(Outcome.QUEUE, "no human channel")
     if awaiting_on_channel:
         return Decision(Outcome.QUEUE, "behind an awaiting approval")
-    if annotation == "delegatable":
+    if annotation == REQUIRED_UNTIL_DELEGATED:
         return Decision(Outcome.ASK, "delegatable asks until delegation exists")
     return Decision(Outcome.ASK, "mandatory")
 
@@ -397,7 +398,7 @@ def gate(chat_session: Any, workflow: Any, command_name: str, input_obj: Any, ra
     if origin is Origin.USER:
         template = MSG_ASK_USER
     else:
-        template = MSG_ASK if annotation == "mandatory" else MSG_ASK_DELEGATABLE
+        template = MSG_ASK if annotation == REQUIRED_ALWAYS else MSG_ASK_DELEGATABLE
     text = template.format(command=qualified, rendering=rendering)
     suspendable = origin is Origin.AGENT
     record = new_record(state=AWAITING, queued=False, suspended=suspendable, text=text)

@@ -144,8 +144,8 @@ from ...application.user import PremiumUser
 
 class Context:
     @classmethod
-    def get_parent(cls, command_context_object: PremiumSession) -> PremiumUser:
-        return command_context_object.user
+    def get_parent(cls, record: PremiumSession) -> PremiumUser:
+        return record.user
 '''
 
 _PREMIUM_SESSION_COMMAND = '''\
@@ -170,7 +170,7 @@ class Signature:
 
 class ResponseGenerator:
     def __call__(self, workflow: fastworkflow.Workflow, command: str, input) -> fastworkflow.CommandResponse:
-        session: PremiumSession = workflow.command_context_for_response_generation
+        session: PremiumSession = workflow.record
         return fastworkflow.CommandResponse(response=session.end_session())
 '''
 

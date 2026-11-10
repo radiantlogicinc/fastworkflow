@@ -6,7 +6,7 @@ __result__ reads both.
 """
 from pydantic import BaseModel
 
-from fastworkflow.planning import count, full_list, listed, run
+from fastworkflow.planning import count, count_and_names_read, run
 
 from .list_loans import Signature as ListLoans
 from .show_book import Signature as ShowBook
@@ -34,11 +34,11 @@ class Shelf(BaseModel):
 
 class PlanGenerator:
     def shelf(self) -> Shelf:
-        return [run("show_book"), full_list("list_loans")]
+        return [run("show_book"), run("list_loans", all_pages=True)]
 
     def __result__(self, shelf):
         book, loans = shelf.book, shelf.loans
         held = f"{book.title} is held at {book.branch}, {count(book.copies, 'copy', 'copies')}"
         if not loans.borrowers:
             return f"{held}; none is on loan."
-        return f"{held}; on loan to {listed(loans.borrowers, loans.total, 'borrower')}."
+        return f"{held}; on loan to {count_and_names_read(loans.borrowers, loans.total, 'borrower')}."

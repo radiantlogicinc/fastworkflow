@@ -9,11 +9,11 @@ class Context:
     state_version = 1
 
     @classmethod
-    def get_parent(cls, command_context_object: PremiumUser) -> None:
+    def get_parent(cls, record: PremiumUser) -> None:
         return None
 
     @classmethod
-    def get_state(cls, command_context_object: PremiumUser) -> dict[str, Any]:
+    def get_state(cls, record: PremiumUser) -> dict[str, Any]:
         """Snapshot the premium user so a session holding it can be evicted.
 
         initialize_user picks the class from its is_premium_user parameter, so
@@ -22,7 +22,7 @@ class Context:
         after the recorded class, and refuses a from_state that hands back a
         different one.
         """
-        return {'name': command_context_object.name}
+        return {'name': record.name}
 
     @classmethod
     def from_state(cls, state: dict[str, Any], workflow: fastworkflow.Workflow,

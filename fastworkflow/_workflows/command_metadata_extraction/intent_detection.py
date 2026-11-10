@@ -22,7 +22,7 @@ from fastworkflow.model_pipeline_training import (
     CommandRouter,
     GLOBAL_CONTEXT_FOLDER,
 )
-# The commands that enter a context are read from the descend edges (`descends_to`
+# The commands that enter a context are read from the descend edges (`@descends_to`
 # on each command, design 3.15), the one navigation declaration.
 from fastworkflow.context_navigation import entering_commands
 from fastworkflow.nlu_labels import (
@@ -118,7 +118,7 @@ def foreign_context_hint(
 
     Generic by construction. The owning contexts come from the routing
     definition, and the entering command only from a command's own
-    `descends_to` declaration -- never from the shape of a command's name.
+    `@descends_to` declaration -- never from the shape of a command's name.
 
     *enter_commands* is keyed by owning context. With one owner the entering
     commands are simply listed; with several, each is named beside the context
@@ -527,7 +527,7 @@ class CommandNamePrediction:
         """The command(s) a workflow declares as entering *context_name*.
 
         Read from the descend edges (`context_navigation.entering_commands`): each
-        command whose `descends_to` names the context, with the values it needs.
+        command whose `@descends_to` names the context, with the values it needs.
         Empty when no command declares it. Nothing here is allowed to raise: a hint
         that names the context alone is worth more than a failed turn.
         """

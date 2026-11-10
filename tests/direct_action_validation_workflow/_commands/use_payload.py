@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import fastworkflow
 from fastworkflow.workflow import Workflow
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 HOOK_MISSING_PAYLOAD = (
     "payload not found in context. Run the initializing command first."
@@ -14,6 +14,13 @@ HOOK_MISSING_PAYLOAD = (
 class Signature:
     class Input(BaseModel):
         note: str = Field(description="A note to attach to the payload")
+
+        @model_validator(mode="after")
+        def refuse_without_payload(self, info):
+            workflow = info.context.get("workflow")
+            if not workflow.context.get("payload"):
+                raise fastworkflow.Refused(HOOK_MISSING_PAYLOAD)
+            return self
 
     class Output(BaseModel):
         result: str = Field(description="Echo of payload and note")
@@ -28,17 +35,6 @@ class Signature:
     @staticmethod
     def generate_utterances(workflow: Workflow, command_name: str) -> list[str]:
         return [command_name.split("/")[-1].lower().replace("_", " ")]
-
-    @staticmethod
-    def validate_extracted_parameters(
-        workflow: fastworkflow.Workflow,
-        command: str,
-        cmd_parameters: "Signature.Input",
-    ) -> None:
-        if not workflow.context.get("payload"):
-            raise fastworkflow.Refused(HOOK_MISSING_PAYLOAD)
-        return None
-
 
 class ResponseGenerator:
     def __call__(self, workflow: Workflow, command: str, input: Signature.Input) -> fastworkflow.CommandResponse:

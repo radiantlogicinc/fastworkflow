@@ -232,11 +232,12 @@ class ResponseGenerator:
 ```
 - A parameter with no default is required: a missing value is asked for, not guessed. `Optional[str] = None` makes it optional.
 - Use `Field` `description` + `examples` (and `pattern`/`min_length` where helpful) to drive accurate parameter extraction.
-- Optional hook: `validate_extracted_parameters(workflow, command, input) -> None`, a staticmethod on
-  `Signature`. It corrects a value by assigning to `input.<field>`, refuses by raising
-  `fastworkflow.Refused(message, field=...)`, and returns `None` to accept. Value lookups
-  (`DatabaseValidator.fuzzy_match`) go in it too. `db_lookup` is retired: a
-  `json_schema_extra={'db_lookup': True}` key or a `Signature.db_lookup` method is a load error.
+- Optional rules: `@model_validator(mode="after")` methods on `Input`. A validator corrects a value by assigning
+  to `self.<field>` and returning `self`, refuses by raising `fastworkflow.Refused(message, field=...)`, and reads
+  the context from `info.context` (`command_text`, `workflow`, `command`). Value lookups
+  (`DatabaseValidator.fuzzy_match`) go in a validator too. The `validate_extracted_parameters` hook is removed (a load
+  error names the validator form). `db_lookup` is retired: a `json_schema_extra={"db_lookup": True}` key or a
+  `Signature.db_lookup` method is a load error.
 - For LLM-generated responses, use `fastworkflow.utils.dspy_utils.dspySignature(Signature.Input, Signature.Output)` with `dspy.Predict`.
 
 ### Context model — `_commands/context_inheritance_model.json`

@@ -11,11 +11,11 @@ Depth: 1 (lower bound; open steps name no command)
 
 ## Inputs
 
-| input | type | default | sample | verify | in_request | description |
+| input | type | default | sample | classifier_confirms / classifier_decides | copied_from_command_text / record_named_in_command_text | description |
 |---|---|---|---|---|---|---|
 | `branch` | str | `""` | `<branch>` |  | yes; ignore `the`, `branch` | the branch asked about, if named (such as Central or Riverside); empty for all |
 
-- `branch` must be written in the request (`in_request`).
+- `branch` must be written in the command text (`copied_from_command_text`).
 
 ## Example requests
 

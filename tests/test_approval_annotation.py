@@ -1,7 +1,7 @@
 """The ``approval`` annotation: declared on a command class, validated at load, exposed (Phase 10 step 10.13).
 
-``approval = "mandatory" | "delegatable"`` on a command's ``ResponseGenerator`` (or a planning command's
-``PlanGenerator``) is read the way ``descends_to`` is. Absent means agent discretion. This file covers the
+``@user_approval_for_execution(UserApproval.REQUIRED_ALWAYS | REQUIRED_UNTIL_DELEGATED)`` on a command's
+``ResponseGenerator`` (or a planning command's ``PlanGenerator``) is read the way ``@descends_to`` is. Absent means agent discretion. This file covers the
 declaration only: nothing is gated here (enforcement is fix-3rsq.10.14).
 
 Each case runs on a COPY of the library example, annotated in the copy. Nothing is mocked: the routing
@@ -18,7 +18,8 @@ import pytest
 import fastworkflow
 from fastworkflow import approval_annotations as aa
 from fastworkflow.approval_annotations import (
-    ApprovalAnnotationError, command_approval, planning_steps_needing_approval)
+    REQUIRED_ALWAYS, REQUIRED_UNTIL_DELEGATED, command_approval, planning_steps_needing_approval)
+from fastworkflow.command_declarations import CommandDeclarationError
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.examples.library.application.library import Library
@@ -43,13 +44,30 @@ def _copy(tmp_path, name: str) -> Path:
     return folder
 
 
-def _annotate(folder: Path, command_file: str, value_text: str, *, on: str = "ResponseGenerator") -> Path:
-    """Write ``approval = <value_text>`` on the command's ``ResponseGenerator`` (or ``PlanGenerator``) in the copy."""
+def _annotate(folder: Path, command_file: str, member: str, *, on: str = "ResponseGenerator") -> Path:
+    """Decorate the command's ``ResponseGenerator`` (or ``PlanGenerator``) in the copy with
+    ``@user_approval_for_execution(UserApproval.<member>)``."""
+    return _decorate(folder, command_file,
+                     f"@fastworkflow.user_approval_for_execution(fastworkflow.UserApproval.{member})", on=on)
+
+
+def _decorate(folder: Path, command_file: str, decorator_line: str, *, on: str = "ResponseGenerator") -> Path:
+    """Put *decorator_line* on the line above the class *on* in the copy."""
     path = folder / "_commands" / command_file
     text = path.read_text()
     marker = f"class {on}:\n"
     assert text.count(marker) == 1, path
-    path.write_text(text.replace(marker, f"class {on}:\n    approval = {value_text}\n", 1))
+    path.write_text(text.replace(marker, f"{decorator_line}\n{marker}", 1))
+    return path
+
+
+def _in_class(folder: Path, command_file: str, body_line: str, *, on: str = "ResponseGenerator") -> Path:
+    """Write *body_line* as a class attribute of the class *on* in the copy (a retired spelling)."""
+    path = folder / "_commands" / command_file
+    text = path.read_text()
+    marker = f"class {on}:\n"
+    assert text.count(marker) == 1, path
+    path.write_text(text.replace(marker, f"class {on}:\n    {body_line}\n", 1))
     return path
 
 
@@ -61,8 +79,8 @@ def _listing_app(folder: Path):
     """The copy as an app workflow, entered at the Library root (the shortlist's own context)."""
     app = fastworkflow.Workflow.create(workflow_folderpath=str(folder), workflow_id_str=f"approval-{folder.name}")
     library = Library()
-    app.root_command_context = library
-    app.current_command_context = library
+    app.root = library
+    app.record = library
     return app
 
 
@@ -72,11 +90,11 @@ def _listing_app(folder: Path):
 
 def test_both_allowed_values_load_and_are_read_by_the_accessor(tmp_path):
     folder = _copy(tmp_path, "accepted")
-    _annotate(folder, "Library/open_book.py", '"mandatory"')
-    _annotate(folder, "Library/open_member.py", '"delegatable"')
+    _annotate(folder, "Library/open_book.py", "REQUIRED_ALWAYS")
+    _annotate(folder, "Library/open_member.py", "REQUIRED_UNTIL_DELEGATED")
 
-    assert command_approval(str(folder), "Library/open_book") == "mandatory"
-    assert command_approval(str(folder), "Library/open_member") == "delegatable"
+    assert command_approval(str(folder), "Library/open_book") == REQUIRED_ALWAYS
+    assert command_approval(str(folder), "Library/open_member") == REQUIRED_UNTIL_DELEGATED
 
 
 def test_an_unannotated_command_has_no_approval(tmp_path):
@@ -91,47 +109,52 @@ def test_an_unknown_command_has_no_approval(tmp_path):
 
 def test_the_value_is_the_snapshot_in_command_directory_json(tmp_path):
     folder = _copy(tmp_path, "snapshot")
-    _annotate(folder, "Library/open_book.py", '"mandatory"')
+    _annotate(folder, "Library/open_book.py", "REQUIRED_ALWAYS")
     RoutingRegistry.get_definition(str(folder))
 
     snapshot = json.loads((folder / "___command_info" / "command_directory.json").read_text())
-    assert snapshot["map_command_2_metadata"]["Library/open_book"]["approval"] == "mandatory"
+    assert snapshot["map_command_2_metadata"]["Library/open_book"]["approval"] == "required_always"
 
 
 # ---------------------------------------------------------------------------
 # Invalid values are load errors
 # ---------------------------------------------------------------------------
 
-def test_an_unknown_value_is_a_load_error_naming_command_file_and_allowed_values(tmp_path):
-    folder = _copy(tmp_path, "unknown_value")
-    _annotate(folder, "Library/open_book.py", '"sometimes"')
+def test_a_retired_string_spelling_is_a_load_error_naming_the_decorator(tmp_path):
+    folder = _copy(tmp_path, "retired_string")
+    _in_class(folder, "Library/open_book.py", 'approval = "mandatory"')
 
-    with pytest.raises(ApprovalAnnotationError) as caught:
+    with pytest.raises(CommandDeclarationError) as caught:
         RoutingRegistry.get_definition(str(folder))
     message = str(caught.value)
-    assert "Library/open_book" in message
     assert "Library/open_book.py" in message
-    assert "'sometimes'" in message
-    assert "'mandatory'" in message and "'delegatable'" in message
+    assert 'approval = "mandatory" is removed: write @user_approval_for_execution(UserApproval.REQUIRED_ALWAYS)' in message
 
 
-def test_a_non_string_value_is_a_load_error(tmp_path):
-    folder = _copy(tmp_path, "wrong_type")
-    _annotate(folder, "Library/open_book.py", "True")
+def test_a_retired_non_string_spelling_is_a_load_error(tmp_path):
+    folder = _copy(tmp_path, "retired_non_string")
+    _in_class(folder, "Library/open_book.py", "approval = True")
 
-    with pytest.raises(ApprovalAnnotationError) as caught:
+    with pytest.raises(CommandDeclarationError) as caught:
         RoutingRegistry.get_definition(str(folder))
-    message = str(caught.value)
-    assert "Library/open_book" in message
-    assert "must be the string" in message
-    assert "not bool" in message
+    assert "approval = True is removed" in str(caught.value)
+    assert "Library/open_book" in str(caught.value)
+
+
+def test_a_decorator_argument_that_is_not_a_member_fails_at_import(tmp_path):
+    folder = _copy(tmp_path, "non_member")
+    _decorate(folder, "Library/open_book.py",
+              '@fastworkflow.user_approval_for_execution("sometimes")')
+
+    with pytest.raises(ImportError, match="takes a UserApproval member"):
+        RoutingRegistry.get_definition(str(folder))
 
 
 def test_the_accessor_surfaces_a_load_error_rather_than_hiding_it(tmp_path):
     folder = _copy(tmp_path, "accessor_error")
-    _annotate(folder, "Library/open_book.py", '"maybe"')
+    _in_class(folder, "Library/open_book.py", 'approval = "maybe"')
 
-    with pytest.raises(ApprovalAnnotationError):
+    with pytest.raises(CommandDeclarationError):
         command_approval(str(folder), "Library/open_book")
 
 
@@ -141,12 +164,12 @@ def test_the_accessor_surfaces_a_load_error_rather_than_hiding_it(tmp_path):
 
 def test_planning_steps_needing_approval_lists_the_annotated_commands_its_template_calls(tmp_path):
     folder = _copy(tmp_path, "planning_steps")
-    _annotate(folder, "Library/open_member.py", '"delegatable"')
+    _annotate(folder, "Library/open_member.py", "REQUIRED_UNTIL_DELEGATED")
 
     # member_report's template calls find_member, open_member, list_member_loans and show_notes;
     # only open_member is annotated.
     assert planning_steps_needing_approval(str(folder), "Library/member_report") == [
-        ("Library/open_member", "delegatable")]
+        ("Library/open_member", REQUIRED_UNTIL_DELEGATED)]
 
 
 def test_planning_steps_needing_approval_is_empty_without_annotated_steps(tmp_path):
@@ -156,9 +179,9 @@ def test_planning_steps_needing_approval_is_empty_without_annotated_steps(tmp_pa
 
 def test_a_planning_command_may_carry_the_annotation_itself(tmp_path):
     folder = _copy(tmp_path, "planning_self")
-    _annotate(folder, "Library/member_report.py", '"mandatory"', on="PlanGenerator")
+    _annotate(folder, "Library/member_report.py", "REQUIRED_ALWAYS", on="PlanGenerator")
 
-    assert command_approval(str(folder), "Library/member_report") == "mandatory"
+    assert command_approval(str(folder), "Library/member_report") == REQUIRED_ALWAYS
 
 
 # ---------------------------------------------------------------------------
@@ -167,8 +190,8 @@ def test_a_planning_command_may_carry_the_annotation_itself(tmp_path):
 
 def test_the_planner_and_executor_listing_mark_an_annotated_command(tmp_path):
     folder = _copy(tmp_path, "listing_markers")
-    _annotate(folder, "Library/open_book.py", '"mandatory"')
-    _annotate(folder, "Library/open_member.py", '"delegatable"')
+    _annotate(folder, "Library/open_book.py", "REQUIRED_ALWAYS")
+    _annotate(folder, "Library/open_member.py", "REQUIRED_UNTIL_DELEGATED")
     folder_str = str(folder)
 
     full = CommandMetadataAPI.get_command_display_text(
@@ -190,7 +213,7 @@ def test_the_planner_and_executor_listing_mark_an_annotated_command(tmp_path):
 
 def test_the_single_command_listing_marks_the_name_line(tmp_path):
     folder = _copy(tmp_path, "single_marker")
-    _annotate(folder, "Library/open_book.py", '"mandatory"')
+    _annotate(folder, "Library/open_book.py", "REQUIRED_ALWAYS")
 
     text = CommandMetadataAPI.get_command_display_text_for_command(
         subject_workflow_path=str(folder), cme_workflow_path=_cme(), active_context_name="Library",
@@ -200,7 +223,7 @@ def test_the_single_command_listing_marks_the_name_line(tmp_path):
 
 def test_the_run_listing_shortlist_marks_an_annotated_command(tmp_path):
     folder = _copy(tmp_path, "shortlist_marker")
-    _annotate(folder, "Library/open_member.py", '"delegatable"')
+    _annotate(folder, "Library/open_member.py", "REQUIRED_UNTIL_DELEGATED")
     app = _listing_app(folder)
 
     text = command_shortlist_text(app, ["Library/open_member", "Library/find_member"])
@@ -213,7 +236,7 @@ def test_marker_text_is_the_only_difference_an_annotation_makes(tmp_path):
     """The annotated listing equals the plain one once the marker is taken out."""
     plain_folder = _copy(tmp_path, "plain_side")
     annotated_folder = _copy(tmp_path, "annotated_side")
-    _annotate(annotated_folder, "Library/open_book.py", '"mandatory"')
+    _annotate(annotated_folder, "Library/open_book.py", "REQUIRED_ALWAYS")
 
     def listing(folder):
         # Command classes are cached by name for the process, so each copy is read on a fresh registry.

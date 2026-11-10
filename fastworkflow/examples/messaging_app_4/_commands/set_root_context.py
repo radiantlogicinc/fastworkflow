@@ -12,7 +12,7 @@ class ResponseGenerator:
         command: str, input: None
     ) -> str:
         # Initialize the root command context
-        workflow.root_command_context = ChatRoom()
+        workflow.root = ChatRoom()
 
         response = (
             f"Now you can call commands exposed in this context."

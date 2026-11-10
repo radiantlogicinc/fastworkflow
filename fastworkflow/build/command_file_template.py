@@ -336,7 +336,7 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
     body += "class ResponseGenerator:\n"
     body += f"    def __call__(self, workflow: Workflow, command: str, input: {input_annotation}) -> Signature.Output:\n"
     body += f"        \"\"\"{docstring}\"\"\"\n"
-    body += f"        app_instance: {app_class_name} = workflow.command_context_for_response_generation\n"
+    body += f"        app_instance: {app_class_name} = workflow.record\n"
     body += f"{process_logic_str}\n"
     body += f"        return Signature.Output({output_return})\n"
     app_imports = [

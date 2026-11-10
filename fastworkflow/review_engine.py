@@ -1134,8 +1134,8 @@ def _prepare_consultation_workflow(policy: "ProposalReplyPolicy", proposal: Prop
     from fastworkflow._workflows.consultation._commands.ProposalReview._ProposalReview import ProposalReview
 
     workflow = policy._consultation_workflow
-    if workflow.current_command_context_name != "ProposalReview":
-        workflow.current_command_context = ProposalReview()
+    if workflow._current_command_context_name != "ProposalReview":
+        workflow.record = ProposalReview()
     workflow.context["consultation_proposal"] = proposal
     workflow.context["consultation_model_rendering"] = proposal.model_rendering()
     workflow.context["consultation_planning_names"] = _consultation_planning_names(policy._app_workflow)

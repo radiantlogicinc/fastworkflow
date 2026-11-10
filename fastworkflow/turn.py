@@ -192,7 +192,7 @@ def warn_on_missing_declared_output(
 
     _MISSING_DECLARED_OUTPUT_WARNED.add(command_name)
     logger.warning(
-        "%s declares an Output but returned none; phases and from_ references cannot read it",
+        "%s declares an Output but returned none; phases and from_command_output references cannot read it",
         command_name,
     )
 

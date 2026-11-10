@@ -36,6 +36,8 @@ hooks and helpers through `self`, as Python resolves any method. A sketch, not a
 sample:
 
 ```python
+from fastworkflow.planning import count_and_names_read, run
+
 from ..Book.list_loans import Signature as ListLoans
 from ._shelf import BookPhases            # a _ module: phases find and book, and a __result__
 
@@ -52,13 +54,13 @@ class PlanGenerator(BookPhases):
         return [self.find, self.book, self.loans]
 
     def loans(self, book) -> ListLoans.Output:
-        return [] if book is None else [full_list("list_loans")]
+        return [] if book is None else [run("list_loans", all_pages=True)]
 
     def __result__(self, input, book, loans):
         said = super().__result__(input, book)
         if loans is None:
             return said
-        return f"{said} It is on loan to {listed(loans.borrowers, loans.total, 'borrower')}."
+        return f"{said} It is on loan to {count_and_names_read(loans.borrowers, loans.total, 'borrower')}."
 ```
 
 The rules:

@@ -70,7 +70,7 @@ def test_what_can_i_do_context(monkeypatch):
     
     # Use TodoListManager as context
     from tests.todo_list_workflow.application.todo_manager import TodoListManager
-    app_workflow.current_command_context = TodoListManager()
+    app_workflow.record = TodoListManager()
     
     # Create a command metadata extraction workflow
     workflow_type = "command_metadata_extraction"

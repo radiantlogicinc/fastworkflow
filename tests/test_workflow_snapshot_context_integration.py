@@ -19,11 +19,11 @@ def test_context_helpers_todo_list(tmp_path):
     )
 
     # Basic sanity checks
-    assert workflow.current_command_context is None
+    assert workflow._current_command_context is None
 
     dummy_obj = object()
-    workflow.current_command_context = dummy_obj
-    assert workflow.current_command_context is dummy_obj
+    workflow.record = dummy_obj
+    assert workflow._current_command_context is dummy_obj
 
-    workflow.current_command_context = None
-    assert workflow.current_command_context is None 
+    workflow.record = None
+    assert workflow._current_command_context is None 

@@ -39,7 +39,7 @@ class ResponseGenerator:
 
         fully_qualified_command_names = (
             set(cme_command_names) | 
-            set(subject_crd.get_command_names(app_workflow.current_command_context_name))
+            set(subject_crd.get_command_names(app_workflow._current_command_context_name))
         )
 
         valid_command_names = [

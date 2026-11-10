@@ -145,7 +145,7 @@ def _enter_todo_list_manager(wf, tmp_path) -> TodoListManager:
     of the todo commands.
     """
     manager = TodoListManager(str(tmp_path / "todo_list.json"))
-    wf.root_command_context = manager
+    wf.root = manager
     return manager
 
 
@@ -356,7 +356,7 @@ class TestAgentTurn:
             # As the real get_todo_list does: it enters the list, which is the
             # context mark_completed is offered in.
             if command == "get_todo_list":
-                _wf.current_command_context = todo_list
+                _wf.record = todo_list
             return fastworkflow.CommandOutput(
                 command_name=command,
                 command_response=
@@ -439,7 +439,7 @@ class TestSuspendResumeTurnCapture:
             # As the real get_todo_list does: it enters the list, which is the
             # context mark_completed is offered in.
             if command == "get_todo_list":
-                _wf.current_command_context = todo_list
+                _wf.record = todo_list
             return fastworkflow.CommandOutput(
                 command_name=command,
                 command_response=

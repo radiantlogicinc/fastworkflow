@@ -20,9 +20,9 @@ member opened; __result__ says what the phases found. A request about every memb
 refused before any step runs.
 """
 import fastworkflow
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from fastworkflow.planning import count, full_list, listed, pick, run
+from fastworkflow.planning import count, count_and_names_read, run
 
 from ..Member.list_member_loans import Signature as ListMemberLoans
 from ..Record.show_notes import Signature as ShowNotes
@@ -46,19 +46,19 @@ class Signature:
 
     class Input(BaseModel):
         member: str = Field(description="the member's name",
-                            json_schema_extra={"in_request": True})
+                            json_schema_extra={"copied_from_command_text": True})
         loans: bool = Field(default=False,
                             description="whether to name the books the member has on loan")
         notes: bool = Field(default=False,
                             description="whether to show the notes on the member's record")
 
-    @staticmethod
-    def validate_extracted_parameters(workflow, command, input, command_text=None):
-        if input.member.casefold() in EVERYONE:
-            raise fastworkflow.Refused(
-                f"member is {input.member!r}, which names no one member; this "
-                "command reports on one member: give that member's name", field="member")
-        return None
+        @model_validator(mode="after")
+        def refuse_everyone(self, info):
+            if self.member.casefold() in EVERYONE:
+                raise fastworkflow.Refused(
+                    f"member is {self.member!r}, which names no one member; this "
+                    "command reports on one member: give that member's name", field="member")
+            return self
 
 
 class PlanGenerator:
@@ -73,12 +73,12 @@ class PlanGenerator:
     def member(self, input, find) -> OpenMember.Output:
         if not find.member_uids:
             return []
-        return [pick("open_member", named=input.member)]
+        return [run("open_member", named=input.member)]
 
     def loans(self, member) -> ListMemberLoans.Output:
         if member is None:
             return []
-        return [full_list("list_member_loans")]
+        return [run("list_member_loans", all_pages=True)]
 
     def notes(self, member) -> ShowNotes.Output:
         if member is None:
@@ -89,11 +89,11 @@ class PlanGenerator:
         if member is None:
             return f"No member is named {input.member}."
         on_loan = (count(member.on_loan, "book") if loans is None
-                   else listed(loans.titles, loans.total, "book"))
+                   else count_and_names_read(loans.titles, loans.total, "book"))
         lines = [f"{member.name} has {on_loan} on loan."]
         if notes is not None:
             lines.append(f"{member.name}'s record holds "
-                         f"{listed(notes.notes, notes.total, 'note')}.")
+                         f"{count_and_names_read(notes.notes, notes.total, 'note')}.")
         return "\n".join(lines)
 
 
@@ -101,29 +101,35 @@ class PlanGenerator:
 EVERYONE = {"everyone", "everybody", "all", "all members", "every member"}
 ```
 
-`validate_extracted_parameters` and `EVERYONE` refuse a request about every member; they are
-page 9's subject.
+The model validator `refuse_everyone` and `EVERYONE` refuse a request about every member; they
+are page 9's subject.
 
 ## Line by line
 
 - **`def __phases__(self, input)`** returns the phases this call runs, in order, as the
   methods themselves (`self.find`, ...). Without it, a call runs every phase. It is written
   first in the class, so a reader sees the shape before the phases.
+- **`return []` does the same job from inside the phase.** `loans` and `notes` could return `[]` when
+  their input is off, as `book` does when the lookup found nothing. Measured on this command, the planner's
+  template reads the same either way (each step says `(only when loans)`). The preview differs: with
+  `__phases__`, its table says `only when loans = true`, and a plan for a call that does not ask for the
+  loans leaves that phase out; with `return []`, the table says `always`, and the plan shows the phase with
+  `No steps`. Use `__phases__` when the input sets the shape, as here, and `return []` when facts do.
 - **`loans: bool` and `notes: bool`**: each adds its phase only when the request asks. A
   shape that depends on the input belongs in `__phases__`, decided before anything runs; a
   skip that depends on facts belongs in the phase (`return []`).
 - **Both default to false**, so a call reads the loans and the notes only when the request
-  asks for them. Their descriptions say what asking means; to have a classifier decide each
-  again from the request, add the `verify` option, which needs `JEV_API_KEY` and checks
-  nothing without it (page 9).
-- **`pick("open_member", named=input.member)`** opens the member named, from the listing the
+  asks for them. Their descriptions say what asking means; to have a classifier check each
+  again from the command text, add the `classifier_confirms` option, which needs `JEV_API_KEY`
+  and checks nothing without it (page 9).
+- **`run("open_member", named=input.member)`** opens the member named, from the listing the
   `find` phase read, as `book_by_title` opens its book (page 4).
 - **Each phase hands on the `Output` of the command it runs.** The commands of other
   contexts are imported from their folders: `list_member_loans` from `../Member/`,
   `show_notes` from `../Record/`.
 - **`def loans(self, member)`**: `member` is `None` when the `member` phase was skipped (no
-  match), so `loans` skips itself too. `full_list("list_member_loans")` writes the step
-  `list_member_loans (full list)`, which code runs once per page until the list is read
+  match), so `loans` skips itself too. `run("list_member_loans", all_pages=True)` writes
+  the step `list_member_loans (full list)`, which code runs once per page until the list is read
   (page 7).
 - **`list_member_loans` and `show_notes` take no uid.** They run on the member that the
   `member` phase opened, because that is where the workflow stands. `show_notes` is a
@@ -131,7 +137,7 @@ page 9's subject.
 - **`def __result__(self, input, member, loans, notes)`**: `loans` is `None` both when the
   call has no `loans` phase and when it was skipped, so the loans are named only when they
   were read. Its answer is two lines when the notes were read.
-- **`listed(...)`** writes "2 books (Dune, Emma)"; page 7 has the wording helpers.
+- **`count_and_names_read(...)`** writes "2 books (Dune, Emma)"; page 7 has the wording helpers.
 - **A call that `__phases__` reduces to one phase** runs as one plan, as page 2's does, when
   that phase fills no facts and reads none (`planning.py`'s `_runs_flat`).
 
@@ -162,11 +168,13 @@ answer `__result__` writes:
 
 ## Answer
 
-Written by `__result__`, when loans = true and notes = true:
+### Answer when loans = true, notes = true
 
-<member.name> has <loans.total> books (<loans.titles>) on loan.
-<member.name>'s record holds <notes.total> notes (<notes.notes>).
+Written by `__result__`: \<member.name> has \<loans.total> book (\<loans.titles[0]>) on loan. \<member.name>'s record holds \<notes.total> note (\<notes.notes[0]>).
 ```
+
+Each combination of the two inputs gets its own answer heading, and a phase shown as "only when"
+is the one an input decides.
 
 ## At run time
 

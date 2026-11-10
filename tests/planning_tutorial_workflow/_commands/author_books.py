@@ -18,7 +18,7 @@ class Signature:
 
     class Input(BaseModel):
         author: str = Field(description="the author's name",
-                            json_schema_extra={"in_request": True})
+                            json_schema_extra={"copied_from_command_text": True})
 
 
 class PlanGenerator:

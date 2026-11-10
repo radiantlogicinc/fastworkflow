@@ -41,8 +41,8 @@ def test_serialize_includes_command_context_name(
     class TodoListManager:
         pass
 
-    wf.root_command_context = TodoListManager()
-    wf.current_command_context = wf.root_command_context
+    wf.root = TodoListManager()
+    wf.record = wf.root
 
     blob = ctx.serialize_state(channel_id=channel_id)
     assert blob.get("current_command_context_name") == "TodoListManager"

@@ -8,15 +8,15 @@ class Context:
     state_version = 1
 
     @classmethod
-    def get_parent(cls, command_context_object: WorkItem) -> Optional[WorkItem]:
-        return command_context_object.parent or command_context_object
+    def get_parent(cls, record: WorkItem) -> Optional[WorkItem]:
+        return record.parent or record
 
     @classmethod
-    def get_displayname(cls, command_context_object: WorkItem) -> str:
-        return f'{command_context_object.__class__.__name__}: {command_context_object.get_absolute_path()}'
+    def get_displayname(cls, record: WorkItem) -> str:
+        return f'{record.__class__.__name__}: {record.get_absolute_path()}'
 
     @classmethod
-    def get_state(cls, command_context_object: WorkItem) -> dict[str, Any]:
+    def get_state(cls, record: WorkItem) -> dict[str, Any]:
         """Snapshot the work item tree so a session holding it can be evicted.
 
         Without this hook the session is pinned: a WorkItem is an ordinary
@@ -24,7 +24,7 @@ class Context:
         fastworkflow.EPHEMERAL instead to declare deliberately that this
         context is not worth persisting.
         """
-        return command_context_object.to_state_dict()
+        return record.to_state_dict()
 
     @classmethod
     def from_state(cls, state: dict[str, Any], workflow: fastworkflow.Workflow,
@@ -46,7 +46,7 @@ class Context:
         return WorkItem.from_state_dict(state, workflow_schema)
 
     @classmethod
-    def get_locator(cls, command_context_object: WorkItem) -> str:
+    def get_locator(cls, record: WorkItem) -> str:
         """Identify a work item within its tree.
 
         The current context is usually a node *inside* the snapshotted root, and
@@ -54,7 +54,7 @@ class Context:
         than as part of the tree. A locator points into the restored tree
         instead, so identity survives.
         """
-        return command_context_object.get_absolute_path()
+        return record.get_absolute_path()
 
     @classmethod
     def find_by_locator(cls, anchor: WorkItem, locator: str) -> Optional[WorkItem]:

@@ -51,16 +51,16 @@ class ResponseGenerator:
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         """Add a new TodoList as a child to this TodoList."""
         # Access the application class instance:
-        app_instance = workflow.command_context_for_response_generation  # type: TodoList
+        app_instance = workflow.record  # type: TodoList
         todo_list = app_instance.add_child_todolist(
             description=input.description, 
             assign_to=input.assign_to, 
             status=TodoItem.COMPLETE if input.is_complete else TodoItem.INCOMPLETE
         )
         
-        current_context = workflow.current_command_context_displayname
-        workflow.current_command_context = todo_list
-        new_context=workflow.current_command_context_displayname
+        current_context = workflow.record_displayname
+        workflow.record = todo_list
+        new_context=type(todo_list).__name__
 
         return Signature.Output(
             current_context=current_context,

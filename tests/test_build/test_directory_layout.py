@@ -82,7 +82,7 @@ class TestManager:
         # Verify the ResponseGenerator class exists
         assert "class ResponseGenerator:" in content
         assert "__call__" in content
-        assert "workflow.root_command_context =" in content
+        assert "workflow.root =" in content
         
         # Verify it doesn't overwrite existing file
         with open(startup_py, "w") as f:
@@ -157,7 +157,7 @@ class TestManager:
         # Should import from application and have parent reference
         assert "from ...application.testcontext import TestContext" in content
         assert "from ...application.basecontext import BaseContext" in content
-        assert "def get_parent(cls, command_context_object: TestContext) -> Optional[BaseContext]:" in content
+        assert "def get_parent(cls, record: TestContext) -> Optional[BaseContext]:" in content
         
         # Check content of BaseContext handler
         with open(base_handler, "r") as f:
@@ -165,4 +165,4 @@ class TestManager:
         
         # Should import from application but have no parent
         assert "from ...application.basecontext import BaseContext" in content
-        assert "def get_parent(cls, command_context_object: BaseContext) -> Optional[None]:" in content 
+        assert "def get_parent(cls, record: BaseContext) -> Optional[None]:" in content 

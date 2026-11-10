@@ -14,7 +14,7 @@ The same file as page 4, read for the parts that page skipped:
 ```python
 """book_by_title: the book whose title the request names, picked by its title.
 
-find lists the matches; book opens the one whose title is the request's title (pick), and
+find lists the matches; book opens the one whose title is the request's title (run(..., named=...)), and
 is skipped when nothing matched; __result__ says the author and copies, or that no book
 matches, and reports the book to a caller in its Output. The call ends on the book it
 opened.
@@ -24,7 +24,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from fastworkflow import CommandResponse
-from fastworkflow.planning import pick, run
+from fastworkflow.planning import run
 
 from ._wording import copies
 from .find_book import Signature as FindBook
@@ -47,7 +47,7 @@ class Signature:
 
     class Input(BaseModel):
         title: str = Field(description="the book's title",
-                           json_schema_extra={"in_request": True})
+                           json_schema_extra={"copied_from_command_text": True})
 
     class Output(BaseModel):
         found: bool = Field(description="whether a book was opened for the title")
@@ -64,7 +64,7 @@ class PlanGenerator:
     def book(self, input, find) -> OpenBook.Output:
         if not find.book_uids:
             return []
-        return [pick("open_book", named=input.title)]
+        return [run("open_book", named=input.title)]
 
     def __result__(self, input, book):
         if book is None:
@@ -80,7 +80,7 @@ class PlanGenerator:
 - **`class Output(BaseModel)` inside `Signature`** is the command's public result, written
   as an execution command's is: typed fields, each with a description. It is what a caller
   reads (page 12) and what API clients receive (below).
-- **No `Output` field has a `from_`**, at either kind of command: an `Output` is built by
+- **No `Output` field has a `from_command_output`**, at either kind of command: an `Output` is built by
   code, not copied from runs.
 - **The phases' facts are working memory.** Here they are the `Output`s of the commands the
   phases ran; on page 10 one is a facts model. Keeping them apart from this command's
@@ -100,11 +100,11 @@ class PlanGenerator:
 - **It returns an `Output` on every path.** When no book matched, the `Output` says so,
   `found=False`, because `book_loans` (page 12) reads it: a command that declares an
   `Output` and returns none gets the warning `book_by_title declares an Output but returned
-  none; phases and from_ references cannot read it`, and its callers get no facts.
+  none; phases and from_command_output references cannot read it`, and its callers get no facts.
 - **The `Output` may span phases or be computed.** `__result__` is ordinary code: it can take
   one field from each of several phases, or compare two of them.
 
-The load checks the hook's shape without running it: a `Signature.Output` with no
+The load checks `__result__`'s shape without running it: a `Signature.Output` with no
 `__result__` to build it, and a parameter (other than `input`) that names no phase, each fail
 the load.
 

@@ -81,7 +81,7 @@ def _make_todo_ctx(todo_workflow_path: str, tmp_path, sink):
     )
     ctx = WorkflowExecutionContext(run_as_agent=False, trace_sink=sink)
     ctx.bind_app_workflow(workflow)
-    workflow.root_command_context = TodoListManager(str(tmp_path / "todo_list.json"))
+    workflow.root = TodoListManager(str(tmp_path / "todo_list.json"))
     return ctx
 
 

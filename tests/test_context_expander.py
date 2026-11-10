@@ -9,7 +9,7 @@ class DummyExpander:
 
     def get_parent_command_context(self, workflow: fastworkflow.Workflow):  # noqa: D401
         """Clear the context of the provided workflow."""
-        workflow.current_command_context = None
+        workflow.record = None
 
 
 def test_workflow_has_context_methods(tmp_path):
@@ -26,16 +26,16 @@ def test_workflow_has_context_methods(tmp_path):
     )
     
     # Initially, context should be None
-    assert workflow.current_command_context is None
+    assert workflow._current_command_context is None
 
     # Set a dummy context object and verify getter returns it
     dummy_obj = object()
-    workflow.current_command_context = dummy_obj
-    assert workflow.current_command_context is dummy_obj
+    workflow.record = dummy_obj
+    assert workflow._current_command_context is dummy_obj
 
     # Reset context to None and verify
-    workflow.current_command_context = None
-    assert workflow.current_command_context is None
+    workflow.record = None
+    assert workflow._current_command_context is None
 
 
 def test_dummy_expander(tmp_path):
@@ -54,13 +54,13 @@ def test_dummy_expander(tmp_path):
 
     # Set some context (simple, picklable object)
     ctx = {"foo": "bar"}
-    workflow.current_command_context = ctx
-    assert workflow.current_command_context is ctx
+    workflow.record = ctx
+    assert workflow._current_command_context is ctx
 
     # Use the updated DummyExpander to clear the context
     expander = DummyExpander()
     expander.get_parent_command_context(workflow)
-    assert workflow.current_command_context is None
+    assert workflow._current_command_context is None
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +80,7 @@ class ChildCtx:
 
     def get_parent_command_context(self, workflow: fastworkflow.Workflow):  # noqa: D401
         """Set the workflow's context to this object's parent context."""
-        workflow.current_command_context = self._parent
+        workflow.record = self._parent
 
 
 def test_object_level_move_to_parent(tmp_path):
@@ -101,9 +101,9 @@ def test_object_level_move_to_parent(tmp_path):
     child = ChildCtx(parent)
 
     # Set the context using the workflow
-    workflow.current_command_context = child
-    assert workflow.current_command_context is child
+    workflow.record = child
+    assert workflow._current_command_context is child
 
     # Use the child's get_parent_command_context method to navigate to parent
     child.get_parent_command_context(workflow)
-    assert workflow.current_command_context is parent 
+    assert workflow._current_command_context is parent 

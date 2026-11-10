@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
+import socket
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -213,20 +216,56 @@ def test_fastworkflow_train_exits_with_an_error_listing_the_problem_before_train
     assert written <= {"command_directory.json", "routing_definition.json"}, f"training began: {sorted(written)}"
 
 
+def _free_port() -> int:
+    """A port nothing is listening on right now (the server gets it; the test does not hold it)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _stop_process_group(process: subprocess.Popen, grace: float = 10.0) -> None:
+    """SIGTERM the whole group the server was started in (the CLI and its server child), then SIGKILL."""
+    def signal_group(sig: int) -> None:
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            pass   # the group is already gone
+
+    signal_group(signal.SIGTERM)
+    try:
+        process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        signal_group(signal.SIGKILL)
+        process.wait(timeout=grace)
+    signal_group(signal.SIGKILL)   # a child that outlived its parent may still hold the port
+
+
 def test_the_server_logs_the_load_problem_at_startup(library, tmp_path):
     _break_a_command_file(library)
     log = tmp_path / "server.log"
+    ready = "Application ready to accept traffic"
     env_files = [os.path.join(library, "fastworkflow.env"), os.path.join(library, "fastworkflow.passwords.env")]
+    env = {**_no_llm_env(), "PYTHONUNBUFFERED": "1"}
+    port = str(_free_port())
     with open(log, "w", encoding="utf-8") as handle:
+        process = subprocess.Popen(
+            [sys.executable, "-m", "fastworkflow.cli", "run_fastapi_mcp", library, *env_files, "--port", port],
+            cwd=ROOT, env=env, stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.STDOUT,
+            start_new_session=True,   # its own process group, so the CLI's server child can be stopped too
+        )
         try:
-            subprocess.run([sys.executable, "-m", "fastworkflow.cli", "run_fastapi_mcp", library, *env_files],
-                           cwd=ROOT, env=_no_llm_env(), stdin=subprocess.DEVNULL, stdout=handle,
-                           stderr=subprocess.STDOUT, timeout=45)
-        except subprocess.TimeoutExpired:
-            pass   # the server runs until stopped: the startup lines are what is read
+            deadline = time.monotonic() + 120
+            while ready not in log.read_text(encoding="utf-8"):
+                if process.poll() is not None:
+                    pytest.fail(f"the server exited before it was ready:\n{log.read_text(encoding='utf-8')}")
+                if time.monotonic() > deadline:
+                    pytest.fail(f"the server was not ready within 120s:\n{log.read_text(encoding='utf-8')}")
+                time.sleep(0.2)
+        finally:
+            _stop_process_group(process)
     text = log.read_text(encoding="utf-8")
     assert "command file does not load, so the server does not serve it: Library/broken_thing" in text
-    assert "Application ready to accept traffic" in text
+    assert ready in text
 
 
 # ------------------------------------------------------------------ no model, by the environment

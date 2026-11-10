@@ -1,4 +1,4 @@
-"""Phase 13 step helpers (``run``, ``full_list``, ``pick``, ``when``, ``do_not_run``):
+"""Phase 13 step helpers (``run``, ``run(..., all_pages=True)``, ``run(..., named=...)``, ``when``, ``do_not_run``):
 their ``Step`` strings and ``.note()``, value quoting, unknown-keyword load checks, and
 ``pick`` reading the listing the call read across phases and pages."""
 from __future__ import annotations
@@ -39,14 +39,12 @@ from fastworkflow.observation_offloading.state import (
 from fastworkflow.plan_frame import runs_outside_ranges
 from fastworkflow.planning import (
     StepFormError,
+    count_and_names_read,
     do_not_run,
-    from_,
-    full_list,
-    pick,
     run,
     when,
 )
-from fastworkflow.planning import Step, command_inputs_for_steps, picks_noted, planned
+from fastworkflow.planning import Step, command_inputs_for_steps, planned
 from fastworkflow.planning_commands import PlanningCommandCallPlan, PlanningCommandFormatError, call_phases
 from fastworkflow.planning_phases import Placeholder, step_paging
 from fastworkflow.turn import TurnStatus
@@ -73,6 +71,7 @@ _COPIED_PLANNING_COMMANDS = (
 _COPIED_COMMANDS = (
     "_commands/library_hours.py",
     "_commands/startup.py",
+    "_commands/Library/_wording.py",
     "_commands/Library/count_overdue.py",
     "_commands/Library/find_book.py",
     "_commands/Library/find_member.py",
@@ -150,17 +149,17 @@ def test_each_helper_returns_the_step_text_and_marks_its_helper():
     s_bare = run("list_branches")
     assert s_bare == "list_branches" and isinstance(s_bare, Step) and s_bare.helper == "run"
 
-    s_full = full_list("list_loans", member_uid=Placeholder("member.uid"))
+    s_full = run("list_loans", member_uid=Placeholder("member.uid"), all_pages=True)
     assert s_full == "list_loans member_uid=<member.uid> (full list)"
-    assert isinstance(s_full, Step) and s_full.helper == "full_list"
+    assert isinstance(s_full, Step) and s_full.helper == "run"
 
-    s_pick_open = pick("open_book", named="Dune")
+    s_pick_open = run("open_book", named="Dune")
     assert s_pick_open == "open_book with the uid of the Dune match"
-    assert isinstance(s_pick_open, Step) and s_pick_open.helper == "pick"
+    assert isinstance(s_pick_open, Step) and s_pick_open.helper == "run"
 
-    s_pick_uid = pick("open_book", named="Dune", book_uid="b1")
+    s_pick_uid = run("open_book", named="Dune", book_uid="b1")
     assert s_pick_uid == "open_book book_uid=b1"
-    assert isinstance(s_pick_uid, Step) and s_pick_uid.helper == "pick"
+    assert isinstance(s_pick_uid, Step) and s_pick_uid.helper == "run"
 
     s_when = when("the member has loans", run("list_member_loans"))
     assert s_when == "only when the member has loans, list_member_loans"
@@ -178,7 +177,7 @@ def test_each_helper_returns_the_step_text_and_marks_its_helper():
 def test_the_runtime_classifiers_read_full_list_when_and_do_not_run():
     commands = ["find_book", "list_loans", "list_member_loans", "add_note"]
     plan = "\n".join([
-        f"1. {full_list('list_loans')}",
+        f"1. {run('list_loans', all_pages=True)}",
         f"2. {when('the member has loans', run('list_member_loans'))}",
         f"3. {do_not_run('add_note')}",
     ])
@@ -218,7 +217,7 @@ def test_run_and_full_list_quote_parser_characters_and_keep_plain_names_and_plac
     assert run("add_note", text="see <link>") == 'add_note text="see <link>"'
     assert run("add_note", text="wait...") == 'add_note text="wait..."'
     assert run("add_note", text='say "hi"') == """add_note text='say "hi"'"""
-    assert full_list("find_book", query="Dune (1965)") == (
+    assert run("find_book", query="Dune (1965)", all_pages=True) == (
         'find_book query="Dune (1965)" (full list)'
     )
 
@@ -328,7 +327,7 @@ class PlanGenerator:
         return ["show_notes (if the member has any)"]
 '''
     good_steps = '''from pydantic import BaseModel, Field
-from fastworkflow.planning import full_list, run, when
+from fastworkflow.planning import run, when
 
 from .find_book import Signature as FindBook
 
@@ -354,7 +353,7 @@ class PlanGenerator:
         return [
             run("add_note", text=input.text).note("the number only"),
             run("add_note", text=input.text).note("only if the member asked"),
-            full_list("list_loans"),
+            run("list_loans", all_pages=True),
             when("the member asked", run("add_note", text=input.text)),
         ]
 '''
@@ -434,7 +433,7 @@ class PlanGenerator:
 
 def test_pick_without_named_is_a_planning_command_load_error(tmp_path):
     bad_pick = '''from pydantic import BaseModel, Field
-from fastworkflow.planning import pick, run
+from fastworkflow.planning import run
 
 from .find_book import Signature as FindBook
 
@@ -451,14 +450,14 @@ class PlanGenerator:
         return [run("find_book", query=input.title)]
 
     def book(self, input, find):
-        return [pick("open_book")]
+        return [run("open_book", named="")]
 '''
     folder = _library_workflow(tmp_path, {"Library/bad_pick": bad_pick})
     path = os.path.join(folder, "_commands", "Library", "bad_pick.py")
     with pytest.raises(
         PlanningCommandFormatError,
         match=r"bad_pick\.py: phase 'book' fails while its template is built .*"
-        r"pick\('open_book'\): named= is the name the row is picked by",
+        r"run\('open_book'\): named= is the name the row is picked by",
     ):
         workflow_agent._read_planning_command_file("Library/bad_pick", path, folder)
     assert {name for name, _, _ in workflow_agent.load_planning_commands(folder)} == set()
@@ -487,7 +486,7 @@ def test_code_runs_quoted_values_and_example_values_while_hand_typed_and_cme_kee
             return [run("find_book", query=input.title)]
 
         def open(self, input, find) -> OpenedBook:
-            return [pick("open_book", named=input.title)]
+            return [run("open_book", named=input.title)]
 
         def notes(self, open):
             return [run("add_note", text=v).note("for the record") for v in special_values]
@@ -515,7 +514,7 @@ def test_code_runs_quoted_values_and_example_values_while_hand_typed_and_cme_kee
     assert planning_phases.code_step(fstring_plan_step, AddNote.Input) == "add_note text=prefers email"
 
     # Now run the skill end-to-end through the phase runner and verify every note bound whole.
-    lib = library_env.wf.root_command_context
+    lib = library_env.wf.root
     before_notes = list(lib.books["b1"].notes)
     result = library_env.ctx.process_turn("look up Dune")
 
@@ -546,7 +545,7 @@ def test_the_cme_declines_an_example_value_in_a_step_the_agent_wrote(library_env
     A hand-typed plan step is still run by ``code_step`` with ``code_written=True``, so the
     example value would bind in code; the agent must write the command outside that path.
     """
-    lib = library_env.wf.root_command_context
+    lib = library_env.wf.root
     book_cls = type(lib.books["b1"])
     lib.books["b5"] = book_cls(lib, "b5", "Dune", "Frank Herbert", 1, "Riverside")
 
@@ -555,7 +554,7 @@ def test_the_cme_declines_an_example_value_in_a_step_the_agent_wrote(library_env
             return [run("find_book", query=input.title)]
 
         def book(self, input, find):
-            return [pick("open_book", named=input.title)]
+            return [run("open_book", named=input.title)]
 
         def __result__(self):
             return "The book was opened."
@@ -580,32 +579,40 @@ def test_the_cme_declines_an_example_value_in_a_step_the_agent_wrote(library_env
 # ----------------------------------------------------------------------
 
 def test_pick_without_uid_and_error_forms():
-    assert pick("open_book", named="Dune") == "open_book with the uid of the Dune match"
-    assert pick("open_book", named="Dune", book_uid=None) == (
+    assert run("open_book", named="Dune") == "open_book with the uid of the Dune match"
+    assert run("open_book", named="Dune", book_uid=None) == (
         "open_book with the uid of the Dune match"
     )
-    assert pick("open_book", named="Dune", book_uid="b2") == "open_book book_uid=b2"
+    assert run("open_book", named="Dune", book_uid="b2") == "open_book book_uid=b2"
+    assert run("open_book") == "open_book"   # no named=: a plain step
     with pytest.raises(StepFormError, match="named= is the name the row is picked by"):
-        pick("open_book")
-    with pytest.raises(StepFormError, match="named= is the name the row is picked by"):
-        pick("open_book", named="  ")
-    with pytest.raises(StepFormError):
-        pick("open_book", named="Dune", book_uid="b1", member_uid="m1")
-    with pytest.raises(StepFormError):
-        pick("open_book", named="Dune", title="Dune")
+        run("open_book", named="  ")
 
     class OpenBookInput(BaseModel):
         book_uid: str
 
     with command_inputs_for_steps({"Library/open_book": SimpleNamespace(Input=OpenBookInput)}):
-        with picks_noted() as picks:
-            pick("open_book", named="Dune")
-    assert picks == [("open_book", "book_uid")]
+        with pytest.raises(StepFormError):
+            run("open_book", named="Dune", book_uid="b1", member_uid="m1")
+        with pytest.raises(StepFormError):
+            run("open_book", named="Dune", title="Dune")
+    class TwoFieldInput(BaseModel):
+        book_uid: str
+        copies: int = 1
+
+    with command_inputs_for_steps({"open_book": SimpleNamespace(Input=TwoFieldInput)}):
+        with pytest.raises(StepFormError, match="takes no other input"):
+            run("open_book", named="Dune", copies=2)
+
+    with command_inputs_for_steps({"Library/open_book": SimpleNamespace(Input=OpenBookInput)},
+                                  collect=True) as (_, steps):
+        run("open_book", named="Dune")
+    assert steps == [("open_book", ())]   # no input passed: the row is opened by name
 
 
 def _qualified(workflow, name: str):
     routing = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
-    for ctx in (workflow.current_command_context_name, "*"):
+    for ctx in (workflow._current_command_context_name, "*"):
         for candidate in routing.get_command_names(ctx):
             if candidate.split("/")[-1] == name:
                 return candidate
@@ -630,14 +637,14 @@ class LibraryRunner:
         wf = self.wf
         name = command.split()[0]
         if name in ("go_up", "reset_context"):
-            if name == "reset_context" or wf.get_parent(wf.current_command_context) is None:
-                wf.current_command_context = wf.root_command_context
+            if name == "reset_context" or wf.get_parent(wf._current_command_context) is None:
+                wf.record = wf.root
             else:
-                wf.current_command_context = wf.get_parent(wf.current_command_context)
+                wf.record = wf.get_parent(wf._current_command_context)
             return fastworkflow.CommandOutput(
                 command_name=f"IntentDetection/{name}",
                 command_response=fastworkflow.CommandResponse(
-                    response=f"Context is now '{wf.current_command_context_displayname}'"
+                    response=f"Context is now '{wf._current_command_context_displayname}'"
                 ),
             )
         # As the CME walk does (3.9): a name on the lookup path runs bound to the record
@@ -650,7 +657,7 @@ class LibraryRunner:
             bound_record = scope.record
         else:
             qualified = _qualified(wf, name)
-            bound_record = wf.current_command_context
+            bound_record = wf._current_command_context
         routing = fastworkflow.RoutingRegistry.get_definition(wf.folderpath)
         cls = routing.get_command_class(qualified, fastworkflow.ModuleType.COMMAND_PARAMETERS_CLASS)
         gen_cls = routing.get_command_class(
@@ -665,7 +672,7 @@ class LibraryRunner:
                 )
                 or ParameterExtraction._extract_parameters_from_bare(command, cls, name)
             )
-        wf.command_context_for_response_generation = bound_record
+        wf._command_context_for_response_generation = bound_record
         raw = call_response_generator(gen_cls(), wf, command, params)
         if isinstance(raw, fastworkflow.CommandOutput):
             out = raw
@@ -753,9 +760,9 @@ def script_command_extraction(monkeypatch, wf, extracted: dict[str, dict] | None
         found = command_on_path(wf, name)
         if found is not None and len(found[1]) == 1:
             qualified = found[1][0]
-            wf.command_context_for_response_generation = found[0].record
+            wf._command_context_for_response_generation = found[0].record
         else:
-            wf.command_context_for_response_generation = wf.current_command_context
+            wf._command_context_for_response_generation = wf._current_command_context
         routing = fastworkflow.RoutingRegistry.get_definition(wf.folderpath)
         cls_params = routing.get_command_class(
             qualified, fastworkflow.ModuleType.COMMAND_PARAMETERS_CLASS)
@@ -982,7 +989,7 @@ def _note_member_without_in_request() -> str:
     text = open(path, encoding="utf-8").read()
     return text.replace(
         'member: str = Field(description="the member\'s name",\n'
-        '                            json_schema_extra={"in_request": True})',
+        '                            json_schema_extra={"copied_from_command_text": True})',
         'member: str = Field(description="the member\'s name")',
     )
 
@@ -1016,7 +1023,7 @@ def test_pick_in_a_later_phase_runs_by_code_on_the_one_exact_match(library_env):
             return [run("find_book", query=input.title)]
 
         def book(self, input, find) -> OpenedBook:
-            return [pick("open_book", named=input.title)]
+            return [run("open_book", named=input.title)]
 
         def __result__(self, book):
             return f"{book.title} ({book.book_uid}) was opened."
@@ -1041,12 +1048,12 @@ def test_pick_goes_to_the_agent_when_two_rows_or_none_match(library_env):
             return [run("find_book", query=input.title)]
 
         def book(self, input, find):
-            return [pick("open_book", named=input.title)]
+            return [run("open_book", named=input.title)]
 
     library_env.planning_command = _build_planning_command(Plan)
 
     # 1. Two rows titled "Dune": add a second edition in the tmp copy's in-memory library.
-    lib = library_env.wf.root_command_context
+    lib = library_env.wf.root
     book_cls = type(lib.books["b1"])
     lib.books["b5"] = book_cls(lib, "b5", "Dune", "Frank Herbert", 1, "Riverside")
 
@@ -1063,7 +1070,7 @@ def test_pick_goes_to_the_agent_when_two_rows_or_none_match(library_env):
     # 2. No row matches the named title ("Dune" when only "Dune 1" and "Dune Messiah" exist).
     del lib.books["b5"]
     lib.books["b1"].title = "Dune 1"
-    library_env.wf.current_command_context = lib
+    library_env.wf.record = lib
     library_env.runner.sent.clear()
     library_env.model.asked.clear()
     library_env.model.run("open_book book_uid=b1")
@@ -1078,7 +1085,7 @@ def test_pick_goes_to_the_agent_when_two_rows_or_none_match(library_env):
 def test_pick_chooses_the_listing_whose_uid_list_fits_the_command_parameter(library_env):
     # find_member query=Dune runs after find_book query=Dune and finds a member named Dune,
     # but open_book's book_uid parameter still picks from find_book's book_uids.
-    lib = library_env.wf.root_command_context
+    lib = library_env.wf.root
     member_cls = type(lib.members["m1"])
     lib.members["m9"] = member_cls(lib, "m9", "Dune")
 
@@ -1090,7 +1097,7 @@ def test_pick_chooses_the_listing_whose_uid_list_fits_the_command_parameter(libr
             ]
 
         def book(self, input, find) -> OpenedBook:
-            return [pick("open_book", named=input.title)]
+            return [run("open_book", named=input.title)]
 
         def __result__(self, book):
             return f"{book.book_uid} was opened."
@@ -1113,7 +1120,7 @@ def test_pick_uses_an_explicit_uid_as_given(library_env):
             return [run("find_book", query=input.title)]
 
         def book(self, input, find) -> OpenedBook:
-            return [pick("open_book", named=input.title, book_uid=find.book_uids[-1])]
+            return [run("open_book", named=input.title, book_uid=find.book_uids[-1])]
 
         def __result__(self, book):
             return f"{book.book_uid} was opened."
@@ -1128,9 +1135,9 @@ def test_pick_uses_an_explicit_uid_as_given(library_env):
 
 def test_pick_joins_pages_of_a_full_list_listing(library_env, monkeypatch):
     # Shrink PAGE_SIZE to 1 on the tmp copy's library module so find_book query="Frank Herbert"
-    # has b1 ("Dune") on page 1 and b2 (renamed "Frank Herbert") on page 2, and pick("open_book",
+    # has b1 ("Dune") on page 1 and b2 (renamed "Frank Herbert") on page 2, and run("open_book",
     # named="Frank Herbert") in the next phase picks b2 from the joined pages.
-    lib = library_env.wf.root_command_context
+    lib = library_env.wf.root
     lib_mod = sys.modules[type(lib).__module__]
     monkeypatch.setattr(lib_mod, "PAGE_SIZE", 1)
     lib.books["b2"].title = "Frank Herbert"
@@ -1141,10 +1148,10 @@ def test_pick_joins_pages_of_a_full_list_listing(library_env, monkeypatch):
 
     class AuthorPlan:
         def find(self, input) -> FoundBooks:
-            return [full_list("find_book", query="Frank Herbert")]
+            return [run("find_book", query="Frank Herbert", all_pages=True)]
 
         def book(self, input, find) -> OpenedBook:
-            return [pick("open_book", named="Frank Herbert")]
+            return [run("open_book", named="Frank Herbert")]
 
         def __result__(self, book):
             return f"{book.book_uid} was opened."
@@ -1168,7 +1175,7 @@ def test_pick_skips_a_child_listing_inside_a_child_range(library_env, monkeypatc
     # exact matches and the parent's has one. With step 1 in a child range on the top frame,
     # the pick reads the parent's listing and opens b1 in code; without it, the pick reads
     # the later listing, finds two matches, and goes to the agent.
-    lib = library_env.wf.root_command_context
+    lib = library_env.wf.root
     book_cls = type(lib.books["b1"])
     runner = library_env.runner
 
@@ -1189,7 +1196,7 @@ def test_pick_skips_a_child_listing_inside_a_child_range(library_env, monkeypatc
             return [run("find_book", query=input.title), "look up the Dune books again"]
 
         def book(self, input, find) -> OpenedBook:
-            return [pick("open_book", named=input.title)]
+            return [run("open_book", named=input.title)]
 
         def __result__(self, book):
             return f"{book.book_uid} was opened."
@@ -1271,7 +1278,7 @@ class PlanGenerator:
         ]
 '''
     helper_written = '''from pydantic import BaseModel, Field
-from fastworkflow.planning import do_not_run, full_list, pick, run, when
+from fastworkflow.planning import do_not_run, run, when
 
 from .find_book import Signature as FindBook
 
@@ -1295,8 +1302,8 @@ class PlanGenerator:
         if not find.book_uids:
             return []
         return [
-            pick("open_book", named=input.title),
-            full_list("list_loans"),
+            run("open_book", named=input.title),
+            run("list_loans", all_pages=True),
             when("the member asked", run("add_note", text=input.text)),
             do_not_run("add_note"),
             "say what was found",
@@ -1328,8 +1335,8 @@ class PlanGenerator:
         "_commands/Library/hand_typed.py: phase 'branches', step 'list_branches': written by hand; write run(...) so that code reads it as you mean",
         "_commands/Library/hand_typed.py: phase 'search', step 'find_book query=<title>': written by hand; write run(...) so that code reads it as you mean",
         "_commands/Library/hand_typed.py: phase 'search', step 'add_note text=prefers email (not phone)': written by hand; write run(...) so that code reads it as you mean",
-        "_commands/Library/hand_typed.py: phase 'search', step 'open_book with the uid of the <title> match': written by hand; write pick(...) so that code reads it as you mean",
-        "_commands/Library/hand_typed.py: phase 'search', step 'list_loans (full list)': written by hand; write full_list(...) so that code reads it as you mean",
+        "_commands/Library/hand_typed.py: phase 'search', step 'open_book with the uid of the <title> match': written by hand; write run(..., named=...) so that code reads it as you mean",
+        "_commands/Library/hand_typed.py: phase 'search', step 'list_loans (full list)': written by hand; write run(..., all_pages=True) so that code reads it as you mean",
         "_commands/Library/hand_typed.py: phase 'search', step 'only when the book has notes, show_notes': written by hand; write when(...) so that code reads it as you mean",
         "_commands/Library/hand_typed.py: phase 'search', step 'do not run add_note': written by hand; write do_not_run(...) so that code reads it as you mean",
     ]
@@ -1456,7 +1463,7 @@ def test_library_note_member_pick_without_uid_on_test_copy(tmp_path, initialized
         loaded = workflow_agent._read_planning_command_file("Library/note_member", planning_command_path, state.wf.folderpath)
         assert workflow_agent.step_command_problems(loaded.command, state.wf.folderpath) == []
 
-        lib = state.wf.root_command_context
+        lib = state.wf.root
         before = list(lib.members["m2"].notes)
         state.planning_command = loaded.command
         state.args = {"member": "Raj Patel", "text": "card renewed"}

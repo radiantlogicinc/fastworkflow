@@ -5,7 +5,7 @@ from __future__ import annotations
 import fastworkflow
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from fastworkflow.workflow import Workflow
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from fastworkflow._workflows.consultation import _item_validation
 
@@ -19,6 +19,22 @@ class Signature:
             description="step numbers and/or goal phrases the user wants removed",
             examples=[["2"], ["3", "check membership"], ["the last step"]],
         )
+
+        @model_validator(mode="after")
+        def drop_items_name_proposal_steps(self, info):
+            workflow = info.context.get("workflow")
+            proposal = workflow.context.get("consultation_proposal")
+            if proposal is None:
+                return self
+            if not self.items:
+                raise fastworkflow.Refused("Which steps should I drop?", fields=["items"])
+            normalized: list[str] = []
+            for entry in self.items:
+                normalized.append(
+                    _item_validation.resolve_proposal_step(proposal, str(entry), field_name="items", slot_retry=True)
+                )
+            self.items = normalized
+            return self
 
     class Output(BaseModel):
         model_config = ConfigDict(extra="forbid")
@@ -44,22 +60,6 @@ class Signature:
         return [
             command_name.split("/")[-1].lower().replace("_", " ")
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
-
-    @staticmethod
-    def validate_extracted_parameters(workflow, command, cmd_parameters) -> None:
-        proposal = workflow.context.get("consultation_proposal")
-        if proposal is None:
-            return None
-        if not cmd_parameters.items:
-            raise fastworkflow.Refused("Which steps should I drop?", fields=["items"])
-        normalized: list[str] = []
-        for entry in cmd_parameters.items:
-            normalized.append(
-                _item_validation.resolve_proposal_step(proposal, str(entry), field_name="items", slot_retry=True)
-            )
-        cmd_parameters.items = normalized
-        return None
-
 
 class ResponseGenerator:
     def __call__(

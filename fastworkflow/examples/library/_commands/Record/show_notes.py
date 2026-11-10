@@ -25,5 +25,5 @@ class Signature:
 class ResponseGenerator:
     def __call__(self, workflow: fastworkflow.Workflow, command: str,
                  input: None) -> Signature.Output:
-        record = workflow.command_context_for_response_generation
+        record = workflow.record
         return Signature.Output(notes=list(record.notes), total=len(record.notes))

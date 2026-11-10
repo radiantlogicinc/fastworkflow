@@ -34,7 +34,7 @@ class ResponseGenerator:
     def _process_command(self, workflow: Workflow) -> Signature.Output:
         """List all todo lists."""
         # Access the application class instance:
-        app_instance = workflow.command_context_for_response_generation  # type: TodoListManager
+        app_instance = workflow.record  # type: TodoListManager
         todo_lists = app_instance.list_todo_lists()
         return Signature.Output(todolist_ids=[todolist.id for todolist in todo_lists])
 

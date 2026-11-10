@@ -5,10 +5,10 @@ description: >-
   parameterized multi-command jobs whose steps are written in code and become the agent's numbered
   plan, flat or as phases that pass facts to each other. Covers when to write a planning command
   instead of a command, the file shape (`Signature` + a top-level `PlanGenerator`), `Input` and
-  `from_`, phases and facts typed by their commands, the step helpers (`run`, `full_list`, `when`,
-  `do_not_run`, `pick`), nesting with its cycle guard and step budget, `__phases__` and `__result__`,
-  `in_request` (free text that must be the user's words included), an input for every scope users ask
-  about and an answer that keeps the description's promise, `writes` on commands that change data (so a
+  `from_command_output`, phases and facts typed by their commands, the step helpers (`run`, `when`,
+  `do_not_run`, `count`), nesting with its cycle guard and step budget, `__phases__` and `__result__`,
+  `copied_from_command_text` (free text that must be the user's words included), an input for every scope users ask
+  about and an answer that keeps the description's promise, `@writes` on commands that change data (so a
   read-only planning command's phases make no writes), reuse from `_` modules only, the `command
   preview` / `--check` loop, the step wording the framework reads in code, and descriptions written for
   people. Use when adding, reviewing or debugging a planning command, or when its steps are run, checked
@@ -33,7 +33,7 @@ How a matched planning command runs (`workflow_agent.match_planning_command` mat
    call fills its inputs.
 2. The planner fills `Input` in one typed call.
 3. The arguments are checked: `check_arguments` checks each field against its type and its options
-   (`in_request` here), and the file's own rules run.
+   (`copied_from_command_text` here), and the file's own rules run.
 4. A refused call is filled once more with the refusal in view. A second refusal is asked of the
    user as a question when the turn may ask; otherwise the text planner takes over.
 5. The call's phases run, and the steps they return become the agent's plan. Code runs the steps it
@@ -106,9 +106,9 @@ class Signature:
 
     class Input(BaseModel):
         name: str = Field(description="the item's name",
-                          json_schema_extra={"in_request": "subject"})
+                          json_schema_extra={"record_named_in_command_text": True})
         checks: bool = Field(default=False, description="the request asks about its open checks",
-                             json_schema_extra={"verify": True})
+                             json_schema_extra={"classifier_confirms": True})
 
 
 class PlanGenerator:
@@ -138,7 +138,7 @@ class PlanGenerator:
             return self.parts.labels
 
     def item(self, input, find) -> ItemFacts:
-        return [pick("open_item_by_uid", item_uid=find.item_uids[0], named=input.name),
+        return [run("open_item_by_uid", item_uid=find.item_uids[0], named=input.name),
                 "list_parts (full list)"]
 
     def checks(self) -> CountChecks.Output:
@@ -174,46 +174,59 @@ class PlanGenerator:
 | A `bool` defaults to false; `default=True` fails the load (the model sets it true only when the request asks) | `planning_commands.py` `_parse_param` |
 | No default: required. A `str` the request may leave out defaults to `""` or is `Optional[str] = None` (the code then gets `None`); a default like `"NOT_FOUND"` is written into the steps | `planning_commands` module doc; `input_instance` |
 | Names `user_query`, `available_commands`, `steps_before`, `steps_after`, `reasoning` are reserved | `planning_commands.py` `RESERVED_NAMES` |
-| `in_request` (in `json_schema_extra`) is allowed on a `str`, `int` or `list[str]` field; `"subject"` on a `str` only; see below | `planning_commands.py` `_spec_from_field`, `check_arguments` |
-| The retired options `subject`, `means` and `strip` fail the load, naming the new spelling | `planning_commands.py` `RETIRED_OPTIONS` |
-| A rule across fields is a pydantic validator on `Input` raising `ValueError` with what to fix; the request is `(info.context or {}).get("request", "")`, `""` when the template is rendered | `planning_commands.py` `check_input` |
-| `validate_extracted_parameters(workflow, command, input, command_text=None)` returns `None` to accept, and raises `fastworkflow.Refused(message, field=...)` to refuse a call; a refusal gets the planner one more typed call, a second falls back to the text planner | `planning_commands.py` `_validate_arguments`, `typed_planning_call` |
+| `copied_from_command_text` (in `json_schema_extra`) is allowed on a `str`, `int` or `list[str]` field; `record_named_in_command_text` on a `str` only; see below | `planning_commands.py` `_spec_from_field`, `check_arguments` |
+| The retired options (`in_request`, `verify`, `positional`, `from`, `subject`, `means`, `strip`) fail the load, naming the new key | `planning_commands.py` `RETIRED_OPTIONS` |
+| A rule across fields is an `@model_validator(mode="after")` on `Input` that corrects (assigns `self.<field>` and returns `self`) or refuses (`raise fastworkflow.Refused(message, field=...)`; a plain `ValueError` refuses with no field); its `info.context` has `command_text`, `workflow` (None while the template renders) and `command` | `planning_commands.py` `check_input` |
+| The `validate_extracted_parameters` hook is removed (a load error that shows the model validator form). A refused call gets the planner one more typed call, a second refusal falls back to the text planner | `planning_commands.py` `_validate_arguments`, `typed_planning_call` |
 
 ### Field options (`json_schema_extra`)
 
-The options below are set in a planning command's `Input` field's `json_schema_extra`. They apply
-to planning commands' `Input` fields today (`planning_commands.PLANNING_COMMAND_FIELD_KEYS`, read by
-`_spec_from_field`). Execution commands get the same options in a later release. Any other key fails
-the load.
+Each option is a key in a field's `json_schema_extra`, written with plain pydantic `Field(...)`. The
+key names the behaviour; its value is `True` or a dict of that key's own options. Combine keys by adding
+them. The options apply to planning commands' `Input` fields today
+(`planning_commands.PLANNING_COMMAND_FIELD_KEYS`, read by `_spec_from_field`). Execution commands get the
+same options in a later release. A retired spelling, an unknown key, a value that is neither `True` nor a
+dict of known options, or two keys that conflict fails the load, naming the key to write instead.
 
-- `in_request: True` (`str`, `int` or `list[str]`): the value must be in the request. A `str` must
+- `copied_from_command_text: True` (`str`, `int` or `list[str]`): the value must be in the request. A `str` must
   appear in it exactly as written (a verbatim substring); a `list[str]` keeps each item the request
   writes. An `int` must be a number the request writes (digits, or the words zero to twenty outside the
   other arguments' text); otherwise it takes the only number written, or its default when that one is
   written, and with several candidates the call fails.
-- `in_request: {"ignore": ["group", "unit"]}` (`str` only): the named words are removed from either end of
+- `copied_from_command_text: {"ignore": ["group", "unit"]}` (`str` only): the named words are removed from either end of
   the value before the check, for example a kind word the model appends to a name ("Payroll group" becomes
-  "Payroll"). It implies `in_request`. `in_request: {"subject": True, "ignore": [...]}` is the subject with
-  the same words removed.
-- `in_request: "subject"` (`str` only): the value names a record of the request (a person, a group, a
+  "Payroll"). `ignore` strips before the verbatim match.
+- `record_named_in_command_text: True` (`str` only): the value names a record of the request (a person, a group, a
   product, a code). It must hold one of the request's subjects whole, or a name-like word, and must not
   cut one. A value cut short at the start or end of exactly one subject becomes that subject ("Ann" of
-  "Ann Lee"). An optional argument takes its default when refused; a required one fails the call.
-- `verify: True` (`bool`, an enum, or a `str` with `in_request: "subject"`): a classifier decides the
+  "Ann Lee"). An optional argument takes its default when refused; a required one fails the call. It
+  checks names already written in the command text; it does not interpret the description. Its
+  `{"ignore": [...]}` form works as the `copied_from_command_text` one does.
+- `classifier_confirms: True` (`bool`, an enum, or a `str` with `record_named_in_command_text`): a classifier decides the
   value again from the request alone, and its answer replaces the planner's when it is sure enough. It
   reads the field's `description`. It needs `JEV_API_KEY`: without the key no classifier is available and
   the check does not run (`planning_commands.check_verdicts` returns nothing when there is no model).
-- `verify: {"group": "a group of people", "unit": "an organisation unit"}` (an enum): the same check,
-  with each value's meaning, which the classifier reads. Its keys must be values of the enum.
+  A model re-picks a record name only with `classifier_confirms` alongside and `JEV_API_KEY`.
+- `classifier_confirms: {"meanings": {"group": "a group of people", "unit": "an organisation unit"}}` (an enum):
+  the same check, with each value's meaning, which the classifier reads. Its keys must be values of the enum.
+- `classifier_decides: True` (`bool`): the classifier alone decides the field from the request; the typed call and
+  the parameter extractor never fill it, and it keeps its default when the classifier is not sure or there is
+  no `JEV_API_KEY`.
+- `command_text_after_command_name: True` (`str`, at most one per `Input`; execution commands only): takes the text after
+  the command name.
+- `from_command_output: "<command>.<field>"` (or a list): the command whose output supplies the value (see
+  "Phases and facts" below).
+- `converted_from_command_text: True` (`str` or `int`, execution commands): the value is converted from the command
+  text (a date written "next Monday"), so it is not checked against the text; the field keeps its other checks.
 
 A field with no check is cleaned in code: `strip_words(text, words)` from `fastworkflow.planning_commands`,
-called in the field's validator or in `Signature.validate_extracted_parameters`. An `Input` validator's
-returned value is written back to the arguments (a refusing validator still refuses). The retired
-`subject`, `means` and `strip` options fail the load and name the new spelling.
+called in the field's `field_validator`. Cross-field rules are model validators (see "`Input` rules"): a
+validator's assigned value is written back to the arguments, and a refusing validator still refuses.
 
-The code appends the rule sentence of `in_request` (and of `in_request: "subject"`) to the field's description for the
-planner (`extraction_sentences`), so the description does not repeat it. Full rules: the
-`planning_commands` module doc.
+The code appends the rule sentence of `copied_from_command_text` (and of `record_named_in_command_text`) to the
+field's description for the planner (`extraction_sentences`), so the description does not repeat it. Full rules:
+the `planning_commands` module doc.
+
 
 ### Free text that must be the user's words
 
@@ -223,7 +236,7 @@ drafted as a paraphrase, an invented sentence ("Requested extension for upcoming
 "she asked for an extension"), the instruction itself ("Note on Mia Chen's record that she asked for an
 extension"), or the note with the next job of a bundled request glued on. Declare it in two layers:
 
-1. **`in_request: True`.** The note must be written in the request, so a paraphrase or an invented note is
+1. **`copied_from_command_text: True`.** The note must be written in the request, so a paraphrase or an invented note is
    refused and the extractor is asked once more with the refusal. The same check runs on a drafted
    sub-task input, on the typed call and on a step that calls the command; nothing in the framework needs
    to know the field is free text. Leave the option off only a value the request may legitimately write
@@ -236,7 +249,7 @@ extension"), or the note with the next job of a bundled request glued on. Declar
    Match the other value as whole words, so a short name does not refuse an unrelated note.
 
 Describe the field as what it holds, with a short worked case in prose ("what the note says, without
-the request around it (to note that someone called: 'someone called')"); the `in_request` sentence is
+the request around it (to note that someone called: 'someone called')"); the `copied_from_command_text` sentence is
 added for the extractor. On the library, live with a small extraction model, that wording took the
 note's own words in 8 of 9 clean sub-tasks and the ninth was refused rather than written, where the bare
 "the note to add" let through a paraphrase, an invention and the whole instruction. Likewise a scope
@@ -261,8 +274,8 @@ drafting run were this command):
   An optional scope takes the default that means "all" (`""`), and the `Input` maps the words for "all"
   ("all branches", "the whole library") to it and refuses a value that names nothing (a branch that does
   not exist), naming the values that exist. A scope the user writes is not a handle: give it
-  `in_request` (with `ignore` for the kind word: "the Riverside branch" becomes "Riverside"), not
-  `from_`. A `from_` producer would make a draft take the value from an earlier sub-task that merely
+  `copied_from_command_text` (with `ignore` for the kind word: "the Riverside branch" becomes "Riverside"), not
+  `from_command_output`. A `from_command_output` producer would make a draft take the value from an earlier sub-task that merely
   listed the branches.
 - **The answer must deliver everything the description promises.** The description said "list the
   branches, then say how many loans are overdue", but the last phase's agent sees only its own phase's
@@ -289,7 +302,7 @@ drafting run were this command):
   above the method. Rule: use the return annotation when the facts type is fixed (or a union for
   "whichever ran"); use `@phase(output=lambda input: ...)` only when the type depends on the input.
   A phase with both is a load error (`PhaseError`, naming the phase).
-- `from_("<command>.<field>")` on a command's `Input` field names the command that supplies the
+- `from_command_output="<command>.<field>"` on a command's `Input` field names the command that supplies the
   value, so the planner can run it first (`planning_commands.py` `resolve_field_sources`). It
   replaces the hand-written `available_from` hint: a hand-written one is an error that
   `command preview --check` reports (the command stays matchable). See the
@@ -322,8 +335,8 @@ drafting run were this command):
   that cannot bind, a facts field typed with anything but a command's `Output` or `Input` (a copy
   included), a method that fails on placeholder facts or writes `None` into a step, and a step naming
   a command the workflow lacks or a parameter its `Signature.Input` lacks fail the load.
-- A planning command imports from `fastworkflow.planning` what it writes: `from_`,
-  `pick`, `run`, `full_list`, `when`, `do_not_run`, `phase`, `num`, `count`, `listed`.
+- A planning command imports from `fastworkflow.planning` what it writes: `run`,
+  `when`, `do_not_run`, `phase`, `count`, `count_and_names_read`.
 
 ## Step helpers
 
@@ -333,12 +346,12 @@ strings work too; the helpers only make the wording exact.
 | Helper | Writes | What it does |
 |---|---|---|
 | `run("cmd", k=v)` | `cmd k=v` | A command step code runs once every required value is given. `run` on another planning command is a nested call (see below). |
-| `full_list("cmd", k=v)` | `cmd k=v (full list)` | A paged command step code reads through every page, up to `CODE_MAX_PAGES` (20); past that the step is open and the agent reads on from the next page. |
+| `run("cmd", k=v, all_pages=True)` | `cmd k=v (full list)` | A paged command step code reads through every page, up to `CODE_MAX_PAGES` (20); past that the step is open and the agent reads on from the next page. |
 | `when("condition", step)` | `only when condition, step` | A conditional step the agent decides whether to run. |
 | `do_not_run("cmd")` | `do not run cmd` | A negated guard: code passes it over and never holds it to a run. |
-| `pick("cmd", item_uid=uid, named=name)` | `cmd item_uid=<uid>` | Opens one row. With a concrete uid, the uid is written. |
-| `pick("cmd", named=name)` | `cmd with the uid of the <name> match` | Without a uid: code runs `cmd` with the uid of the one row of the listing the step before it read that holds `name` whole (or the one row, when the listing has one). `named=` is required; at most one `*_uid` parameter. |
-| `num`, `count`, `listed` | text | How a number, a count or a list reads in a step (`planning.py`). |
+| `run("cmd", named=name, item_uid=uid)` | `cmd item_uid=<uid>` | Opens one row. With a concrete uid, the uid is written. |
+| `run("cmd", named=name)` | `cmd with the uid of the <name> match` | Without a uid: code runs `cmd` with the uid of the one row of the listing the step before it read that holds `name` whole (or the one row, when the listing has one). `named=` is required; at most one `*_uid` parameter. |
+| `count(n, noun, plural=None)`, `count_and_names_read(names, total, noun)` | text | How a number or a counted list reads in a step (`planning.py`). Use `count`, not an inline `n == 1`, which the preview cannot render. |
 
 ## Nesting, the cycle guard and the step budget
 
@@ -366,7 +379,7 @@ strings work too; the helpers only make the wording exact.
   the tie-break offers each candidate by its first sentence only (see the `evaluate-intent-routing`
   skill).
 - A field's `description` says what the field holds, in words a person would use. The planner reads
-  it; so does a `verify` check. Do not repeat the rule sentences the options add (`in_request`).
+  it; so does a `classifier_confirms` check. Do not repeat the rule sentences the options add (`copied_from_command_text`).
 - `plain_utterances` are example requests in the words people use for that job. Keep them generic,
   and do not copy names from a test workflow.
 - Step wording is not written for people: the framework reads it, so use the grammar below.
@@ -383,7 +396,7 @@ strings work too; the helpers only make the wording exact.
   (`planning_phases.py` `command_response_from_call_result`). Its parameters name `input` or a phase
   of the call; any other name is a load error.
 - A planning command that declares `Signature.Output` must have a `__result__` that builds it: "nothing
-  builds it" otherwise. An `Output` field cannot declare `from_`; the value is built in `__result__`.
+  builds it" otherwise. An `Output` field cannot declare `from_command_output`; the value is built in `__result__`.
 - If `__result__` raises or returns something else, one model call writes the answer instead
   (`planning_phases.py` `run_call_result`, logged as a warning).
 
@@ -420,7 +433,7 @@ fastworkflow command preview <workflow_folder> --check    # writes nothing; exit
 5. Commit the previews and run `--check` in CI (`command_preview.py` `check_previews`). It fails on a
    stale, missing or extra preview; a planning command file that does not load (a step naming an
    unknown command or parameter included); a phase fact source the workflow does not have; and a
-   `from_` error reported by `planning_commands.resolve_field_sources`.
+   `from_command_output` error reported by `planning_commands.resolve_field_sources`.
 
 ## Step grammar
 
@@ -478,34 +491,35 @@ Consequences worth designing for:
 - `repeat()` and `@<skill>` include lines are gone: loop over `range()` bounded by an int field's
   `le`, and share steps through a helper module.
 
-## Approval annotation (`approval`)
+## Approval annotation (`@user_approval_for_execution`)
 
-A planning command (and an execution command) may declare `approval = "mandatory"` or
-`approval = "delegatable"` on its `PlanGenerator` (or `ResponseGenerator`). Use `mandatory` for an
+A planning command (and an execution command) may carry `@user_approval_for_execution(UserApproval.REQUIRED_ALWAYS)`
+or `@user_approval_for_execution(UserApproval.REQUIRED_UNTIL_DELEGATED)` on its `PlanGenerator` (or
+`ResponseGenerator`), imported from `fastworkflow`. Use `REQUIRED_ALWAYS` for an
 action that cannot be undone, such as sending a critical email; `delegatable` when the user may
-hand the decision over. Leave it out for everything else: the agent decides, with no gate. Any
-other value, or a non-string value, fails the load and names the command and its file.
+hand the decision over. Leave the decorator out for everything else: the agent decides, with no gate. Any
+value that is not a `UserApproval` member fails the load and names the command and its file.
 
-The annotation is enforced. `mandatory` asks before every run, including a run the user typed;
-`delegatable` asks until a standing approval exists. The reply is `yes`, `no` or `always`, bound to
+The annotation is enforced. `REQUIRED_ALWAYS` asks before every run, including a run the user typed;
+`REQUIRED_UNTIL_DELEGATED` asks until a standing approval exists. The reply is `yes`, `no` or `always`, bound to
 the exact parameters, single-use, and it expires. The listings mark the command, and
 `planning_steps_needing_approval` lists the annotated commands a planning command's template calls.
 It is not read/write gating: an easy-to-undo write needs no annotation. Full rules are in
 `docs/planning_command_file_layout.md`.
 
-## Commands that write (`writes`)
+## Commands that write (`@writes`)
 
 An execution command that changes the application's data declares it on its `ResponseGenerator`:
 
 ```python
+@writes    # adds a note, cancels an order, sends a message
 class ResponseGenerator:
-    writes = True    # adds a note, cancels an order, sends a message
 ```
 
 Absent means the command only reads, or only moves the workflow between records (navigation is
-`descends_to`). A planning command does not declare it: it writes when one of its steps (directly, or
+`@descends_to`). A planning command does not declare it: it writes when one of its steps (directly, or
 through a planning command it calls) runs a command that writes, and it is read-only otherwise
-(`command_writes.write_commands`). `writes` on a `PlanGenerator`, or a value that is not a bool, fails
+(`command_writes.write_commands`). `@writes` on a `PlanGenerator` fails
 the load.
 
 Inside a planning command's phase, a command that writes runs only when a step of that phase names it:
@@ -515,7 +529,7 @@ approval gate). So a read-only planning command changes nothing, and a writing o
 writes its steps name. Outside a phase (the turn's own agent, a typed command) nothing changes.
 
 Declare `writes` on every command that changes data, including the easy-to-undo ones that need no
-`approval`: the two are independent. Without it, the library's `author_books` (find books, open each)
+`@user_approval_for_execution`: the two are independent. Without it, the library's `author_books` (find books, open each)
 added notes to the books it opened in 6 of 36 failed direct sub-tasks (fix-fixv), the phase agent
 copying `add_note`'s description example. A phase that should write names the command in a step
 (`run("add_note", text=input.text)`); a step in open words ("add a note saying ...") names none, and
@@ -533,11 +547,11 @@ that name each step.
 - [ ] Input types are str / bool / int / Literal / Optional[str] = None; bools default false
 - [ ] An input for every way users scope the question (branch, date range, owner), with the "all" default
 - [ ] Every promise of the description reaches the answer (as a fact in the answer step, or __result__)
-- [ ] Free text the command stores is in_request, plus a validator for the instruction carried along
-- [ ] Every execution command its steps run that changes data declares writes = True
+- [ ] Free text the command stores is copied_from_command_text, plus a validator for the instruction carried along
+- [ ] Every execution command its steps run that changes data carries `@writes` on its `ResponseGenerator`
 - [ ] Signature + top-level PlanGenerator; each phase a method with self, in run order; helpers _named
 - [ ] Every fact field is typed with a command's Output or Input (or the phase returns a command's Output)
-- [ ] Every Input handle that another command supplies carries from_ (not available_from)
+- [ ] Every Input handle that another command supplies carries `from_command_output` (not a hand-written `available_from`)
 - [ ] Input-dependent shape in __phases__; a skip is `if not <what it needs>: return []`;
       a phase that may be skipped is read through =None
 - [ ] No __call__; a Signature.Output has a __result__ that builds it
@@ -553,7 +567,7 @@ that name each step.
   `answer_by_code`, `facts_error`): the `debug-workflow-conversations` skill.
 - The commands a planning command's steps name, and their `Output` fields its facts copy: the
   `integrate-chat-agent` skill's reference for command files.
-- The `from_` producer hints on `Input` fields, and their rules: the `declare-parameter-producers`
+- The `from_command_output` producer hints on `Input` fields, and their rules: the `declare-parameter-producers`
   skill.
 - Whether a planning command change helped, measured on a fixed task set: the
   `optimize-workflow-with-feedback` skill.

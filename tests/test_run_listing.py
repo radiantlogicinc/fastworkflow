@@ -52,8 +52,8 @@ def copy_of(tmp_path, initialized_fastworkflow):  # noqa: F811 - fixture; clears
         pushed.append(ctx)
         _CONTEXT_OF[id(app)] = ctx
         if root_context is not None:
-            app.root_command_context = root_context
-            app.current_command_context = root_context
+            app.root = root_context
+            app.record = root_context
         return app
 
     yield open_copy

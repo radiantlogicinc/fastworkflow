@@ -74,36 +74,57 @@ runs bound to the root object; otherwise the current context's head is asked and
 An exact command name skips this step and takes the nearest scope. So a planning command in a base
 context reaches every context that inherits the base, and one in a child context is not offered from a
 sibling. Moving or renaming a planning command
-changes its qualified name, exactly as for a command, so its `from_` edges and previews move with it.
+changes its qualified name, exactly as for a command, so its `from_command_output` edges and previews move with it.
 
 ## Rule 1 — keep `get_parent` honest; there is no second copy to maintain
 
 The parent of a context is what its `get_parent` returns for the live object. There is no JSON copy
 to drift from it. Check each `get_parent` against the object it should return: a record's parent is
 the record that holds it, and the root returns `None`. The scan that the earlier design used
-(recording which class each command assigns to `current_command_context`) still shows which contexts
+(recording which record each command assigns to `workflow.record`) still shows which contexts
 a command can enter, which is what `descends_to` needs, and what the shortlist will need when it is on.
 
 ## Rule 1a — navigation is declared once, with `descends_to`, on the command
 
 A command that moves the workflow into another context declares it on its own class:
-`descends_to = "<Context>"` on its `ResponseGenerator` or `PlanGenerator`. Do not write
+`@descends_to("<Context>")` on its `ResponseGenerator` or `PlanGenerator` (with `when_parameter="<param>"`
+when a parameter picks the entry). Do not write
 `enter_command` or `enter_commands` on a context class. That is a load error, and it names the command
 and the fix. A command that moves the workflow into a context it does not declare logs one warning per
 command and target. Planning and the run's listing read only the `descends_to` declarations.
 
-## Rule 1b — `approval` is a command attribute too, and it is a gate
+## Rule 1b — `@user_approval_for_execution` is a command declaration too, and it is a gate
 
-Next to `descends_to`, a command's class may declare `approval = "mandatory"` or
-`approval = "delegatable"` (on its `ResponseGenerator`, or a planning command's `PlanGenerator`).
-Absent means the agent decides, with no gate. It is validated at load and shown in the listings
-with a marker. A `mandatory` command asks before every run, including a run the user typed; a
-`delegatable` command asks until a standing approval exists. The reply is bound to the exact
-parameters, is single-use and expires. It does not change navigation, and it is not read/write
+Next to `@descends_to`, a command's class may carry `@user_approval_for_execution(UserApproval.REQUIRED_ALWAYS)`
+or `@user_approval_for_execution(UserApproval.REQUIRED_UNTIL_DELEGATED)` (on its `ResponseGenerator`, or a
+planning command's `PlanGenerator`). Absent means the agent decides, with no gate. It is validated at load and
+shown in the listings with a marker. A `REQUIRED_ALWAYS` command asks before every run, including a run the
+user typed; a `REQUIRED_UNTIL_DELEGATED` command asks until a standing approval exists. The reply is `yes`,
+`no` or `always`; `always` records the delegation for that user, workflow and command. The approval is bound
+to the exact parameters, is single-use and expires. It does not change navigation, and it is not read/write
 gating: an easy-to-undo write needs no annotation. See `docs/planning_command_file_layout.md`,
-"Approval annotation". Writing is declared separately, with `writes = True` on the
-`ResponseGenerator` of every command that changes data: inside a planning command's phase such a command
-runs only when a step of the phase names it (the `author-planning-commands` skill, "Commands that write").
+"Approval annotation". Writing is declared separately, with `@writes` on the `ResponseGenerator` of every
+command that changes data: inside a planning command's phase such a command runs only when a step of the phase
+names it (the `author-planning-commands` skill, "Commands that write").
+
+## Naming a record: `get_displayname` and `instance_label_attr`
+
+A context class declares two things about the record it manages, and they answer different questions. Keep
+them apart:
+
+| | `get_displayname(cls, record)` | `instance_label_attr = "<attribute or property>"` |
+|---|---|---|
+| What it is | a classmethod that returns any free-form display string | a class attribute that names one attribute (or property) of the record |
+| Example value | `"Book: Dune (b12)"` | `"uid"`, whose value on the record is `b12` |
+| What it answers | "how should this record look to a person?" | "what is this record's identity?" |
+| Who reads it | `workflow.record_displayname` (for the record the command acts on), the CLI and chat context line, observability | `context_identity` (listing tags, `search_memory`, the extract step, the approval binding) |
+| When absent | optional; without it the context name is shown | nothing is guessed; the record has no identity in those readers |
+| Derived from the other? | no: it may use the identity, but `instance_label_attr` is never read from it | no: it names an attribute, it does not compute one |
+
+`workflow.record_displayname` reads `get_displayname` for the record the command acts on. It is a reader of
+that declaration, not a third one. A computed identity is a property on the record, which `instance_label_attr`
+names. The `instance_label` classmethod is removed (a context that still defines one fails the load).
+
 
 ## Rule 2 — cutting the `parent` axis is free; cutting `base` is not
 
@@ -129,7 +150,7 @@ Inheritance is all-or-nothing per base context, so a context that needs one comm
 take all of them. When a fat base is inherited by several contexts, split it.
 
 The evidence for what a context needs is **not intuition** — it is the parameter-producer hints its
-own commands declare (`from_` edges, which `command preview --check` resolves). Collect, per context, the producers named by its commands;
+own commands declare (`from_command_output` edges, which `command preview --check` resolves). Collect, per context, the producers named by its commands;
 that is the minimum base it needs.
 
 Then chain the bases so nothing regresses:
@@ -210,7 +231,7 @@ over-escalation (its own commands losing to a lone `wildcard`) before assuming t
 
 ```
 - [ ] 1. Check each context's get_parent against the live object it should return
-- [ ] 2. Check which contexts each command enters (current_command_context assignments)
+- [ ] 2. Check which contexts each command enters (`workflow.record` assignments)
 - [ ] 3. Per context, list surface vs. the producers its own commands declare
 - [ ] 4. For each unused inherited command, check Rule 2 depth before cutting
 - [ ] 5. Split fat base contexts; chain the wide base onto the narrow ones

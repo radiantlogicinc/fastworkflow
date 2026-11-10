@@ -10,7 +10,7 @@ import os
 from contextlib import suppress
 from dataclasses import dataclass, field as dataclass_field
 from types import UnionType
-from typing import Literal, Optional, Tuple, Union, Dict, Any, Type, List, get_args, get_origin
+from typing import Literal, NamedTuple, Optional, Tuple, Union, Dict, Any, Type, List, get_args, get_origin
 from enum import Enum
 from datetime import date
 import re
@@ -29,6 +29,7 @@ from fastworkflow.utils.fuzzy_match import (
     best_window_distance, find_best_matches, normalize_text, normalized_levenshtein_distance,
 )
 from fastworkflow.utils import dspy_utils
+from fastworkflow.utils.input_validation import bound_fields, is_pydantic_model, set_field_unvalidated
 from fastworkflow.utils.dspy_logger import DSPyForward
 from fastworkflow.command_directory import CommandDirectory
 from fastworkflow import planning_commands
@@ -91,23 +92,28 @@ def parameters_with_unfilled(model_class: Type[BaseModel], values: Dict[str, Any
     its ``not_given_value``, so validation reports it as missing (and the user is asked for it)
     instead of pydantic raising on the construction.
 
-    With every field given, the model is built exactly as before. With a field unfilled, the
-    model is validated once with the markers in place; if a marker does not validate (a
-    pattern, a bound, a validator), it is built unvalidated, and ``validate_parameters`` is the
-    one check that runs, as on the NLU path.
+    The given values are checked field by field (``bound_fields``: type, constraints and the field's
+    own validators), with no model validators: an ``Input``'s validators need the validation context, and ``validate_parameters``
+    runs them with it, once. A value that does not check raises ValidationError when every field was
+    given, as the constructor did; with a field unfilled, the model is built unvalidated, and
+    ``validate_parameters`` is the one check that runs, as on the NLU path.
     """
     unfilled = {
         name: not_given_value(info)
         for name, info in getattr(model_class, "model_fields", {}).items()
         if name not in values and info.is_required()
     }
-    if not unfilled:
+    if not is_pydantic_model(model_class):
+        # Not a pydantic model: nothing to check or mark, so it is built from the values as given.
         return model_class(**values)
     data = {**values, **unfilled}
     try:
-        return model_class(**data)
+        checked = bound_fields(model_class, data)
     except ValidationError:
+        if not unfilled:
+            raise
         return model_class.model_construct(**data)
+    return model_class.model_construct(**checked)
 
 
 # --- Angle-bracketed parameter values ------------------------------------------
@@ -616,14 +622,14 @@ def default_unfilled_optional_strs(cmd_parameters: BaseModel, not_found: Optiona
             continue
         if is_optional_str_field(field_info):
             default = field_info.get_default(call_default_factory=True)
-            setattr(cmd_parameters, field_name, None if default is PydanticUndefined else default)
+            set_field_unvalidated(cmd_parameters, field_name, None if default is PydanticUndefined else default)
         elif not field_info.is_required():
             # A plain ``str`` field that declares a default (``reason: str = "ordered by mistake"``) is
             # optional too: not given, it takes that default instead of reaching the missing check,
             # which counts only ``Optional[...]`` fields as optional and would ask the user for it.
-            setattr(cmd_parameters, field_name, field_info.get_default(call_default_factory=True))
+            set_field_unvalidated(cmd_parameters, field_name, field_info.get_default(call_default_factory=True))
         elif value.strip() == "None":
-            setattr(cmd_parameters, field_name, None)
+            set_field_unvalidated(cmd_parameters, field_name, None)
         else:
             continue
         changed.append(field_name)
@@ -692,14 +698,27 @@ def screen_parameter_values(cmd_parameters: BaseModel, quote_texts: Optional[str
         quoted, field_value = unwrap_quoted_value(field_value, quote_texts)
         kind, new_value = classify_bracketed_value(field_value, field_name)
         if kind == "unwrapped":
-            unwrapped_fields[field_name] = original_value
             inner_quoted, new_value = unwrap_quoted_value(new_value, quote_texts)
             quoted = quoted or inner_quoted
             field_value = new_value
+        # HEAD wrote a screened value with a plain assignment, which validated it only on an Input with
+        # validate_assignment=True (there it raised, uncaught). On such an Input the value is checked
+        # against its own field (type, constraints, field validators; no model validator): a value that
+        # passes is stored as validated (coerced), one that does not is refused like the other invalid
+        # values (reported, not written; the field keeps the value as given). Any other Input gets the
+        # unwrapped value stored unvalidated, as HEAD did.
+        if field_value is not original_value and type(cmd_parameters).model_config.get("validate_assignment"):
+            try:
+                field_value = bound_fields(type(cmd_parameters), {field_name: field_value})[field_name]
+            except ValidationError:
+                invalid_fields.append(f"{field_name} '{field_value}'")
+                continue
+        if kind == "unwrapped":
+            unwrapped_fields[field_name] = original_value
         if quoted:
             quoted_fields[field_name] = original_value
         if field_value is not original_value:
-            setattr(cmd_parameters, field_name, field_value)
+            set_field_unvalidated(cmd_parameters, field_name, field_value)
         # A declared Literal or Enum choice is never ungrounded: it is the field's own vocabulary,
         # and a choice that looks like a placeholder word (``code``) is not one. A bracketed
         # placeholder (``<code>``) is still refused: it is not the choice itself.
@@ -722,7 +741,7 @@ def screen_parameter_values(cmd_parameters: BaseModel, quote_texts: Optional[str
             if default is PydanticUndefined and is_optional_field:
                 default = None
             if default is not PydanticUndefined:
-                setattr(cmd_parameters, field_name, default)
+                set_field_unvalidated(cmd_parameters, field_name, default)
                 # The framework's own "not given" marker is routine; only a
                 # number the model made up is worth recording.
                 if number not in (INVALID_INT_VALUE, INVALID_FLOAT_VALUE):
@@ -1003,23 +1022,37 @@ def _unfilled_required(planning, cmd_parameters: BaseModel) -> List[str]:
     return unfilled
 
 
-def check_hook_accepts(result, command_name: str) -> None:
-    """The one contract of ``validate_extracted_parameters``: return None to accept (fail fast otherwise).
+_REMOVED_VALIDATE_HOOK = (
+    'validate_extracted_parameters is removed: write @model_validator(mode="after") on Input '
+    '(read info.context["command_text"], ["workflow"], ["command"])'
+)
 
-    A hook that returns anything, a tuple included, is a call error naming the form it must use.
-    It refuses by raising ``fastworkflow.Refused``; the framework does not read a return value.
-    """
-    if result is None:
-        return
-    raise TypeError(
-        f"{command_name}'s validate_extracted_parameters must return None to accept and raise "
-        f"fastworkflow.Refused(message, field=...) to refuse; it returned {type(result).__name__}"
-    )
+
+def removed_validate_hook_message(signature_class, where: str) -> Optional[str]:
+    """The load error for a Signature that still defines ``validate_extracted_parameters`` (spec 3.1), or None."""
+    if signature_class is not None and "validate_extracted_parameters" in vars(signature_class):
+        return f"{where}: {_REMOVED_VALIDATE_HOOK}"
+    return None
+
+
+class _InputRules(NamedTuple):
+    """The outcome of the Input's validators (``_check_input_rules``)."""
+    ran: bool                 # the Input declares a validator
+    message: Optional[str]    # the refusal's or the call error's text; None when accepted
+    fields: tuple             # the fields a fastworkflow.Refused named
+    raised: Optional[str]     # the exception type of a validator that raised (not a refusal)
+    changed: tuple            # the fields the validators wrote back
+
+
+def _declares_input_validators(model) -> bool:
+    """Whether an Input declares a model or field validator (spec 3.1)."""
+    decorators = getattr(model, "__pydantic_decorators__", None)
+    return bool(decorators and (decorators.model_validators or decorators.field_validators))
 
 
 _RETIRED_DB_LOOKUP = (
-    "db_lookup is retired: do the lookup in validate_extracted_parameters, write the corrected value "
-    "to input, or raise fastworkflow.Refused('... Did you mean ...?', field='<name>')"
+    "db_lookup is retired: do the lookup in a model validator on Input, write the corrected value "
+    "to self, or raise fastworkflow.Refused('... Did you mean ...?', field='<name>')"
 )
 
 
@@ -1456,24 +1489,37 @@ Today's date is {today}.
         if diagnostics is not None and notes:
             diagnostics["argument_notes"] = list(notes)
         for name, value in args.items():
-            setattr(cmd_parameters, name, value)
+            set_field_unvalidated(cmd_parameters, name, value)
         return None
 
-    def _check_input_rules(self, command, cmd_parameters: BaseModel, app_workflow) -> Optional[str]:
-        """The refusal text of the ``Input``'s own validators, for a command of either kind, or None.
+    def _check_input_rules(self, command, cmd_parameters: BaseModel, app_workflow) -> "_InputRules":
+        """The outcome of the ``Input``'s own model validators, for a command of either kind (spec 3.1-3.4).
 
-        The validators read the request (self.command) and the workflow from the validation context
-        (``planning_commands.check_input``, design 3.4). A value a validator returns instead of its
-        input is written back onto the command's parameters.
+        The validators read the command text (self.command), the workflow and the command's name from the
+        validation context (``planning_commands.check_input``). A value a validator changes is written back
+        onto the command's parameters. ``message`` is None when they accept.
         """
+        ran = _declares_input_validators(type(cmd_parameters))
         args = {name: getattr(cmd_parameters, name, None) for name in type(cmd_parameters).model_fields}
         try:
             written = planning_commands.check_input(command, args, self.command, app_workflow)
-        except planning_commands.PlanningCommandCallError as refusal:
-            return str(refusal)
+        except planning_commands.PlanningCommandCallError as failure:
+            # The hook's wording on this path (HEAD's signature hook): a validator's refusal is its bare
+            # message, a validator that raised is "Exception in X's validate_extracted_parameters function: e".
+            # The writes it made before it stopped are kept on the parameters, as the hook kept them.
+            changed = tuple(getattr(failure, "written", {}))
+            for name, value in getattr(failure, "written", {}).items():
+                set_field_unvalidated(cmd_parameters, name, value)
+            if getattr(failure, "refusal", None) is not None:
+                return _InputRules(ran, failure.refusal, tuple(failure.fields), None, changed)
+            raised = getattr(failure, "raised", None)
+            if raised:
+                message = f"Exception in {command.name}'s validate_extracted_parameters function: {failure.detail}"
+                return _InputRules(ran, message, (), raised, changed)
+            return _InputRules(ran, str(failure), tuple(getattr(failure, "fields", ())), None, changed)
         for name, value in written.items():
-            setattr(cmd_parameters, name, value)
-        return None
+            set_field_unvalidated(cmd_parameters, name, value)
+        return _InputRules(ran, None, (), None, tuple(written))
 
     def validate_parameters(self,
                             app_workflow: fastworkflow.Workflow,
@@ -1540,7 +1586,7 @@ Today's date is {today}.
         for field_name in {**command_name_fields, **word_fields}:
             field_info = type(cmd_parameters).model_fields[field_name]
             default = field_info.get_default(call_default_factory=True)
-            setattr(cmd_parameters, field_name, None if default is PydanticUndefined else default)
+            set_field_unvalidated(cmd_parameters, field_name, None if default is PydanticUndefined else default)
         if diagnostics is not None:
             def _as_text(fields: Dict[str, Any]) -> Dict[str, str]:
                 return {name: str(value) for name, value in fields.items()}
@@ -1798,13 +1844,13 @@ Today's date is {today}.
                                         is_valid = False
                                     else:
                                         try:
-                                            setattr(cmd_parameters, field_name, corrected_value)
+                                            set_field_unvalidated(cmd_parameters, field_name, corrected_value)
                                         except Exception as e:
                                             logger.critical(f"Failed to set attribute {field_name} with value {corrected_value}")
                                             raise e
                                 else:
                                     try:
-                                        setattr(cmd_parameters, field_name, corrected_value)
+                                        set_field_unvalidated(cmd_parameters, field_name, corrected_value)
                                     except Exception as e:
                                         logger.critical(f"Failed to set attribute {field_name} with value {corrected_value}")
                                         raise e
@@ -1861,79 +1907,52 @@ Today's date is {today}.
                 missing_fields.extend(unfilled)
                 is_valid = False
         # One validation step for every command (3.4, The argument path): the options' checks, then the
-        # hook, then the Input's validators. A command's checks are its option fields (2.46).
+        # roles, then the Input's validators (the former hook). A command's checks are its option fields (2.46).
         command = planning if planning is not None else self._option_command(
             app_workflow, subject_command_name, cmd_parameters)
         if is_valid and command.params:
             guard_refusal = self._check_option_arguments(command, cmd_parameters, diagnostics)
             if guard_refusal is not None:
                 return (False, guard_refusal, {}, [])
+        # The roles of two required str inputs given one value (3.4), as the typed planning call checks them.
+        # HEAD's order on this path: the option checks, the roles, then the hook (now the Input's validators).
         if is_valid and planning is not None:
-            # The roles of two required str inputs given one value (3.4), as the typed planning call checks them.
             values = {param.name: getattr(cmd_parameters, param.name, None) for param in planning.params}
             try:
                 planning_commands._check_roles(planning, values, self.command)
             except planning_commands.PlanningCommandInputError as refusal:
                 return (False, str(refusal), {}, [])
-
-        hook_refusal = None
-        if is_valid and self.input_for_param_extraction_class and \
-                hasattr(self.input_for_param_extraction_class, 'validate_extracted_parameters'):
-            hook = self.input_for_param_extraction_class.validate_extracted_parameters
-            # The command text goes only to a hook that declares `command_text`,
-            # so every (workflow, command, cmd_parameters) hook is called exactly as before.
-            hook_kwargs = (
-                {"command_text": self.command}
-                if "command_text" in inspect.signature(hook).parameters
-                else {}
-            )
-            before = cmd_parameters.model_dump()
-            result = None
-            try:
-                result = hook(app_workflow, subject_command_name, cmd_parameters, **hook_kwargs)
-            except fastworkflow.Refused as refusal:
-                hook_refusal = refusal
-            except Exception as e:
-                message = f"Exception in {subject_command_name}'s validate_extracted_parameters function: {str(e)}"
-                logger.critical(message)
-                if diagnostics is not None:
-                    diagnostics["validation_hook"] = {
-                        "ran": True,
-                        "is_valid": False,
-                        "message": message,
-                        "raised": type(e).__name__,
-                    }
-                return (False, message, {}, [])
-            if hook_refusal is None:
-                check_hook_accepts(result, subject_command_name)
-            after = cmd_parameters.model_dump()
-            changed_fields = [name for name in after if after[name] != before.get(name)]
+        # The Input's validators (the former hook: after the option checks and the roles). A refusal with a
+        # field asks for that field again with its message; one without, or a call error, answers the call.
+        if is_valid:
+            rules = self._check_input_rules(command, cmd_parameters, app_workflow)
             if diagnostics is not None:
-                # `changed_fields`: the fields the hook rewrote in place (the value is written back);
-                # the slot-binding record reads it as the `validation_hook` binding (fix-3rsq.one-hook).
+                # `ran` says whether the Input declares a validator (False is the honest fact for a command with none).
+                # `changed_fields`: the fields the validators wrote back (the slot-binding record reads it as the
+                # `validation_hook` binding, fix-3rsq.one-hook); `refused_fields`: the fields a Refused named.
                 diagnostics["validation_hook"] = {
-                    "ran": True,
-                    "is_valid": hook_refusal is None,
-                    "message": None if hook_refusal is None else str(hook_refusal),
-                    "changed_fields": changed_fields,
-                    "refused_fields": list(hook_refusal.fields) if hook_refusal is not None else [],
+                    "ran": rules.ran,
+                    "is_valid": rules.message is None,
+                    "message": rules.message,
+                    "changed_fields": list(rules.changed),
+                    "refused_fields": list(rules.fields),
                 }
-            if hook_refusal is not None:
-                if not hook_refusal.fields:
-                    return (False, str(hook_refusal), {}, [])
+                if rules.raised:
+                    diagnostics["validation_hook"]["raised"] = rules.raised
+            if rules.message is not None:
+                if rules.raised:
+                    logger.critical(rules.message)
+                if not rules.fields or rules.raised:
+                    return (False, rules.message, {}, [])
                 is_valid = False
-                for name in hook_refusal.fields:
+                for name in rules.fields:
                     if name not in type(cmd_parameters).model_fields:
                         raise ValueError(
                             f"{subject_command_name}: fastworkflow.Refused names {name!r}, which is not a field "
                             f"of its Input (fields: {', '.join(type(cmd_parameters).model_fields)})")
                     invalid_fields.append(f"{name} '{getattr(cmd_parameters, name, None)}'")
-                refusal_messages.append(str(hook_refusal))
+                refusal_messages.append(rules.message)
 
-        if is_valid:
-            input_refusal = self._check_input_rules(command, cmd_parameters, app_workflow)
-            if input_refusal is not None:
-                return (False, input_refusal, {}, [])
         if is_valid:
             return (True, "All required parameters are valid.", {}, [])
 

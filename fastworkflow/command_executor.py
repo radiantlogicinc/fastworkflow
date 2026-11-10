@@ -187,18 +187,18 @@ _UNDECLARED_MOVES_WARNED: set[tuple[str, str]] = set()
 
 
 def _warn_undeclared_move(routing, command_name: str, workflow, context_before) -> None:
-    """Warn once when a command moved the workflow into a context its ``descends_to`` does not name.
+    """Warn once when a command moved the workflow into a context its ``@descends_to`` does not name.
 
     Design 3.15: the comparison is the one the `now_in` note makes (the current object before and
     after), made here so assistant mode reports it too. Core commands (go_up, reset_context) are
     exempt, and nothing here may fail the command.
     """
     try:
-        if workflow.current_command_context is context_before:
+        if workflow._current_command_context is context_before:
             return
         if command_name in _core_command_names():
             return
-        target = workflow.current_command_context_name
+        target = workflow._current_command_context_name
         if declared_descends_to(routing, command_name) == target:
             return
         key = (command_name, target)
@@ -207,8 +207,8 @@ def _warn_undeclared_move(routing, command_name: str, workflow, context_before) 
         _UNDECLARED_MOVES_WARNED.add(key)
         short = command_name.split("/")[-1]
         logger.warning(
-            f'{short} moved the workflow into {target} but declares no descends_to; '
-            f'declare descends_to = "{target}" so plans can reach {target}\'s commands'
+            f'{short} moved the workflow into {target} but declares no @descends_to; '
+            f'declare @descends_to("{target}") on its ResponseGenerator so plans can reach {target}\'s commands'
         )
     except Exception:  # noqa: BLE001 - a warning about navigation must not fail the command
         logger.debug("undeclared-move check skipped for %r", command_name, exc_info=True)
@@ -278,7 +278,7 @@ def _planning_command_refusal_output(
     )
     if workflow is not None:
         command_output.workflow_name = workflow.folderpath.split("/")[-1]
-        command_output.context = workflow.current_command_context_displayname
+        command_output.context = workflow._current_command_context_displayname
     return command_output
 
 
@@ -593,7 +593,7 @@ class CommandExecutor(CommandExecutorInterface):
 
         workflow = chat_session.get_active_workflow()
         workflow_name = workflow.folderpath.split('/')[-1]
-        context = workflow.current_command_context_displayname
+        context = workflow._current_command_context_displayname
 
         # A command that writes, called inside a planning command's phase whose steps do not name it,
         # is refused unrun (fix-fixv, command_writes): a read-only planning command changes nothing.
@@ -638,7 +638,7 @@ class CommandExecutor(CommandExecutorInterface):
                 if assistant and "is_assistant_mode_command" in chat_session.cme_workflow._context:
                     del chat_session.cme_workflow._context["is_assistant_mode_command"]
             planning_output.workflow_name = workflow.folderpath.split("/")[-1]
-            planning_output.context = workflow.current_command_context_displayname
+            planning_output.context = workflow._current_command_context_displayname
             planning_output.command_name = planning_name
             planning_output.command_parameters = input_obj or None
             return planning_output
@@ -688,7 +688,7 @@ class CommandExecutor(CommandExecutorInterface):
                 del chat_session.cme_workflow._context["is_assistant_mode_command"]
             return blocked
 
-        context_before = workflow.current_command_context
+        context_before = workflow._current_command_context
         try:
             # command_parameters is the filled Input, or None for a command with no Input (3.14).
             command_parameters_class = command_routing_definition.get_command_class(
@@ -739,8 +739,8 @@ class CommandExecutor(CommandExecutorInterface):
         workflow: fastworkflow.Workflow,
         action: fastworkflow.Action,
     ) -> fastworkflow.CommandOutput:  # sourcery skip: extract-method
-        workflow.command_context_for_response_generation = \
-            workflow.current_command_context
+        workflow._command_context_for_response_generation = \
+            workflow._current_command_context
 
         # One id per dispatch through this method (arch §12.0 delta 1). It is
         # the outermost id on the direct-action, startup-action and MCP paths,
@@ -749,7 +749,7 @@ class CommandExecutor(CommandExecutorInterface):
         call_id = tracing.new_command_call_id()
 
         workflow_name = workflow.folderpath.split('/')[-1]
-        context = workflow.current_command_context_displayname
+        context = workflow._current_command_context_displayname
 
         if action.command_name != "wildcard":
             if planning_name := _resolve_planning_command_name(
@@ -829,7 +829,7 @@ class CommandExecutor(CommandExecutorInterface):
             return command_output
 
         # Always resolve the command's Signature class via create() so
-        # validate_extracted_parameters runs on the direct-action
+        # the Input's model validators run on the direct-action
         # path the same way they do on the NLU path. Validate even when
         # action.parameters is empty/falsy — context preconditions still apply.
         # A required field the caller leaves out is asked for, as on the NLU path (fix-3rsq.plain-required).

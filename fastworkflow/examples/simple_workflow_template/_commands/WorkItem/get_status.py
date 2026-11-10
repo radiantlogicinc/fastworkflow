@@ -27,7 +27,7 @@ class ResponseGenerator:
     """Handle command execution and craft the textual response."""
 
     def _process_command(self, workflow: fastworkflow.Workflow) -> Signature.Output:
-        workitem: WorkItem = workflow.command_context_for_response_generation
+        workitem: WorkItem = workflow.record
         
         # Get the status of the work item
         return Signature.Output(

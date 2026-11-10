@@ -6,7 +6,7 @@ skipped when no book was opened) and __result__ writes the answer.
 """
 from pydantic import BaseModel, Field
 
-from fastworkflow.planning import full_list, listed, pick, run
+from fastworkflow.planning import count_and_names_read, run
 
 from .find_book import Signature as FindBook
 from .list_loans import Signature as ListLoans
@@ -59,12 +59,12 @@ class PlanGenerator:
     def book(self, input, find) -> Book:
         if not find.book_uids:
             return []
-        return [pick("show_book", named=input.title)]
+        return [run("show_book", named=input.title)]
 
     def loans(self, book=None) -> ListLoans.Output:
         if book is None:
             return []
-        return [full_list("list_loans", book_uid=book.uid)]
+        return [run("list_loans", book_uid=book.uid, all_pages=True)]
 
     def __result__(self, input, find=None, book=None, loans=None):
         if input.brief:
@@ -75,5 +75,5 @@ class PlanGenerator:
             return f"No book matches {input.title}."
         lines = [f"{book.name} is by {book.author}; the library owns {book.copies} copies."]
         if loans is not None:
-            lines.append(f"It is on loan to {listed(loans.borrowers, loans.total, 'borrower')}.")
+            lines.append(f"It is on loan to {count_and_names_read(loans.borrowers, loans.total, 'borrower')}.")
         return "\n".join(lines)

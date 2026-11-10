@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -45,6 +46,37 @@ This loader performs:
 4. Cycle detection for the ``base`` context inheritance graph.
 5. Resolution of effective command lists per context (own commands from filesystem + inherited commands from JSON).
 """
+
+
+#: The callback-class methods whose first parameter is the record (renamed from ``command_context_object``).
+_RECORD_PARAMETER_METHODS = ("get_parent", "get_displayname", "get_state", "get_locator")
+
+
+def context_class_problems(context_class: Any) -> list[str]:
+    """The load errors of a context callback class, empty when it loads.
+
+    Two removed spellings fail the load, each naming its replacement: a classmethod
+    ``instance_label`` (make the label a property on the record object and name it with
+    ``instance_label_attr``), and a parameter ``command_context_object`` on
+    ``get_parent``, ``get_displayname``, ``get_state`` or ``get_locator`` (name it ``record``).
+    """
+    problems = []
+    if hasattr(context_class, "instance_label"):
+        problems.append(
+            "instance_label is removed: make the label a property on the record object "
+            "and name it with instance_label_attr = \"<property name>\" (e.g. \"instance_label\")")
+    for method_name in _RECORD_PARAMETER_METHODS:
+        method = getattr(context_class, method_name, None)
+        if method is None:
+            continue
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            continue
+        if "command_context_object" in parameters:
+            problems.append(
+                f'{method_name}: parameter "command_context_object" is removed: name it "record"')
+    return problems
 
 
 class CommandContextModelError(Exception):
@@ -175,7 +207,9 @@ class CommandContextModel:
     ) -> None:
         """Validate that *context_name* and its transitive ``base`` contexts exist in
         *valid_contexts* (defaults to ``set(contexts)``) and contain no inheritance cycle."""
-        allowed = set(contexts) if valid_contexts is None else valid_contexts
+        # "*" (the global context) is always a valid base: routing gives it a context even when no
+        # top-level command file exists (command_routing: resolved_contexts['*']), so it is never missing.
+        allowed = (set(contexts) | {"*"}) if valid_contexts is None else valid_contexts
         if context_name not in allowed:
             # A context must be defined either by having command files
             # or by being part of a command inheritance structure. If it's not
@@ -250,7 +284,9 @@ class CommandContextModel:
         else:
             known = set(known_contexts)
 
-        valid_contexts = set(raw_contexts.keys()) | known
+        # The global context "*" always exists (command routing gives it a context even when no
+        # global command does), so a base of "*" names the global commands and is never missing.
+        valid_contexts = set(raw_contexts.keys()) | known | {"*"}
         for ctx_name in raw_contexts:
             cls._validate_context_inheritance(ctx_name, raw_contexts, valid_contexts)
 
@@ -357,7 +393,13 @@ class CommandContextModel:
             context_metadata.context_module_path,
             context_metadata.workflow_folderpath or self._workflow_path,
         ):
-            return getattr(module, context_metadata.context_class, None)
+            context_class = getattr(module, context_metadata.context_class, None)
+            if context_class is not None:
+                problems = context_class_problems(context_class)
+                if problems:
+                    raise CommandContextModelError(
+                        f"context {context_name!r} does not load: " + "; ".join(problems))
+            return context_class
         else:
             return None
 

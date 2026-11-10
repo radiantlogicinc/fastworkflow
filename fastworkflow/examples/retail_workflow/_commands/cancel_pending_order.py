@@ -1,5 +1,5 @@
 # common imports
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from fastworkflow.workflow import Workflow
 
 # For command metadata extraction
@@ -10,7 +10,6 @@ import fastworkflow
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 
 # For response generation
-from fastworkflow import from_
 from ..retail_data import load_data 
 from ..tools.cancel_pending_order import CancelPendingOrder
 
@@ -20,9 +19,9 @@ class Signature:
     class Input(BaseModel):
         order_id: Annotated[
             str,
-            from_(
-                "get_user_details",
+            Field(
                 description="The order ID to cancel",
+                json_schema_extra={"from_command_output": "get_user_details"},
                 pattern=r"^(#?[\w\d]+)$",
                 examples=["123", "#abc123", "order456"],
             )
@@ -44,6 +43,12 @@ class Signature:
             arbitrary_types_allowed=True,
             validate_assignment=True
         )
+
+        @model_validator(mode="after")
+        def order_id_has_hash(self, info):
+            if not self.order_id.startswith('#'):
+                self.order_id = f'#{self.order_id}'
+            return self
 
     class Output(BaseModel):
         status: str = Field(
@@ -74,16 +79,6 @@ class Signature:
         return generate_diverse_utterances(
             utterances_obj.plain_utterances, command_name
         )
-
-    @staticmethod
-    def validate_extracted_parameters(
-        workflow: fastworkflow.Workflow, 
-        command: str, cmd_parameters: "Signature.Input"
-    ) -> None:
-        if not cmd_parameters.order_id.startswith('#'):
-            cmd_parameters.order_id = f'#{cmd_parameters.order_id}'
-        return None
-
 
 class ResponseGenerator:
     def __call__(

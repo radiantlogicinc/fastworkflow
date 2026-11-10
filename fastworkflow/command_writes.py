@@ -1,11 +1,11 @@
-"""The ``writes`` declaration: a command that changes the application's data says so (fix-fixv).
+"""The ``@writes`` declaration: a command that changes the application's data says so (fix-fixv).
 
-An execution command's ``ResponseGenerator`` declares::
+An execution command's ``ResponseGenerator`` carries the decorator::
 
-    writes = True    # running it changes the application's data (adds a note, cancels an order)
+    @writes    # running it changes the application's data (adds a note, cancels an order)
 
-Absent (or False) means the command only reads, or only moves the workflow between records. A
-planning command does not declare it: it writes when one of its steps (directly, or through a planning
+Absent means the command only reads, or only moves the workflow between records. A planning command
+cannot carry it (a load error): it writes when one of its steps (directly, or through a planning
 command it calls) runs a command that writes. A planning command whose steps reach no write is
 read-only.
 
@@ -19,8 +19,8 @@ when one of the phase's steps names it:
   (``phase_write_refusal``, called by ``CommandExecutor`` before the approval gate).
 
 Outside a planning command's phase (the turn's agent, a plain goal, a command the user typed) nothing
-changes. The declaration is validated when the routing definition loads: it must be ``True`` or
-``False``, and only an execution command may carry it.
+changes. The decorator is defined in ``fastworkflow.command_declarations``; the load check here rejects it on a
+planning command.
 """
 from __future__ import annotations
 
@@ -29,11 +29,9 @@ import os
 from typing import Any, Optional
 
 import fastworkflow
+from fastworkflow.command_declarations import WRITES_ATTRIBUTE, declares_writes  # noqa: F401 - re-exported
 
 logger = logging.getLogger(__name__)
-
-#: The class attribute an execution command's ``ResponseGenerator`` declares.
-WRITES_ATTRIBUTE = "writes"
 
 #: The refusal the agent reads when a phase calls a write command its steps do not name.
 UNPLANNED_WRITE_REFUSAL = (
@@ -42,25 +40,19 @@ UNPLANNED_WRITE_REFUSAL = (
 
 
 class WritesDeclarationError(ValueError):
-    """A command declares ``writes`` with a value that is not a bool, or on a planning command."""
-
-
-def declares_writes(command_class: Any) -> bool:
-    """Whether *command_class* (a ``ResponseGenerator``) declares ``writes = True``."""
-    return getattr(command_class, WRITES_ATTRIBUTE, False) is True
+    """A planning command carries ``@writes``: a planning command writes through its steps, not by declaration."""
 
 
 def check_write_declarations(workflow_folderpath: str, routing) -> None:
-    """Validate every command's ``writes`` declaration when the routing definition loads.
+    """Reject ``@writes`` on a planning command when the routing definition loads.
 
-    Raises :class:`WritesDeclarationError` naming the command and its file when the value is not a
-    bool, or when a planning command declares it (its steps say whether it writes). Core commands are
-    skipped; a command whose class cannot be read is left to its own load path.
+    Raises :class:`WritesDeclarationError` naming the command and its file. Core commands are skipped;
+    a command whose class cannot be read is left to its own load path.
     """
     problems: list[str] = []
     core = set(routing.command_directory.core_command_names)
     for command_name, metadata in routing.command_directory.map_command_2_metadata.items():
-        if command_name in core:
+        if command_name in core or not metadata.is_planning:
             continue
         try:
             command_class = routing.get_command_class(
@@ -68,17 +60,10 @@ def check_write_declarations(workflow_folderpath: str, routing) -> None:
         except Exception:  # noqa: BLE001 - an unreadable class is reported by its own load path
             logger.debug("writes declaration unread for %r", command_name, exc_info=True)
             continue
-        if command_class is None or WRITES_ATTRIBUTE not in vars(command_class):
-            continue
-        value = vars(command_class)[WRITES_ATTRIBUTE]
-        where = _source_label(metadata, workflow_folderpath)
-        if not isinstance(value, bool):
-            problems.append(f"{where}: {command_name}'s {WRITES_ATTRIBUTE} must be True or False, "
-                            f"not {type(value).__name__}")
-        elif metadata.is_planning:
-            problems.append(f"{where}: {command_name} is a planning command; it does not declare "
-                            f"{WRITES_ATTRIBUTE}. It writes when its steps run a command that declares "
-                            f"{WRITES_ATTRIBUTE} = True: declare it on that execution command")
+        if command_class is not None and WRITES_ATTRIBUTE in vars(command_class):
+            problems.append(f"{_source_label(metadata, workflow_folderpath)}: {command_name} is a planning "
+                            "command; it cannot carry @writes. It writes when its steps run a command that "
+                            "carries @writes: put the decorator on that execution command")
     if problems:
         raise WritesDeclarationError("\n".join(problems))
 
@@ -92,7 +77,7 @@ def _source_label(metadata, workflow_folderpath: str) -> str:
 
 def write_commands(workflow_folderpath: str) -> frozenset[str]:
     """The qualified names of the commands of *workflow_folderpath* that write: each execution command
-    that declares ``writes = True``, and each planning command whose steps reach one (through the
+    that carries ``@writes``, and each planning command whose steps reach one (through the
     planning commands they call). Empty when the workflow cannot be read."""
     try:
         routing = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)

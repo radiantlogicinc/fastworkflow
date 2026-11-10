@@ -297,11 +297,11 @@ class ResponseGenerator:
             '{app_module}/'
             'data.json'  # Replace with your application's data file if needed
         )
-        workflow.root_command_context = {manager_class}(filepath)
+        workflow.root = {manager_class}(filepath)
         
         response = {{
             "message": "Application initialized.",
-            "context": workflow.current_command_context_name
+            "context": type(workflow.root).__name__
         }}
 
         return str(response)

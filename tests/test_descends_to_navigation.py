@@ -1,4 +1,4 @@
-"""Navigation is declared once, on the command: ``descends_to`` (design 3.15, Phase 10 step 2).
+"""Navigation is declared once, on the command: ``@descends_to`` (design 3.15, Phase 10 step 2).
 
 Each case runs on a COPY of a real workflow (the library example, or ``tests/todo_list_workflow``).
 Nothing is mocked: the routing definition, the context classes and the command classes are the
@@ -41,8 +41,8 @@ LIBRARY_EDGES_BEFORE = (
 )
 
 UNDECLARED_WARNING = (
-    'open_book moved the workflow into Book but declares no descends_to; '
-    'declare descends_to = "Book" so plans can reach Book\'s commands'
+    'open_book moved the workflow into Book but declares no @descends_to; '
+    'declare @descends_to("Book") on its ResponseGenerator so plans can reach Book\'s commands'
 )
 
 
@@ -60,14 +60,14 @@ def _edit(path, marker: str, insertion: str) -> None:
 
 def _declare_descends_to(folder, command_file: str, context: str) -> None:
     _edit(folder / "_commands" / command_file, "class ResponseGenerator:\n",
-          f'class ResponseGenerator:\n    descends_to = "{context}"\n')
+          f'@fastworkflow.descends_to("{context}")\nclass ResponseGenerator:\n')
 
 
 def _undeclare_open_book(folder) -> None:
     path = folder / "_commands" / "Library" / "open_book.py"
     text = path.read_text()
-    assert 'descends_to = "Book"\n' in text, path
-    path.write_text(text.replace('    descends_to = "Book"\n', "", 1))
+    assert '@fastworkflow.descends_to("Book")\n' in text, path
+    path.write_text(text.replace('@fastworkflow.descends_to("Book")\n', "", 1))
 
 
 def _application(folder):
@@ -110,7 +110,7 @@ def test_enter_command_on_a_context_class_fails_to_load_naming_descends_to(
 
     assert str(raised.value) == (
         '_commands/TodoList/_TodoList.py: Context.enter_command is no longer read; '
-        'declare descends_to = "TodoList" on get_todo_list\'s ResponseGenerator'
+        'declare @descends_to("TodoList") on get_todo_list\'s ResponseGenerator'
     )
 
 
@@ -124,7 +124,7 @@ def test_enter_command_fails_again_on_every_read_because_nothing_is_cached(
     _application(folder)  # creating the workflow does not read its routing
 
     for _ in range(2):
-        with pytest.raises(ValueError, match=re.escape('declare descends_to = "TodoList" on get_todo_list')):
+        with pytest.raises(ValueError, match=re.escape('declare @descends_to("TodoList") on get_todo_list')):
             fastworkflow.RoutingRegistry.get_definition(str(folder))
 
 
@@ -138,8 +138,8 @@ def test_enter_commands_list_fails_to_load_naming_each_command(tmp_path, initial
 
     message = str(raised.value)
     assert "Context.enter_commands is no longer read" in message
-    assert 'declare descends_to = "TodoList" on get_todo_list\'s ResponseGenerator' in message
-    assert 'declare descends_to = "TodoList" on add_child_todolist\'s ResponseGenerator' in message
+    assert 'declare @descends_to("TodoList") on get_todo_list\'s ResponseGenerator' in message
+    assert 'declare @descends_to("TodoList") on add_child_todolist\'s ResponseGenerator' in message
 
 
 def test_enter_command_stays_a_load_error_when_the_definition_was_persisted(
@@ -156,7 +156,7 @@ def test_enter_command_stays_a_load_error_when_the_definition_was_persisted(
 
 
 # ---------------------------------------------------------------------------
-# descends_to is the edge
+# @descends_to is the edge
 # ---------------------------------------------------------------------------
 
 def test_descends_to_on_a_command_is_the_collected_edge(tmp_path, initialized_fastworkflow):
@@ -177,7 +177,7 @@ def test_a_command_without_descends_to_collects_no_edge(tmp_path, initialized_fa
 
 
 def test_library_navigation_edges_are_unchanged_by_the_migration(tmp_path, initialized_fastworkflow):
-    """Before and after: the library never declared enter_command, so its descends_to edges
+    """Before and after: the library never declared enter_command, so its @descends_to edges
     (recorded before this change) are the same set."""
     folder = _copy(tmp_path, LIBRARY, "library_edges")
 
@@ -193,17 +193,17 @@ def test_an_undeclared_move_warns_once_per_command_and_context(
     folder = _copy(tmp_path, LIBRARY, "library_undeclared")
     _undeclare_open_book(folder)
     app = _application(folder)
-    app.root_command_context = _library_root()
-    app.current_command_context = app.root_command_context
+    app.root = _library_root()
+    app.record = app.root
     session = _session(app)
     script_command_extraction(monkeypatch, app)
 
     with caplog.at_level(logging.WARNING, logger=command_executor.__name__):
         CommandExecutor._invoke_command_impl(session, "open_book book_uid=b1")
-        assert app.current_command_context_name == "Book"
+        assert app._current_command_context_name == "Book"
         CommandExecutor._invoke_command_impl(session, "open_book book_uid=b2")
 
-    warnings = [r for r in caplog.records if "declares no descends_to" in r.getMessage()]
+    warnings = [r for r in caplog.records if "declares no @descends_to" in r.getMessage()]
     assert [r.getMessage() for r in warnings] == [UNDECLARED_WARNING]
     assert warnings[0].levelno == logging.WARNING
 
@@ -212,16 +212,16 @@ def test_a_declared_move_does_not_warn(
         tmp_path, initialized_fastworkflow, monkeypatch, warnings_reset, caplog):
     folder = _copy(tmp_path, LIBRARY, "library_declared")
     app = _application(folder)
-    app.root_command_context = _library_root()
-    app.current_command_context = app.root_command_context
+    app.root = _library_root()
+    app.record = app.root
     session = _session(app)
     script_command_extraction(monkeypatch, app)
 
     with caplog.at_level(logging.WARNING, logger=command_executor.__name__):
         CommandExecutor._invoke_command_impl(session, "open_book book_uid=b1")
 
-    assert app.current_command_context_name == "Book"
-    assert not [r for r in caplog.records if "declares no descends_to" in r.getMessage()]
+    assert app._current_command_context_name == "Book"
+    assert not [r for r in caplog.records if "declares no @descends_to" in r.getMessage()]
 
 
 def _library_root():

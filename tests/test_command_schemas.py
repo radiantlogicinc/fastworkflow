@@ -72,10 +72,6 @@ _BODY = """    plain_utterances = [
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
-    @staticmethod
-    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> None:
-        return None
-
 class ResponseGenerator:
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> float:
         '''Execute add_two_numbers function'''

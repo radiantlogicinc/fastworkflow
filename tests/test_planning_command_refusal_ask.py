@@ -101,12 +101,10 @@ def _refusal(command: sc.PlanningCommandCommand, values: dict, asked_in: str) ->
     return refused.value
 
 
-#: A refusal naming no input, worded as the hook path words a ``Refused(message)`` without ``field``
-#: (``_run_validate``), and as an ``Input`` rule is worded (``check_input``): the command does not
-#: fit the request, which no answer from the user fixes.
+#: A refusal naming no input, worded as a validator's ``Refused(message)`` without ``field`` is worded
+#: (``check_input``): the command does not fit the request, which no answer from the user fixes.
 NOT_THIS_JOB = sc.PlanningCommandInputError(
-    "validate_extracted_parameters: fact='owner' does not fit kind='login': the owner of any other "
-    "kind is not this job")
+    "fact='owner' does not fit kind='login': the owner of any other kind is not this job")
 INPUT_RULE = sc.PlanningCommandInputError("the arguments break a rule of member_loans: the two names are one record")
 
 

@@ -3,7 +3,7 @@
 A planning command of the Book context: it is found only while the workflow stands on a
 book. loans lists the book's loans; __result__ names each borrower with the due date.
 """
-from fastworkflow.planning import full_list
+from fastworkflow.planning import run
 
 from .list_loans import Signature as ListLoans
 
@@ -25,7 +25,7 @@ class Signature:
 
 class PlanGenerator:
     def loans(self) -> ListLoans.Output:
-        return [full_list("list_loans")]
+        return [run("list_loans", all_pages=True)]
 
     def __result__(self, loans):
         if not loans.borrowers:

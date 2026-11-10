@@ -1,9 +1,8 @@
 from typing import List
 
 import fastworkflow
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 from fastworkflow.workflow import Workflow
-from fastworkflow import from_
 
 from ..retail_data import load_data
 from ..tools.modify_pending_order_payment import ModifyPendingOrderPayment
@@ -12,20 +11,26 @@ from ..tools.modify_pending_order_payment import ModifyPendingOrderPayment
 class Signature:
     """Modify pending order payment method"""
     class Input(BaseModel):
-        order_id: str = from_(
-            "get_user_details",
+        order_id: str = Field(
             description="The order ID to modify",
+            json_schema_extra={"from_command_output": "get_user_details"},
             pattern=r"^(#?[\w\d]+)$",
             examples=["#W0000000"],
         )
-        payment_method_id: str = from_(
-            "get_user_details",
+        payment_method_id: str = Field(
             description="Payment method ID to switch to",
+            json_schema_extra={"from_command_output": "get_user_details"},
             pattern=r"^((gift_card|credit_card|paypal)_\d+)$",
             examples=["gift_card_0000000", "credit_card_0000000", "paypal_0000000"],
         )
 
         model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
+
+        @model_validator(mode="after")
+        def order_id_has_hash(self, info):
+            if not self.order_id.startswith('#'):
+                self.order_id = f'#{self.order_id}'
+            return self
 
     class Output(BaseModel):
         status: str = Field(description="Whether payment modification succeeded.")
@@ -45,16 +50,6 @@ class Signature:
         utterances_obj = utterance_definition.get_command_utterances(command_name)
         from fastworkflow.train.generate_synthetic import generate_diverse_utterances
         return generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
-
-    @staticmethod
-    def validate_extracted_parameters(
-        workflow: fastworkflow.Workflow, 
-        command: str, cmd_parameters: "Signature.Input"
-    ) -> None:
-        if not cmd_parameters.order_id.startswith('#'):
-            cmd_parameters.order_id = f'#{cmd_parameters.order_id}'
-        return None
-
 
 class ResponseGenerator:
     def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> Signature.Output:

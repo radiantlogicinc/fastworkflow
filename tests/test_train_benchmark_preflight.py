@@ -69,7 +69,10 @@ def hello_world(tmp_path: Path) -> str:
 
 def _first_seed_utterance(workflow_path: str) -> str:
     cmd_dir = CommandDirectory.load(workflow_path)
-    for command_key in cmd_dir.get_utterance_keys():
+    # Only execution commands are trained and checked for leaks (preflight_benchmark and the
+    # intent trainer both use get_execution_commands). Framework planning-review commands such as
+    # review_plan also carry utterance metadata, but their phrasings are not training seeds.
+    for command_key in cmd_dir.get_execution_commands():
         metadata = cmd_dir.get_utterance_metadata(command_key)
         if metadata and metadata.plain_utterances:
             return metadata.plain_utterances[0]

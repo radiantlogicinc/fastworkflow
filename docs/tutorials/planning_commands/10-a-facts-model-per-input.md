@@ -24,7 +24,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from fastworkflow.planning import listed, run
+from fastworkflow.planning import count_and_names_read, run
 
 from .find_book import Signature as FindBook
 from .find_member import Signature as FindMember
@@ -46,7 +46,7 @@ class Signature:
 
     class Input(BaseModel):
         name: str = Field(description="the name to look for",
-                          json_schema_extra={"in_request": True})
+                          json_schema_extra={"copied_from_command_text": True})
         kind: Literal["book", "member"] = Field(
             default="book", description="whether to look for a book or a member")
 
@@ -57,7 +57,7 @@ class PlanGenerator:
 
     def __result__(self, input, find):
         names = find.titles if input.kind == "book" else find.names
-        return f"{input.name} matches {listed(names, find.total, input.kind)}."
+        return f"{input.name} matches {count_and_names_read(names, find.total, input.kind)}."
 
 
 FIND = {"book": "find_book", "member": "find_member"}
@@ -110,7 +110,7 @@ __result__ reads both.
 """
 from pydantic import BaseModel
 
-from fastworkflow.planning import count, full_list, listed, run
+from fastworkflow.planning import count, count_and_names_read, run
 
 from .list_loans import Signature as ListLoans
 from .show_book import Signature as ShowBook
@@ -138,14 +138,14 @@ class Shelf(BaseModel):
 
 class PlanGenerator:
     def shelf(self) -> Shelf:
-        return [run("show_book"), full_list("list_loans")]
+        return [run("show_book"), run("list_loans", all_pages=True)]
 
     def __result__(self, shelf):
         book, loans = shelf.book, shelf.loans
         held = f"{book.title} is held at {book.branch}, {count(book.copies, 'copy', 'copies')}"
         if not loans.borrowers:
             return f"{held}; none is on loan."
-        return f"{held}; on loan to {listed(loans.borrowers, loans.total, 'borrower')}."
+        return f"{held}; on loan to {count_and_names_read(loans.borrowers, loans.total, 'borrower')}."
 ```
 
 - **It lives in `_commands/Book/`**, beside the two commands it runs, so it runs on the book

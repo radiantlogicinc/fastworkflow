@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 import fastworkflow
 from fastworkflow.command_executor import CommandExecutor
@@ -61,7 +62,9 @@ def test_create_path_rejects_missing_payload(initialized, workflow_path):
         "use_payload", fastworkflow.ModuleType.COMMAND_PARAMETERS_CLASS
     )
     assert params_cls is not None
-    input_obj = params_cls(note="hello")
+    # Built unvalidated, as the framework builds a direct action's Input: validate_parameters runs the
+    # Input's model validators, with the validation context. Constructing it here would run them with none.
+    input_obj = params_cls.model_construct(note="hello")
 
     is_valid, error_msg, _, _ = extractor.validate_parameters(
         workflow, "use_payload", input_obj
@@ -140,3 +143,28 @@ def test_perform_action_no_params_succeeds_when_ready(initialized, workflow_path
 
     assert result.success is True
     assert "ready=true" in result.command_response.response
+
+
+def test_perform_action_reports_every_bad_field_in_one_error(tmp_path):
+    """Two fields that fail their own checks are both reported, in one validation error, as the
+    constructor reports them (the shipped messaging example's send_message: a bad ``to`` pattern and a
+    short ``message``)."""
+    fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "workflow_contexts")})
+    example = str(Path(fastworkflow.__file__).resolve().parent / "examples" / "messaging_app_1")
+    fastworkflow.RoutingRegistry.clear_registry()
+    try:
+        fastworkflow.RoutingRegistry.get_definition(example, load_cached=False)
+        workflow = fastworkflow.Workflow.create(
+            example, workflow_id_str=f"dav_{uuid.uuid4().hex[:8]}")
+        action = fastworkflow.Action(
+            command_name="send_message",
+            command="send a message",
+            parameters={"to": "Bob", "message": "hi"},
+        )
+        with pytest.raises(ValidationError) as exc_info:
+            CommandExecutor.perform_action(workflow, action)
+    finally:
+        fastworkflow.RoutingRegistry.clear_registry()
+
+    assert [error["loc"][0] for error in exc_info.value.errors()] == ["to", "message"]
+    assert exc_info.value.title == "Input"

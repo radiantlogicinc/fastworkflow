@@ -37,7 +37,7 @@ class _FindParams(BaseModel):
 
 
 class _MarkedFindParams(BaseModel):
-    query: Optional[str] = Field(default=None, json_schema_extra={"positional": True})
+    query: Optional[str] = Field(default=None, json_schema_extra={"command_text_after_command_name": True})
     start: Optional[int] = Field(default=None)
 
 
@@ -51,7 +51,7 @@ class _TwoStrings(BaseModel):
 
 
 class _MarkedTwoStrings(BaseModel):
-    book_uid: Optional[str] = Field(default=None, json_schema_extra={"positional": True})
+    book_uid: Optional[str] = Field(default=None, json_schema_extra={"command_text_after_command_name": True})
     filter: Optional[str] = Field(default=None)
 
 
@@ -253,8 +253,8 @@ def test_positional_needs_this_command_as_lead_and_a_plain_text():
 
 def test_positional_declines_two_marks():
     class _TwoMarks(BaseModel):
-        a: Optional[str] = Field(default=None, json_schema_extra={"positional": True})
-        b: Optional[str] = Field(default=None, json_schema_extra={"positional": True})
+        a: Optional[str] = Field(default=None, json_schema_extra={"command_text_after_command_name": True})
+        b: Optional[str] = Field(default=None, json_schema_extra={"command_text_after_command_name": True})
 
     assert _pos("find_book x", _TwoMarks) is None
 
@@ -274,7 +274,7 @@ LIST = "Shelf/list_books"
 def _pending_round(stored, command=LIST):
     workflow = MagicMock()
     app_workflow = MagicMock()
-    app_workflow.current_command_context_name = "Shelf"
+    app_workflow._current_command_context_name = "Shelf"
     workflow.context = {
         "app_workflow": app_workflow,
         "NLU_Pipeline_Stage": NLUPipelineStage.PARAMETER_EXTRACTION,

@@ -354,22 +354,22 @@ def test_the_sample_of_a_list_and_a_float_without_examples_is_the_placeholder_or
 class GroupInput(BaseModel):
     """An execution command's Input whose fields carry the check options (2.46)."""
 
-    name: str = Field(description="the group's name", json_schema_extra={"in_request": True})
+    name: str = Field(description="the group's name", json_schema_extra={"copied_from_command_text": True})
     plain: str = Field(default="", description="a free note, with no option")
-    count: int = Field(default=2, description="how many members", json_schema_extra={"in_request": True})
+    count: int = Field(default=2, description="how many members", json_schema_extra={"copied_from_command_text": True})
     titles: list[str] = Field(default_factory=list, description="titles",
-                              json_schema_extra={"in_request": True})
+                              json_schema_extra={"copied_from_command_text": True})
     ratio: float = Field(default=0.5, description="a share, which takes no option")
     checked: bool = Field(default=False, description="also check the titles",
-                          json_schema_extra={"verify": True})
+                          json_schema_extra={"classifier_confirms": True})
 
 
 class GroupSubjectInput(BaseModel):
-    name: str = Field(description="the record's name", json_schema_extra={"in_request": "subject"})
+    name: str = Field(description="the record's name", json_schema_extra={"record_named_in_command_text": True})
 
 
 class GroupStripInput(BaseModel):
-    name: str = Field(description="the group", json_schema_extra={"in_request": {"ignore": ["group"]}})
+    name: str = Field(description="the group", json_schema_extra={"copied_from_command_text": {"ignore": ["group"]}})
 
 
 class ValidatedInput(BaseModel):
@@ -380,7 +380,7 @@ class ValidatedInput(BaseModel):
     @field_validator("name")
     @classmethod
     def written_in_the_request(cls, value, info: ValidationInfo):
-        if value not in str((info.context or {}).get("request", "")):
+        if value not in str((info.context or {}).get("command_text", "")):
             raise ValueError("not written in the request")
         return value
 
@@ -410,7 +410,7 @@ def test_the_same_execution_command_str_without_the_option_accepts_the_value():
 
 
 def test_a_planning_command_str_with_in_request_refuses_and_the_same_str_without_it_accepts(tmp_path):
-    with_option = _command(tmp_path / "a", _module('name: str = Field(description="n", json_schema_extra={"in_request": True})'),
+    with_option = _command(tmp_path / "a", _module('name: str = Field(description="n", json_schema_extra={"copied_from_command_text": True})'),
                            name="weigh")
     without = _command(tmp_path / "b", _module('name: str = Field(description="n")'), name="weigh")
     with pytest.raises(PlanningCommandInputError, match="name='Billing' is not written in the request"):
@@ -463,38 +463,38 @@ def test_verify_checks_nothing_without_a_classifier_and_takes_the_verdict_with_o
     assert seen == [("Library/show_group", ["checked"])]
 
     command = _command(tmp_path, _module('checked: bool = Field(default=True, description="check it", '
-                                         'json_schema_extra={"verify": True})'), name="weigh")
+                                         'json_schema_extra={"classifier_confirms": True})'), name="weigh")
     args, _ = pc.check_arguments(command, {"checked": True}, request, {"checked": (False, 0.99)})
     assert args["checked"] is False
 
 
-def test_validate_extracted_parameters_runs_once_after_the_option_checks_for_an_execution_command():
+def test_an_input_validator_runs_once_after_the_option_checks_for_an_execution_command():
     calls = []
 
-    class Hook:
-        @staticmethod
-        def validate_extracted_parameters(workflow, command, cmd_parameters):
-            calls.append(cmd_parameters.name)
-            return None
+    class CheckedGroupStripInput(GroupStripInput):
+        @model_validator(mode="after")
+        def look(self, info):
+            calls.append(self.name)
+            return self
 
-    instance = GroupStripInput(name="Payroll group")
+    instance = CheckedGroupStripInput.model_construct(name="Payroll group")
     is_valid, *_ = InputForParamExtraction(command="Show the Payroll group",
-                                           input_for_param_extraction_class=Hook).validate_parameters(
+                                           input_for_param_extraction_class=None).validate_parameters(
         None, "Library/show_group", instance)
     assert is_valid and calls == ["Payroll"]          # after the strip and the request's spelling, once
 
     calls.clear()
-    refused = GroupStripInput(name="Billing")
+    refused = CheckedGroupStripInput.model_construct(name="Billing")
     is_valid, message, *_ = InputForParamExtraction(command="Show the Payroll group",
-                                                    input_for_param_extraction_class=Hook).validate_parameters(
+                                                    input_for_param_extraction_class=None).validate_parameters(
         None, "Library/show_group", refused)
     assert not is_valid and "not written in the request" in message
-    assert calls == []                                 # a refused value never reaches the hook
+    assert calls == []                                 # a refused value never reaches the validator
 
 
 HOOKED_WEIGH = '''"""weigh: weigh one group, for the test."""
 import fastworkflow
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class Signature:
@@ -503,14 +503,14 @@ class Signature:
     template = ["say the weight"]
 
     class Input(BaseModel):
-        name: str = Field(description="the group", json_schema_extra={"in_request": {"ignore": ["group"]}})
+        name: str = Field(description="the group", json_schema_extra={"copied_from_command_text": {"ignore": ["group"]}})
 
-    @staticmethod
-    def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
-        # the hook sees the value after the option checks (the ignore words are already gone)
-        if cmd_parameters.name != "Payroll":
-            raise fastworkflow.Refused(f"the hook saw {cmd_parameters.name}", field="name")
-        return None
+        @model_validator(mode="after")
+        def only_payroll(self, info):
+            # the validator sees the value after the option checks (the ignore words are already gone)
+            if self.name != "Payroll":
+                raise fastworkflow.Refused(f"the validator saw {self.name}", field="name")
+            return self
 
 
 class PlanGenerator:
@@ -519,12 +519,11 @@ class PlanGenerator:
 '''
 
 
-def test_validate_extracted_parameters_runs_once_after_the_option_checks_for_a_planning_command(tmp_path):
+def test_an_input_validator_runs_once_after_the_option_checks_for_a_planning_command(tmp_path):
     command = _command(tmp_path, HOOKED_WEIGH, name="weigh")
-    assert command.validate is not None
-    # the option's ignore words and the request's spelling come first; the hook then sees "Payroll"
+    # the option's ignore words and the request's spelling come first; the validator then sees "Payroll"
     args, _ = pc.check_arguments(command, {"name": "Payroll group"}, "Show the Payroll group")
-    assert pc._run_validate(command, args, "Show the Payroll group", None)["name"] == "Payroll"
+    assert pc._validate_arguments(command, args, "Show the Payroll group", None)["name"] == "Payroll"
     # a value the option refuses never reaches the hook
     with pytest.raises(PlanningCommandInputError, match="name='Billing' is not written in the request"):
         pc.check_arguments(command, {"name": "Billing"}, "Show the Payroll group")
@@ -543,39 +542,39 @@ def test_an_input_validator_that_reads_the_request_refuses_on_either_kind():
 
 def test_an_option_on_a_type_it_does_not_apply_to_is_a_load_error_naming_the_option_and_the_type(tmp_path):
     class BadFloat(BaseModel):
-        ratio: float = Field(description="a share", json_schema_extra={"in_request": True})
+        ratio: float = Field(description="a share", json_schema_extra={"copied_from_command_text": True})
 
     with pytest.raises(pc.PlanningCommandFormatError,
-                       match="option in_request does not apply to field 'ratio' of type float"):
+                       match="option copied_from_command_text does not apply to field 'ratio' of type float"):
         pc.option_params(BadFloat, "app/show")
 
     class BadVerify(BaseModel):
-        name: str = Field(description="a name", json_schema_extra={"verify": True})
+        name: str = Field(description="a name", json_schema_extra={"classifier_confirms": True})
 
     with pytest.raises(pc.PlanningCommandFormatError,
-                       match="option verify does not apply to field 'name' of type str"):
+                       match="option classifier_confirms does not apply to field 'name' of type str"):
         pc.option_params(BadVerify, "app/show")
 
     class BadMeans(BaseModel):
-        kind: str = Field(description="a kind", json_schema_extra={"verify": {"a": "x"}})
+        kind: str = Field(description="a kind", json_schema_extra={"classifier_confirms": {"meanings": {"a": "x"}}})
 
     with pytest.raises(pc.PlanningCommandFormatError,
-                       match="option verify \\(a dict of meanings\\) does not apply to field 'kind' of type str"):
+                       match="option classifier_confirms \\(a dict of meanings\\) does not apply to field 'kind' of type str"):
         pc.option_params(BadMeans, "app/show")
 
     class VerifyDictOnEnum(BaseModel):
-        kind: Literal["a", "b"] = Field(description="a kind", json_schema_extra={"verify": {"a": "x"}})
+        kind: Literal["a", "b"] = Field(description="a kind", json_schema_extra={"classifier_confirms": {"meanings": {"a": "x"}}})
     (check,) = pc.option_params(VerifyDictOnEnum, "app/show")
     assert (check.verify, check.means) == (True, (("a", "x"),))   # the dict is the check: no separate verify
 
     pick = _module('kind: Literal["a", "b"] = Field(description="a kind", json_schema_extra={"means": {"a": "x"}})')
     pick = pick.replace("from pydantic import", "from typing import Literal\nfrom pydantic import", 1)
     error = _load_error(_write(tmp_path, {"pick": pick}), "pick")
-    assert "option means is retired: write verify: {value: meaning, ...}" in error
+    assert 'means: {"a": "x"} is removed: write "classifier_confirms": {"meanings": {"a": "x"}}' in error
 
     error = _load_error(_write(tmp_path, {"weigh": _module(
-        'ratio: float = Field(description="a share", json_schema_extra={"in_request": True})')}), "weigh")
-    assert "option in_request does not apply to field 'ratio' of type float" in error
+        'ratio: float = Field(description="a share", json_schema_extra={"copied_from_command_text": True})')}), "weigh")
+    assert "option copied_from_command_text does not apply to field 'ratio' of type float" in error
 
 
 def test_the_extractor_reads_the_options_sentences_for_both_kinds_and_none_for_a_field_without_options(tmp_path):
@@ -596,7 +595,7 @@ def test_the_extractor_reads_the_options_sentences_for_both_kinds_and_none_for_a
     assert "Copy" not in desc["ratio"] and "request writes" not in desc["ratio"]
 
     command = _command(tmp_path, _module('name: str = Field(description="the name", '
-                                         'json_schema_extra={"in_request": True})'), name="weigh")
+                                         'json_schema_extra={"copied_from_command_text": True})'), name="weigh")
     assert pc.option_sentences(command.input_model) == {"name": (pc.IN_REQUEST_STR_SENTENCE,)}
     plain = _command(tmp_path / "plain", _module('name: str = Field(description="the name")'), name="weigh")
     assert pc.option_sentences(plain.input_model) == {}
@@ -604,7 +603,7 @@ def test_the_extractor_reads_the_options_sentences_for_both_kinds_and_none_for_a
 
 def test_an_in_request_list_keeps_the_written_items_and_drops_the_rest_per_element(tmp_path):
     command = _command(tmp_path, _module('titles: list[str] = Field(description="titles", '
-                                         'json_schema_extra={"in_request": True})'), name="weigh")
+                                         'json_schema_extra={"copied_from_command_text": True})'), name="weigh")
     args, notes = pc.check_arguments(command, {"titles": ["Dune", "Hamlet"]}, "check Dune and Emma")
     assert args["titles"] == ["Dune"]
     assert any("'Hamlet' is not written in the request: dropped" in note for note in notes)
@@ -614,7 +613,7 @@ def test_an_in_request_list_keeps_the_written_items_and_drops_the_rest_per_eleme
 
     option = pc.option_command(type("ListInput", (BaseModel,), {
         "__annotations__": {"titles": list[str]},
-        "titles": Field(description="titles", json_schema_extra={"in_request": True})}), "x")
+        "titles": Field(description="titles", json_schema_extra={"copied_from_command_text": True})}), "x")
     args, _ = pc.check_arguments(option, {"titles": ["Dune", "Hamlet"]}, "check Dune and Emma")
     assert args["titles"] == ["Dune"]
 
@@ -647,11 +646,11 @@ def _literal_module(field: str) -> str:
 
 @pytest.mark.parametrize("field, message", [
     ('name: str = Field(description="n", json_schema_extra={"subject": True})',
-     'option subject is retired: write in_request: "subject"'),
+     'subject: True is removed: write "record_named_in_command_text": True'),
     ('kind: Literal["a", "b"] = Field(description="k", json_schema_extra={"means": {"a": "x"}})',
-     "option means is retired: write verify: {value: meaning, ...}"),
+     'means: {"a": "x"} is removed: write "classifier_confirms": {"meanings": {"a": "x"}}'),
     ('name: str = Field(description="n", json_schema_extra={"strip": ["group"]})',
-     'option strip is retired: write in_request: {\"ignore\": [...]}'),
+     'strip: ["group"] is removed: write "copied_from_command_text": {"ignore": ["group"]}'),
 ])
 def test_a_retired_option_is_a_load_error_naming_the_new_spelling_on_a_planning_command(tmp_path, field, message):
     error = _load_error(_write(tmp_path, {"bad": _literal_module(field)}))
@@ -660,11 +659,11 @@ def test_a_retired_option_is_a_load_error_naming_the_new_spelling_on_a_planning_
 
 @pytest.mark.parametrize("field, message", [
     ('name: str = Field(description="n", json_schema_extra={"subject": True})',
-     'option subject is retired: write in_request: "subject"'),
+     'subject: True is removed: write "record_named_in_command_text": True'),
     ('kind: Literal["a", "b"] = Field(description="k", json_schema_extra={"means": {"a": "x"}})',
-     "option means is retired: write verify: {value: meaning, ...}"),
+     'means: {"a": "x"} is removed: write "classifier_confirms": {"meanings": {"a": "x"}}'),
     ('name: str = Field(description="n", json_schema_extra={"strip": ["group"]})',
-     'option strip is retired: write in_request: {\"ignore\": [...]}'),
+     'strip: ["group"] is removed: write "copied_from_command_text": {"ignore": ["group"]}'),
 ])
 def test_a_retired_option_is_a_load_error_naming_the_new_spelling_on_an_execution_command(field, message):
     class Input(BaseModel):
@@ -680,23 +679,23 @@ def test_a_retired_option_is_a_load_error_naming_the_new_spelling_on_an_executio
 
 def test_a_verify_dict_with_a_value_the_enum_lacks_is_a_load_error(tmp_path):
     error = _load_error(_write(tmp_path, {"bad": _literal_module(
-        'kind: Literal["a", "b"] = Field(description="k", json_schema_extra={"verify": {"c": "x"}})')}))
-    assert "verify of 'kind': 'c' is not a value of it, or not text" in error
+        'kind: Literal["a", "b"] = Field(description="k", json_schema_extra={"classifier_confirms": {"meanings": {"c": "x"}}})')}))
+    assert "classifier_confirms meanings: 'c' is not a value of it, or not text" in error
 
 
 def test_a_verify_dict_on_a_non_enum_is_a_load_error_naming_the_type(tmp_path):
     error = _load_error(_write(tmp_path, {"bad": _module(
-        'flag: bool = Field(default=False, description="f", json_schema_extra={"verify": {"true": "asked"}})')}))
-    assert "option verify (a dict of meanings) does not apply to field 'flag' of type bool (it takes an enum)" in error
+        'flag: bool = Field(default=False, description="f", json_schema_extra={"classifier_confirms": {"meanings": {"true": "asked"}}})')}))
+    assert "option classifier_confirms (a dict of meanings) does not apply to field 'flag' of type bool (it takes an enum)" in error
 
 
 def test_in_request_subject_on_a_non_str_is_a_load_error_and_on_a_str_is_the_subject_option(tmp_path):
     error = _load_error(_write(tmp_path, {"bad": _module(
-        'count: int = Field(default=1, description="c", json_schema_extra={"in_request": "subject"})')}))
-    assert 'option in_request: "subject" does not apply to field \'count\' of type int (it takes a str)' in error
+        'count: int = Field(default=1, description="c", json_schema_extra={"record_named_in_command_text": True})')}))
+    assert 'option record_named_in_command_text does not apply to field \'count\' of type int (it takes a str)' in error
 
     command = _command(tmp_path / "ok", _module(
-        'name: str = Field(description="n", json_schema_extra={"in_request": "subject"})'), name="weigh")
+        'name: str = Field(description="n", json_schema_extra={"record_named_in_command_text": True})'), name="weigh")
     param = command.param("name")
     assert (param.subject, param.in_request) == (True, True)
     assert pc.extraction_sentences(param) == (pc.SUBJECT_SENTENCE,)
@@ -705,12 +704,12 @@ def test_in_request_subject_on_a_non_str_is_a_load_error_and_on_a_str_is_the_sub
 def test_in_request_on_a_planning_command_read_as_true_or_false_or_subject_only(tmp_path):
     error = _load_error(_write(tmp_path, {"bad": _module(
         'name: str = Field(description="n", json_schema_extra={"in_request": "yes"})')}))
-    assert 'in_request must be true, false, "subject" or a dict' in error
+    assert 'in_request: "yes" is removed: write' in error
 
 
 def test_a_verify_dict_is_the_check_and_its_meanings_are_the_sentences_the_check_reads(tmp_path):
     command = _command(tmp_path, _literal_module(
-        'kind: Literal["a", "b"] = Field(description="a kind", json_schema_extra={"verify": {"b": "the b one"}})'
+        'kind: Literal["a", "b"] = Field(description="a kind", json_schema_extra={"classifier_confirms": {"meanings": {"b": "the b one"}}})'
     ), name="weigh")
     param = command.param("kind")
     assert (param.verify, param.means) == (True, (("b", "the b one"),))
@@ -730,55 +729,55 @@ def test_strip_words_cleans_a_value_from_a_validator_and_from_the_validation_hoo
     assert Cleaned.model_validate({"name": "Payroll group"}).name == "Payroll"
     assert pc.strip_words("Payroll group", ("group",)) == "Payroll"
     assert pc.strip_words("Ann's group", ("group",)) == "Ann"
-    # the hook is the step that keeps the cleaned value: _run_validate returns the hook's fields
+    # the validator is the step that keeps the cleaned value: _validate_arguments returns the checked fields
     command = _command(tmp_path, HOOKED_WEIGH, name="weigh")
     args, _ = pc.check_arguments(command, {"name": "Payroll group"}, "Show the Payroll group")
-    assert pc._run_validate(command, args, "Show the Payroll group", None)["name"] == "Payroll"
+    assert pc._validate_arguments(command, args, "Show the Payroll group", None)["name"] == "Payroll"
 
 
 # ---------------------------------------------------------------- in_request as a dict: ignore (fix-3rsq.two-options)
 
 def test_the_in_request_dict_forms_read_as_subject_and_ignore(tmp_path):
     class Forms(BaseModel):
-        plain: str = Field(description="p", json_schema_extra={"in_request": {"ignore": ["group"]}})
-        named: str = Field(description="n", json_schema_extra={"in_request": {"subject": True}})
-        both: str = Field(description="b", json_schema_extra={"in_request": {"subject": True, "ignore": ["unit"]}})
+        plain: str = Field(description="p", json_schema_extra={"copied_from_command_text": {"ignore": ["group"]}})
+        named: str = Field(description="n", json_schema_extra={"record_named_in_command_text": True})
+        both: str = Field(description="b", json_schema_extra={"record_named_in_command_text": {"ignore": ["unit"]}})
 
     params = {p.name: p for p in pc.option_params(Forms, "app/show")}
     assert (params["plain"].in_request, params["plain"].subject, params["plain"].ignore) == (True, False, ("group",))
     assert (params["named"].in_request, params["named"].subject, params["named"].ignore) == (True, True, ())
     assert (params["both"].in_request, params["both"].subject, params["both"].ignore) == (True, True, ("unit",))
-    # the dict {"subject": True} is the same option as "subject"
+    # the record-named dict form is the same option as record_named_in_command_text: True
     assert pc.extraction_sentences(params["named"]) == (pc.SUBJECT_SENTENCE,)
 
 
 @pytest.mark.parametrize("value, message", [
-    ('{"sbject": True}', "in_request has unknown key(s) sbject"),
-    ('{"ignore": "group"}', "in_request ignore must be a list of words"),
-    ('{"ignore": [1]}', "in_request ignore must be a list of words"),
-    ('{}', "in_request {} is empty"),
-    ('{"subject": "yes"}', "in_request subject must be true or false"),
+    ('{"sbject": True}', "copied_from_command_text has unknown option 'sbject'"),
+    ('{"ignore": "group"}', "copied_from_command_text ignore must be a list of words"),
+    ('{"ignore": [1]}', "copied_from_command_text ignore must be a list of words"),
+    ('{}', "copied_from_command_text is empty"),
+    ('{"subject": "yes"}', "copied_from_command_text has unknown option 'subject'"),
 ])
 def test_a_malformed_in_request_dict_is_a_load_error(tmp_path, value, message):
     error = _load_error(_write(tmp_path, {"bad": _module(
-        f'name: str = Field(description="n", json_schema_extra={{"in_request": {value}}})')}))
+        f'name: str = Field(description="n", json_schema_extra={{"copied_from_command_text": {value}}})')}))
     assert message in error
 
 
 def test_ignore_on_a_non_str_is_a_load_error_naming_the_option_and_the_type(tmp_path):
     error = _load_error(_write(tmp_path, {"bad": _module(
-        'count: int = Field(default=1, description="c", json_schema_extra={"in_request": {"ignore": ["x"]}})')}))
-    assert "option in_request ignore does not apply to field 'count' of type int (it takes a str)" in error
+        'count: int = Field(default=1, description="c", json_schema_extra={"copied_from_command_text": {"ignore": ["x"]}})')}))
+    assert "option copied_from_command_text ignore does not apply to field 'count' of type int (it takes a str)" in error
 
     class BadInt(BaseModel):
-        count: int = Field(default=1, description="c", json_schema_extra={"in_request": {"ignore": ["x"]}})
+        count: int = Field(default=1, description="c", json_schema_extra={"copied_from_command_text": {"ignore": ["x"]}})
 
-    with pytest.raises(pc.PlanningCommandFormatError, match="in_request ignore does not apply to field 'count'"):
+    with pytest.raises(pc.PlanningCommandFormatError, match="copied_from_command_text ignore does not apply to field 'count'"):
         pc.option_params(BadInt, "app/show")
 
 
 class IgnoreGroupInput(BaseModel):
-    name: str = Field(description="the group", json_schema_extra={"in_request": {"ignore": ["group"]}})
+    name: str = Field(description="the group", json_schema_extra={"copied_from_command_text": {"ignore": ["group"]}})
 
 
 def test_ignore_keeps_the_strip_outcomes_of_head_on_the_payroll_group_cases():
@@ -792,15 +791,14 @@ def test_ignore_keeps_the_strip_outcomes_of_head_on_the_payroll_group_cases():
 
     class OptionalIgnore(BaseModel):
         name: str = Field(default="", description="the group",
-                          json_schema_extra={"in_request": {"ignore": ["group"]}})
+                          json_schema_extra={"copied_from_command_text": {"ignore": ["group"]}})
 
     args, _ = pc.check_arguments(pc.option_command(OptionalIgnore, "Library/show_group"),
                                  {"name": "Payroll group"}, request)
     assert args["name"] == "Payroll"
 
     class SubjectIgnore(BaseModel):
-        name: str = Field(description="the group", json_schema_extra={"in_request": {"subject": True,
-                                                                                      "ignore": ["group"]}})
+        name: str = Field(description="the group", json_schema_extra={"record_named_in_command_text": {"ignore": ["group"]}})
 
     args, _ = pc.check_arguments(pc.option_command(SubjectIgnore, "Library/show_group"),
                                  {"name": "Payroll group"}, request)
@@ -814,7 +812,7 @@ def test_a_field_validator_that_cleans_a_value_changes_the_argument_of_a_plannin
             'from fastworkflow.planning_commands import strip_words\n\n\n'
             'class Signature:\n    """Weigh one group."""\n\n'
             '    class Input(BaseModel):\n'
-            '        name: str = Field(description="the group", json_schema_extra={"in_request": True})\n\n'
+            '        name: str = Field(description="the group", json_schema_extra={"copied_from_command_text": True})\n\n'
             '        @field_validator("name")\n'
             '        @classmethod\n'
             '        def without_group(cls, value):\n'
@@ -832,7 +830,7 @@ def test_a_field_validator_that_cleans_a_value_changes_the_argument_of_a_plannin
 
 def test_a_field_validator_that_cleans_a_value_changes_the_argument_of_an_execution_command():
     class Cleaned(BaseModel):
-        name: str = Field(description="the group", json_schema_extra={"in_request": True})
+        name: str = Field(description="the group", json_schema_extra={"copied_from_command_text": True})
 
         @field_validator("name")
         @classmethod
@@ -850,7 +848,7 @@ def test_a_field_validator_that_cleans_a_value_changes_the_argument_of_an_execut
 
 def test_a_refusing_validator_still_refuses_on_either_kind_and_a_model_validator_writes_back(tmp_path):
     class Rewrites(BaseModel):
-        name: str = Field(description="the group", json_schema_extra={"in_request": True})
+        name: str = Field(description="the group", json_schema_extra={"copied_from_command_text": True})
 
         @model_validator(mode="after")
         def upper_name(self):
@@ -868,10 +866,11 @@ def test_a_refusing_validator_still_refuses_on_either_kind_and_a_model_validator
     refused = Rewrites.model_construct(name="refuse")
     is_valid, message, *_ = InputForParamExtraction(command="Show refuse", input_for_param_extraction_class=None
                                                     ).validate_parameters(None, "Library/show_group", refused)
-    assert not is_valid and "refused by the validator" in message
+    assert not is_valid and message == "validate_extracted_parameters: refused by the validator"
 
     # a planning command: the same validator writes back into the arguments, and a refusal refuses
     option = pc.option_command(Rewrites, "Library/show_group")
     assert pc.check_input(option, {"name": "Payroll"}, "Show the Payroll group") == {"name": "PAYROLL"}
-    with pytest.raises(PlanningCommandInputError, match="refused by the validator"):
+    with pytest.raises(PlanningCommandInputError, match="^validate_extracted_parameters: "
+                                                        "refused by the validator$"):
         pc.check_input(option, {"name": "refuse"}, "Show the Payroll group")

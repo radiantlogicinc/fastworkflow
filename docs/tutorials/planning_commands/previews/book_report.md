@@ -11,7 +11,7 @@ Depth: 1 (lower bound; open steps name no command)
 
 ## Inputs
 
-| input | type | default | sample | verify | in_request | description |
+| input | type | default | sample | classifier_confirms / classifier_decides | copied_from_command_text / record_named_in_command_text | description |
 |---|---|---|---|---|---|---|
 | `title` | str | required | `<title>` |  |  | the book's title |
 | `loans` | bool | false | false |  |  | the request asks who has the book on loan |

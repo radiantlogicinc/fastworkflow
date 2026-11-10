@@ -271,7 +271,7 @@ def _flat_planning_command(steps, plan=None):
 
 def _qualified(workflow, name):
     routing = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
-    return next((n for n in routing.get_command_names(workflow.current_command_context_name)
+    return next((n for n in routing.get_command_names(workflow._current_command_context_name)
                  if n.split("/")[-1] == name), None)
 
 
@@ -304,21 +304,21 @@ class Workflow:
                 command_response=fastworkflow.CommandResponse(
                     response=response, success=success, output=output))
         if name in ("go_up", "reset_context"):
-            if name == "reset_context" or wf.get_parent(wf.current_command_context) is None:
-                wf.current_command_context = wf.root_command_context
+            if name == "reset_context" or wf.get_parent(wf._current_command_context) is None:
+                wf.record = wf.root
             else:
-                wf.current_command_context = wf.get_parent(wf.current_command_context)
+                wf.record = wf.get_parent(wf._current_command_context)
             return fastworkflow.CommandOutput(
                 command_name=f"IntentDetection/{name}",
                 command_response=fastworkflow.CommandResponse(
-                    response=f"Context is now '{wf.current_command_context_displayname}'"))
+                    response=f"Context is now '{wf._current_command_context_displayname}'"))
         # As the CME walk does (3.9): a name on the lookup path runs bound to the record of its
         # scope. perform_action would reset the binding to the current object, so such a run
         # calls the response generator itself, after binding.
         from fastworkflow.context_navigation import command_on_path
 
         found = command_on_path(wf, name)
-        bound = found is not None and len(found[1]) == 1 and found[0].record is not wf.current_command_context
+        bound = found is not None and len(found[1]) == 1 and found[0].record is not wf._current_command_context
         if found is not None and len(found[1]) == 1:
             qualified = found[1][0]
         else:
@@ -332,7 +332,7 @@ class Workflow:
         if bound:
             from fastworkflow.command_executor import call_response_generator
 
-            wf.command_context_for_response_generation = found[0].record
+            wf._command_context_for_response_generation = found[0].record
             gen_cls = routing.get_command_class(
                 qualified, fastworkflow.ModuleType.RESPONSE_GENERATION_INFERENCE)
             raw = call_response_generator(gen_cls(), wf, command, params, command_name=qualified)
@@ -404,7 +404,7 @@ def todo(initialized_fastworkflow, todo_workflow_path, monkeypatch):
     # example value of get_todo_list, so a step that opens it binds in code.
     from tests.todo_list_workflow.application.todo_list import TodoList
 
-    root = wf.root_command_context
+    root = wf.root
     chores = TodoList(id=7, description="chores")
     chores.parent = root
     root.lists[7] = chores
@@ -687,7 +687,7 @@ def test_code_reaches_the_context_of_a_step_by_a_no_value_path(todo, climbable):
     # in place (bound to the manager) and no go_up is inserted. The list stays current.
     assert todo.model.asked == []
     assert todo.workflow.sent == ["get_todo_list id=8", "list_todo_lists"]
-    assert todo.wf.current_command_context.id == 8
+    assert todo.wf._current_command_context.id == 8
     runs = [r["command"].split("/")[-1] for r in todo.ctx._archived_command_runs()]
     assert runs[:2] == ["get_todo_list", "list_todo_lists"]
 
@@ -725,7 +725,7 @@ def test_opening_the_record_already_open_counts_as_done(todo, monkeypatch):
     # refused as "already in context". The step still counts as done, with no model call.
     assert todo.model.asked == []
     assert todo.workflow.sent == ["get_todo_list id=8", "get_todo_list id=8", "get_properties"]
-    assert todo.wf.current_command_context.id == 8
+    assert todo.wf._current_command_context.id == 8
     assert _phases(todo.sink)[0].attributes["code_stop"] == "done"
 
 
@@ -733,7 +733,7 @@ def test_code_path_takes_only_one_shortest_no_value_path(monkeypatch):
     from fastworkflow import context_navigation
     from fastworkflow.context_navigation import DescendEdge, code_path
 
-    wf = SimpleNamespace(current_command_context_name="Shelf", folderpath="/x")
+    wf = SimpleNamespace(_current_command_context_name="Shelf", folderpath="/x")
     monkeypatch.setattr(context_navigation, "live_context_chain",
                         lambda workflow: ("Shelf", "Library", "*"))
     homes = {"find": ["Catalog"], "two": ["Catalog", "Archive"], "deep": ["Book"]}
@@ -934,7 +934,7 @@ def climbable(monkeypatch):
 
     real_chain = context_navigation.live_context_chain
     monkeypatch.setattr(context_navigation, "live_context_chain", lambda wf: (
-        ("TodoList", "TodoListManager", "*") if wf.current_command_context_name == "TodoList"
+        ("TodoList", "TodoListManager", "*") if wf._current_command_context_name == "TodoList"
         else real_chain(wf)))
 
 
@@ -954,7 +954,7 @@ def test_a_fan_out_of_mechanical_items_runs_every_item_with_no_model_call(todo, 
     # item runs in place: no go_up between the items. The last item stays current.
     assert todo.workflow.sent == ["get_todo_list id=7", "get_properties",
                                   "get_todo_list id=8", "get_properties"]
-    assert todo.wf.current_command_context.id == 8
+    assert todo.wf._current_command_context.id == 8
     items = [s for s in _phases(todo.sink) if s.attributes["phase"] == "each"]
     assert [s.attributes["facts"] for s in items] == [{"description": "chores"},
                                                       {"description": "errands"}]

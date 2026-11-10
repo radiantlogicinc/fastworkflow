@@ -1,53 +1,57 @@
 ---
 name: declare-parameter-producers
 description: >-
-  Declare producers on fastWorkflow command parameters with `from_` so the planner can chain commands
-  into a working sequence and so a missing parameter tells the caller which command supplies it.
-  Covers the `from_` form (command names and `<command>.<field>` references), how the planner, the
-  parameter listing and the missing-parameter message consume it, choosing a producer the caller can
-  reach, matching handle types between producer and consumer, and what `command preview --check`
-  verifies. Use when a command takes an id, uid, code or other opaque handle it cannot invent, when an
-  agent cannot work out the order to call commands in, or when authoring or reviewing any command
-  `Signature.Input`.
+  Declare producers on fastWorkflow command parameters with `from_command_output` so the planner can
+  chain commands into a working sequence and so a missing parameter tells the caller which command
+  supplies it. Covers the `from_command_output` form (command names and `<command>.<field>` references),
+  how the planner, the parameter listing and the missing-parameter message consume it, choosing a
+  producer the caller can reach, matching handle types between producer and consumer, and what
+  `command preview --check` verifies. Use when a command takes an id, uid, code or other opaque handle it
+  cannot invent, when an agent cannot work out the order to call commands in, or when authoring or
+  reviewing any command `Signature.Input`.
 ---
 
-# Declaring parameter producers with `from_`
+# Declaring parameter producers with `from_command_output`
 
 A command that takes an opaque handle (an id, uid, code, ticket number) cannot be called until
-something produces that handle. `from_` records which command that is, turning a flat list of
+something produces that handle. `from_command_output` records which command that is, turning a flat list of
 commands into a graph the planner can walk.
 
 ## The declaration
 
-On the `Input` field, with `from_` in place of `Field`:
+On the `Input` field, as a `json_schema_extra` key of a plain `Field`. The key names the behaviour, and its
+value is the producer:
 
 ```python
-from fastworkflow.planning import from_   # the same helper planning commands import
+from pydantic import BaseModel, Field
+
 
 class Signature:
     class Input(BaseModel):
-        order_id: str = from_(
-            "CustomerDesk/find_order.order_ids",
+        order_id: str = Field(
             description="The order to fetch",
             examples=["#W0000000"],
+            json_schema_extra={"from_command_output": "CustomerDesk/find_order.order_ids"},
         )
 ```
 
-`from_(source, **field_kwargs)` is `Field(**field_kwargs)` with the source recorded as the producer
-edge (`planning_phases.py` `from_`). The source takes three forms:
+`from_command_output` is an option key, not a helper: there is no `from_(...)` function (it is removed; a
+`from_` import fails). The value is the producer edge (`planning_phases.py` reads it). It takes three forms:
 
 - `"<Context>/<command>.<field>"`: a field of the producer's `Output`. Prefer this; it says which
   value the consumer needs.
 - `"<Context>/<command>"` or `"<command>"`: a bare command. Accepted, but `command preview --check`
   reports it at info level and asks for a field.
-- a list of those, when several commands can supply the handle: `from_(["A/x.id", "B/y.id"])`.
+- a list of those, when several commands can supply the handle:
+  `json_schema_extra={"from_command_output": ["A/x.id", "B/y.id"]}`.
 
-`from_` is for an `Input` field. An `Output` field cannot declare it (build the value in
-`__result__`, for a planning command), and a facts model field is typed with a command's `Output` or `Input`, not `from_` (and not a copy: `fact_from` is removed).
+`from_command_output` is for an `Input` field. An `Output` field cannot declare it (build the value in
+`__result__`, for a planning command), and a facts model field is typed with a command's `Output` or `Input`,
+not a producer key (and not a copy: `"from"` on a facts field is removed).
 
-`available_from` is no longer written by hand. A hand-written `json_schema_extra={"available_from":
-...}` is an error that `command preview --check` reports ("available_from is written by from_"):
-convert it to `from_`.
+`available_from` is no longer written by hand. A hand-written `json_schema_extra={"available_from": ...}` is
+an error that `command preview --check` reports ("available_from is written by from_command_output"):
+convert it to `from_command_output`.
 
 ## Who reads it
 
@@ -56,22 +60,22 @@ Three consumers, and they behave differently:
 1. **The planner.** Its instruction is to walk the graph of producer edges to build the command
    sequence (`workflow_agent.py` `PLANNER_INSTRUCTIONS`), and the agent's command display renders each
    resolved edge as `available_from: [...]` beside the parameter. The runtime text keeps that name; you
-   still write `from_`. The edges are the only structured statement of "you
+   still write `from_command_output`. The edges are the only structured statement of "you
    must call X before Y", so an unhinted handle parameter is a parameter the planner has to guess its
    way to.
 2. **The missing-parameter message.** When validation finds the field absent, it appends
    `use the <producers> command(s) to get <field> information` (`utils/signatures.py`). A human caller
    is told to `abort and use ...`; an agent (`run_as_agent` set on the workflow context) is told to
    just use it, because the agent can chain without abandoning the turn.
-3. **`command preview --check`.** It resolves every `from_` edge and reports the ones that do not hold
-   (see "What the check verifies" below).
+3. **`command preview --check`.** It resolves every `from_command_output` edge and reports the ones that do
+   not hold (see "What the check verifies" below).
 
 Only `Input` fields are read. The edge is surfaced **only when the field is missing**, so it never
 substitutes for `description`; write both.
 
 **Above the listing size.** A workflow too large to list whole can show the planner a shortlist
 instead: the commands that match the request, plus the producers of their inputs. A producer edge is
-what brings a producer onto that shortlist, and a `descends_to` brings in the way to a context. The
+what brings a producer onto that shortlist, and a `@descends_to` brings in the way to a context. The
 shortlist is built but **off** in this release, so the planner sees the full command list and the
 edges work as described above. Write the edges as if the shortlist were on, because it is expected to
 be switched on with the plan review round.
@@ -99,10 +103,10 @@ Two commands can both return "an order id" and still not be interchangeable.
   child when given a uid and lists them when not is the only thing that yields uids it will accept:
 
 ```python
-task_id: Optional[str] = from_(
-    "Project/list_tasks.task_ids",                  # itself
+task_id: Optional[str] = Field(
     default=None,
     description="Task to open. Omit to list them instead.",
+    json_schema_extra={"from_command_output": "Project/list_tasks.task_ids"},  # itself
 )
 ```
 
@@ -139,16 +143,16 @@ pass the wrong one and get a not-found:
 
 ## Rule 4: keep the edges true as the tree changes
 
-`from_` names a command by its qualified name, so moving a command between contexts, or deleting it,
-invalidates every edge pointing at it. `command preview --check` reports an edge whose producer no
-longer resolves, which catches a deleted or renamed command. It does not re-check reachability for a
+`from_command_output` names a command by its qualified name, so moving a command between contexts, or
+deleting it, invalidates every edge pointing at it. `command preview --check` reports an edge whose producer
+no longer resolves, which catches a deleted or renamed command. It does not re-check reachability for a
 qualified name that still exists, so re-check reachability whenever a context's inherited surface
 changes (Rule 1).
 
 ## What `command preview --check` verifies
 
 `fastworkflow command preview <workflow_folder> --check` runs `planning_commands.resolve_field_sources`
-over every execution and planning command and reports each `error`. For each `from_` edge it checks:
+over every execution and planning command and reports each `error`. For each `from_command_output` edge it checks:
 
 - the reference is well formed (`[<Context>/]<command>[.<field>]`);
 - the producer exists. A qualified name must exist; an unqualified name must be on the consumer's
@@ -166,7 +170,7 @@ guidance, as the rules above say.
 ## Authoring checklist
 
 ```
-- [ ] Every non-inventable handle parameter carries a from_ edge
+- [ ] Every non-inventable handle parameter carries a from_command_output edge
 - [ ] The edge is context-qualified (Context/command.field)
 - [ ] Each named producer is reachable from the consuming context (surface or live ancestor)
 - [ ] Each named producer emits handles this consumer will accept (Rule 2)
@@ -179,7 +183,7 @@ guidance, as the rules above say.
 
 ## Related
 
-- `from_` answers "the parameter never arrived". Its counterpart for "the parameter arrived
+- `from_command_output` answers "the parameter never arrived". Its counterpart for "the parameter arrived
   unusable" is the `validate-command-parameters` skill, and for "the parameter arrived nearly right"
   the `resolve-parameter-values` skill.
 - Reachability is decided by the context models; see the `design-context-models` skill.

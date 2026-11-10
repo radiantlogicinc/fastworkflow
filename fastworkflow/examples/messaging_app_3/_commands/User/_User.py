@@ -9,11 +9,11 @@ class Context:
     state_version = 1
 
     @classmethod
-    def get_parent(cls, command_context_object: User) -> None:
+    def get_parent(cls, record: User) -> None:
         return None
 
     @classmethod
-    def get_state(cls, command_context_object: User) -> dict[str, Any]:
+    def get_state(cls, record: User) -> dict[str, Any]:
         """Snapshot the user so a session holding it can be evicted.
 
         This workflow never sets a root context, so the current user is what
@@ -23,7 +23,7 @@ class Context:
         fastworkflow.EPHEMERAL instead to declare deliberately that this
         context is not worth persisting.
         """
-        return {'name': command_context_object.name}
+        return {'name': record.name}
 
     @classmethod
     def from_state(cls, state: dict[str, Any], workflow: fastworkflow.Workflow,

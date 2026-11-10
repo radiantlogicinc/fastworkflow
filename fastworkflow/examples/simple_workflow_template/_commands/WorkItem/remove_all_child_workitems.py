@@ -31,7 +31,7 @@ class ResponseGenerator:
     """Handle command execution and craft the textual response."""
 
     def _process_command(self, workflow: fastworkflow.Workflow) -> Signature.Output:
-        workitem: WorkItem = workflow.command_context_for_response_generation
+        workitem: WorkItem = workflow.record
         
         try:
             # Remove all child work items
@@ -46,6 +46,6 @@ class ResponseGenerator:
 
         if output.error_msg:
             return fastworkflow.CommandResponse(response=output.error_msg, output=output)
-        workitem: WorkItem = workflow.command_context_for_response_generation
+        workitem: WorkItem = workflow.record
         return fastworkflow.CommandResponse(
             response=f"Removed all child work items from '{workitem.get_absolute_path()}'.", output=output)

@@ -281,12 +281,12 @@ def _executor_commands_text(current_workflow, exclude: frozenset[str] = frozense
     commands = CommandMetadataAPI.get_command_display_text(
         subject_workflow_path=current_workflow.folderpath,
         cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
-        active_context_name=current_workflow.current_command_context_name,
+        active_context_name=current_workflow._current_command_context_name,
         exclude=exclude,
     )
     other_contexts = CommandMetadataAPI.get_other_contexts_text(
         subject_workflow_path=current_workflow.folderpath,
-        active_context_name=current_workflow.current_command_context_name,
+        active_context_name=current_workflow._current_command_context_name,
         navigation_workflow=current_workflow,
         exclude=exclude,
     )
@@ -449,7 +449,7 @@ def _explicit_agent_command(command: str, workflow) -> str:
     parts = command.strip().split(maxsplit=1)
     token = parts[0].lstrip("/") if parts else ""
     app = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
-    current_context = workflow.current_command_context_name
+    current_context = workflow._current_command_context_name
     # A planning command is available where it is runnable, by the same rule as an
     # execution command: a name outside this set is refused with the same message.
     available = (set(app.get_command_names(current_context))
@@ -611,7 +611,7 @@ def _parameter_fields(command: str, workflow) -> frozenset[str] | None:
         return None
     try:
         app = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
-        context = workflow.current_command_context_name
+        context = workflow._current_command_context_name
         names = [name for name in (*app.get_command_names(context),
                                    *app.get_planning_command_names(context))
                  if _command_name_matches(token, name)]
@@ -657,7 +657,7 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     if guard is not None and guard.blocked_command and " ".join(command.split()) == guard.blocked_command[2]:
         return (f"{guard.blocked_command[0]} with these arguments is unavailable for this step: "
                 f"{guard.blocked_command[1]}. Use what it returned, or do something else.")
-    ran_in = active.current_command_context_name if active is not None else None
+    ran_in = active._current_command_context_name if active is not None else None
     try:
         ran_in_clause = context_clause_for(active) if active is not None else ""
         ran_in_name = context_identity(active)[0]
@@ -1104,7 +1104,7 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
 
     def _run_execute_workflow_query_unscoped(command: str) -> str:
         # Check if this command originated from user input (iteration_counter == 0)
-        # Set flag in workflow context so validate_extracted_parameters can access it
+        # Set flag in workflow context so the Input's model validators can access it
         is_user_command = chat_session_obj.workflow_tool_agent.iteration_counter <= 0 
         run_state = getattr(chat_session_obj.workflow_tool_agent, "run_state", None)
         by_code = isinstance(run_state, dict) and bool(run_state.get("by_code"))
@@ -1207,7 +1207,7 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         alias = current_execute_alias(chat_session_obj.workflow_tool_agent)
         workflow = chat_session_obj.get_active_workflow()
         clause = context_clause_for(workflow)
-        context_before = getattr(workflow, "current_command_context", None)
+        context_before = getattr(workflow, "_current_command_context", None)
         # What a nested run this command starts needs to finish this step after a suspension:
         # the command as the action log holds it, and the note on its folded arguments.
         run_state = getattr(chat_session_obj.workflow_tool_agent, "run_state", None)
@@ -1224,7 +1224,7 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
             if ran_on_clause is not None:
                 clause = ran_on_clause
         workflow_after = chat_session_obj.get_active_workflow()
-        context_changed = getattr(workflow_after, "current_command_context", None) is not context_before
+        context_changed = getattr(workflow_after, "_current_command_context", None) is not context_before
         # Name where the command left the agent: a weak model otherwise reads
         # the context the command ran in as the one it is now in.
         return run_observation(
@@ -1644,11 +1644,11 @@ def warm_planning_commands(workflow_folderpath: str) -> None:
     A workflow without planning commands has nothing to warm. Never raises: a failure is
     logged and the turn path meets it again."""
     if not _planning_command_files(os.path.join(workflow_folderpath, "_commands")):
-        if _jev_lm() is None:   # the verify checks of execution commands' fields need the key too (2.46)
+        if _jev_lm() is None:   # the classifier checks of execution commands' fields need the key too (2.46)
             try:
                 _warn_missing_jev_key(workflow_folderpath)
             except Exception as error:  # noqa: BLE001 - warm-up must not stop startup
-                logger.debug(f"planning command warm-up: no verify check listing for {workflow_folderpath}: {error}")
+                logger.debug(f"planning command warm-up: no classifier check listing for {workflow_folderpath}: {error}")
         return
     loaded = ()
     for step in (load_planning_commands, planning_commands.command_utterances):
@@ -1821,9 +1821,9 @@ def planning_scopes(workflow) -> tuple[str, ...]:
     if workflow is None:
         return ("",)
     folder = getattr(workflow, "folderpath", None)
-    names = [getattr(workflow, "current_command_context_name", "*")]
-    obj = getattr(workflow, "current_command_context", None)
-    root = getattr(workflow, "root_command_context", None)
+    names = [getattr(workflow, "_current_command_context_name", "*")]
+    obj = getattr(workflow, "_current_command_context", None)
+    root = getattr(workflow, "root", None)
     visited_objs: set[int] = {id(obj)} if obj is not None else set()
     while obj is not None and obj is not root:
         try:
@@ -1884,7 +1884,7 @@ def planner_commands_text(current_workflow) -> str:
     return CommandMetadataAPI.get_all_contexts_command_display_text(
         subject_workflow_path=current_workflow.folderpath,
         cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
-        active_context_name=current_workflow.current_command_context_name,
+        active_context_name=current_workflow._current_command_context_name,
         navigation_workflow=current_workflow,
     )
 
@@ -1941,7 +1941,7 @@ def typed_planner_commands_text(current_workflow) -> str:
     """
     full = planner_commands_text(current_workflow)
     folderpath = current_workflow.folderpath
-    active = current_workflow.current_command_context_name
+    active = current_workflow._current_command_context_name
     cme_path = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
     crd = fastworkflow.RoutingRegistry.get_definition(folderpath)
     # (context, name) -> (description, parameter names), from every context's metadata; and the
@@ -2009,15 +2009,15 @@ def _warn_missing_jev_key(workflow_folderpath: str) -> None:
     """The INFO line of design 3.9, once per workflow folder per process, when a workflow has
     planning commands (``_commands``) and ``JEV_API_KEY`` is not set. Planning commands are ordinary
     intent labels, so intent detection still matches them; without the key, Jev's planning-match
-    candidates are off, and so are the ``verify`` checks of the fields that name planning commands.
+    candidates are off, and so are the classifier checks (``classifier_confirms``) of the fields that name planning commands.
     """
     fields = planning_commands.verify_field_names(workflow_folderpath)
     if not _planning_command_files(os.path.join(workflow_folderpath, "_commands")):
         if fields:
-            logger.info(f"{workflow_folderpath}: JEV_API_KEY is not set: the verify checks of "
+            logger.info(f"{workflow_folderpath}: JEV_API_KEY is not set: the classifier checks of "
                         f"{', '.join(fields)} are inactive.")
         return
-    checks_clause = f" and the verify checks of {', '.join(fields)}" if fields else ""
+    checks_clause = f" and the classifier checks of {', '.join(fields)}" if fields else ""
     logger.info(
         f"{workflow_folderpath}: planning commands are matched by intent detection; without "
         f"JEV_API_KEY, Jev's planning-match candidates{checks_clause} are off."
@@ -2655,7 +2655,7 @@ def build_query_with_next_steps(user_query: str,
             planner then fills the planning command's typed parameters and code expands its steps
             (``planning_commands.typed_planning_call``; span ``plan_source`` "skill_call"; a planning command
             without parameters makes no planner call); Jev, when configured, checks the
-            planning command's ``verify`` parameters against the request. The call's phases are then
+            planning command's classifier-checked parameters against the request. The call's phases are then
             run by the execution context (``_phased_planning_command_call``). Any failure falls back to
             the text planner with ``plan_template``, except a refusal of the arguments
             (PlanningCommandInputError) on a turn that may ask (``_planning_command_refusal_may_ask``): its question

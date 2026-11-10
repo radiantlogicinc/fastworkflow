@@ -59,7 +59,7 @@ def test_context_no_properties():
     )
     
     # Use TodoListManager as context
-    app_workflow.current_command_context = TodoListManager()
+    app_workflow.record = TodoListManager()
     
     # Create a command metadata extraction workflow
     workflow_type = "command_metadata_extraction"
@@ -95,7 +95,7 @@ def test_context_with_properties():
     
     # Create a TodoList with some properties
     todo_list = TodoList(id=1, description="Test List")
-    app_workflow.current_command_context = todo_list
+    app_workflow.record = todo_list
     
     # Create a command metadata extraction workflow
     workflow_type = "command_metadata_extraction"

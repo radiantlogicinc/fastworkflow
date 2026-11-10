@@ -45,7 +45,7 @@ def gated(todo):
     """The approval tests' ``todo`` context with the review gate restored (``todo`` bypasses it for those tests), at the
     library's root context, where the sub-tasks are run."""
     vars(todo.ctx).pop("_subtask_gate", None)
-    todo.wf.current_command_context = todo.library
+    todo.wf.record = todo.library
     return todo
 
 

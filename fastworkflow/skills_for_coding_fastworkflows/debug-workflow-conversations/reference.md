@@ -154,7 +154,7 @@ Wraps parameter extraction + validation for the resolved command.
 | `retry_round` | true when this turn continues a parameter-correction loop |
 | `parameters_valid` | The overall verdict (span `status` stays `ok`; only exceptions mark `error`) |
 | `missing_fields` / `invalid_fields` | Structured field lists (no prose parsing needed) |
-| `validation_hook` | `{ran, is_valid, message, raised?, changed_fields, refused_fields}` from the command's `validate_extracted_parameters`. `changed_fields` lists the fields the hook corrected in place; `refused_fields` lists the fields a `fastworkflow.Refused(..., field=...)` reset to missing. `raised` is set only when the hook crashed with a non-`Refused` exception. There is no `db_lookup` key on a span recorded at version 8 or later |
+| `validation_hook` | `{ran, is_valid, message, raised?, changed_fields, refused_fields}` from the command's `Input` model validators (always emitted; `ran: false` when the Input declares none). `changed_fields` lists the fields the hook corrected in place; `refused_fields` lists the fields a `fastworkflow.Refused(..., field=...)` reset to missing. `raised` is set only when the hook crashed with a non-`Refused` exception. There is no `db_lookup` key on a span recorded at version 8 or later |
 
 ### `fw.ask_user` (kind `human_wait`)
 One per clarifying question (deterministic per-attempt span ids). Attributes:

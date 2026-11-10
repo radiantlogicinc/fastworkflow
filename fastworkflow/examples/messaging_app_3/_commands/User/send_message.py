@@ -35,7 +35,7 @@ class ResponseGenerator:
     """Call the User.send_message instance method."""
 
     def _process_command(self, workflow: fastworkflow.Workflow, input: Signature.Input) -> None:
-        user: User = workflow.command_context_for_response_generation
+        user: User = workflow.record
         user.send_message(to=input.to, message=input.message)
 
     def __call__(self, workflow: 

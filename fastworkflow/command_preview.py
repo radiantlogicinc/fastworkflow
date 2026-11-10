@@ -7,15 +7,16 @@ workflow's planning commands with the planning command loader (``workflow_agent.
 (``<workflow_folder>/../docs/planning_command_previews``, see ``default_out_dir``). With
 ``--check`` nothing is written: the command exits non-zero when a preview in ``<out>``
 differs from a fresh render, is missing, or is an extra ``.md`` file no planning command renders, and
-when a phase output field's ``"from"`` names a command or field the workflow lacks.
+when a phase output field's ``from_command_output`` names a command or field the workflow lacks.
 
 A preview, in the order of the planning command-file layout (``docs/planning_command_file_layout.md``):
 
 1. the planning command's name, its description (the ``Signature`` docstring) and its kind (flat
    steps, or phases);
 2. its inputs: name, type, default, the sample value the preview renders with, the
-   ``verify`` and ``in_request`` flags and the description, then the verify meanings
-   (``verify`` dict);
+   ``classifier_confirms`` / ``classifier_decides`` and ``copied_from_command_text`` /
+   ``record_named_in_command_text`` columns and the description, then the classifier meanings
+   (the ``classifier_confirms`` dict);
 3. its ``plain_utterances``;
 4. for a phased planning command (``plan()``): when ``plan()`` returns phases at all (when some inputs
    make the call run flat), then the phases, each with its output model, when it runs and
@@ -982,14 +983,13 @@ def _render(command, args: dict) -> _Render:
 
 
 def _validated(command, args: dict) -> tuple[bool, str]:
-    """Whether a planning command call can reach ``steps()`` with *args*, and why not."""
+    """Whether a planning command call can reach ``steps()`` with *args*, and why not: the Input's
+    validators (``check_input``, on the placeholder context) refuse or change them."""
     from fastworkflow import planning_commands
 
-    if command.validate is None:
-        return True, ""
     try:
-        if planning_commands._run_validate(command, args, "", None) != args:
-            return False, "validate_extracted_parameters changes it"
+        if planning_commands.check_input(command, args, "", None):
+            return False, "a validator on Input changes it"
     except planning_commands.PlanningCommandCallError as error:
         return False, str(error)
     return True, ""
@@ -1135,8 +1135,7 @@ def variants(command) -> tuple[list[_Variant], list[str]]:
     (``describe_inputs``), the first the one of the sample inputs. Past ``MAX_VARIANTS``
     renders, only those a pairwise cover reaches and one of each other layout (``_layout``)
     are ``shown`` in the plan section; the phases table reads them all. A combination
-    ``validate_extracted_parameters`` changes or refuses is a variant without a render,
-    one per reason.
+    Input validator changes or refuses is a variant without a render, one per reason.
     """
     base = _sample_args(command)
     axes = _axes(command)
@@ -1216,7 +1215,8 @@ def _inputs_section(command) -> list[str]:
         return lines + ["None: the steps are fixed.", ""]
     if not command.params:
         return lines + ["None: every call runs the same plan.", ""]
-    lines += ["| input | type | default | sample | verify | in_request | description |",
+    lines += ["| input | type | default | sample | classifier_confirms / classifier_decides | "
+              "copied_from_command_text / record_named_in_command_text | description |",
               "|---|---|---|---|---|---|---|"]
     notes = []
     for p in command.params:
@@ -1233,14 +1233,14 @@ def _inputs_section(command) -> list[str]:
                        _code(json.dumps(sample)) if isinstance(sample, list) else
                        _code(sample) if sample != "" else '`""`')
         lines.append(f"| `{p.name}` | {_text(type_text, True)} | {default} | {sample_text.replace('|', chr(92) + '|')} "
-                     f"| {'alone' if p.alone else 'yes' if p.verify else ''} | {_in_request_cell(p)} | {_text(p.desc, True)} |")
+                     f"| {'decides' if p.alone else 'yes' if p.verify else ''} | {_in_request_cell(p)} | {_text(p.desc, True)} |")
         if p.means:
             notes.append(f"- `{p.name}` means: " + "; ".join(f"{_code(v)}: {_text(t)}" for v, t in p.means) + ".")
-        if p.in_request and not p.subject:   # the subject column says it (in_request "subject")
+        if p.in_request and not p.subject:   # the record named column says it (record_named_in_command_text)
             if p.type == "str":
-                notes.append(f"- `{p.name}` must be written in the request (`in_request`).")
+                notes.append(f"- `{p.name}` must be written in the command text (`copied_from_command_text`).")
             else:
-                notes.append(f"- `{p.name}` must be a number the request writes (`in_request`).")
+                notes.append(f"- `{p.name}` must be a number the command text writes (`copied_from_command_text`).")
     lines.append("")
     if notes:
         lines += notes + [""]
@@ -1248,9 +1248,10 @@ def _inputs_section(command) -> list[str]:
 
 
 def _in_request_cell(p) -> str:
-    """The ``in_request`` column of an input row: ``subject`` for the subject option, ``yes`` for
-    ``in_request: True``, empty otherwise; the words it ignores at either end follow (``ignore``)."""
-    cell = "subject" if p.subject else ("yes" if p.in_request else "")
+    """The copied_from_command_text / record_named_in_command_text column of an input row: ``record named``
+    for the record_named_in_command_text option, ``yes`` for copied_from_command_text, empty otherwise; the words
+    it ignores at either end follow (``ignore``)."""
+    cell = "record named" if p.subject else ("yes" if p.in_request else "")
     if p.ignore:
         cell = (f"{cell}; " if cell else "") + "ignore " + ", ".join(_code(w) for w in p.ignore)
     return cell
@@ -1696,7 +1697,7 @@ def _steps_section(found: list[_Variant], changing: list[str], phased: bool,
                                    _text(first.title()) if first else "", command_names)
     if refused:
         lines += ["Not rendered, as no planning command call reaches `steps()` with them "
-                  "(`validate_extracted_parameters` changes or refuses them):", ""]
+                  "(an Input validator changes or refuses them):", ""]
         lines += [f"- {_text(variant.title()) or 'the sample inputs'}: {_text(variant.refused)}"
                   for variant in refused] + [""]
     return lines
@@ -1821,9 +1822,11 @@ def _load_error(name: str, path: str, folder: str) -> str:
 def load_problems(workflow_folder: str) -> list[str]:
     """The workflow's command files that do not load, each as ``<name>: <error>``: the load problems
     ``fastworkflow command preview --check`` reports for them (``_load_error``). Empty when every planning
-    command file loads. One function for the three places a developer looks: ``fastworkflow run`` prints
-    them before its first prompt, ``fastworkflow train`` stops on them before training, and the FastAPI
-    server logs them at startup. A retired ``_skills`` folder is one problem, as it is for the preview.
+    command file and every execution command's Signature loads. One function for the three places a developer
+    looks: ``fastworkflow run`` prints them before its first prompt, ``fastworkflow train`` stops on them before
+    training, and the FastAPI server logs them at startup. A retired ``_skills`` folder is one problem, as it is
+    for the preview. An execution command's Signature is checked here too, so a removed
+    ``validate_extracted_parameters`` (spec 3.1) fails the load of its command.
     """
     from fastworkflow import workflow_agent
     from fastworkflow.command_directory import check_no_planning_commands_folder
@@ -1840,8 +1843,71 @@ def load_problems(workflow_folder: str) -> list[str]:
         loaded = {name for name, _, _ in workflow_agent.load_planning_commands(folder)}
     except Exception as error:  # noqa: BLE001 - a file the command directory cannot parse fails the whole load
         return [f"the workflow's commands do not load: {type(error).__name__}: {error}"]
-    return [_load_error(name, path, folder) for name, path in workflow_agent._planning_command_files(root)
-            if name not in loaded]
+    planning = [_load_error(name, path, folder) for name, path in workflow_agent._planning_command_files(root)
+                if name not in loaded]
+    definition, definition_lines = _definition_problems(folder, planning)
+    if definition is None:
+        return planning + definition_lines
+    return planning + _execution_load_problems(definition) + _context_load_problems(definition)
+
+
+_PY_FILE = re.compile(r"([^\s'\"]+\.py)")
+
+
+def _definition_problems(folder: str, planning: list[str]) -> tuple[Any, list[str]]:
+    """The workflow's routing definition, or None with its load error as problem lines. Building the
+    definition imports every command file and checks the retired declarations, so a file that does not
+    import or a retired spelling fails it. Such a failure is reported here rather than raised, and a file
+    the planning problems already name is left out, so ``load_problems`` lists it once."""
+    from fastworkflow.command_routing import RoutingRegistry
+
+    try:
+        return RoutingRegistry.get_definition(folder), []
+    except Exception as error:  # noqa: BLE001 - a problem line, never a raise: run, train and the server print it
+        kind = type(error).__name__
+        lines = []
+        for text in str(error).strip().splitlines() or [""]:
+            match = _PY_FILE.search(text)
+            if match is None:
+                lines.append(f"the workflow's commands do not load: {kind}: {text}")
+                continue
+            file_name = match.group(1)
+            label = os.path.relpath(file_name, folder) if os.path.isabs(file_name) else file_name
+            if any(os.path.basename(label) in line for line in planning):
+                continue
+            rest = text[len(file_name) + 2:] if text.startswith(file_name + ": ") else text
+            lines.append(f"{label}: {kind}: {rest}")
+        return None, lines
+
+
+def _context_load_problems(definition: Any) -> list[str]:
+    """Each context callback class that does not load, as its load error: a removed ``instance_label``
+    classmethod, or a ``command_context_object`` parameter (``command_context_model.context_class_problems``)."""
+    import fastworkflow
+
+    problems = []
+    for name in sorted(definition.command_directory.map_context_2_metadata):
+        try:
+            definition.context_model.get_context_class(name, fastworkflow.ModuleType.CONTEXT_CLASS)
+        except Exception as error:  # noqa: BLE001 - the load error is what the developer needs to see
+            problems.append(f"{name}: {error}")
+    return problems
+
+
+def _execution_load_problems(definition: Any) -> list[str]:
+    """Each execution command whose Signature does not load, as its load error (the removed
+    ``validate_extracted_parameters``, a retired ``db_lookup``, or a file that does not import)."""
+    import fastworkflow
+
+    problems = []
+    for name, metadata in sorted(definition.command_directory.map_command_2_metadata.items()):
+        if metadata.is_planning or metadata.framework:
+            continue
+        try:
+            definition.get_command_class(name, fastworkflow.ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)
+        except Exception as error:  # noqa: BLE001 - the load error is what the developer needs to see
+            problems.append(f"{name}: {error}")
+    return problems
 
 
 def _present_previews(out_dir: str) -> list[str]:
@@ -1866,6 +1932,15 @@ def _present_previews(out_dir: str) -> list[str]:
     return sorted(out)
 
 
+def _workflow_context_folders(workflow_folder: str) -> set[str]:
+    """The context folders of the workflow's ``_commands`` (``_commands/<Context>/``)."""
+    root = os.path.join(os.path.abspath(workflow_folder), "_commands")
+    if not os.path.isdir(root):
+        return set()
+    return {entry for entry in os.listdir(root)
+            if not entry.startswith(("_", ".")) and os.path.isdir(os.path.join(root, entry))}
+
+
 def check_previews(workflow_folder: str, out_dir: Optional[str] = None) -> list[str]:
     """The problems of the previews in *out_dir* (``<out>/<name>.md`` and
     ``<out>/<Context>/<name>.md``) against a fresh render; empty when current.
@@ -1873,6 +1948,11 @@ def check_previews(workflow_folder: str, out_dir: Optional[str] = None) -> list[
     A problem is a preview that differs, one that is missing, an extra ``.md`` file, or a
     ``from_`` / facts-field error reported by ``planning_commands.resolve_field_sources`` across
     the workflow's execution and planning commands.
+
+    An extra file is one this workflow would own: a file in a ``<Context>/`` folder of a context
+    the workflow has (its folder under ``_commands/``, or a context of a rendered preview), or a
+    root-level file when the workflow renders root-level previews. Files in other folders belong
+    to another workflow that shares *out_dir* and are ignored.
     """
     from fastworkflow import planning_commands, workflow_agent
 
@@ -1888,7 +1968,13 @@ def check_previews(workflow_folder: str, out_dir: Optional[str] = None) -> list[
         with open(path, encoding="utf-8", newline="") as handle:
             if handle.read() != text:
                 problems.append(f"stale: {name}")
-    problems += [f"extra: {name}" for name in present if name not in fresh]
+    contexts = _workflow_context_folders(workflow_folder) | {n.split("/")[0] for n in fresh if "/" in n}
+    renders_at_root = any("/" not in n for n in fresh)
+    for name in present:
+        if name in fresh:
+            continue
+        if ("/" in name and name.split("/")[0] in contexts) or ("/" not in name and renders_at_root):
+            problems.append(f"extra: {name}")
     folder = os.path.abspath(workflow_folder)
     for err in planning_commands.resolve_field_sources(folder).errors:
         formatted = err.format()
@@ -2031,12 +2117,21 @@ def preview_main(args) -> int:
             return 1
         for info in planning_commands.resolve_field_sources(os.path.abspath(args.workflow_folder)).infos:
             print(f"info: {info.format()}")
+        # Past check_previews, every planning command file loads, so these are the execution, context and
+        # routing load problems (a retired declaration, a command file that does not import).
+        command_problems = load_problems(args.workflow_folder)
+        if command_problems:
+            print("command files that do not load (fastworkflow run, train and the server stop on them):")
+            for problem in command_problems:
+                print(f"  {problem}")
         for warning in check_hand_typed_warnings(args.workflow_folder):
             print(warning)
         for warning in check_note_condition_warnings(args.workflow_folder):
             print(warning)
         for warning in check_kind_list_warnings(args.workflow_folder):
             print(warning)
+        if command_problems:
+            return 1
         if problems:
             print(f"planning command previews in {out_dir} are not current "
                   f"(run: fastworkflow command preview {args.workflow_folder}"

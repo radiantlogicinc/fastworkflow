@@ -64,7 +64,7 @@ def app_module(tmp_path, env_files, monkeypatch):
     monkeypatch.setattr(jwt_manager, "EXPECT_ENCRYPTED_JWT", True)
     folder = tmp_path / "todo_annotated"
     shutil.copytree(TODO, folder, ignore=_COPY_IGNORE, symlinks=True)
-    _annotate(folder, "TodoList/set_properties.py", '"mandatory"')
+    _annotate(folder, "TodoList/set_properties.py", "REQUIRED_ALWAYS")
     env_file, passwords_file = env_files
     sys.argv = ["pytest", "--workflow_path", str(folder), "--env_file_path", env_file,
                 "--passwords_file_path", passwords_file]
@@ -86,11 +86,11 @@ def _setup_todo_context(app_module, channel_id: str):
         runtime = await app_module.session_manager.get_session(channel_id)
         wf = runtime.execution_context.app_workflow
         root = TodoListManager(str(Path(wf.folderpath).parent / f"todo_{uuid.uuid4().hex}.json"))
-        wf.root_command_context = root
+        wf.root = root
         chores = TodoList(id=7, description="chores")
         chores.parent = root
         root.lists[7] = chores
-        wf.current_command_context = chores
+        wf.record = chores
         # A list is identified by its id in the instance label (as a record is), so the context locates.
         from fastworkflow.context_identity import context_class_for
         context_class_for(wf, "TodoList").instance_label_attr = "id"

@@ -149,7 +149,10 @@ class TestParamExtractionSpan:
         assert span.attributes["extraction_method"] == "xml_regex"
         assert span.attributes["retry_round"] is False
         assert span.attributes["parameters_valid"] is True
-        assert span.attributes["validation_hook"]["ran"] is True
+        # add_two_numbers declares no Input validator, so the validation step did not run
+        # (ran=False is the honest fact). The facts are still emitted; a command with a
+        # validator reports ran=True (test_validation_hook_outcomes_are_structured).
+        assert span.attributes["validation_hook"]["ran"] is False
         assert span.attributes["validation_hook"]["is_valid"] is True
 
     def test_key_value_extraction_valid(self, hello_ctx):
@@ -213,7 +216,7 @@ class TestStructuredValidationDiagnostics:
         add_params = routing.get_command_class(
             "ChatRoom/add_user", fastworkflow.ModuleType.COMMAND_PARAMETERS_CLASS
         )
-        wf.command_context_for_response_generation = wf.root_command_context
+        wf._command_context_for_response_generation = wf.root
         add_user(wf, "add Alice", add_params(user_name="Alice", is_premium_user=False))
         add_user(wf, "add Bob", add_params(user_name="Bob Smith", is_premium_user=True))
 

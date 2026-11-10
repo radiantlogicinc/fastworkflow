@@ -41,7 +41,7 @@ class ResponseGenerator:
     """Call the User.send_message instance method."""
 
     def _process_command(self, workflow: fastworkflow.Workflow, input: Signature.Input) -> Signature.Output:
-        chatroom: ChatRoom = workflow.command_context_for_response_generation
+        chatroom: ChatRoom = workflow.record
 
         if input.user_name in chatroom.list_users():
             return Signature.Output(user_added=False)

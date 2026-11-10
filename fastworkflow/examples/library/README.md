@@ -4,12 +4,12 @@ A small library (two branches, four books, three members and their loans) whose 
 the worked examples of [docs/tutorials/planning_commands](../../../docs/tutorials/planning_commands/README.md).
 
 > **Status.** Written for the release that implements the unified command architecture,
-> sixth amendment included: planning commands in `_commands/`, `from_`, `__result__`, check
-> options such as `in_request` on any command's `Input` fields, nested planning commands,
+> sixth amendment included: planning commands in `_commands/`, `from_command_output`, `__result__`, field
+> options such as `copied_from_command_text` on any command's `Input` fields, nested planning commands,
 > scoped lookup, commands that return their `Output`, facts typed by the commands that
-> produce them, steps written with helpers, and `pick` reading the listing wherever the
-> call read it. It does not load on earlier releases, which have no `fastworkflow.from_`
-> and no `fastworkflow.planning`.
+> produce them, steps written with helpers, and `run(..., named=...)` reading the listing wherever the
+> call read it. It does not load on earlier releases, which have no `fastworkflow.planning`
+> and no `from_command_output` key.
 
 ## Layout
 
@@ -46,10 +46,10 @@ True`: inside a planning command's phase it runs only when a step of that phase 
 | planning command | tutorial page | what it shows |
 |---|---|---|
 | `Library/overdue_summary` | 1 | two phases, an optional input, a fact the answer step carries, steps written with `run` |
-| `Library/note_member` | 2 | inputs, `in_request` on a name and on free text, `pick`, a call with one phase |
+| `Library/note_member` | 2 | inputs, `copied_from_command_text` on a name and on free text, `run(named=...)`, a call with one phase |
 | `Library/count_books` | 3 | a phase that hands on a command's `Output`, an answer `__result__` writes |
-| `Library/book_by_title` | 4, 11 | skipping, `pick` from an earlier phase's listing, a `_` helper, a typed `Output` that `__result__` returns with the answer |
-| `Library/member_report` | 6, 9 | `__phases__`, `full_list`, refusing a call |
+| `Library/book_by_title` | 4, 11 | skipping, `run(named=...)` from an earlier phase's listing, a `_` helper, a typed `Output` that `__result__` returns with the answer |
+| `Library/member_report` | 6, 9 | `__phases__`, `run(..., all_pages=True)`, refusing a call |
 | `Library/author_books` | 8 | a fan-out, bound to the records it opens |
 | `Library/find_record` | 10 | a union of `Output`s: whichever search ran |
 | `Book/shelf_report` | 10 | a facts model with one field per command |

@@ -643,7 +643,7 @@ def test_the_aggregate_number_moves_only_on_purpose():
     itself, so a bump -- or an accidental revert -- passes them all. Pinning the
     literal makes a change to the aggregate a deliberate edit to this test, next
     to the history comment in `tracing.py` that says what moved."""
-    assert tracing.SPAN_CONTRACT_VERSION == 40
+    assert tracing.SPAN_CONTRACT_VERSION == 41
 
 
 def test_a_provenance_record_written_before_the_map_still_validates():
@@ -715,7 +715,7 @@ def _make_ctx(todo_workflow_path: str, tmp_path, sink) -> WorkflowExecutionConte
     )
     context = WorkflowExecutionContext(run_as_agent=False, trace_sink=sink)
     context.bind_app_workflow(workflow)
-    workflow.root_command_context = TodoListManager(str(tmp_path / "todo_list.json"))
+    workflow.root = TodoListManager(str(tmp_path / "todo_list.json"))
     return context
 
 

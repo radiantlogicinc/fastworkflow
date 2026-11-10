@@ -3,7 +3,7 @@
 **Goal:** "who wrote Dune?" The command finds the book, opens it, and says its author and
 copies. Two things can go wrong. Nothing matches, so there is nothing to open: the second
 phase is skipped and the answer says so. Or several books match (`find_book query=Dune`
-lists Dune and Dune Messiah): the command opens the one *titled* Dune, with `pick`.
+lists Dune and Dune Messiah): the command opens the one *titled* Dune, with `run(..., named=...)`.
 
 ## The planning command file
 
@@ -11,7 +11,7 @@ lists Dune and Dune Messiah): the command opens the one *titled* Dune, with `pic
 ```python
 """book_by_title: the book whose title the request names, picked by its title.
 
-find lists the matches; book opens the one whose title is the request's title (pick), and
+find lists the matches; book opens the one whose title is the request's title (run(..., named=...)), and
 is skipped when nothing matched; __result__ says the author and copies, or that no book
 matches, and reports the book to a caller in its Output. The call ends on the book it
 opened.
@@ -21,7 +21,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from fastworkflow import CommandResponse
-from fastworkflow.planning import pick, run
+from fastworkflow.planning import run
 
 from ._wording import copies
 from .find_book import Signature as FindBook
@@ -44,7 +44,7 @@ class Signature:
 
     class Input(BaseModel):
         title: str = Field(description="the book's title",
-                           json_schema_extra={"in_request": True})
+                           json_schema_extra={"copied_from_command_text": True})
 
     class Output(BaseModel):
         found: bool = Field(description="whether a book was opened for the title")
@@ -61,7 +61,7 @@ class PlanGenerator:
     def book(self, input, find) -> OpenBook.Output:
         if not find.book_uids:
             return []
-        return [pick("open_book", named=input.title)]
+        return [run("open_book", named=input.title)]
 
     def __result__(self, input, book):
         if book is None:
@@ -104,7 +104,7 @@ def copies(number):
 - **`if not find.book_uids: return []`**: a phase that returns no steps is **skipped**. The
   method is called once, when the run reaches the phase, with the real facts; the decision
   is never made earlier. A skipped phase runs nothing and hands nothing on.
-- **`pick("open_book", named=input.title)`** writes the step that opens one row of a
+- **`run("open_book", named=input.title)`** writes the step that opens one row of a
   listing, in the words a row is picked by: `open_book with the uid of the Dune match`. Code
   looks for the listing among the runs of this call, wherever it read it: the latest run
   whose arguments hold the name and whose uid list fits `open_book`'s `book_uid`. Here that
@@ -114,7 +114,7 @@ def copies(number):
   - otherwise the agent picks the row: the step is written in words it can read.
 
   When a rule of your own chooses the row, give the uid yourself:
-  `pick("open_book", named=input.title, book_uid=uid)`.
+  `run("open_book", named=input.title, book_uid=uid)`.
 - **`def __result__(self, input, book)`**: `book` is `None` when the `book` phase was
   skipped, so `__result__` says that no book matches. A phase that was skipped always
   arrives as `None`, here and in a later phase's parameters; no default is needed.
@@ -132,7 +132,7 @@ show_book with the uid of the <title> match (only when find.book_uids)
 ## What the agent plans from
 
 In the template every fact is unknown, so every test on one reads as true and is noted. The
-`book` phase's line ends with the test its method made, and the `pick` is in pick words:
+`book` phase's line ends with the test its method made, and the row is named in words:
 
 ```text
 find_book query=<title>
@@ -234,7 +234,7 @@ Each run that opened a book ends with `now in:`: the call moved the workflow ont
 and leaves it there. Page 5 is about that. The `output:` lines are the `Output` page 11 is
 about.
 
-Run offline for the title Dune, the pick opens the one exact match:
+Run offline for the title Dune, the named row opens the one exact match:
 
 <!-- dry-run: book_by_title {"title": "Dune"} -->
 ```text
@@ -253,6 +253,6 @@ answer written by __result__:
 ## What you learned
 
 `return []` skips a phase, decided when it is reached; whatever reads a skipped phase gets
-`None`; the template marks the skipped lines "(only when ...)". `pick(command, named=...)`
+`None`; the template marks the skipped lines "(only when ...)". `run(command, named=...)`
 opens the row of a listing the call read, in any phase: code opens the row titled as asked,
 or the only row, and otherwise the agent picks. A `_` file holds what several commands share.

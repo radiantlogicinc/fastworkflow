@@ -177,7 +177,7 @@ def context_commands(app_workflow, cme_workflow_folderpath: str) -> list[str]:
     meta = CommandMetadataAPI.get_enhanced_command_info(
         subject_workflow_path=app_workflow.folderpath,
         cme_workflow_path=cme_workflow_folderpath,
-        active_context_name=app_workflow.current_command_context_name,
+        active_context_name=app_workflow._current_command_context_name,
         include_planning=False,
     )
     return [cmd["name"] for cmd in meta.get("commands", [])
@@ -189,7 +189,7 @@ def other_context_commands(app_workflow) -> dict[str, list[str]]:
     in every context, so the current one already lists (and skips) them. Empty on failure."""
     try:
         return CommandMetadataAPI.get_other_context_commands(
-            app_workflow.folderpath, app_workflow.current_command_context_name)
+            app_workflow.folderpath, app_workflow._current_command_context_name)
     except Exception:
         return {}
 

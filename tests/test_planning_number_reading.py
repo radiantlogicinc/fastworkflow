@@ -23,7 +23,7 @@ class Signature:
     """Add copies of a book."""
 
     class Input(BaseModel):
-        copies: int = Field(description="how many copies to add", json_schema_extra={"in_request": True})
+        copies: int = Field(description="how many copies to add", json_schema_extra={"copied_from_command_text": True})
 
 
 class PlanGenerator:

@@ -2042,7 +2042,7 @@ class ObservabilityStore:
         # attributes JSON has been scrubbed since [R20]; the four scalars written
         # next to it never were, and one of them can carry entity content.
         #
-        # `context` is `workflow.current_command_context_displayname`, which calls
+        # `context` is `workflow._current_command_context_displayname`, which calls
         # a workflow-supplied `get_displayname(instance)` hook — the bundled
         # simple_workflow_template returns the work item's absolute path from it.
         # So it is not a type name, it is a label about a specific instance.

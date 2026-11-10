@@ -149,8 +149,8 @@ def test_a_declared_template_is_the_planner_template_as_written(tmp_path):
         '        "<find_group or find_unit, by kind> query=<name>",\n'
         '        "repeat count times (n = 1 to count): open member <n>",\n'
         '    ]\n\n'
-        '    @staticmethod')
-    text = EXAMPLE.replace("    @staticmethod", declared, 1)
+        '    class Input(BaseModel):')
+    text = EXAMPLE.replace("    class Input(BaseModel):", declared, 1)
     assert text != EXAMPLE
     command = _example(tmp_path, text)
     assert command.template == ("<find_group or find_unit, by kind> query=<name>",
@@ -160,7 +160,7 @@ def test_a_declared_template_is_the_planner_template_as_written(tmp_path):
 
 LABEL = '''from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class Signature:
@@ -172,11 +172,11 @@ class Signature:
         list_all: bool = False
         detail: bool = False
 
-        @staticmethod
-        def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
-            if not cmd_parameters.list_all:
-                cmd_parameters.detail = False
-            return None
+        @model_validator(mode="after")
+        def detail_only_for_all(self, info):
+            if not self.list_all:
+                self.detail = False
+            return self
 
 
 class PlanGenerator:
@@ -208,18 +208,19 @@ def test_the_rendered_template_says_when_each_step_is_written(tmp_path):
 def test_the_template_leaves_out_what_the_validation_hook_changes_or_refuses(tmp_path):
     # a hook refusing a unit with a person: the template renders a unit without one only
     refusing = EXAMPLE.replace(
-        "if cmd_parameters.include_risk and cmd_parameters.person:",
-        'if cmd_parameters.kind == "unit" and cmd_parameters.person:')
+        "if self.include_risk and self.person:",
+        'if self.kind == "unit" and self.person:')
     assert refusing != EXAMPLE
     assert _example(tmp_path / "refusing", refusing).template[:4] == (
         "find_group query=<name> (only when kind is group)",
         "list_members filter=<person> (only when person is given)",
         "find_unit query=<name> (only when kind is unit)",
         "list_members (only when person is empty)")
-    always = FIELD.format(field="name: str").replace(
-        '    class Input', '    @staticmethod\n    def validate_extracted_parameters(workflow, command, p):\n'
-        '        p.name = "x"\n        return None\n\n    class Input')
-    assert "changes or refuses every placeholder combination" in \
+    always = FIELD.format(field="name: str\n\n        @model_validator(mode=\"after\")\n"
+                          "        def always_x(self, info):\n            self.name = \"x\"\n            return self\n"
+                          ).replace("from pydantic import BaseModel, Field",
+                                    "from pydantic import BaseModel, Field, model_validator")
+    assert "validators change or refuse every placeholder combination" in \
         _load_error(_write(tmp_path / "always", {"bad": always}))
 
 
@@ -357,21 +358,21 @@ class PlanGenerator:
 
 @pytest.mark.parametrize("field, message", [
     ("ratios: list[int] = []", "has type"),
-    ("count: Optional[int] = None", "Optional is for an argument the request may leave out"),
+    ("count: Optional[int] = None", "Optional is for an argument the command text may leave out"),
     ("name: Optional[str] = 'x'", "Optional is for"),
     ("name: str = None", "default must be a value of its type"),
     ("flag: bool = 1", "bool parameter .* default must be true or false"),
     ("kind: Literal['a', 'b'] = 'c'", "not one of its values"),
     ("kind: Literal[1, 2]", "a Literal of text values only"),
-    ("name: str = Field(json_schema_extra={'colour': 'red'})", "unknown key"),
-    ("name: str = Field(json_schema_extra={'verify': True})", "option verify does not apply to field 'name' of type str"),
-    ("name: str = Field(json_schema_extra={'strip': ['group']})", "option strip is retired: write in_request"),
-    ("name: str = Field(json_schema_extra={'subject': 'yes'})", "option subject is retired: write in_request"),
-    ("name: str = Field(json_schema_extra={'in_request': 'yes'})", "in_request must be true, false, \"subject\" or a dict"),
+    ("name: str = Field(json_schema_extra={'colour': 'red'})", "unknown option 'colour'; its options are"),
+    ("name: str = Field(json_schema_extra={'classifier_confirms': True})", "option classifier_confirms does not apply to field 'name' of type str"),
+    ("name: str = Field(json_schema_extra={'strip': ['group']})", "strip: \\[\"group\"\] is removed: write \"copied_from_command_text\": \\{\"ignore\""),
+    ("name: str = Field(json_schema_extra={'subject': 'yes'})", "subject: \"yes\" is removed: write \"record_named_in_command_text\": True"),
+    ("name: str = Field(json_schema_extra={'in_request': 'yes'})", "in_request: \"yes\" is removed: write"),
     ("count: int = Field(default=1, json_schema_extra={'requires': 'name'})",
-     "requires is not a planning command option; .*Signature.validate_extracted_parameters"),
-    ("kind: Literal['a', 'b'] = Field(json_schema_extra={'verify': {'c': 'x'}})", "'c' is not a value of it"),
-    ("kind: Literal['a', 'b'] = Field(json_schema_extra={'means': {'a': 'x'}})", "option means is retired"),
+     "requires is not a planning command option; .*a model validator on Input"),
+    ("kind: Literal['a', 'b'] = Field(json_schema_extra={'classifier_confirms': {'meanings': {'c': 'x'}}})", "'c' is not a value of it"),
+    ("kind: Literal['a', 'b'] = Field(json_schema_extra={'means': {'a': 'x'}})", "means: \\{\"a\": \"x\"\} is removed: write \"classifier_confirms\": \\{\"meanings\""),
     ("reasoning: int = 1", "bad parameter name 'reasoning'"),
 ])
 def test_a_malformed_input_field_fails_the_load(tmp_path, field, message):
@@ -379,7 +380,7 @@ def test_a_malformed_input_field_fails_the_load(tmp_path, field, message):
 
 
 OPTIONAL = '''from typing import Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class Signature:
@@ -395,10 +396,11 @@ class Signature:
             assert value is None or value != info.data.get("name"), "owner is not the record"
             return value
 
-    @staticmethod
-    def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
-        SEEN.append(cmd_parameters.owner)
-        return None
+        @model_validator(mode="after")
+        def record_owner(self, info):
+            SEEN.append(self.owner)
+            return self
+
 
 
 SEEN = []
@@ -418,10 +420,10 @@ def test_an_optional_str_field_is_none_when_the_request_leaves_it_out(tmp_path):
                                 "say who owns it (only when owner is empty)")
     args, _ = sc.check_arguments(command, {"name": "Payroll"}, "Show Payroll.")
     assert args["owner"] == ""
-    seen = sys.modules[command.validate.__module__].SEEN
+    seen = sys.modules[command.input_model.__module__].SEEN
     seen.clear()
     assert sc._validate_arguments(command, args, "Show Payroll.") == args
-    assert seen == [None]   # the hook, the validator and steps() read None
+    assert seen == [None]   # the validator and steps() read None
     assert sc.expand(command, args) == ["open Payroll", "say who owns it"]
     args = sc._validate_arguments(command, {"name": "Payroll", "owner": "Ann Lee"}, "Show Payroll and Ann Lee.")
     assert sc.expand(command, args) == ["open Payroll", "check owner Ann Lee"]
@@ -491,7 +493,11 @@ def test_a_unicode_dash_in_the_request_matches_a_plain_one(tmp_path):
 
 # ---------------------------------------------------------------- validate_extracted_parameters
 
-def test_the_validation_hook_can_refuse_or_correct_a_call(tmp_path):
+def test_the_input_validator_can_refuse_or_correct_a_call(tmp_path):
+    from dataclasses import replace
+
+    from pydantic import model_validator
+
     command = _example(tmp_path)
     with pytest.raises(PlanningCommandCallError, match="the risk is assessed for the whole record"):
         sc._validate_arguments(command, _args(person="Ann Lee", include_risk=True), "x")
@@ -499,21 +505,24 @@ def test_the_validation_hook_can_refuse_or_correct_a_call(tmp_path):
 
     seen = []
 
-    def correcting(workflow, name, params, command_text=None):
-        seen.append((workflow, name, command_text))
-        params.name = params.name.upper()
-        return None
+    class Correcting(command.input_model):
+        @model_validator(mode="after")
+        def correcting(self, info):
+            seen.append((info.context["workflow"], info.context["command"], info.context["command_text"]))
+            self.name = self.name.upper()
+            return self
 
-    from dataclasses import replace
     notes: list[str] = []
-    args = sc._validate_arguments(replace(command, validate=correcting), _args(), "who is in Payroll", "WF", notes)
+    args = sc._validate_arguments(replace(command, input_model=Correcting), _args(), "who is in Payroll", "WF", notes)
     assert args["name"] == "PAYROLL" and seen == [("WF", "show_record", "who is in Payroll")]
     assert notes == ["name='Payroll' -> 'PAYROLL' (validate_extracted_parameters)"]
 
-    def raising(workflow, name, params):
-        raise RuntimeError("backend down")
+    class Raising(command.input_model):
+        @model_validator(mode="after")
+        def raising(self, info):
+            raise RuntimeError("backend down")
     with pytest.raises(PlanningCommandCallError, match="raised RuntimeError: backend down"):
-        sc._validate_arguments(replace(command, validate=raising), _args(), "x")
+        sc._validate_arguments(replace(command, input_model=Raising), _args(), "x")
 
 
 def _typed(**fields):

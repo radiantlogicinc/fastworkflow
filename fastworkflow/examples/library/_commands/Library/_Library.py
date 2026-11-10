@@ -3,9 +3,9 @@ from ...application.library import Library
 
 class Context:
     @classmethod
-    def get_parent(cls, command_context_object: Library) -> None:
+    def get_parent(cls, record: Library) -> None:
         return None
 
     @classmethod
-    def get_displayname(cls, command_context_object: Library) -> str:
+    def get_displayname(cls, record: Library) -> str:
         return "Library"

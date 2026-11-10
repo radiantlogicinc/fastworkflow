@@ -1,6 +1,5 @@
 """open_book: make one book, by its uid, the current record."""
 import fastworkflow
-from fastworkflow import from_
 from pydantic import BaseModel, Field
 
 from ...application.library import Library
@@ -10,8 +9,11 @@ class Signature:
     """Open one book by its uid, so that the book's own commands act on it."""
 
     class Input(BaseModel):
-        book_uid: str = from_("find_book.book_uids", description="the uid of the book to open",
-                               pattern=r"^b[0-9]+$")
+        book_uid: str = Field(
+            description="the uid of the book to open",
+            json_schema_extra={"from_command_output": "find_book.book_uids"},
+            pattern=r"^b[0-9]+$",
+        )
 
     class Output(BaseModel):
         book_uid: str = Field(description="the uid of the book now open")
@@ -31,16 +33,16 @@ class Signature:
     ]
 
 
+@fastworkflow.descends_to("Book")
 class ResponseGenerator:
-    descends_to = "Book"
 
     def __call__(self, workflow: fastworkflow.Workflow, command: str,
                  input: Signature.Input) -> Signature.Output:
-        library: Library = workflow.command_context_for_response_generation
+        library: Library = workflow.record
         book = library.books.get(input.book_uid)
         if book is None:
             raise fastworkflow.Refused(
                 f"no book has the uid {input.book_uid}; find_book lists the uids")
-        workflow.current_command_context = book
+        workflow.record = book
         return Signature.Output(book_uid=book.uid, title=book.title, author=book.author,
                                 copies=book.copies)

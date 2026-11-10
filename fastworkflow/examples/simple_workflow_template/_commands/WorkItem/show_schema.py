@@ -26,7 +26,7 @@ class ResponseGenerator:
     """Handle command execution and craft the textual response."""
 
     def _process_command(self, workflow: fastworkflow.Workflow) -> dict:
-        workitem: WorkItem = workflow.command_context_for_response_generation
+        workitem: WorkItem = workflow.record
         
         # Get the schema for the current work item type
         return workitem.schema

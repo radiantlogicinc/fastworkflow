@@ -65,9 +65,11 @@ Optional: ``PlanGenerator.__phases__(self, input)`` returns the phases a call ru
 (default: every one); ``return [self.check]`` runs one. ``@phase(over=..., max_items=..., until=...,
 noun=..., optional=...)`` makes a phase a fan-out (once per item) or optional.
 
-Steps: ``run("command", k=v)`` runs a command when every value is given; ``pick("command",
-named=x)`` opens the row a find listed whose label matches ``x``; ``full_list("command")`` reads
-every page; ``when(...)`` and ``do_not_run(...)`` guard a step. ``say that ...`` is an answer line
+Steps: ``run("command", k=v)`` runs a command when every value is given; ``run("command",
+named=x)`` opens the row a find listed whose label matches ``x``; ``run("command", all_pages=True)``
+reads every page; ``when(...)`` and ``do_not_run(...)`` guard a step. ``count(n, noun, plural=None)`` and
+``count_and_names_read(names, total, noun)`` write the counted lines. The retired helpers (``pick``,
+``full_list``, ``listed``, ``num``) fail the import, each naming its replacement. ``say that ...`` is an answer line
 code copies word for word; any other line is the agent's to write.
 
 The template (what the planner sees) calls each method once per input with every fact a
@@ -89,21 +91,28 @@ from pydantic import BaseModel
 
 from fastworkflow.observation_offloading.finish_check import quote_step_value
 from fastworkflow.utils.python_utils import type_text
+from fastworkflow.field_options import (ConfirmsOptions, CopiedOptions, FieldOptions,  # noqa: F401
+                                        RecordNamedOptions)
+from fastworkflow.command_declarations import (UserApproval, descends_to,  # noqa: F401
+                                               user_approval_for_execution)
 from fastworkflow.planning_phases import (Phase, PhaseError, Placeholder, _template_kwargs,
-                                       concatenated_steps, from_, is_building_template,
+                                       concatenated_steps, is_building_template,
                                        is_placeholder, tests_noted)
 
 __all__ = [
+    "ConfirmsOptions",
+    "CopiedOptions",
+    "FieldOptions",
+    "RecordNamedOptions",
+    "UserApproval",
     "count",
+    "count_and_names_read",
+    "descends_to",
     "do_not_run",
-    "from_",
-    "full_list",
-    "listed",
-    "num",
     "phase",
-    "pick",
     "run",
     "run_code",
+    "user_approval_for_execution",
     "when",
 ]
 
@@ -134,50 +143,116 @@ class Step(str):
         return Step(f"{self} ({text})", self.helper)
 
 
-#: ``(command name -> [set of Input field names, ...], collected (command, keys) list or None)``.
-_COMMAND_INPUTS: contextvars.ContextVar[
-    Optional[tuple[dict[str, list[set[str]]], Optional[list[tuple[str, tuple[str, ...]]]]]]
-] = contextvars.ContextVar("fw_planning_command_command_inputs", default=None)
+#: The Input field names the step helpers take as their own keywords (7.4). A command with a field of
+#: either name fails the load: ``run`` could not pass it to the command.
+RESERVED_INPUT_NAMES = ("named", "all_pages")
+
+
+def reserved_input_name_message(input_model: Any, where: str) -> Optional[str]:
+    """The load error for a command ``Input`` with a field named like a step helper's keyword (7.4),
+    or None."""
+    clash = next((name for name in RESERVED_INPUT_NAMES
+                  if name in (getattr(input_model, "model_fields", None) or {})), None)
+    if clash is None:
+        return None
+    return (f"{where}: Input field {clash!r} is reserved: run() takes {clash}= as its own keyword, so "
+            f"no command call can pass a field of that name; rename the field")
+
+#: Key recorded for a ``run(..., named=...)`` step whose command declares no row id input: a load problem.
+_NAMED_UNRESOLVED = "named"
+
+#: ``(command name -> [set of Input field names, ...], collected (command, keys) list or None,
+#: command name -> set of row id input names (None where none is declared))``.
+_COMMAND_INPUTS: contextvars.ContextVar[Optional[tuple[
+    dict[str, list[set[str]]], Optional[list[tuple[str, tuple[str, ...]]]], dict[str, set[Optional[str]]]]
+]] = contextvars.ContextVar("fw_planning_command_command_inputs", default=None)
+
+
+def row_id_field(input_model: Any) -> Optional[str]:
+    """The Input field a row is opened by (``run(command, named=...)``): the one field declared with
+    ``from_command_output``, else the one required ``str`` field, else None."""
+    fields = getattr(input_model, "model_fields", None) or {}
+    declared = [name for name, info in fields.items()
+                if isinstance(getattr(info, "json_schema_extra", None), dict)
+                and info.json_schema_extra.get("from_command_output")]
+    if len(declared) == 1:
+        return declared[0]
+    required = [name for name, info in fields.items() if info.is_required() and info.annotation is str]
+    return required[0] if len(required) == 1 else None
 
 
 @contextlib.contextmanager
 def command_inputs_for_steps(signatures: Optional[dict[str, Any]], collect: bool = False):
-    """Set the workflow's command ``Signature.Input`` field sets for ``run`` and ``full_list``.
+    """Set the workflow's command ``Signature.Input`` field sets and row ids for ``run``.
 
     With *collect* (``planning_commands.check_step_commands``), each call's ``(command, keys)`` is
     appended to the yielded list instead of raising ``StepFormError`` on the first bad keyword.
     """
     fields: Optional[dict[str, list[set[str]]]] = None
+    row_ids: dict[str, set[Optional[str]]] = {}
     steps: Optional[list[tuple[str, tuple[str, ...]]]] = [] if collect else None
     if signatures is not None:
         fields = {}
         for key, sig in signatures.items():
-            names = set(getattr(getattr(sig, "Input", None), "model_fields", {}) or {})
+            input_model = getattr(sig, "Input", None)
+            names = set(getattr(input_model, "model_fields", {}) or {})
+            row_id = row_id_field(input_model)
             for name in {key, key.rsplit("/", 1)[-1]}:
                 fields.setdefault(name, []).append(names)
-    token = _COMMAND_INPUTS.set((fields, steps) if fields is not None else None)
+                row_ids.setdefault(name, set()).add(row_id)
+    token = _COMMAND_INPUTS.set((fields, steps, row_ids) if fields is not None else None)
     try:
         yield (fields, steps) if collect else fields
     finally:
         _COMMAND_INPUTS.reset(token)
 
 
-def _check_step_keywords(command: str, values: dict[str, Any]) -> None:
+def _check_step_keywords(command: str, keys: tuple[str, ...]) -> None:
     state = _COMMAND_INPUTS.get()
     if state is None:
         return
-    fields, steps = state
+    fields, steps, _ = state
     if steps is not None:
-        steps.append((command, tuple(values)))
+        steps.append((command, keys))
         return
-    if not values or command not in fields:
+    if not keys or command not in fields:
         return
-    unknown = [k for k in values if not any(k in f for f in fields[command])]
+    unknown = [k for k in keys if not any(k in f for f in fields[command])]
     if unknown:
         raise StepFormError(
             f"a step passes {', '.join(unknown)} to {command!r}, whose "
             "Signature.Input has no such field"
         )
+
+
+def _unknown_keys(command: str, keys: tuple[str, ...]) -> list[str]:
+    """The keys of a step that the command's ``Signature.Input`` has no field for (none without signatures)."""
+    state = _COMMAND_INPUTS.get()
+    if state is None or not keys or command not in state[0]:
+        return []
+    return [k for k in keys if not any(k in f for f in state[0][command])]
+
+
+def _row_id_of(command: str) -> tuple[bool, Optional[str]]:
+    """``(command is known with its signature, its row id input or None)``. Unknown without a
+    signature (a run, outside the load check)."""
+    state = _COMMAND_INPUTS.get()
+    if state is None or command not in state[2]:
+        return False, None
+    ids = state[2][command]
+    return True, (next(iter(ids)) if len(ids) == 1 else None)
+
+
+def _named_problem(command: str, message: str, reported: bool) -> None:
+    """A ``run(..., named=...)`` step that cannot open its row: a load error (raised), or, while the
+    load check collects, a problem the check reports. *reported*: an unknown keyword already is the
+    problem, so the row problem is not added."""
+    state = _COMMAND_INPUTS.get()
+    if state is not None and state[1] is not None:
+        if not reported:
+            state[1].append((command, (_NAMED_UNRESOLVED,)))
+        return
+    raise StepFormError(message)
 
 
 def _is_step_placeholder(value: Any) -> bool:
@@ -195,22 +270,52 @@ def _step_value(value: Any) -> str:
     return quote_step_value(value)
 
 
-def _command_step(command: str, values: dict[str, Any]) -> str:
-    _check_step_keywords(command, values)
+def _command_text(command: str, values: dict[str, Any]) -> str:
     parts = [f"{k}={_step_value(v)}" for k, v in values.items() if v is not None]
     return f"{command} {' '.join(parts)}" if parts else str(command)
 
 
-def run(command: str, **values: Any) -> Step:
-    """A command step code runs when every required value is given: ``<command> <k=v ...>``."""
-    return Step(_command_step(command, values), "run")
+def run(command: str, *, named: Any = None, all_pages: bool = False, **inputs: Any) -> Step:
+    """A command step code runs when every required value is given: ``<command> <k=v ...>``.
 
+    ``inputs`` are the command's own ``Input`` field names; a ``None`` value is left out.
 
-def full_list(command: str, **values: Any) -> Step:
-    """A paged command step code reads through every page (up to ``CODE_MAX_PAGES``, then the
-    agent reads on from the next page):
-    ``<command> <k=v ...> (full list)``."""
-    return Step(f"{_command_step(command, values)} (full list)", "full_list")
+    - ``all_pages=True``: a paged command read through every page (up to ``CODE_MAX_PAGES``, then
+      the agent reads on from the next page): ``<command> <k=v ...> (full list)``.
+    - ``named=<name>``: open the row of a listing this call read whose label holds that name (or the
+      only row). Its row id is the input named by ``from_command_output``, else the command's one
+      required ``str`` field. Given a concrete id, the step is ``<command> <id field>=<value>``;
+      without one it is ``<command> with the uid of the <name> match``, which code runs on the
+      matching row.
+    """
+    if named is not None and all_pages:
+        raise StepFormError(f"run({command!r}): named= opens one row and all_pages=True reads every "
+                            "page; give one of them")
+    _check_step_keywords(command, tuple(inputs))
+    typo = bool(_unknown_keys(command, tuple(inputs)))
+    given = {k: v for k, v in inputs.items() if v is not None}
+    if named is None:
+        text = _command_text(command, given)
+        return Step(f"{text} (full list)" if all_pages else text, "run")
+    if not str(named).strip():
+        raise StepFormError(f"run({command!r}): named= is the name the row is picked by")
+    known, row_id = _row_id_of(command)
+    if not known:
+        # Outside the load check (no signatures): a concrete value is written; none is the row's words.
+        if any(not is_placeholder(v) for v in given.values()):
+            return Step(_command_text(command, given), "run")
+        return Step(f"{command} with the uid of the {named} match", "run")
+    if row_id is not None and row_id in given and not is_placeholder(given[row_id]):
+        return Step(_command_text(command, given), "run")
+    if row_id is None:
+        _named_problem(command, f"run({command!r}, named=...): {command} declares no row id input "
+                                "(a field from_command_output, or its one required str field): pass "
+                                "the id input explicitly", typo)
+    elif set(given) - {row_id}:
+        _named_problem(command, f"run({command!r}, named=...): with no {row_id} given, the step opens "
+                                "the row by name and takes no other input: pass the row's id, or drop "
+                                "the other input", typo)
+    return Step(f"{command} with the uid of the {named} match", "run")
 
 
 def when(condition: str, step: str) -> Step:
@@ -221,51 +326,6 @@ def when(condition: str, step: str) -> Step:
 def do_not_run(command: str) -> Step:
     """A negated step code passes over, and a guard: ``do not run <command>``."""
     return Step(f"do not run {command}", "do_not_run")
-
-
-#: ``(command, uid parameter)`` of each ``pick`` while ``picks_noted`` is open.
-_PICKS: contextvars.ContextVar[Optional[list]] = contextvars.ContextVar("fw_planning_command_picks",
-                                                                        default=None)
-
-
-@contextlib.contextmanager
-def picks_noted():
-    """A list that gets ``(command, uid parameter)`` of each ``pick`` made inside the block
-    (the load-time step check reads the parameter the text no longer shows)."""
-    picks: list = []
-    token = _PICKS.set(picks)
-    try:
-        yield picks
-    finally:
-        _PICKS.reset(token)
-
-
-def pick(command: str, *, named: Any = "", **uid: Any) -> Step:
-    """Open one row a listing read: ``command <uid_param>=<uid>`` when a concrete uid is
-    given; else ``command with the uid of the NAMED match``, which code runs on the one
-    matching row of the listing this call read. Only a missing uid, ``None``, or a
-    ``Placeholder`` fact uses pick words; plain ``'<...>'`` strings (such as an indexed
-    template value from ``only_uid``) are written as ``uid=<value>``. A uid containing
-    ``(`` or ``;`` is quoted (``quote_step_value``), so the chain keeps it."""
-    if len(uid) > 1 or any(not k.endswith("_uid") for k in uid):
-        raise StepFormError(f"pick({command!r}): give at most one uid parameter "
-                            f"(..._uid=...), got {sorted(uid)}")
-    if not str(named if named is not None else "").strip():
-        raise StepFormError(f"pick({command!r}): named= is the name the row is picked by")
-    param, value = next(iter(uid.items())) if uid else ("", None)
-    picks = _PICKS.get()
-    if picks is not None:
-        if not param:
-            state = _COMMAND_INPUTS.get()
-            if state is not None and command in state[0]:
-                uid_fields = {f for s in state[0][command] for f in s if f.endswith("_uid")}
-                if len(uid_fields) == 1:
-                    (param,) = uid_fields
-        picks.append((command, param))
-    if not uid or value is None or is_placeholder(value):
-        return Step(f"{command} with the uid of the {named} match", "pick")
-    return Step(f"{command} {param}={_step_value(value)}", "pick")
-
 
 #: ``(phase_name, step_text)`` of each step written while ``steps_by_phase_noted`` is open.
 _PHASE_STEPS: contextvars.ContextVar[Optional[list[tuple[str, str]]]] = contextvars.ContextVar(
@@ -294,30 +354,18 @@ def note_phase_steps(phase_name: str, lines: Any) -> None:
                 kept = Step(text, line.helper) if isinstance(line, Step) else text
                 seen.append((phase_name, kept))
 
-
 # --------------------------------------------------------------------------- filters
 
-def num(value: Any, none: str = "none recorded", grouped: bool = False) -> str:
-    """A number exactly as read: 4.0 is "4", 2.5 stays "2.5"; with *grouped*, 5000000.0 is
-    "5,000,000". None is *none*."""
-    if is_placeholder(value):
-        return str(value)
-    if value is None:
-        return none
-    if float(value).is_integer():
-        return f"{int(value):,}" if grouped else str(int(value))
-    return f"{float(value):,}" if grouped else repr(float(value))
-
-
 def count(number: Any, noun: str, plural: Optional[str] = None) -> str:
-    """"1 login", "2 logins" ("2 people" with ``plural="people"``)."""
+    """"1 login", "2 logins" ("2 people" with ``plural="people"``). A placeholder keeps its text:
+    a Placeholder's == is always true, so the plural test is not made on it."""
     if is_placeholder(number):
         return f"{number} {plural or noun + 's'}"
     return f"{number} " + (noun if number == 1 else plural or noun + "s")
 
 
-def listed(names: Any, total: Any, noun: str, same: Optional[tuple] = None,
-           plural: Optional[str] = None) -> str:
+def count_and_names_read(names: Any, total: Any, noun: str, same: Optional[tuple] = None,
+                         plural: Optional[str] = None) -> str:
     """"N <noun>s (a, b)", "none (0 <noun>s)", with "K of N shown" when fewer were read.
     *same* is ``("<what>", items)`` of a list already stated in full: when *names* holds
     exactly those items, all N shown, it is "N <noun>s (the same <what>)"."""
@@ -331,6 +379,24 @@ def listed(names: Any, total: Any, noun: str, same: Optional[tuple] = None,
     shown = f"; {len(names)} of {total} shown" if len(names) < total else ""
     return f"{count(total, noun, plural)} ({', '.join(names)}{shown})"
 
+
+#: The helpers removed from this module, each with the spelling that replaces it. Importing one
+#: (``from fastworkflow.planning import pick``) fails the load with that message.
+_REMOVED = {
+    "pick": "pick is removed: write run(command, named=<name>, <id input>=<value>), "
+            "e.g. run(\"open_book\", named=input.title)",
+    "full_list": "full_list is removed: write run(command, ..., all_pages=True)",
+    "from_": "from_ is removed: write json_schema_extra={\"from_command_output\": \"<command>.<field>\"} "
+             "on the Input field",
+    "listed": "listed is removed: write count_and_names_read(names, total, noun)",
+    "num": "num is removed: write the number inline, e.g. f\"{value}\" (see the planning command docs)",
+}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _REMOVED:
+        raise ImportError(_REMOVED[name])
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # --------------------------------------------------------------------------- @phase
 

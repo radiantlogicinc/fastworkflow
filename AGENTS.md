@@ -106,7 +106,7 @@ Optional settings for planning commands (`_commands/<name>.py` files; see
 - `JEV_API_KEY` (optional). Without it, no planning command is matched and there is no typed planning
   call: the text planner plans, and its command listing names the planning commands. With it, Jev
   (`workflow_agent._jev_lm`) matches a sub-task to a planning command (`_planning_command_matcher`),
-  and the typed planning call fills that command's arguments and runs its `verify` checks. Without the
+  and the typed planning call fills that command's arguments and runs its classifier checks (`classifier_confirms`). Without the
   key, a workflow that has planning commands logs one INFO line (`workflow_agent._warn_missing_jev_key`).
 - `FW_TURN_MAX_STEPS` (optional, default 400). The most model steps the nested planning-command calls of
   one turn may take together; it resets each turn. A value that is not a positive integer logs a
@@ -114,7 +114,7 @@ Optional settings for planning commands (`_commands/<name>.py` files; see
 
 Planning command previews: `fastworkflow command preview <workflow_folder>` writes one markdown preview
 per planning command to `<workflow_folder>/../docs/planning_command_previews/`. With `--check` it writes
-nothing and exits 1 when a preview is stale, missing or extra, or when a `from_` edge does not resolve.
+nothing and exits 1 when a preview is stale, missing or extra, or when a `from_command_output` edge does not resolve.
 `command preview` replaced `fastworkflow skill preview`.
 
 Running one call with no model: `fastworkflow command run-code <workflow_folder> <command> [--input '<json>']

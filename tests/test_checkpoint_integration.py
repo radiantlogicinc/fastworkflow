@@ -214,7 +214,7 @@ def _count_calls(call_log: str) -> int:
 NO_HOOK_CONTEXT = '''
 class Context:
     @classmethod
-    def get_parent(cls, command_context_object) -> None:
+    def get_parent(cls, record) -> None:
         return None
 '''
 
@@ -310,7 +310,7 @@ def test_an_evicted_channel_returns_with_its_application_state(
             )
         )
         incarnation = runtime.session_incarnation
-        live_root_id = id(ctx.app_workflow.root_command_context)
+        live_root_id = id(ctx.app_workflow.root)
 
         # See the module docstring: a surviving reference makes the cold session
         # adopt this very workflow instead of rebuilding one.
@@ -335,7 +335,7 @@ def test_an_evicted_channel_returns_with_its_application_state(
     assert restored.session_incarnation == incarnation
 
     workflow = restored.execution_context.app_workflow
-    manager_obj = workflow.root_command_context
+    manager_obj = workflow.root
     assert id(manager_obj) != live_root_id, "this is the pre-eviction object, not a restore"
     assert {id_: lst.description for id_, lst in manager_obj.lists.items()} == {
         1: "groceries",
@@ -349,10 +349,10 @@ def test_an_evicted_channel_returns_with_its_application_state(
 
     # Identity, not equality. Two independent snapshots of the same node would
     # restore as two objects and current_command_context would no longer be a
-    # node inside root_command_context — the application would then navigate one
+    # node inside root — the application would then navigate one
     # tree while its commands mutated another.
-    assert workflow.current_command_context is laundry
-    assert workflow.command_context_for_response_generation is chores
+    assert workflow._current_command_context is laundry
+    assert workflow.record is chores
     assert laundry.parent is chores
     assert chores.parent is manager_obj
 
@@ -376,7 +376,7 @@ def test_a_context_without_hooks_is_never_evicted(speedict_folder, tmp_path):
     async def body():
         await _create(manager, pinned, scratch)
         runtime = await manager.get_session(pinned)
-        runtime.execution_context.app_workflow.root_command_context = Widget()
+        runtime.execution_context.app_workflow.root = Widget()
 
         eligibility = checkpoint.assess(runtime)
         await _create(manager, newcomer, HELLO_WORLD)

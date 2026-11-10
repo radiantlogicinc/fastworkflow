@@ -1,47 +1,42 @@
-"""validate_extracted_parameters receives the command text only when it asks for it."""
+"""The Input's model validators receive the command text, the workflow and the command in their context (spec 3.2)."""
 import fastworkflow
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from fastworkflow.utils.signatures import InputForParamExtraction
 
 
-class Params(BaseModel):
-    control_code: str = Field(description="code")
-
-
-def _validate(hook_class, command="list_findings ctrl_ABC"):
-    extraction = InputForParamExtraction(
-        command=command, input_for_param_extraction_class=hook_class)
+def _validate(input_model, command="list_findings ctrl_ABC"):
+    extraction = InputForParamExtraction(command=command, input_for_param_extraction_class=None)
     return extraction.validate_parameters(
-        None, "ControlsMonitor/list_findings", Params(control_code="ctrl_ABC"))
+        None, "ControlsMonitor/list_findings", input_model.model_construct(control_code="ctrl_ABC"))
 
 
-def test_a_hook_that_declares_command_text_receives_it():
+def test_an_input_validator_receives_the_command_text_workflow_and_command():
     seen = {}
 
-    class Hook:
-        @staticmethod
-        def validate_extracted_parameters(workflow, command, cmd_parameters, command_text):
-            seen.update(command=command, command_text=command_text)
-            return None
+    class Params(BaseModel):
+        control_code: str = Field(description="code")
 
-    is_valid, *_ = _validate(Hook)
+        @model_validator(mode="after")
+        def look(self, info):
+            seen.update(info.context)
+            return self
+
+    is_valid, *_ = _validate(Params)
 
     assert is_valid
-    assert seen == {"command": "ControlsMonitor/list_findings",
-                    "command_text": "list_findings ctrl_ABC"}
+    assert seen == {"command_text": "list_findings ctrl_ABC", "workflow": None,
+                    "command": "ControlsMonitor/list_findings"}
 
 
-def test_an_existing_three_argument_hook_is_called_as_before():
-    seen = []
+def test_a_validator_refusal_without_a_field_refuses_the_call():
+    class Params(BaseModel):
+        control_code: str = Field(description="code")
 
-    class Hook:
-        @staticmethod
-        def validate_extracted_parameters(workflow, command, cmd_parameters):
-            seen.append(command)
+        @model_validator(mode="after")
+        def refuse(self, info):
             raise fastworkflow.Refused("rejected")
 
-    is_valid, message, *_ = _validate(Hook)
+    is_valid, message, *_ = _validate(Params)
 
     assert not is_valid and "rejected" in message
-    assert seen == ["ControlsMonitor/list_findings"]

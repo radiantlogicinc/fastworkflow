@@ -6,7 +6,7 @@ __result__ names the borrowers.
 """
 from pydantic import BaseModel, Field
 
-from fastworkflow.planning import full_list, listed, run
+from fastworkflow.planning import count_and_names_read, run
 
 from ..Book.list_loans import Signature as ListLoans
 from .book_by_title import Signature as BookByTitle
@@ -28,7 +28,7 @@ class Signature:
 
     class Input(BaseModel):
         title: str = Field(description="the book's title",
-                           json_schema_extra={"in_request": True})
+                           json_schema_extra={"copied_from_command_text": True})
 
 
 class PlanGenerator:
@@ -38,9 +38,9 @@ class PlanGenerator:
     def loans(self, book) -> ListLoans.Output:
         if not book.found:
             return []
-        return [full_list("list_loans")]
+        return [run("list_loans", all_pages=True)]
 
     def __result__(self, input, book, loans):
         if loans is None:
             return f"No book matches {input.title}."
-        return f"{book.title} is on loan to {listed(loans.borrowers, loans.total, 'borrower')}."
+        return f"{book.title} is on loan to {count_and_names_read(loans.borrowers, loans.total, 'borrower')}."

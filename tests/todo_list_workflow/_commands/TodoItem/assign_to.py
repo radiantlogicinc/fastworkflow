@@ -33,15 +33,11 @@ class Signature:
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
-    @staticmethod
-    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> None:
-        return None
-
 class ResponseGenerator:
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         """Set the person assigned to the todo item."""
         # Access the application class instance:
-        todo_item = workflow.command_context_for_response_generation  # type: TodoItem
+        todo_item = workflow.record  # type: TodoItem
         todo_item.assign_to = input.assign_to
         return Signature.Output(success=True)
 

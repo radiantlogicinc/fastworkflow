@@ -18,7 +18,7 @@ LOOKUP = '''
 from typing import Literal
 
 import fastworkflow
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 FIND = {"group": "find_group", "feed": "find_feed"}
 COUNT_WORD = {1: "one", 2: "two"}
@@ -33,19 +33,19 @@ class Signature:
 
     class Input(BaseModel):
         name: str = Field(description="the record's name",
-                          json_schema_extra={"in_request": {"ignore": ["group", "feed"]}})
+                          json_schema_extra={"copied_from_command_text": {"ignore": ["group", "feed"]}})
         kind: Literal["group", "feed"] = Field(description="group, or feed (a source of logins)")
         person: str = Field(default="", description="one named person to check for; empty lists everyone",
-                            json_schema_extra={"in_request": True})
+                            json_schema_extra={"copied_from_command_text": True})
         include_risk: bool = Field(default=False, description="the request asks how risky it is")
         count: int = Field(default=2, description="how many members to open")
         owner: str = Field(default="", description="the owner to compare the risk with")
 
-    @staticmethod
-    def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
-        if not cmd_parameters.include_risk:   # an owner only for the risk comparison
-            cmd_parameters.owner = ""
-        return None
+        @model_validator(mode="after")
+        def owner_only_for_the_risk(self, info):
+            if not self.include_risk:   # an owner only for the risk comparison
+                self.owner = ""
+            return self
 
 
 class PlanGenerator:
@@ -123,7 +123,7 @@ def test_a_planning_command_file_gives_typed_params_and_the_description(tmp_path
         ("include_risk", "bool", False, False), ("count", "int", False, 2), ("owner", "str", False, "")]
     assert command.param("kind").values == ("group", "feed")
     assert command.param("name").ignore == ("group", "feed")
-    assert callable(command.validate)
+    assert command.input_model.__pydantic_decorators__.model_validators
     # what the matcher sees is the description, as for a plain skill
     assert workflow_agent._job_types_for(folder) == f"- lookup: {command.description}"
 
@@ -547,16 +547,16 @@ CHECKED = LOOKUP.replace(
     '''kind: Literal["group", "feed"] = Field(description="group, or feed (a source of logins)")''',
     '''kind: Literal["group", "feed"] = Field(
             description="group, or feed (a source of logins)",
-            json_schema_extra={"verify": {"group": "a group of people",
-                                          "feed": "a feed that logins arrive on"}})''',
+            json_schema_extra={"classifier_confirms": {"meanings": {"group": "a group of people",
+                                          "feed": "a feed that logins arrive on"}}})''',
 ).replace(
     '''include_risk: bool = Field(default=False, description="the request asks how risky it is")''',
     '''include_risk: bool = Field(default=False, description="the request asks how risky it is",
-                                    json_schema_extra={"verify": True})''',
+                                    json_schema_extra={"classifier_confirms": True})''',
 ).replace(
     '''count: int = Field(default=2, description="how many members to open")''',
     '''count: int = Field(default=2, description="how many members to open",
-                             json_schema_extra={"in_request": True})''',
+                             json_schema_extra={"copied_from_command_text": True})''',
 )
 
 
@@ -593,17 +593,17 @@ class PlanGenerator:
 
 
 @pytest.mark.parametrize("field, message", [
-    ("name: str = Field(json_schema_extra={'verify': True})", "option verify does not apply to field 'name' of type str"),
-    ("flag: bool = Field(default=False, json_schema_extra={'in_request': 'subject'})", "option in_request: \"subject\" does not apply to field 'flag' of type bool"),
-    ("flag: bool = Field(default=False, json_schema_extra={'subject': True})", "option subject is retired: write in_request: \"subject\""),
-    ("flag: bool = Field(default=False, json_schema_extra={'verify': 'yes'})", 'verify must be true, false, "alone" or a dict'),
-    ("flag: bool = Field(default=False, json_schema_extra={'verify': {'true': 'asked'}})",
-     "option verify \\(a dict of meanings\\) does not apply to field 'flag' of type bool"),
+    ("name: str = Field(json_schema_extra={'classifier_confirms': True})", "option classifier_confirms does not apply to field 'name' of type str"),
+    ("flag: bool = Field(default=False, json_schema_extra={'record_named_in_command_text': True})", "option record_named_in_command_text does not apply to field 'flag' of type bool"),
+    ("flag: bool = Field(default=False, json_schema_extra={'subject': True})", "subject: True is removed: write \"record_named_in_command_text\": True"),
+    ("flag: bool = Field(default=False, json_schema_extra={'verify': 'yes'})", 'verify: "yes" is removed: write'),
+    ("flag: bool = Field(default=False, json_schema_extra={'classifier_confirms': {'meanings': {'true': 'asked'}}})",
+     "option classifier_confirms \\(a dict of meanings\\) does not apply to field 'flag' of type bool"),
     ("flag: bool = Field(default=False, json_schema_extra={'means': {'true': 'asked'}})",
-     "option means is retired: write verify: \\{value: meaning"),
-    ("kind: Literal['a', 'b'] = Field(json_schema_extra={'verify': {'c': 'x'}})", "'c' is not a value of it"),
-    ("kind: Literal['a', 'b'] = Field(json_schema_extra={'in_request': True})",
-     "option in_request does not apply to field 'kind' of type enum"),
+     'means: \\{"true": "asked"\\} is removed: write "classifier_confirms": \\{"meanings": \\{"true": "asked"\\}\\}'),
+    ("kind: Literal['a', 'b'] = Field(json_schema_extra={'classifier_confirms': {'meanings': {'c': 'x'}}})", "'c' is not a value of it"),
+    ("kind: Literal['a', 'b'] = Field(json_schema_extra={'copied_from_command_text': True})",
+     "option copied_from_command_text does not apply to field 'kind' of type enum"),
 ])
 def test_a_malformed_check_fails_the_load(tmp_path, field, message):
     assert re.search(message, _load_error(_write(tmp_path, {"bad": CHECK_FIELD.replace("{field}", field)})))
@@ -755,9 +755,9 @@ class Signature:
 
     class Input(BaseModel):
         right: str = Field(description="the right's name",
-                           json_schema_extra={"in_request": {"subject": True, "ignore": ["right"]}})
+                           json_schema_extra={"record_named_in_command_text": {"ignore": ["right"]}})
         person: str = Field(default="", description="the person asking for it",
-                            json_schema_extra={"in_request": "subject", "verify": True})
+                            json_schema_extra={"record_named_in_command_text": True, "classifier_confirms": True})
         note: str = Field(default="", description="free text")
 
 
@@ -1101,7 +1101,7 @@ class Signature:
 
     class Input(BaseModel):
         first: str = Field(description="the first record's name")
-        second: str = Field(description="the second record's name", json_schema_extra={"in_request": True})
+        second: str = Field(description="the second record's name", json_schema_extra={"copied_from_command_text": True})
         kind: Literal["group", "feed"] = Field(description="group, or feed (a source of logins)")
 
         @model_validator(mode="after")
@@ -1109,7 +1109,7 @@ class Signature:
             if self.first.casefold() == self.second.casefold():
                 raise ValueError(f"first and second are both {self.first!r}; second is the other record "
                                  "the request names")
-            request = (info.context or {}).get("request", "")
+            request = (info.context or {}).get("command_text", "")
             if self.kind != "feed" and " feeds" in request:
                 raise ValueError(f"kind={self.kind!r}, but the request says feeds; kind is feed")
             return self
@@ -1119,6 +1119,14 @@ class PlanGenerator:
     def steps(self, input):
         return [f"open {input.kind} {input.first}", f"open {input.kind} {input.second}", "say which is riskier"]
 '''
+
+# The same pair, refused with Refused(field="second") instead of a plain ValueError: a refusal that names an input
+# is put to the extractor again (the replan route), as a hook's Refused was at HEAD.
+PAIR_REFUSED = (PAIR.replace('raise ValueError(f"first and second', 'raise fastworkflow.Refused(f"first and second')
+                .replace('"the request names")', '"the request names", field="second")')
+                .replace("from pydantic import BaseModel, Field, ValidationInfo, model_validator",
+                         "import fastworkflow\nfrom pydantic import BaseModel, Field, ValidationInfo, model_validator", 1))
+assert "fastworkflow.Refused" in PAIR_REFUSED and 'field="second"' in PAIR_REFUSED
 
 PAIR_REQUEST = "Which of Payroll and Billing is riskier?"
 
@@ -1134,14 +1142,14 @@ def test_input_validators_refuse_a_call_with_a_message_that_says_what_to_fix(tmp
     command = _command(tmp_path, PAIR, "pair")
     args, notes = sc.check_arguments(command, {"first": "Payroll", "second": "payroll", "kind": "group"},
                                      PAIR_REQUEST)
-    with pytest.raises(sc.PlanningCommandInputError, match="rule of pair: first and second are both 'Payroll'; second is the other record") as refused:
+    with pytest.raises(sc.PlanningCommandInputError, match="^validate_extracted_parameters: first and second are both 'Payroll'; second is the other record") as refused:
         sc._validate_arguments(command, args, PAIR_REQUEST, None, notes)
     assert "Value error" not in str(refused.value)
-    assert isinstance(refused.value, PlanningCommandCallError)
+    assert refused.value.fields == ()
     # the request reaches the validators through the validation context
     request = "Which of the Payroll and Billing feeds is riskier?"
     args, _ = sc.check_arguments(command, {"first": "Payroll", "second": "Billing", "kind": "group"}, request)
-    with pytest.raises(sc.PlanningCommandInputError, match="kind is feed"):
+    with pytest.raises(sc.PlanningCommandInputError, match="validate_extracted_parameters: kind='group', but the request says feeds; kind is feed"):
         sc._validate_arguments(command, args, request)
     assert sc._validate_arguments(command, {**args, "kind": "feed"}, request)["kind"] == "feed"
     # the template is rendered as before: the placeholders differ and the request is empty
@@ -1150,11 +1158,13 @@ def test_input_validators_refuse_a_call_with_a_message_that_says_what_to_fix(tmp
 
 
 def test_a_hook_refusal_is_an_input_error_and_a_hook_exception_is_not(tmp_path):
-    hooked = LOOKUP.replace('        return None', '        if cmd_parameters.count > 5:\n'
-                            '            raise fastworkflow.Refused("count is at most 5")\n'
-                            '        if cmd_parameters.count < 0:\n'
-                            '            raise RuntimeError("bug")\n'
-                            '        return None')
+    hooked = LOOKUP.replace('                self.owner = ""\n            return self\n', '                self.owner = ""\n'
+                            '            if self.count > 5:\n'
+                            '                raise fastworkflow.Refused("count is at most 5")\n'
+                            '            if self.count < 0:\n'
+                            '                raise RuntimeError("bug")\n'
+                            '            return self\n', 1)
+    assert hooked != LOOKUP
     command = _command(tmp_path, hooked)
     with pytest.raises(sc.PlanningCommandInputError, match="count is at most 5"):
         sc._validate_arguments(command, _args(count=9), "Who is in Payroll?")
@@ -1180,7 +1190,7 @@ def test_a_refused_planning_command_call_is_planned_again_with_the_refusal(tmp_p
     extractor = script_extractor(monkeypatch, _arguments(_pair_answer(second="Payroll")), _arguments(_pair_answer()))
     lm = DummyLM([_pair_answer()])
 
-    _plan_pair(ctx, wf, lm, _command(tmp_path, PAIR, "pair"))
+    _plan_pair(ctx, wf, lm, _command(tmp_path, PAIR_REFUSED, "pair"))
 
     assert len(extractor.prompts) == 2 and len(lm.history) == 1
     assert "was refused" not in extractor.prompts[0]
@@ -1221,13 +1231,13 @@ def test_a_second_refusal_falls_back_to_the_template_path(tmp_path, workflow_env
                                  _arguments(_pair_answer(first="Billing")))
     lm = DummyLM([_text_answer()])
 
-    _plan_pair(ctx, wf, lm, _command(tmp_path, PAIR, "pair"))
+    _plan_pair(ctx, wf, lm, _command(tmp_path, PAIR_REFUSED, "pair"))
 
     # a rule of the Input refuses the pair, not one missing argument: no typed fill fallback, the text planner plans
     assert len(extractor.prompts) == 2 and len(lm.history) == 1
     span = _plan_span(sink)
     assert span.attributes["plan_source"] == "text"
-    assert "break a rule of pair" in span.attributes["skill_fallback"]
+    assert "validate_extracted_parameters: first and second are both" in span.attributes["skill_fallback"]
 
 
 def test_a_guard_refusal_is_planned_again_with_the_refusal(tmp_path, workflow_env, monkeypatch):

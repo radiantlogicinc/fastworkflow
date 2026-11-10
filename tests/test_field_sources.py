@@ -20,13 +20,11 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import ModuleType, from_, planning_commands, command_preview, workflow_agent
+from fastworkflow import ModuleType, planning_commands, command_preview, workflow_agent
 from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.planning import from_ as planning_from_
 from fastworkflow.planning_phases import fill_output
-from fastworkflow.planning_phases import from_ as phases_from_
 from fastworkflow.utils.signatures import InputForParamExtraction, parameters_with_unfilled
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -125,44 +123,39 @@ def _preview_check(folder: str, out_dir: str, capsys) -> tuple[int, str]:
 
 
 def test_from_exports_and_field_construction():
-    assert from_ is planning_from_
-    assert from_ is phases_from_
-    assert fastworkflow.from_ is from_
-    assert "from" in planning_commands.PLANNING_COMMAND_FIELD_KEYS
+    import fastworkflow.planning as planning
+    import fastworkflow.planning_phases as planning_phases
+
+    assert not hasattr(fastworkflow, "from_")
+    with pytest.raises(ImportError, match='from_command_output'):
+        from fastworkflow.planning import from_  # noqa: F401
+    assert not hasattr(planning_phases, "from_")
+    assert "from_command_output" in planning_commands.PLANNING_COMMAND_FIELD_KEYS
+    assert "from" not in planning_commands.PLANNING_COMMAND_FIELD_KEYS
     assert "available_from" in planning_commands.PLANNING_COMMAND_FIELD_KEYS
 
     class SampleInput(BaseModel):
-        uid: str = from_(
-            "find_book.book_uids",
-            description="the book uid",
-            json_schema_extra={"in_request": "subject"},
-        )
-        multi: str = from_(
-            ["find_book.book_uids", "Library/find_member.member_uids"],
-            default="b1",
-        )
+        uid: str = Field(description="the book uid", json_schema_extra={"from_command_output": "find_book.book_uids", "record_named_in_command_text": True})
+        multi: str = Field(default="b1", json_schema_extra={"from_command_output": ["find_book.book_uids", "Library/find_member.member_uids"]})
 
     uid_info = SampleInput.model_fields["uid"]
     assert uid_info.description == "the book uid"
     assert uid_info.is_required()
     assert uid_info.json_schema_extra == {
-        "in_request": "subject",
-        "from": "find_book.book_uids",
+        "record_named_in_command_text": True,
+        "from_command_output": "find_book.book_uids",
     }
 
     multi_info = SampleInput.model_fields["multi"]
     assert multi_info.default == "b1"
     assert multi_info.json_schema_extra == {
-        "from": ["find_book.book_uids", "Library/find_member.member_uids"],
+        "from_command_output": ["find_book.book_uids", "Library/find_member.member_uids"],
     }
 
 
 def test_from_has_no_kind_keyword():
-    import inspect
-
-    sig = inspect.signature(from_)
-    assert "kind" not in sig.parameters
-    assert list(sig.parameters) == ["source", "field_kwargs"]
+    """The helper is gone (no alias): the producer edge is the ``from_command_output`` key of a ``Field``."""
+    assert not hasattr(fastworkflow, "from_")
 
 
 _COPY_LOAD_ERROR = (
@@ -256,7 +249,6 @@ class PlanGenerator:
 def test_producer_edge_field_and_command_only_resolution_and_model_map(tmp_path, capsys):
     open_book_cmd = '''from typing import Optional
 import fastworkflow
-from fastworkflow import from_
 from pydantic import BaseModel, Field
 
 
@@ -264,11 +256,8 @@ class Signature:
     """Open one book by its uid."""
 
     class Input(BaseModel):
-        book_uid: str = from_(
-            ["find_book.book_uids", "Book/show_book.book_uid"],
-            description="the uid of the book to open",
-        )
-        branch_hint: Optional[str] = from_("library_hours", default=None, description="hours info")
+        book_uid: str = Field(description="the uid of the book to open", json_schema_extra={"from_command_output": ["find_book.book_uids", "Book/show_book.book_uid"]})
+        branch_hint: Optional[str] = Field(default=None, description="hours info", json_schema_extra={"from_command_output": "library_hours"})
 
     class Output(BaseModel):
         book_uid: str = Field(description="the uid")
@@ -280,20 +269,17 @@ class ResponseGenerator:
                  command_parameters: Signature.Input) -> Signature.Output:
         return Signature.Output(book_uid=command_parameters.book_uid, title="Dune")
 '''
-    planning_command_with_from = '''from typing import Optional
+    planning_command_with_from = '''from pydantic import Field
+from typing import Optional
 from pydantic import BaseModel
-from fastworkflow import from_
 
 
 class Signature:
     """Inspect a book by uid."""
 
     class Input(BaseModel):
-        book_uid: str = from_(
-            ["Library/find_book.book_uids", "Book/show_book.book_uid"],
-            description="the uid",
-        )
-        hours_note: Optional[str] = from_("library_hours", default=None, description="hours")
+        book_uid: str = Field(description="the uid", json_schema_extra={"from_command_output": ["Library/find_book.book_uids", "Book/show_book.book_uid"]})
+        hours_note: Optional[str] = Field(default=None, description="hours", json_schema_extra={"from_command_output": "library_hours"})
 
 
 class PlanGenerator:
@@ -350,7 +336,6 @@ class PlanGenerator:
 def test_planning_command_under_commands_gets_producer_missing_output_field_check(tmp_path):
     """Step 2: ``from_`` producer field checks apply to planning commands in ``_commands/``."""
     planning_cmd = '''import fastworkflow
-from fastworkflow import from_
 from pydantic import BaseModel, Field
 
 
@@ -358,7 +343,7 @@ class Signature:
     """Planning command referencing a missing Output field."""
 
     class Input(BaseModel):
-        book_uid: str = from_("find_book.uids", description="the uid")
+        book_uid: str = Field(description="the uid", json_schema_extra={"from_command_output": "find_book.uids"})
 
 
 class PlanGenerator:
@@ -388,7 +373,6 @@ def test_unqualified_resolution_across_own_context_inherited_base_and_global_and
     # Book inherits from Record; library_hours is global; show_book is in Book;
     # Library/find_member is in another context (checked for existence and type at load)
     book_cmd = '''import fastworkflow
-from fastworkflow import from_
 from pydantic import BaseModel, Field
 
 
@@ -396,18 +380,18 @@ class Signature:
     """Check book details."""
 
     class Input(BaseModel):
-        title: str = from_("show_book.title", description="from own context Book")
-        note: str = from_("show_notes.notes", description="from base context Record")
-        branch: str = from_("library_hours.branches", description="from global")
-        member_uid: str = from_("Library/find_member.member_uids", description="qualified in another context")
+        title: str = Field(description="from own context Book", json_schema_extra={"from_command_output": "show_book.title"})
+        note: str = Field(description="from base context Record", json_schema_extra={"from_command_output": "show_notes.notes"})
+        branch: str = Field(description="from global", json_schema_extra={"from_command_output": "library_hours.branches"})
+        member_uid: str = Field(description="qualified in another context", json_schema_extra={"from_command_output": "Library/find_member.member_uids"})
 
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
         return fastworkflow.CommandResponse(response="ok")
 '''
-    bad_qualified_cmd = '''import fastworkflow
-from fastworkflow import from_
+    bad_qualified_cmd = '''from pydantic import Field
+import fastworkflow
 from pydantic import BaseModel
 
 
@@ -415,8 +399,8 @@ class Signature:
     """Bad qualified references in another context."""
 
     class Input(BaseModel):
-        missing_cmd: str = from_("Library/no_such_cmd.out")
-        wrong_type: int = from_("Library/find_member.member_uids")
+        missing_cmd: str = Field(json_schema_extra={"from_command_output": "Library/no_such_cmd.out"})
+        wrong_type: int = Field(json_schema_extra={"from_command_output": "Library/find_member.member_uids"})
 
 
 class ResponseGenerator:
@@ -474,8 +458,8 @@ class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
         return Signature.Output(notes=[])
 '''
-    bad_book_cmd = '''import fastworkflow
-from fastworkflow import from_
+    bad_book_cmd = '''from pydantic import Field
+import fastworkflow
 from pydantic import BaseModel
 
 
@@ -483,8 +467,8 @@ class Signature:
     """Reserve book for member."""
 
     class Input(BaseModel):
-        member_uid: str = from_("find_member.member_uids")
-        note: str = from_("show_notes.notes")
+        member_uid: str = Field(json_schema_extra={"from_command_output": "find_member.member_uids"})
+        note: str = Field(json_schema_extra={"from_command_output": "show_notes.notes"})
 
 
 class ResponseGenerator:
@@ -534,8 +518,8 @@ class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
         return Signature.Output(book_uid="b1")
 '''
-    consumer_cmd = '''import fastworkflow
-from fastworkflow import from_
+    consumer_cmd = '''from pydantic import Field
+import fastworkflow
 from pydantic import BaseModel
 
 
@@ -543,7 +527,7 @@ class Signature:
     """Consumer."""
 
     class Input(BaseModel):
-        book_uid: str = from_("open_book.book_uid")
+        book_uid: str = Field(json_schema_extra={"from_command_output": "open_book.book_uid"})
 
 
 class ResponseGenerator:
@@ -567,8 +551,8 @@ class ResponseGenerator:
 
 
 def test_target_field_only_in_input_produces_exact_error_text(tmp_path):
-    bad_cmd = '''import fastworkflow
-from fastworkflow import from_
+    bad_cmd = '''from pydantic import Field
+import fastworkflow
 from pydantic import BaseModel
 
 
@@ -576,7 +560,7 @@ class Signature:
     """Count books."""
 
     class Input(BaseModel):
-        query: str = from_("find_book.query")
+        query: str = Field(json_schema_extra={"from_command_output": "find_book.query"})
 
 
 class ResponseGenerator:
@@ -592,20 +576,20 @@ class ResponseGenerator:
     assert len(res.errors) == 1
     assert res.errors[0].message == (
         "Input.query (from 'find_book.query'): find_book's query is an Input field; "
-        "from_ names the Output field a value comes from. To describe the value, write "
+        "from_command_output names the Output field a value comes from. To describe the value, write "
         "Field(description=...); the preview shows find_book.query's description beside it"
     )
     cmd_file = os.path.join(folder, "_commands", "Library", "count_books.py")
     assert res.errors[0].format() == (
         f"{cmd_file}: Input.query (from 'find_book.query'): find_book's query is an Input field; "
-        "from_ names the Output field a value comes from. To describe the value, write "
+        "from_command_output names the Output field a value comes from. To describe the value, write "
         "Field(description=...); the preview shows find_book.query's description beside it"
     )
 
 
 def test_error_rows_output_field_and_facts_model_field_and_missing_target_field(tmp_path, caplog, capsys):
-    bad_output_cmd = '''import fastworkflow
-from fastworkflow import from_
+    bad_output_cmd = '''from pydantic import Field
+import fastworkflow
 from pydantic import BaseModel
 
 
@@ -613,22 +597,21 @@ class Signature:
     """Command with from_ on Output."""
 
     class Output(BaseModel):
-        author: str = from_("show_book.author")
+        author: str = Field(json_schema_extra={"from_command_output": "show_book.author"})
 
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
         return Signature.Output(author="Herbert")
 '''
-    bad_output_planning_command = '''from pydantic import BaseModel
-from fastworkflow import from_
+    bad_output_planning_command = '''from pydantic import BaseModel, Field
 
 
 class Signature:
     """Skill with from_ on Output."""
 
     class Output(BaseModel):
-        author: str = from_("Book/show_book.author")
+        author: str = Field(json_schema_extra={"from_command_output": "Book/show_book.author"})
 
 
 class PlanGenerator:
@@ -638,8 +621,8 @@ class PlanGenerator:
     def __result__(self, input):
         return Signature.Output(author="Herbert")
 '''
-    bad_missing_field_cmd = '''import fastworkflow
-from fastworkflow import from_
+    bad_missing_field_cmd = '''from pydantic import Field
+import fastworkflow
 from pydantic import BaseModel
 
 
@@ -647,15 +630,14 @@ class Signature:
     """Command naming nonexistent Output field."""
 
     class Input(BaseModel):
-        book_uid: str = from_("find_book.uids")
+        book_uid: str = Field(json_schema_extra={"from_command_output": "find_book.uids"})
 
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
         return fastworkflow.CommandResponse(response="ok")
 '''
-    bad_facts_planning_command = '''from pydantic import BaseModel
-from fastworkflow import from_
+    bad_facts_planning_command = '''from pydantic import BaseModel, Field
 
 
 class Signature:
@@ -667,7 +649,7 @@ class Signature:
 
 class PlanGenerator:
     class Shelf(BaseModel):
-        branch: str = from_("show_book.branch")
+        branch: str = Field(json_schema_extra={"from_command_output": "show_book.branch"})
 
     def shelf(self, input) -> Shelf:
         return ["show_book"]
@@ -699,7 +681,7 @@ class PlanGenerator:
     messages = [e.message for e in res.errors]
     output_errors = [
         e for e in res.errors
-        if "Signature.Output.author: an Output field cannot declare from_; build the value in __result__"
+        if "Signature.Output.author: an Output field cannot declare from_command_output; build the value in __result__"
         in e.message
     ]
     assert {e.command for e in output_errors} == {"Library/bad_output", "Book/bad_output_planning_command"}
@@ -708,7 +690,7 @@ class PlanGenerator:
         for m in messages
     )
     assert any(
-        "Shelf.branch (from 'show_book.branch'): from_ is only for a command's Input field; "
+        "Shelf.branch (from_command_output 'show_book.branch'): from_command_output is only for a command's Input field; "
         "type the field with the command's Output instead" in m
         for m in messages
     )
@@ -733,8 +715,8 @@ class PlanGenerator:
         extra_commands={
             "Library/bad_output": bad_output_cmd,
             "Library/bad_missing": bad_missing_field_cmd,
-            "Library/bad_input_only": '''import fastworkflow
-from fastworkflow import from_
+            "Library/bad_input_only": '''from pydantic import Field
+import fastworkflow
 from pydantic import BaseModel
 
 
@@ -742,7 +724,7 @@ class Signature:
     """Target field only in Input."""
 
     class Input(BaseModel):
-        query: str = from_("find_book.query")
+        query: str = Field(json_schema_extra={"from_command_output": "find_book.query"})
 
 
 class ResponseGenerator:
@@ -755,9 +737,9 @@ class ResponseGenerator:
     command_preview.write_previews(folder_exec_errs, out_exec)
     code_exec, stdout_exec = _preview_check(folder_exec_errs, out_exec, capsys)
     assert code_exec == 1
-    assert "Signature.Output.author: an Output field cannot declare from_" in stdout_exec
+    assert "Signature.Output.author: an Output field cannot declare from_command_output" in stdout_exec
     assert "Library/find_book has no Output field 'uids'" in stdout_exec
-    assert "find_book's query is an Input field; from_ names the Output field a value comes from" in stdout_exec
+    assert "find_book's query is an Input field; from_command_output names the Output field a value comes from" in stdout_exec
 
 
 def test_type_check_passes_and_failures(tmp_path):
@@ -781,9 +763,9 @@ class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
         return Signature.Output(exact_str="a", str_list=["a"], count=1)
 '''
-    valid_consumer = '''import fastworkflow
+    valid_consumer = '''from pydantic import Field
+import fastworkflow
 from typing import Optional
-from fastworkflow import from_
 from pydantic import BaseModel
 
 
@@ -791,21 +773,21 @@ class Signature:
     """Consumer with matching types."""
 
     class Input(BaseModel):
-        a: str = from_("producer.exact_str")
-        b: Optional[str] = from_("producer.exact_str")
-        c: str = from_("producer.opt_str")
-        d: str = from_("producer.str_list")
-        e: Optional[str] = from_("producer.str_list")
-        f: str = from_("producer.opt_str_list")
-        g: list[str] = from_("producer.str_list")
+        a: str = Field(json_schema_extra={"from_command_output": "producer.exact_str"})
+        b: Optional[str] = Field(json_schema_extra={"from_command_output": "producer.exact_str"})
+        c: str = Field(json_schema_extra={"from_command_output": "producer.opt_str"})
+        d: str = Field(json_schema_extra={"from_command_output": "producer.str_list"})
+        e: Optional[str] = Field(json_schema_extra={"from_command_output": "producer.str_list"})
+        f: str = Field(json_schema_extra={"from_command_output": "producer.opt_str_list"})
+        g: list[str] = Field(json_schema_extra={"from_command_output": "producer.str_list"})
 
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
         return fastworkflow.CommandResponse(response="ok")
 '''
-    invalid_consumer = '''import fastworkflow
-from fastworkflow import from_
+    invalid_consumer = '''from pydantic import Field
+import fastworkflow
 from pydantic import BaseModel
 
 
@@ -813,7 +795,7 @@ class Signature:
     """Consumer with mismatched types."""
 
     class Input(BaseModel):
-        book_uid: int = from_("find_book.book_uids")
+        book_uid: int = Field(json_schema_extra={"from_command_output": "find_book.book_uids"})
 
 
 class ResponseGenerator:
@@ -889,7 +871,7 @@ class PlanGenerator:
         if "command 'Library/hand_planning_command':" in rec.getMessage()
     ]
     assert len(hand_planning_command_logs) == 1
-    assert "available_from is written by from_" in hand_planning_command_logs[0].getMessage()
+    assert "available_from is written by from_command_output" in hand_planning_command_logs[0].getMessage()
 
     res = planning_commands.resolve_field_sources(folder)
     assert {"Library/get_order", "Library/hand_planning_command"} <= res.skipped_commands
@@ -897,8 +879,8 @@ class PlanGenerator:
     assert "available_from" not in (hand_sig.Input.model_fields["book_uid"].json_schema_extra or {})
     messages = [e.message for e in res.errors]
     assert any(
-        'Input.order_id: available_from is written by from_; write from_("find_book") '
-        'or from_("find_book.<field>")' in m
+        'Input.order_id: available_from is written by from_command_output; write "from_command_output": "find_book" '
+        'or "from_command_output": "find_book.<field>"' in m
         for m in messages
     )
 
@@ -922,7 +904,7 @@ class PlanGenerator:
         if "command 'Library/get_order':" in rec.getMessage()
     ]
     assert len(get_order_logs) == 1
-    assert "available_from is written by from_" in get_order_logs[0].getMessage()
+    assert "available_from is written by from_command_output" in get_order_logs[0].getMessage()
     assert "Library/get_order" in routing_def.get_command_names("Library")
     param_cls = routing_def.get_command_class("Library/get_order", ModuleType.COMMAND_PARAMETERS_CLASS)
     assert param_cls is not None
@@ -930,26 +912,26 @@ class PlanGenerator:
     out_dir = str(tmp_path / "previews_exec")
     command_preview.write_previews(folder_exec_only, out_dir)
     problems = command_preview.check_previews(folder_exec_only, out_dir)
-    assert any("available_from is written by from_" in p for p in problems)
+    assert any("available_from is written by from_command_output" in p for p in problems)
     code, stdout = _preview_check(folder_exec_only, out_dir, capsys)
     assert code == 1
-    assert "available_from is written by from_" in stdout
+    assert "available_from is written by from_command_output" in stdout
 
     out_dir_both = str(tmp_path / "previews_both")
     command_preview.write_previews(folder, out_dir_both)
     problems_both = command_preview.check_previews(folder, out_dir_both)
-    assert any("available_from is written by from_" in p for p in problems_both)
+    assert any("available_from is written by from_command_output" in p for p in problems_both)
     code_both, stdout_both = _preview_check(folder, out_dir_both, capsys)
     assert code_both == 1
-    assert "available_from is written by from_" in stdout_both
+    assert "available_from is written by from_command_output" in stdout_both
 
 
 def test_planning_command_with_from_error_loads_matchable_logs_once_and_preview_check_fails(
     tmp_path, caplog, capsys,
 ):
     """Planning skill with a bad ``from_`` stays in the registry and ``load_planning_command_map``."""
-    bad_planning = '''import fastworkflow
-from fastworkflow import from_
+    bad_planning = '''from pydantic import Field
+import fastworkflow
 from pydantic import BaseModel
 
 
@@ -957,7 +939,7 @@ class Signature:
     """Planning command with invalid from_ reference."""
 
     class Input(BaseModel):
-        book_uid: int = from_("find_book.book_uids")
+        book_uid: int = Field(json_schema_extra={"from_command_output": "find_book.book_uids"})
 
 
 class PlanGenerator:
@@ -998,7 +980,6 @@ def test_a_from_naming_a_callee_of_its_own_steps_is_an_error_that_asks_for_a_des
     cannot be told to run it first; the Input must carry a description. A producer the
     steps do not call stays a valid ``from_``."""
     calls_producer = '''import fastworkflow
-from fastworkflow import from_
 from pydantic import BaseModel, Field
 
 
@@ -1007,7 +988,7 @@ class Signature:
 
     class Input(BaseModel):
         title: str = Field(description="the book's title")
-        total: int = from_("find_book.total", description="how many books match")
+        total: int = Field(description="how many books match", json_schema_extra={"from_command_output": "find_book.total"})
 
 
 class PlanGenerator:
@@ -1015,11 +996,11 @@ class PlanGenerator:
         return [f"find_book query={input.title}", "say the count"]
 '''
     described = calls_producer.replace(
-        'from_("find_book.total", description="how many books match")',
+        'Field(description="how many books match", json_schema_extra={"from_command_output": "find_book.total"})',
         'Field(description="how many books match")')
     runs_other_producer = calls_producer.replace(
-        'from_("find_book.total", description="how many books match")',
-        'from_("find_member.total", description="how many members match")')
+        'Field(description="how many books match", json_schema_extra={"from_command_output": "find_book.total"})',
+        'Field(description="how many members match", json_schema_extra={"from_command_output": "find_member.total"})')
     folder = _build_workflow(
         tmp_path,
         "wf_callee_from",
@@ -1049,8 +1030,8 @@ def test_library_planning_commands_resolve_without_source_errors_and_with_their_
 def test_target_command_whose_file_fails_to_import_is_reported(tmp_path):
     broken_target = '''import non_existent_module_xyz
 '''
-    consumer = '''import fastworkflow
-from fastworkflow import from_
+    consumer = '''from pydantic import Field
+import fastworkflow
 from pydantic import BaseModel
 
 
@@ -1058,7 +1039,7 @@ class Signature:
     """Consumer pointing to a broken command file."""
 
     class Input(BaseModel):
-        val: str = from_("broken_cmd.out")
+        val: str = Field(json_schema_extra={"from_command_output": "broken_cmd.out"})
 
 
 class ResponseGenerator:
@@ -1081,8 +1062,8 @@ class ResponseGenerator:
 
 
 def test_hand_written_available_from_alongside_from_is_reported_and_rerun_is_idempotent(tmp_path):
-    both_cmd = '''import fastworkflow
-from fastworkflow import from_
+    both_cmd = '''from pydantic import Field
+import fastworkflow
 from pydantic import BaseModel
 
 
@@ -1090,18 +1071,15 @@ class Signature:
     """Command with both from_ and a hand-written available_from."""
 
     class Input(BaseModel):
-        book_uid: str = from_(
-            "find_book.book_uids",
-            json_schema_extra={"available_from": ["find_book"]},
-        )
+        book_uid: str = Field(json_schema_extra={"from_command_output": "find_book.book_uids", "available_from": ["find_book"]})
 
 
 class ResponseGenerator:
     def __call__(self, workflow, command, command_parameters):
         return fastworkflow.CommandResponse(response="ok")
 '''
-    valid_cmd = '''import fastworkflow
-from fastworkflow import from_
+    valid_cmd = '''from pydantic import Field
+import fastworkflow
 from pydantic import BaseModel
 
 
@@ -1109,7 +1087,7 @@ class Signature:
     """Command with valid from_."""
 
     class Input(BaseModel):
-        book_uid: str = from_("find_book.book_uids")
+        book_uid: str = Field(json_schema_extra={"from_command_output": "find_book.book_uids"})
 
 
 class ResponseGenerator:
@@ -1130,8 +1108,8 @@ class ResponseGenerator:
     assert len(res.errors) == 1
     assert res.errors[0].command == "Library/both_cmd"
     assert (
-        'Input.book_uid: available_from is written by from_; write from_("find_book") '
-        'or from_("find_book.<field>")'
+        'Input.book_uid: available_from is written by from_command_output; write "from_command_output": "find_book" '
+        'or "from_command_output": "find_book.<field>"'
     ) in res.errors[0].message
 
     # Re-running resolve_signature_field_sources on an already-resolved Signature is idempotent
@@ -1204,8 +1182,8 @@ def test_broken_context_or_workflow_inheritance_models_are_reported_as_problems(
 def test_base_contexts_preserved_when_another_command_fails_to_import(tmp_path):
     broken_cmd = '''import non_existent_planning_module_xyz
 '''
-    book_cmd = '''import fastworkflow
-from fastworkflow import from_
+    book_cmd = '''from pydantic import Field
+import fastworkflow
 from pydantic import BaseModel
 
 
@@ -1213,7 +1191,7 @@ class Signature:
     """Book command referencing inherited Record/show_notes unqualified."""
 
     class Input(BaseModel):
-        note: str = from_("show_notes.notes", description="from base context Record")
+        note: str = Field(description="from base context Record", json_schema_extra={"from_command_output": "show_notes.notes"})
 
 
 class ResponseGenerator:
@@ -1241,8 +1219,8 @@ class ResponseGenerator:
 
 
 def test_resolve_field_sources_does_not_create_command_info_or_write_to_workflow_folder(tmp_path):
-    open_book_cmd = '''import fastworkflow
-from fastworkflow import from_
+    open_book_cmd = '''from pydantic import Field
+import fastworkflow
 from pydantic import BaseModel
 
 
@@ -1250,8 +1228,8 @@ class Signature:
     """Open book."""
 
     class Input(BaseModel):
-        book_uid: str = from_("find_book.book_uids")
-        note: str = from_("Record/show_notes.notes")
+        book_uid: str = Field(json_schema_extra={"from_command_output": "find_book.book_uids"})
+        note: str = Field(json_schema_extra={"from_command_output": "Record/show_notes.notes"})
 
 
 class ResponseGenerator:
@@ -1294,7 +1272,6 @@ class ResponseGenerator:
 def test_hydrating_execution_command_resolves_from_before_command_metadata_api(tmp_path):
     open_book_cmd = '''from typing import Optional
 import fastworkflow
-from fastworkflow import from_
 from pydantic import BaseModel, Field
 
 
@@ -1302,11 +1279,8 @@ class Signature:
     """Open one book by its uid."""
 
     class Input(BaseModel):
-        book_uid: str = from_(
-            ["find_book.book_uids", "Book/show_book.book_uid"],
-            description="the uid of the book to open",
-        )
-        branch_hint: Optional[str] = from_("library_hours", default=None, description="hours info")
+        book_uid: str = Field(description="the uid of the book to open", json_schema_extra={"from_command_output": ["find_book.book_uids", "Book/show_book.book_uid"]})
+        branch_hint: Optional[str] = Field(default=None, description="hours info", json_schema_extra={"from_command_output": "library_hours"})
 
     class Output(BaseModel):
         book_uid: str = Field(description="the uid")
@@ -1380,7 +1354,6 @@ class ResponseGenerator:
 
 def test_field_source_resolution_is_cached_per_workflow(tmp_path):
     open_book_cmd = '''import fastworkflow
-from fastworkflow import from_
 from pydantic import BaseModel, Field
 
 
@@ -1388,7 +1361,7 @@ class Signature:
     """Open one book by its uid."""
 
     class Input(BaseModel):
-        book_uid: str = from_("find_book.book_uids", description="the uid")
+        book_uid: str = Field(description="the uid", json_schema_extra={"from_command_output": "find_book.book_uids"})
 
     plain_utterances = ["open book"]
 
@@ -1420,8 +1393,8 @@ class ResponseGenerator:
 
 
 def test_execution_command_with_from_error_logs_error_once_leaves_field_unwritten_and_stays_routable(tmp_path, caplog):
-    bad_exec_cmd = '''import fastworkflow
-from fastworkflow import from_
+    bad_exec_cmd = '''from pydantic import Field
+import fastworkflow
 from pydantic import BaseModel
 
 
@@ -1429,7 +1402,7 @@ class Signature:
     """Command with invalid from_ reference."""
 
     class Input(BaseModel):
-        book_uid: int = from_("find_book.book_uids")
+        book_uid: int = Field(json_schema_extra={"from_command_output": "find_book.book_uids"})
 
     plain_utterances = ["bad open book"]
 
@@ -1495,7 +1468,6 @@ class ResponseGenerator:
 
 def test_snapshot_reloaded_in_fresh_subprocess_preserves_resolved_available_from(tmp_path):
     open_book_cmd = '''import fastworkflow
-from fastworkflow import from_
 from pydantic import BaseModel, Field
 
 
@@ -1503,10 +1475,7 @@ class Signature:
     """Open one book by its uid."""
 
     class Input(BaseModel):
-        book_uid: str = from_(
-            ["find_book.book_uids", "Book/show_book.book_uid"],
-            description="the uid of the book to open",
-        )
+        book_uid: str = Field(description="the uid of the book to open", json_schema_extra={"from_command_output": ["find_book.book_uids", "Book/show_book.book_uid"]})
 
     plain_utterances = ["open book {book_uid}"]
 
@@ -1583,7 +1552,6 @@ print("RESULT_JSON:" + json.dumps(cmd["inputs"]))
 def test_missing_parameter_message_strips_context_prefix_and_field_suffix(tmp_path):
     open_book_cmd = '''from typing import Optional
 import fastworkflow
-from fastworkflow import from_
 from pydantic import BaseModel, Field
 
 from fastworkflow.utils.signatures import NOT_FOUND
@@ -1593,11 +1561,7 @@ class Signature:
     """Open one book by its uid."""
 
     class Input(BaseModel):
-        book_uid: str = from_(
-            ["find_book.book_uids", "Book/show_book.book_uid", "library_hours"],
-            default=NOT_FOUND,
-            description="the uid of the book to open",
-        )
+        book_uid: str = Field(default=NOT_FOUND, description="the uid of the book to open", json_schema_extra={"from_command_output": ["find_book.book_uids", "Book/show_book.book_uid", "library_hours"]})
 
     plain_utterances = ["open book {book_uid}"]
 

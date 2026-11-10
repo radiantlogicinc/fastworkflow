@@ -30,15 +30,11 @@ class Signature:
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
-    @staticmethod
-    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> None:
-        return None
-
 class ResponseGenerator:
     def _process_command(self, workflow: Workflow) -> Signature.Output:
         """Mark this TodoList and all children as incomplete."""
         # Access the application class instance:
-        app_instance = workflow.command_context_for_response_generation  # type: TodoList
+        app_instance = workflow.record  # type: TodoList
         app_instance.mark_pending()
         return Signature.Output(success=True)
 

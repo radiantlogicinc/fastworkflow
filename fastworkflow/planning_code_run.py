@@ -113,7 +113,7 @@ class _Walk:
     def context_name(self) -> str:
         """The name of the workflow's current context (its root object's too: ``Library``), ``""`` for global."""
         try:
-            return str(getattr(self.wf, "current_command_context_name", "") or "")
+            return str(getattr(self.wf, "_current_command_context_name", "") or "")
         except Exception:  # noqa: BLE001 - a context that cannot be named is the global one here
             return ""
 

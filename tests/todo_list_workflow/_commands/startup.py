@@ -8,11 +8,11 @@ class ResponseGenerator:
             'application/'
             'todo_list.json'
         )
-        workflow.root_command_context = TodoListManager(filepath)
+        workflow.root = TodoListManager(filepath)
         
         response = {
             "message": "Application initialized.",
-            "context": workflow.current_command_context_name
+            "context": type(workflow.root).__name__
         }
 
         return str(response)

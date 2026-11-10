@@ -2803,7 +2803,7 @@ def test_a_failure_after_an_earlier_phase_ran_does_not_restart_the_call(phased, 
 
 @pytest.mark.skip(reason="fix-zezw disabled after benchmark pass 4")
 def test_a_first_phase_whose_steps_name_a_writing_command_is_not_restarted(phased, monkeypatch):
-    # The library's find_book is declared writes = True (stubbed here: the todo workflow declares none). Its
+    # The library's find_book is declared @writes (stubbed here: the todo workflow declares none). Its
     # step ran before the facts failed, so a restart would write it twice: no re-extraction, no second plan.
     from fastworkflow import command_writes
     monkeypatch.setattr(command_writes, "write_commands",

@@ -455,7 +455,7 @@ class ChatSession:
     #         mcp_result = self._CommandExecutor.perform_mcp_tool_call(
     #             workflow, 
     #             tool_call, 
-    #             command_context=workflow.current_command_context_name
+    #             command_context=workflow._current_command_context_name
     #         )
             
     #         # Convert MCPToolResult back to CommandOutput for consistency

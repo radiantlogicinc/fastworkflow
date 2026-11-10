@@ -6,44 +6,59 @@ the member" leaves out the one thing the command needs.
 
 ## The checks a field can ask for
 
-`member_report`'s `member` carries `json_schema_extra={"in_request": True}` (page 6). Each
-check is such an option of an `Input` field, and means the same on an execution command's
-field as on a planning command's:
+`member_report`'s `member` carries `json_schema_extra={"copied_from_command_text": True}` (page 6).
+Each check is one key of a field's `json_schema_extra`, and means the same on an execution
+command's field as on a planning command's. The key names the behaviour; its value is `True`, or
+a dict of that key's own options:
 
-| option | on a field of type | what it checks |
+| key | on a field of type | what it checks |
 |---|---|---|
-| `in_request: True` | `str`, `int`, `list[str]` | a `str` is written in the request (case and dashes aside); an `int` is a number the request writes; each item of a `list[str]` is written |
-| `in_request: "subject"` | `str` | as `in_request`, and the value names a record the request names |
-| `in_request: {"ignore": [...]}` | `str` | as `in_request`, after the named words are removed from either end of the value (the cleanup the retired `strip` option did) |
-| `verify: True` | `bool`, `Literal`, or a `str` with `in_request: "subject"` | a classifier decides the value again from the request; it needs `JEV_API_KEY`, and without it checks nothing |
-| `verify: {value: meaning, ...}` | `Literal` | the same check, and gives each value its meaning (every key one of the enum's values) |
+| `copied_from_command_text: True` | `str`, `int`, `list[str]` | a `str` is written in the command text (case and dashes aside); an `int` is a number the command text writes; each item of a `list[str]` is written |
+| `copied_from_command_text: {"ignore": [...]}` | `str` | as above, after the named words are removed from either end of the value (the cleanup the retired `strip` option did) |
+| `record_named_in_command_text: True` | `str` | as `copied_from_command_text`, and the value names a record the command text already names |
+| `record_named_in_command_text: {"ignore": [...]}` | `str` | as above, with the named words removed from either end first |
+| `classifier_confirms: True` | `bool`, `Literal`, or a `str` with `record_named_in_command_text` alongside | a classifier decides the value again from the command text; it needs `JEV_API_KEY`, and without it checks nothing |
+| `classifier_confirms: {"meanings": {value: meaning, ...}}` | `Literal` | the same check, and gives each value its meaning (every key one of the enum's values) |
+| `classifier_decides: True` | `bool` | the classifier alone decides the value from the command text; the typed call and the parameter extractor never fill it, and it keeps its default when the classifier is not sure or there is no `JEV_API_KEY` |
 
-Two options is the whole list: `in_request` (with `"subject"` and the `ignore` words inside it) and
-`verify` (with `"alone"` for a bool only the classifier decides, such as a part of the job the
-request may leave out; see "Field options" in
-[planning_command_file_layout.md](../../planning_command_file_layout.md)). A field with no check is cleaned in code: call `strip_words(text, words)` from
-`fastworkflow.planning_commands` in its validator or in the `validate_extracted_parameters` hook. An
-`Input` validator's returned value is written back, so a validator that cleans a value changes the
-argument. The retired `subject`, `means` and `strip` options fail the load and name the new spelling.
+`record_named_in_command_text` checks a value the parameter extractor already proposed. The
+extractor reads the field's description, which says what the field holds (a person's name, a
+product, a code) and does not say how a record is found. The check matches that value against
+names the command text already writes; it does not read the description. The description and the
+sentence the framework appends to it are what the extractor reads. A model chooses among those
+names again only when the same field also has `classifier_confirms`, and only when `JEV_API_KEY`
+is set. Without the key the string check still runs.
 
-A field with no option is checked by its type alone, and an option on a type it does not
-apply to fails the load. For each option it finds, the framework adds a sentence to the
-field's description when it asks the parameter extractor to fill it (page 2).
+The keys are not the whole list: `command_text_after_command_name`, `from_command_output`
+and `converted_from_command_text` are the other field keys, and the
+[planning command file layout](../../planning_command_file_layout.md) has them under "Field
+options". A field with no check is cleaned in code: call `strip_words(text, words)` from
+`fastworkflow.planning_commands` in a `field_validator` on that field. A validator's returned value
+is written back, so a validator that cleans a value changes the argument. A validator cannot
+replace "required" or `ignore`: a missing required field fails before any validator runs, and
+`ignore` strips the value before the verbatim match.
 
-## The hook
+A field with no key is checked by its type alone, and a key on a type it does not apply to fails
+the load. For each key a field carries, the framework adds a sentence to the field's description
+when it asks the parameter extractor to fill it (page 2).
 
-`member_report` (page 6) refuses in its `Signature`:
+## The validator
+
+`member_report` (page 6) refuses in a model validator on its `Input`:
 
 ```python
-class Signature:
+class Input(BaseModel):
+    member: str = Field(description="the member's name",
+                        json_schema_extra={"copied_from_command_text": True})
     ...
-    @staticmethod
-    def validate_extracted_parameters(workflow, command, input, command_text=None):
-        if input.member.casefold() in EVERYONE:
+
+    @model_validator(mode="after")
+    def refuse_everyone(self, info):
+        if self.member.casefold() in EVERYONE:
             raise fastworkflow.Refused(
-                f"member is {input.member!r}, which names no one member; this "
+                f"member is {self.member!r}, which names no one member; this "
                 "command reports on one member: give that member's name", field="member")
-        return None
+        return self
 
 ...
 
@@ -53,27 +68,34 @@ EVERYONE = {"everyone", "everybody", "all", "all members", "every member"}
 
 ## Line by line
 
-- **`validate_extracted_parameters`** is the hook an execution command's `Signature` has,
-  with the same signature. It gets the arguments as an `Input` (`input`) after they
-  were filled and checked, before the `PlanGenerator` is called. `command_text` is the
-  request the arguments were filled from.
-- **`raise fastworkflow.Refused(message, field="member")`** refuses the call. Write the message
-  as what to fix. `field` names the input the user can fix: on a typed call in an attended
-  turn, that input is asked for. Leave `field` out when no answer could fix the call, because
-  the command does not fit the request ("the owner is read only for an application"): the
-  request is then planned without the command, and the user is not asked. Return `None` to
-  accept; a tuple such as `(False, message)` is a call error.
-- **Any other exception** the hook raises fails the call; `Refused` is the one that means
-  "these arguments are wrong".
-- **The hook may correct** as well as refuse: set a field of `input` (a name in the
-  catalogue's spelling, say) and return `None`. It runs once per call, after the
-  options' checks, so a value it corrects is not checked again against the request.
-- **A rule that ties fields together**, or a field to the request, can instead be a
-  pydantic validator on `Input` raising `ValueError` (see "Rules on the arguments" in
-  [planning_command_file_layout.md](../../planning_command_file_layout.md)). It is checked after the hook, with the
-  request in the validation context. That context carries the request on a planning command;
-  an execution command's validators get none.
-- **`EVERYONE`** is a module-level table, written after `PlanGenerator`. The hook reads it
+- **`@model_validator(mode="after")`** is the one place a cross-field rule is written, for both
+  kinds of command. It runs on the `Input` after the arguments were filled and the field options
+  were checked, and before the `PlanGenerator` is called. A validator on several fields reads
+  them all as `self`, so there is no hook to set up: the rule is a method of the model.
+- **`info.context`** is the validation context: `command_text` (the text the arguments were
+  filled from), `workflow` (the app's workflow, or `None` while the template is rendered) and
+  `command` (the qualified name, such as `Library/member_report`). Both kinds of command get the
+  same context, so a validator that reads `info.context["command_text"]` needs no guard.
+  `refuse_everyone` does not read it.
+- **`raise fastworkflow.Refused(message, field="member")`** refuses the call, and it is the
+  refusal that names an input. Write the message as what to fix. `field` names the input the
+  user can fix: on a typed call in an attended turn, that input is asked for. Leave `field` out
+  when no answer could fix the call, because the command does not fit the request ("the owner is
+  read only for an application"): the request is then planned without the command, and the user
+  is not asked. The `fields` of the refusal reach the caller intact, as the `member` above does.
+- **A plain `ValueError`** in a validator is a refusal with no field named, worded as the hook's:
+  `validate_extracted_parameters: <text>`. The extractor is asked once more, and if the call is still
+  refused the planner's typed fill takes over. The note validator on page 2 is one: its refusal names
+  no input.
+- **A correction** is an assignment and a return. A validator that sets `self.<field>` and returns
+  `self` writes the value back, and the notes of the call record what changed, attributed to the
+  validator. Its message says what to fix in the same way.
+- **Several validators** run in the order they are declared, one after another, each on the
+  values the one before left.
+- **A placeholder combination** (the template and the preview build the call with `command_text=""`
+  and `workflow=None`) runs the validators too. A combination a validator refuses or changes is left
+  out of the template and the preview, as the old hook's were.
+- **`EVERYONE`** is a module-level table, written after `PlanGenerator`. The validator reads it
   when it is called, so the order does not matter to Python.
 
 ## How the arguments arrive
@@ -89,8 +111,8 @@ A planning command's arguments arrive one of two ways, and the same checks run o
    sentences of their options (page 2), as it does for an execution command.
 
 Then **the checks run**, in this order, for either kind of command: the field options' checks
-(here, that `member` is written in the request), then this hook, once, then the `Input`'s
-validators. Last, **the `PlanGenerator` is called** with the checked `Input`.
+(here, that `member` is written in the command text), then the `Input`'s model validators, in
+the order declared. Last, **the `PlanGenerator` is called** with the checked `Input`.
 
 The request the checks read is the user's request for a typed call. For a step, it is the
 step's text, with one exception: when the planner wrote the step, its arguments are checked
@@ -120,8 +142,8 @@ The reply is the next message, and it completes the call. An unattended turn nev
 planner plans the request from the command's template instead.
 
 **On a step**, the step's observation is the message any command gets for a missing
-argument. It names the field, and the commands a producer `from_` points it to, when the
-field has one:
+argument. It names the field, and the commands a producer `from_command_output` points it to,
+when the field has one:
 
 ```text
 Missing parameter values: member
@@ -174,8 +196,8 @@ answer written by __result__:
 ## What you learned
 
 A planning command's arguments are checked the way any command's are, whether a typed call or
-a step filled them: by the options their fields carry (`in_request`, `verify`), then
-`validate_extracted_parameters`, once, then the `Input`'s validators;
+a step filled them: by the options their fields carry (`copied_from_command_text`,
+`classifier_confirms`), then the `Input`'s model validators;
 `raise fastworkflow.Refused(...)` sends the caller back with what to fix. A missing argument
 on a typed call is asked for in a question code writes, in an attended turn; on a step it
 comes back as the same message an execution command's does, and the agent asks for it.

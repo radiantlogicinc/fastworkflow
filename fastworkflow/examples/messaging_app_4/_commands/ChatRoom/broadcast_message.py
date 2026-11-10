@@ -31,7 +31,7 @@ class ResponseGenerator:
     """Call the Chatroom.broadcast instance method."""
 
     def _process_command(self, workflow: fastworkflow.Workflow, input: Signature.Input) -> None:
-        chatroom: ChatRoom = workflow.command_context_for_response_generation
+        chatroom: ChatRoom = workflow.record
         chatroom.broadcast(input.message)
 
     def __call__(self, workflow: 

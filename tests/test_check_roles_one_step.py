@@ -32,8 +32,8 @@ class Signature:
     """Move one member's loan of a book to a branch."""
 
     class Input(BaseModel):
-        member: str = Field(description="the member whose loan moves", json_schema_extra={"in_request": True})
-        branch: str = Field(description="the branch the loan moves to", json_schema_extra={"in_request": True})
+        member: str = Field(description="the member whose loan moves", json_schema_extra={"copied_from_command_text": True})
+        branch: str = Field(description="the branch the loan moves to", json_schema_extra={"copied_from_command_text": True})
 
 
 class PlanGenerator:
@@ -50,7 +50,7 @@ class Signature:
     """File a note about one member."""
 
     class Input(BaseModel):
-        member: str = Field(description="the member the note is about", json_schema_extra={"in_request": True})
+        member: str = Field(description="the member the note is about", json_schema_extra={"copied_from_command_text": True})
         title: str = Field(description="a title for the note")
 
 

@@ -93,7 +93,7 @@ def test_a_context_given_no_sink_records_into_its_workflows_db(
     try:
         context.bind_observability_identity(channel_id="embedded-channel")
         context.bind_app_workflow(workflow)
-        workflow.root_command_context = TodoListManager(str(tmp_path / "todo_list.json"))
+        workflow.root = TodoListManager(str(tmp_path / "todo_list.json"))
 
         db_path = state_paths.observability_db(todo_workflow_path)
         sink = context.trace_sink
@@ -147,7 +147,7 @@ def test_an_explicit_no_op_sink_stays_no_op_and_records_nothing(
     try:
         context.bind_observability_identity(channel_id="silent-channel")
         context.bind_app_workflow(workflow)
-        workflow.root_command_context = TodoListManager(str(tmp_path / "todo_list.json"))
+        workflow.root = TodoListManager(str(tmp_path / "todo_list.json"))
 
         assert isinstance(context.trace_sink, tracing.NoOpTraceSink)
         turn = context.process_action_turn(_action())

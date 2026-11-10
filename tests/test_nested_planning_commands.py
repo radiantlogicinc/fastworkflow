@@ -263,7 +263,7 @@ class Signature:
 
     class Input(BaseModel):
         title: str = Field(description="the book's title",
-                           json_schema_extra={"in_request": True})
+                           json_schema_extra={"copied_from_command_text": True})
 
 
 class PlanGenerator:
@@ -327,26 +327,17 @@ HOOK_CALLS = "title_hook_calls"
 #: A test copy of book_by_title whose hook counts its calls (in the workflow's context), corrects
 #: a lower-case title and refuses one title.
 _HOOK = '''
-    @staticmethod
-    def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
-        if workflow is not None:
-            workflow.context.setdefault("title_hook_calls", []).append(command_text)
-        if cmd_parameters.title.lower() == "dune":
-            cmd_parameters.title = "Dune"
-        if cmd_parameters.title == "Emma":
-            raise fastworkflow.Refused("the library holds no Emma")
-        return None
-'''
-_HOOK_ANCHOR = '''    plain_utterances = [
-        "who wrote Dune",
-        "how many copies of Dune Messiah are there",
-        "who is the author of Persuasion, and how many copies do we have",
-        "tell me about the book Emma",
-        "what is Dune Messiah by, and how many copies",
-        "give me the author and copy count for the title Emma",
-        "does the library own Persuasion, and who wrote it",
-        "how many copies of Emma do we own and who wrote it",
-    ]
+        @model_validator(mode="after")
+        def counts_corrects_and_refuses(self, info):
+            workflow = info.context.get("workflow")
+            if workflow is not None:
+                workflow.context.setdefault("title_hook_calls", []).append(info.context.get("command_text"))
+            if self.title.lower() == "dune":
+                self.title = "Dune"
+            if self.title == "Emma":
+                raise fastworkflow.Refused("the library holds no Emma")
+            return self
+
 '''
 
 #: A test copy of book_by_title whose Input rule reads the request from the validation context:
@@ -354,17 +345,17 @@ _HOOK_ANCHOR = '''    plain_utterances = [
 _INPUT_RULE = '''        @field_validator("title")
         @classmethod
         def title_is_not_withdrawn(cls, value, info):
-            if "withdrawn" in (info.context or {}).get("request", "").lower():
+            if "withdrawn" in (info.context or {}).get("command_text", "").lower():
                 raise ValueError("the library does not look up withdrawn books")
             return value
 
 '''
-_TITLE_FIELD_ANCHOR = '                           json_schema_extra={"in_request": True})\n'
+_TITLE_FIELD_ANCHOR = '                           json_schema_extra={"copied_from_command_text": True})\n'
 _PYDANTIC_ANCHOR = "from pydantic import BaseModel, Field\n"
 
 #: A test copy of book_by_title with a verify bool the classifier decides from the request.
 _VERIFY_FIELD = '''        flagged: bool = Field(default=False, description="whether the book is flagged",
-                              json_schema_extra={"verify": True})
+                              json_schema_extra={"classifier_confirms": True})
 '''
 
 
@@ -374,7 +365,8 @@ def _insert_after(source: str, anchor: str, addition: str) -> str:
 
 
 def _hooked_book_by_title() -> str:
-    return _insert_after(_BOOK_BY_TITLE_SOURCE, _HOOK_ANCHOR, _HOOK)
+    text = _insert_after(_BOOK_BY_TITLE_SOURCE, _TITLE_FIELD_ANCHOR, _HOOK)
+    return text.replace(_PYDANTIC_ANCHOR, "from pydantic import BaseModel, Field, model_validator\n")
 
 
 def _input_rule_book_by_title() -> str:
@@ -571,7 +563,7 @@ def test_n_a_verify_field_is_checked_once_on_the_request_before_the_guards(
 
 
 class TitleInput(BaseModel):
-    title: str = Field(description="the book's title", json_schema_extra={"in_request": True})
+    title: str = Field(description="the book's title", json_schema_extra={"copied_from_command_text": True})
 
 
 def _planning_command(name: str, plan_cls, input_cls=None):
@@ -1055,7 +1047,7 @@ def test_af_the_parent_continues_in_the_context_its_child_ended_on(nested_env):
     # The parent's next step acts on the record the child left; nothing restored its context.
     [listed] = [o for o in ctx._turn_outputs if o.command_name == "Book/list_loans"]
     assert listed.success is True
-    assert ctx.get_active_workflow().current_command_context_name == "Book"
+    assert ctx.get_active_workflow()._current_command_context_name == "Book"
 
 
 def test_ag_a_resumed_step_whose_child_navigated_carries_the_now_in_note(open_find_env):
@@ -1257,7 +1249,7 @@ def test_ak_two_fan_out_items_each_open_their_record_in_place(open_by_uid_env, m
     first_open = names.index("Library/open_by_uid")
     second_open = names.index("Library/open_by_uid", first_open + 1)
     assert "IntentDetection/go_up" not in names[first_open + 1:second_open]
-    assert state.wf.current_command_context.uid == "b2"
+    assert state.wf._current_command_context.uid == "b2"
     assert result.answer == "b1 Dune, b2 Dune Messiah"
 
 
@@ -1279,12 +1271,12 @@ def test_a_library_command_and_a_library_planning_command_are_callable_from_the_
     result = state.ctx.process_turn("open book b1")
     assert result.status == TurnStatus.COMPLETED
     wf = state.wf
-    assert wf.current_command_context_name == "Book"
+    assert wf._current_command_context_name == "Book"
 
     # 3.9: accepted by name, and the current object does not move (no go_up is inserted).
     assert workflow_agent._explicit_agent_command("find_book", wf) == "find_book"
     assert workflow_agent._explicit_agent_command("open_by_uid", wf) == "open_by_uid"
-    assert wf.current_command_context_name == "Book"
+    assert wf._current_command_context_name == "Book"
 
     # Off the path: Member is a sibling of Book, so its command is refused, as before.
     refused = _refusal_text(wf, "list_member_loans")
@@ -1303,7 +1295,7 @@ def test_a_refusal_from_a_record_under_the_root_names_the_way_back_through_the_r
     result = state.ctx.process_turn("open book b1")
     assert result.status == TurnStatus.COMPLETED
     wf = state.wf
-    assert wf.current_command_context_name == "Book"
+    assert wf._current_command_context_name == "Book"
 
     refused = _refusal_text(wf, "list_member_loans")
 
@@ -1347,7 +1339,6 @@ def test_am_a_from_naming_the_planning_command_its_steps_call_asks_for_a_descrip
     steps run: the load error asks for a description, as an execution callee does."""
     calls_child = '''from pydantic import BaseModel, Field
 
-from fastworkflow import from_
 from fastworkflow.planning import run
 
 
@@ -1356,7 +1347,7 @@ class Signature:
 
     class Input(BaseModel):
         title: str = Field(description="the book's title")
-        book_uid: str = from_("book_by_title.book_uid", description="the uid of the book")
+        book_uid: str = Field(description="the uid of the book", json_schema_extra={"from_command_output": "book_by_title.book_uid"})
 
 
 class PlanGenerator:
@@ -1364,7 +1355,7 @@ class PlanGenerator:
         return [run("book_by_title", title=input.title), "say the title"]
 '''
     described = calls_child.replace(
-        'from_("book_by_title.book_uid", description="the uid of the book")',
+        'Field(description="the uid of the book", json_schema_extra={"from_command_output": "book_by_title.book_uid"})',
         'Field(description="the uid of the book")').replace(
         "from fastworkflow import from_\n", "")
     folder = _library_workflow(
@@ -1394,10 +1385,10 @@ def test_an_the_now_in_note_names_the_record_the_child_opened(nested_env, monkey
     assert "now in context 'Book' and b1" in _turn_observation(nested_env)
     [listed] = [o for o in nested_env.ctx._turn_outputs if o.command_name == "Book/list_loans"]
     assert listed.command_response.output.borrowers == ["Ann Lee", "Raj Patel"]
-    assert nested_env.ctx.get_active_workflow().current_command_context_name == "Book"
+    assert nested_env.ctx.get_active_workflow()._current_command_context_name == "Book"
 
 
-_PICK_LINE = '    return [pick("open_book", named=input.title)]'
+_PICK_LINE = '    return [run("open_book", named=input.title)]'
 _OPEN_OTHER_LINE = '    return [run("open_book", book_uid="b2")]'
 
 
@@ -1424,7 +1415,7 @@ def test_ao_a_child_that_ends_on_another_record_is_acted_on_there_and_not_restor
         assert listed.command_response.output.total == 0
         assert [h["output"]["book_uid"] for h in _held_runs(state.ctx, BOOK_BY_TITLE)] == ["b2"]
         # Nothing restored A's earlier context: the workflow stays on the record the child left.
-        assert state.ctx.get_active_workflow().current_command_context_name == "Book"
+        assert state.ctx.get_active_workflow()._current_command_context_name == "Book"
         assert len(state.ctx._frame_stack()) == 1
     finally:
         state.ctx.pop_active_workflow()
@@ -1689,7 +1680,7 @@ def test_an_agent_step_naming_a_planning_command_of_another_context_is_refused(n
     assert entered == []
     assert not [o for o in nested_book_env.ctx._turn_outputs
                 if o.command_name == "Book/loan_report"]
-    assert wf.current_command_context_name == "Library"
+    assert wf._current_command_context_name == "Library"
 
 
 class _PlanRefusedThenInContext:
@@ -1740,7 +1731,7 @@ def test_a_global_planning_command_is_called_by_name_from_any_context(tmp_path,
     assert fastworkflow.RoutingRegistry.get_definition(wf.folderpath).get_planning_command_names(
         "*") == ["dune_total"]
 
-    assert wf.current_command_context_name == "Library"
+    assert wf._current_command_context_name == "Library"
     # 3.9 ("Planning commands use the same path", 3.4 Routing): the global scope is on every lookup
     # path, so a global planning command is called by its name from a context, as a global
     # execution command (library_hours) is. The call is bound to the root object (the global
@@ -1755,11 +1746,11 @@ def test_a_global_planning_command_is_called_by_name_from_any_context(tmp_path,
     # The root is the Library itself (the current object), so the run is not moved: no
     # "ran on" stamp is set, and the binding is the root object.
     assert "ran_on_context_name" not in walked.command_response.artifacts
-    assert wf.command_context_for_response_generation is wf.root_command_context
-    assert wf.current_command_context_name == "Library"
+    assert wf.record is wf.root
+    assert wf._current_command_context_name == "Library"
 
-    wf.current_command_context = None
-    assert wf.current_command_context_name == "*"
+    wf.record = None
+    assert wf._current_command_context_name == "*"
     assert workflow_agent._explicit_agent_command("dune_total", wf) == "dune_total"
 
 

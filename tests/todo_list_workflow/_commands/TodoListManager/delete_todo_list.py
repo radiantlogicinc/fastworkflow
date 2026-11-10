@@ -35,15 +35,11 @@ class Signature:
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
-    @staticmethod
-    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> None:
-        return None
-
 class ResponseGenerator:
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         """Delete a todo list."""
         # Access the application class instance:
-        app_instance = workflow.command_context_for_response_generation  # type: TodoListManager
+        app_instance = workflow.record  # type: TodoListManager
         result = app_instance.delete_todo_list(id=input.id)
         return Signature.Output(success=result)
 

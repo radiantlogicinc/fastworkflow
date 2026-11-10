@@ -519,10 +519,10 @@ def test_a_restored_session_resumes_in_the_command_context_its_turn_left(tmp_pat
     first.model.run("find_book query=Dune")
     first.model.finish()
     assert first.ctx.process_turn("look up Dune").status == TurnStatus.COMPLETED
-    left_in = first.wf.current_command_context_name
+    left_in = first.wf._current_command_context_name
     blob = json.loads(json.dumps(first.ctx.serialize_state(channel_id="plan-frames-navigation")))
 
     restored = library_sessions(folder, startup=False)
     restored.ctx.apply_serialized_state(blob)
 
-    assert restored.wf.current_command_context_name == left_in
+    assert restored.wf._current_command_context_name == left_in

@@ -75,7 +75,8 @@ def test_drop_returns_items():
         CONSULTATION,
     )
     wf = _workflow()
-    params = drop_mod.Signature.Input(items=["2", "renewal step"])
+    # Built unvalidated: the drop validator reads the context, which a direct call does not supply.
+    params = drop_mod.Signature.Input.model_construct(items=["2", "renewal step"])
     response = drop_mod.ResponseGenerator()(wf, "ProposalReview/drop", params)
     assert response.output.items == ["2", "renewal step"]
 

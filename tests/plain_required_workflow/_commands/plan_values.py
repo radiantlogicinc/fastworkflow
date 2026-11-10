@@ -13,7 +13,7 @@ class Signature:
     plain_utterances = ["plan a recording of the values"]
 
     class Input(BaseModel):
-        name: str = Field(description="a name", json_schema_extra={"in_request": True})
+        name: str = Field(description="a name", json_schema_extra={"copied_from_command_text": True})
         count: int = Field(description="a count")
         ratio: float = Field(description="a ratio")
         ids: list[str] = Field(description="a list of ids")

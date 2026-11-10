@@ -257,7 +257,7 @@ def validate_command_file_components_in_dir(directory: str) -> list:
                         errors.append((file_path, 'Output class does not inherit from BaseModel'))
                     if not has_plain_utterances:
                         errors.append((file_path, 'Missing plain_utterances in Signature'))
-                    # generate_utterances and validate_extracted_parameters are optional: without them the
+                    # generate_utterances and the Input's model validators are optional: without them the
                     # framework's defaults apply (the hook is emitted only when a command needs one).
                     if not has_response_generator:
                         errors.append((file_path, 'Missing ResponseGenerator class'))

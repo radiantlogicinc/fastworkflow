@@ -10,7 +10,7 @@ class Signature:
     plain_utterances = ["find books by Jane Austen", "do you have Dune"]
 
     class Input(BaseModel):
-        query: str = Field(description="the title or author words", json_schema_extra={"in_request": True})
+        query: str = Field(description="the title or author words", json_schema_extra={"copied_from_command_text": True})
 
 
 class PlanGenerator:

@@ -706,7 +706,7 @@ def _input_text(value: Any) -> str:
 
 
 def _producers(workflow, means: Means, earlier: list[SubTask]) -> dict[str, int]:
-    """``{field: N}``: the fields of *means*'s ``Input`` whose declared producer (``from_``, resolved as
+    """``{field: N}``: the fields of *means*'s ``Input`` whose declared producer (``from_command_output``, resolved as
     ``available_from``) an earlier sub-task N runs, as its command or as a step of its planning command; the latest N."""
     from fastworkflow import ModuleType, RoutingRegistry, planning_commands
 
@@ -751,7 +751,7 @@ def draft_inputs(workflow, item: SubTask, sub_task: str, earlier: list[SubTask],
                  planner_lm=None) -> Optional[DraftedInputs]:
     """The inputs of *item*'s means drafted from *sub_task* (fix-48np, stage 1), or None when no draft was made.
 
-    A field whose declared producer (``from_``) an earlier sub-task runs is ``from sub-task N``, not extracted. The
+    A field whose declared producer (``from_command_output``) an earlier sub-task runs is ``from sub-task N``, not extracted. The
     other values are the shared extractor's (``parameter_extraction.extract_arguments``: the extractor execution
     commands use, with its checks, and for a planning command ``check_arguments``, the checks the typed planning call
     runs), each one the extractor gave and the checks kept that is not the field's default. For a planning command
@@ -1689,7 +1689,7 @@ def reviewed_values(workflow, item: SubTask, resolved: ResolvedInputs, required:
 
 def _produced_fields(workflow, item: SubTask, answers: Mapping[int, str]) -> dict[str, str]:
     """``{field: value}`` for the ``from sub-task N`` inputs of *item* whose field declares the producer field it takes
-    (``from_("find_book.book_uids")``) and whose sub-task N's output is JSON holding it: that field's value, the one
+    (``from_command_output="find_book.book_uids"``) and whose sub-task N's output is JSON holding it: that field's value, the one
     element of a one-element list. Other ``from sub-task N`` inputs keep N's whole output (``resolve_inputs``)."""
     from fastworkflow import ModuleType, RoutingRegistry
 
@@ -1729,7 +1729,7 @@ def reviewed_arguments(workflow, command, item: SubTask, resolved: ResolvedInput
     """``(ReviewedValues, run_listing.ArgumentCheck)`` for a sub-task bound to planning command *command* (fix-48np.1).
 
     The values (``reviewed_values``) go through the checks a typed planning call runs (``checked_arguments``:
-    ``check_arguments``, ``validate_extracted_parameters``, the ``Input``'s rules) against *request* with the turn's
+    ``check_arguments``, the ``Input``'s model validators) against *request* with the turn's
     earlier outputs after it. A refusal is returned: the caller hands the sub-task to the agent with it (F2) and records
     the deviation.
     """

@@ -25,11 +25,11 @@ ROOT = Path(__file__).resolve().parent.parent
 class ReportInput(BaseModel):
     title: str = Field(description="the book's title")
     loans: bool = Field(default=False, description="the request asks who has the book on loan",
-                        json_schema_extra={"verify": True})
+                        json_schema_extra={"classifier_confirms": True})
     leave_out_author: bool = Field(
         default=False,
         description="the request says to leave out the book's author, or asks only for other parts",
-        json_schema_extra={"verify": "alone"})
+        json_schema_extra={"classifier_decides": True})
 
 
 def _command() -> pc.PlanningCommandCommand:
@@ -51,9 +51,9 @@ def test_verify_alone_loads_as_a_verify_bool_the_classifier_alone_decides():
 
 def test_verify_alone_on_a_field_that_is_not_a_bool_is_a_load_error():
     class Bad(BaseModel):
-        kind: str = Field(description="a kind", json_schema_extra={"verify": "alone"})
+        kind: str = Field(description="a kind", json_schema_extra={"classifier_decides": True})
 
-    with pytest.raises(pc.PlanningCommandFormatError, match='option verify "alone" does not apply'):
+    with pytest.raises(pc.PlanningCommandFormatError, match='option classifier_decides does not apply'):
         pc.option_params(Bad, "bad")
 
 
@@ -61,7 +61,7 @@ def test_another_verify_word_is_still_a_load_error():
     class Bad(BaseModel):
         flag: bool = Field(default=False, description="a flag", json_schema_extra={"verify": "only"})
 
-    with pytest.raises(pc.PlanningCommandFormatError, match="verify must be true, false, \"alone\""):
+    with pytest.raises(pc.PlanningCommandFormatError, match='verify: "only" is removed: write'):
         pc.option_params(Bad, "bad")
 
 
@@ -109,7 +109,7 @@ def test_a_plain_verify_field_keeps_the_planner_filled_value_until_a_sure_verdic
 def test_the_preview_marks_a_verify_alone_field():
     from fastworkflow import command_preview
     rows = command_preview._inputs_section(_command())
-    assert any(r.startswith("| `leave_out_author` |") and "| alone |" in r for r in rows), rows
+    assert any(r.startswith("| `leave_out_author` |") and "| decides |" in r for r in rows), rows
     assert any(r.startswith("| `loans` |") and "| yes |" in r for r in rows), rows
 
 

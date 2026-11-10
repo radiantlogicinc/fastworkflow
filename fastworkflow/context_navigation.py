@@ -19,6 +19,7 @@ from typing import Iterable
 
 import fastworkflow
 from fastworkflow.command_context_model import CommandContextModel
+from fastworkflow.command_declarations import declared_descend
 from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.entry_declarations import declared_occupiable
 
@@ -71,13 +72,13 @@ def live_context_chain(workflow) -> tuple[str, ...]:
     the object in hand, which has one parent. A path that climbed a parent the
     live object does not have would send the caller the wrong way.
     """
-    current = getattr(workflow, "current_command_context_name", "*")
+    current = getattr(workflow, "_current_command_context_name", "*")
     if current == "*":
         return ("*",)
     names = [current]
     seen = {current}
-    obj = getattr(workflow, "current_command_context", None)
-    root = getattr(workflow, "root_command_context", None)
+    obj = getattr(workflow, "_current_command_context", None)
+    root = getattr(workflow, "root", None)
     while obj is not None and obj is not root:
         try:
             parent = workflow.get_parent(obj)
@@ -162,8 +163,8 @@ def exact_name_scopes(workflow) -> tuple[LookupScope, ...]:
     With no current object there is only the global scope.
     """
     folder = getattr(workflow, "folderpath", None)
-    root = getattr(workflow, "root_command_context", None)
-    obj = getattr(workflow, "current_command_context", None)
+    root = getattr(workflow, "root", None)
+    obj = getattr(workflow, "_current_command_context", None)
     records: list[tuple[str, object]] = []
     if obj is not None:
         records.append((fastworkflow.Workflow.get_command_context_name(obj), obj))
@@ -481,7 +482,7 @@ def code_path(workflow, command: str) -> list[str] | None:
     ``reset_context``, an opener with no parameters): anything else is the agent's.
     """
     try:
-        current = workflow.current_command_context_name
+        current = workflow._current_command_context_name
         homes = home_contexts(workflow, command)
         paths = plan_navigation(current, homes, live_context_chain(workflow),
                                 collect_descend_edges(workflow.folderpath))
@@ -537,10 +538,10 @@ def render_already_in_context(token: str, current: str, workflow) -> str:
 
 
 def collect_descend_edges(workflow_folderpath: str) -> tuple[DescendEdge, ...]:
-    """The navigation edges, declared by ``descends_to`` on each command and nothing else.
+    """The navigation edges, declared by ``@descends_to`` on each command and nothing else.
 
-    ``descend_parameter`` makes the edge conditional: the parameter is then required to enter
-    (``required_to_enter``). The parameters the command needs to run come from its required
+    ``when_parameter`` on ``@descends_to`` makes the edge conditional: the parameter is then required to
+    enter (``required_to_enter``). The parameters the command needs to run come from its required
     ``Input`` fields (``needs``), as ``_required_parameters`` reads them (design 3.15). A context
     class's ``enter_command`` is no longer read; it is a load error (``entry_declarations``).
     """
@@ -597,7 +598,7 @@ def entering_commands(workflow_folderpath: str, context_name: str) -> list[str]:
 
 
 def declared_descends_to(routing, command_name: str) -> str | None:
-    """The context a command declares it enters with ``descends_to``, or None."""
+    """The context a command declares it enters with ``@descends_to``, or None."""
     descend = _declared_descend(routing, command_name)
     return descend.target if descend is not None else None
 
@@ -628,7 +629,7 @@ def _put(raw: dict[tuple[str, str, str], _RawEdge], record: _RawEdge) -> None:
 
 @dataclass(frozen=True)
 class _DeclaredDescend:
-    """A command's ``descends_to`` attribute."""
+    """A command's ``@descends_to`` declaration."""
 
     target: str
     when_parameter_present: str | None = None
@@ -638,10 +639,10 @@ class _DeclaredDescend:
 
 
 def _declared_descend(routing, command_name: str) -> _DeclaredDescend | None:
-    """The ``descends_to`` a command declares on its response-generator class, or None.
+    """The ``@descends_to`` a command declares on its response-generator class, or None.
 
     The class is read through the same routing lookup as the other command
-    facts. ``descend_parameter`` is the parameter whose presence makes the command
+    facts. ``when_parameter`` is the parameter whose presence makes the command
     descend; without it the command always descends.
     """
     try:
@@ -650,19 +651,18 @@ def _declared_descend(routing, command_name: str) -> _DeclaredDescend | None:
     except Exception:
         logger.debug("descend declaration unread for %r", command_name, exc_info=True)
         return None
-    target = getattr(module, "descends_to", None)
-    if not isinstance(target, str) or not target.strip():
+    declared = declared_descend(module)
+    if declared is None:
         return None
-    gate = getattr(module, "descend_parameter", None)
-    gate = gate.strip() if isinstance(gate, str) and gate.strip() else None
-    return _DeclaredDescend(target.strip(), gate)
+    target, gate = declared
+    return _DeclaredDescend(target, gate)
 
 
 def _navigation_effects(workflow_folderpath: str):
-    """The ``descends_to`` commands and the ``occupiable`` contexts of a workflow.
+    """The ``@descends_to`` commands and the ``occupiable`` contexts of a workflow.
 
     Both are read from the workflow's own classes: ``occupiable`` on a context's
-    callback class, ``descends_to`` on a command's response-generator class. A
+    callback class, ``@descends_to`` on a command's response-generator class. A
     context or command that declares nothing is absent from the result.
     """
     effects: dict = {}
@@ -741,7 +741,7 @@ def _classify(
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Split parameters into 'must pass to run' and 'must pass to enter'.
 
-    A required input is ``needs``. ``descend_parameter`` on an optional field is the
+    A required input is ``needs``. ``when_parameter`` on an optional field is the
     second kind: the command runs without it and stays put.
     """
     needs = tuple(schema_required or ())

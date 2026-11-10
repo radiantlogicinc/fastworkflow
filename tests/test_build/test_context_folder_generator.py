@@ -105,8 +105,8 @@ def test_handler_file_creation(temp_dir, basic_context_model, commands_dir):
         # Verify Context class with get_parent method
         assert "class Context:" in content
         assert "@classmethod" in content
-        assert "def get_parent(cls, command_context_object: TodoList)" in content
-        assert "return getattr(command_context_object, 'parent', None)" in content
+        assert "def get_parent(cls, record: TodoList)" in content
+        assert "return getattr(record, 'parent', None)" in content
 
     # Check TodoItem handler file
     with open(commands_dir / "TodoItem" / "_TodoItem.py", 'r') as f:
@@ -115,8 +115,8 @@ def test_handler_file_creation(temp_dir, basic_context_model, commands_dir):
         assert "from ...application.todoitem import TodoItem" in content
         assert "class Context:" in content
         assert "@classmethod" in content
-        assert "def get_parent(cls, command_context_object: TodoItem)" in content
-        assert "return getattr(command_context_object, 'parent', None)" in content
+        assert "def get_parent(cls, record: TodoItem)" in content
+        assert "return getattr(record, 'parent', None)" in content
 
 
 def test_handler_file_with_inheritance(temp_dir, inheritance_context_model, commands_dir):
@@ -136,8 +136,8 @@ def test_handler_file_with_inheritance(temp_dir, inheritance_context_model, comm
         assert "from ...application.todolist import TodoList" in content
         assert "from ...application.baselist import BaseList" in content
         # Verify return type annotation includes parent class
-        assert "def get_parent(cls, command_context_object: TodoList) -> Optional[BaseList]:" in content
-        assert "return getattr(command_context_object, 'parent', None)" in content
+        assert "def get_parent(cls, record: TodoList) -> Optional[BaseList]:" in content
+        assert "return getattr(record, 'parent', None)" in content
     
     # Check TodoItem handler file with inheritance
     with open(commands_dir / "TodoItem" / "_TodoItem.py", 'r') as f:
@@ -146,8 +146,8 @@ def test_handler_file_with_inheritance(temp_dir, inheritance_context_model, comm
         assert "from ...application.todoitem import TodoItem" in content
         assert "from ...application.baseitem import BaseItem" in content
         # Verify return type annotation includes parent class
-        assert "def get_parent(cls, command_context_object: TodoItem) -> Optional[BaseItem]:" in content
-        assert "return getattr(command_context_object, 'parent', None)" in content
+        assert "def get_parent(cls, record: TodoItem) -> Optional[BaseItem]:" in content
+        assert "return getattr(record, 'parent', None)" in content
 
 
 def test_idempotence(temp_dir, basic_context_model, commands_dir):
@@ -184,9 +184,9 @@ from ...application.todolist import TodoList
 
 class Context:
     @classmethod
-    def get_parent(cls, command_context_object: TodoList) -> Optional[object]:
+    def get_parent(cls, record: TodoList) -> Optional[object]:
         # Custom implementation
-        return command_context_object.custom_parent
+        return record.custom_parent
 """
     with open(commands_dir / "TodoList" / "_TodoList.py", 'w') as f:
         f.write(custom_content)
@@ -198,7 +198,7 @@ class Context:
     with open(commands_dir / "TodoList" / "_TodoList.py", 'r') as f:
         content = f.read()
         assert "# Custom implementation" in content
-        assert "return command_context_object.custom_parent" in content
+        assert "return record.custom_parent" in content
 
 
 def test_missing_model_file(temp_dir, commands_dir):

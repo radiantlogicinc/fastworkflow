@@ -39,7 +39,7 @@ def _top_level_hint(app_workflow: fastworkflow.Workflow) -> str:
     core = core_command_names()
     names = sorted(
         name.split("/")[-1]
-        for name in routing.get_command_names(app_workflow.current_command_context_name)
+        for name in routing.get_command_names(app_workflow._current_command_context_name)
         if name not in core)
     if not names:
         return ""
@@ -52,11 +52,11 @@ class ResponseGenerator:  # noqa: D101
         # Move the context to its parent.
         app_workflow = workflow.context["app_workflow"]   #type: fastworkflow.Workflow
 
-        if app_workflow.is_current_command_context_root:
+        if app_workflow._is_current_command_context_root:
             return ("Already at the top-level 'global' context."
                                  + _top_level_hint(app_workflow))
 
-        parent_context = app_workflow.get_parent(app_workflow.current_command_context)
-        app_workflow.current_command_context = parent_context
+        parent_context = app_workflow.get_parent(app_workflow._current_command_context)
+        app_workflow.record = parent_context
 
-        return f"Context is now '{app_workflow.current_command_context_displayname}'" 
+        return f"Context is now '{app_workflow._current_command_context_displayname}'" 

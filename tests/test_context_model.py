@@ -136,3 +136,47 @@ def test_ordered_base_contexts_diamond_and_two_level_chain(tmp_path: Path):
     assert model.ordered_base_contexts("RootBase") == []
     assert model.ordered_base_contexts("*") == []
     assert model.ordered_base_contexts("UnknownContext") == []
+
+
+def test_a_base_of_the_global_context_star_is_valid(tmp_path: Path):
+    """messaging_app_3 names "*" as User's base: the global commands. The preview loader accepts it
+    (the global context always exists), and the bases read through to the root."""
+    messaging_app_3 = Path(__file__).parent.parent / "fastworkflow" / "examples" / "messaging_app_3"
+    bases = CommandContextModel.load_base_contexts(messaging_app_3)
+    assert bases == {"PremiumUser": ("User", "*"), "User": ("*",)}
+
+
+def test_a_base_of_the_global_context_star_loads_without_a_top_level_command(tmp_path: Path):
+    """A workflow whose User context has base "*" and no top-level command file loads, and the base reads
+    through to the global commands. messaging_app_3 without initialize_user.py is that workflow."""
+    import shutil
+
+    source = Path(__file__).parent.parent / "fastworkflow" / "examples" / "messaging_app_3"
+    folder = tmp_path / "messaging_app_3"
+    shutil.copytree(source, folder, ignore=shutil.ignore_patterns("__pycache__", "___*"))
+    (folder / "_commands" / "initialize_user.py").unlink()
+
+    model = CommandContextModel.load(str(folder))
+    assert model.commands("User") == ["User/send_message", "wildcard"]
+    assert model.commands("PremiumUser") == ["PremiumUser/send_priority_message", "User/send_message", "wildcard"]
+
+
+def test_a_star_base_is_valid_when_the_star_context_is_not_in_the_model():
+    """Routing always provides the global context "*" (command_routing: resolved_contexts['*']), so a base
+    of "*" resolves even when no top-level command file put "*" into the model."""
+    model = CommandContextModel(_workflow_path="unused", _command_contexts={
+        "User": {"base": ["*"], "/": ["User/send_message"]},
+    })
+    assert model.commands("User") == ["User/send_message"]
+    with pytest.raises(CommandContextModelValidationError, match="Context 'NoSuchBase' not found"):
+        CommandContextModel(_workflow_path="unused", _command_contexts={
+            "User": {"base": ["NoSuchBase"], "/": ["User/send_message"]},
+        }).commands("User")
+
+
+def test_messaging_app_3_user_commands_with_a_top_level_command_are_unchanged():
+    """A workflow WITH a top-level command keeps its effective commands: User inherits the top-level
+    commands through its "*" base."""
+    messaging_app_3 = Path(__file__).parent.parent / "fastworkflow" / "examples" / "messaging_app_3"
+    model = CommandContextModel.load(str(messaging_app_3))
+    assert model.commands("User") == ["User/send_message", "initialize_user", "wildcard"]

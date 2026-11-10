@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 import fastworkflow
 from fastworkflow import command_preview, planning_commands, planning_phases, tracing, workflow_agent
-from fastworkflow.planning import phase, pick, run
+from fastworkflow.planning import phase, run
 from fastworkflow.planning_commands import PlanningCommandFormatError
 from fastworkflow.turn import TurnStatus
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
@@ -139,7 +139,7 @@ def test_result_gets_none_for_a_skipped_phase(library_env, answered):
 
         def book(self, input, find) -> OpenedBook:
             # Filling nothing skips the phase: its output is None for __result__.
-            return [pick("open_book", named=input.title)] if find.book_uids else []
+            return [run("open_book", named=input.title)] if find.book_uids else []
 
         def __result__(self, input, find, book):
             seen.append(book)
@@ -163,7 +163,7 @@ def test_result_gets_none_for_a_phase_not_in_this_calls_phases(library_env, answ
             return [run("find_book", query=input.title)]
 
         def book(self, input, find) -> OpenedBook:
-            return [pick("open_book", named=input.title)]
+            return [run("open_book", named=input.title)]
 
         def __result__(self, input, find, book):
             seen.append(book)

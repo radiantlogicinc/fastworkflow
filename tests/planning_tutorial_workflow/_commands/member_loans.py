@@ -5,9 +5,9 @@ name; member reads the loans of the one picked by name (skipped when nothing mat
 __result__ names the books.
 """
 import fastworkflow
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from fastworkflow.planning import listed, pick, run
+from fastworkflow.planning import count_and_names_read, run
 
 from .find_member import Signature as FindMember
 from .list_member_loans import Signature as ListMemberLoans
@@ -21,14 +21,13 @@ class Signature:
     class Input(BaseModel):
         member: str = Field(description="the member's name")
 
-    @staticmethod
-    def validate_extracted_parameters(workflow, command, input, command_text=None):
-        if input.member.casefold() in EVERYONE:
-            raise fastworkflow.Refused(
-                f"member is {input.member!r}, which names no one member; this skill "
-                "reads one member's loans: give that member's name", field="member")
-        return None
-
+        @model_validator(mode="after")
+        def refuse_everyone(self, info):
+            if self.member.casefold() in EVERYONE:
+                raise fastworkflow.Refused(
+                    f"member is {self.member!r}, which names no one member; this skill "
+                    "reads one member's loans: give that member's name", field="member")
+            return self
 
 class PlanGenerator:
     def find(self, input) -> FindMember.Output:
@@ -37,12 +36,12 @@ class PlanGenerator:
     def member(self, input, find) -> ListMemberLoans.Output:
         if not find.member_uids:
             return []
-        return [pick("list_member_loans", named=input.member)]
+        return [run("list_member_loans", named=input.member)]
 
     def __result__(self, input, member=None):
         if member is None:
             return f"No member is named {input.member}."
-        return f"{input.member} has {listed(member.titles, member.total, 'book')} on loan."
+        return f"{input.member} has {count_and_names_read(member.titles, member.total, 'book')} on loan."
 
 
 #: Words that name every member, not one.

@@ -1,6 +1,6 @@
 """book_by_title: the book whose title the request names, picked by its title.
 
-find lists the matches; book opens the one whose title is the request's title (pick), and
+find lists the matches; book opens the one whose title is the request's title (run(..., named=...)), and
 is skipped when nothing matched; __result__ says the author and copies, or that no book
 matches, and reports the book to a caller in its Output. The call ends on the book it
 opened.
@@ -10,7 +10,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from fastworkflow import CommandResponse
-from fastworkflow.planning import pick, run
+from fastworkflow.planning import run
 
 from ._wording import copies
 from .find_book import Signature as FindBook
@@ -33,7 +33,7 @@ class Signature:
 
     class Input(BaseModel):
         title: str = Field(description="the book's title",
-                           json_schema_extra={"in_request": True})
+                           json_schema_extra={"copied_from_command_text": True})
 
     class Output(BaseModel):
         found: bool = Field(description="whether a book was opened for the title")
@@ -50,7 +50,7 @@ class PlanGenerator:
     def book(self, input, find) -> OpenBook.Output:
         if not find.book_uids:
             return []
-        return [pick("open_book", named=input.title)]
+        return [run("open_book", named=input.title)]
 
     def __result__(self, input, book):
         if book is None:

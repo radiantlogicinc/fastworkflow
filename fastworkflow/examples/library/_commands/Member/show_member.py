@@ -28,6 +28,6 @@ class Signature:
 class ResponseGenerator:
     def __call__(self, workflow: fastworkflow.Workflow, command: str,
                  input: None) -> Signature.Output:
-        member: Member = workflow.command_context_for_response_generation
+        member: Member = workflow.record
         return Signature.Output(member_uid=member.uid, name=member.name,
                                 on_loan=len(member.library.loans_of_member(member.uid)))

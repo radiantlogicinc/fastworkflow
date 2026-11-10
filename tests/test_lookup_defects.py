@@ -57,8 +57,8 @@ def todo_chain(tmp_path):
     todo_list.parent = manager
     item = TodoItem(1, "milk")
     item.parent = todo_list
-    app.root_command_context = manager
-    app.current_command_context = item
+    app.root = manager
+    app.record = item
     return app, cme, item, todo_list, manager
 
 

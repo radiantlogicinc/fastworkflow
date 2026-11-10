@@ -3,7 +3,6 @@ from typing import List
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.workflow import Workflow
-from fastworkflow import from_
 
 from ..retail_data import load_data
 from ..tools.get_product_details import GetProductDetails
@@ -12,9 +11,9 @@ from ..tools.get_product_details import GetProductDetails
 class Signature:
     """Get product details"""
     class Input(BaseModel):
-        product_id: str = from_(
-            ["get_order_details", "list_all_product_types"],
+        product_id: str = Field(
             description="The product ID (numeric string)",
+            json_schema_extra={"from_command_output": ["get_order_details", "list_all_product_types"]},
             pattern=r"^(\d{10})$",
             examples=["6086499569"],
         )

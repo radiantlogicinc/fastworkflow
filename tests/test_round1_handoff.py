@@ -282,8 +282,8 @@ def _scripted_context(annotated_library, monkeypatch):
     ctx.set_trace_sink(sink)
     ctx.push_active_workflow(wf)
     library = Library()
-    wf.root_command_context = library
-    wf.current_command_context = library
+    wf.root = library
+    wf.record = library
     ctx._cme_workflow.context["run_as_agent"] = True
     wf.context["run_as_agent"] = True
     monkeypatch.setattr(context_class_for(wf, "Book"), "instance_label_attr", "uid", raising=False)

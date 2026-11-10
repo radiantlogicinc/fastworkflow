@@ -7,10 +7,21 @@ from types import SimpleNamespace
 from typing import List, Optional
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 import fastworkflow
 from fastworkflow.utils import signatures
+
+
+def _with_validator(base, check):
+    """*base* with one model validator (spec 3.1): ``check(self)`` runs on the validated arguments, and the
+    validator returns self. A stand-in for a command's Input validator, as a test subclass."""
+    class Checked(base):
+        @model_validator(mode="after")
+        def apply_check(self, info):
+            check(self)
+            return self
+    return Checked
 from fastworkflow.utils.signatures import (
     InputForParamExtraction,
     classify_bracketed_value,
@@ -99,18 +110,13 @@ def test_list_items_are_checked_one_by_one():
 
 # --- validate_parameters -------------------------------------------------------
 
-def test_validation_unwraps_before_the_hook_sees_the_value():
+def test_validation_unwraps_before_the_validator_sees_the_value():
     seen = {}
+    Checked = _with_validator(ItemParams, lambda p: seen.__setitem__("item_uid", p.item_uid))
 
-    class Hook:
-        @staticmethod
-        def validate_extracted_parameters(workflow, command, cmd_parameters):
-            seen["item_uid"] = cmd_parameters.item_uid
-            return None
-
-    params = ItemParams.model_construct(item_uid="<9a1b2c3d4e5f60718293a4b5c6d7e8f9>")
+    params = Checked.model_construct(item_uid="<9a1b2c3d4e5f60718293a4b5c6d7e8f9>")
     diagnostics = {}
-    is_valid, _, _, fields = _validate(params, Hook, diagnostics)
+    is_valid, _, _, fields = _validate(params, None, diagnostics)
 
     assert is_valid and fields == []
     assert params.item_uid == "9a1b2c3d4e5f60718293a4b5c6d7e8f9"
@@ -121,16 +127,11 @@ def test_validation_unwraps_before_the_hook_sees_the_value():
 
 def test_a_placeholder_is_refused_with_a_message_naming_the_field():
     hook_calls = []
+    Checked = _with_validator(ItemParams, lambda p: hook_calls.append(p.item_uid))
 
-    class Hook:
-        @staticmethod
-        def validate_extracted_parameters(workflow, command, cmd_parameters):
-            hook_calls.append(command)
-            return None
-
-    params = ItemParams.model_construct(item_uid="<item_uid>")
+    params = Checked.model_construct(item_uid="<item_uid>")
     diagnostics = {}
-    is_valid, message, _, fields = _validate(params, Hook, diagnostics)
+    is_valid, message, _, fields = _validate(params, None, diagnostics)
 
     assert not is_valid
     assert fields == ["item_uid"]
@@ -142,22 +143,21 @@ def test_a_placeholder_is_refused_with_a_message_naming_the_field():
 
 
 def test_a_placeholder_is_not_sent_to_the_validation_hook():
-    # The placeholder check runs before the workflow's hook, so the hook never sees "<uid>" as a value to match
-    # (the hook does the lookup that db_lookup used to do; fix-3rsq.one-hook). Were it called, it would refuse
+    # The placeholder check runs before the Input's validators, so they never see "<uid>" as a value to match
+    # (the validator does the lookup that db_lookup used to do; fix-3rsq.one-hook). Were it called, it would refuse
     # with a suggestion; the refusal is not reached, so no suggestion is offered.
     hook_calls = []
 
     class LookupParams(BaseModel):
         item_uid: str = Field(description="uid")
 
-    class Hook:
-        @staticmethod
-        def validate_extracted_parameters(workflow, command, cmd_parameters):
-            hook_calls.append(cmd_parameters.item_uid)
-            raise fastworkflow.Refused("Did you mean abc?", field="item_uid")
+    def refuse(p):
+        hook_calls.append(p.item_uid)
+        raise fastworkflow.Refused("Did you mean abc?", field="item_uid")
 
+    Checked = _with_validator(LookupParams, refuse)
     is_valid, message, _, fields = _validate(
-        LookupParams.model_construct(item_uid="<uid>"), Hook)
+        Checked.model_construct(item_uid="<uid>"), None)
 
     assert not is_valid and fields == ["item_uid"]
     assert hook_calls == []

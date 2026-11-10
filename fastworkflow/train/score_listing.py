@@ -366,13 +366,13 @@ def open_workflow(source: Path, label: str, scratch: Path, *, context_path: str 
     if context_path:
         module_name, _, class_name = context_path.partition(":")
         root = getattr(importlib.import_module(module_name), class_name)()
-        app.root_command_context = root
-        app.current_command_context = root
+        app.root = root
+        app.record = root
     from fastworkflow import planning_commands
 
     planning = frozenset(planning_commands.visible_planning_commands(str(folder)))
     info = Path(source) / "___command_info"
-    return OpenedWorkflow(label=label, app=app, ctx=ctx, root_context=app.current_command_context_name,
+    return OpenedWorkflow(label=label, app=app, ctx=ctx, root_context=app._current_command_context_name,
                           bases=inheritance_bases(folder), planning=planning,
                           command_info_root=str(info) if info.is_dir() else None)
 
@@ -395,7 +395,7 @@ def gather_contexts(opened: OpenedWorkflow) -> list[str]:
     from fastworkflow.run_listing import _reachable_contexts
 
     scopes = [scope.context_name for scope in exact_name_scopes(opened.app)]
-    return list(dict.fromkeys([*scopes, *_reachable_contexts(opened.app.folderpath, opened.app.current_command_context_name)]))
+    return list(dict.fromkeys([*scopes, *_reachable_contexts(opened.app.folderpath, opened.app._current_command_context_name)]))
 
 
 def head_seeds(opened: OpenedWorkflow, utterance: str) -> tuple[set[str], dict[str, float]]:
@@ -634,7 +634,7 @@ def context_full_chars(opened: OpenedWorkflow, name: str) -> int | None:
     from fastworkflow.context_identity import context_class_for
 
     app = opened.app
-    previous = app.current_command_context
+    previous = app._current_command_context
     try:
         if name == opened.root_context:
             return len(workflow_agent.planner_commands_text(app))
@@ -645,12 +645,12 @@ def context_full_chars(opened: OpenedWorkflow, name: str) -> int | None:
             instance = cls()
         except Exception:  # noqa: BLE001 - a context that needs an instance argument is left out, and says so
             return None
-        app.current_command_context = instance
+        app.record = instance
         return len(workflow_agent.planner_commands_text(app))
     except Exception:  # noqa: BLE001 - a listing that cannot be built in a context is reported as None
         return None
     finally:
-        app.current_command_context = previous
+        app.record = previous
 
 
 # ---------------------------------------------------------------------------

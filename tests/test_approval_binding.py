@@ -23,6 +23,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow import approval_binding as ab
+from fastworkflow.approval_annotations import REQUIRED_ALWAYS, REQUIRED_UNTIL_DELEGATED
 from fastworkflow.approval_binding import Origin, Outcome, Surface
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.examples.library.application.library import Library  # noqa: F401
@@ -40,8 +41,8 @@ LIBRARY = Path(fastworkflow.__file__).resolve().parent / "examples" / "library"
 _COPY_IGNORE = shutil.ignore_patterns(
     "___workflow_contexts", "___convo_info", "__pycache__", "versions",
 )
-MANDATORY = "Record/add_note"            # annotated approval = "mandatory" (text=...)
-DELEGATABLE = "Record/show_notes"        # annotated approval = "delegatable" (no parameters)
+MANDATORY = "Record/add_note"            # annotated REQUIRED_ALWAYS (text=...)
+DELEGATABLE = "Record/show_notes"        # annotated REQUIRED_UNTIL_DELEGATED (no parameters)
 UNANNOTATED = "Book/show_book"           # no annotation: never gated
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
@@ -52,12 +53,14 @@ pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
 # ----------------------------------------------------------------------
 
 
-def _annotate(folder: Path, command_file: str, value_text: str) -> None:
+def _annotate(folder: Path, command_file: str, member: str) -> None:
+    """Decorate the copy's ResponseGenerator with ``@user_approval_for_execution(UserApproval.<member>)``."""
     path = folder / "_commands" / command_file
     text = path.read_text()
     marker = "class ResponseGenerator:\n"
     assert text.count(marker) == 1, path
-    path.write_text(text.replace(marker, f"class ResponseGenerator:\n    approval = {value_text}\n", 1))
+    decorator = f"@fastworkflow.user_approval_for_execution(fastworkflow.UserApproval.{member})\n"
+    path.write_text(text.replace(marker, decorator + marker, 1))
 
 
 @pytest.fixture(autouse=True)
@@ -97,8 +100,8 @@ def annotated_library(tmp_path) -> Path:
     shutil.copytree(LIBRARY, folder, ignore=_COPY_IGNORE, symlinks=True)
     # The trained versions are ~1.4 GB: link them rather than copy them. Tests here never train.
     os.symlink(LIBRARY / "___command_info" / "versions", folder / "___command_info" / "versions")
-    _annotate(folder, "Record/add_note.py", '"mandatory"')
-    _annotate(folder, "Record/show_notes.py", '"delegatable"')
+    _annotate(folder, "Record/add_note.py", "REQUIRED_ALWAYS")
+    _annotate(folder, "Record/show_notes.py", "REQUIRED_UNTIL_DELEGATED")
     # add_note and show_notes are the library's own commands, unchanged: each returns its Signature.Output,
     # and the framework frames it (design 3.14). show_notes takes no Input, so it is called with None.
     return folder
@@ -139,8 +142,8 @@ def todo(annotated_library, monkeypatch, tmp_path):
     ctx.set_trace_sink(sink)
     ctx.push_active_workflow(wf)
     library = Library()
-    wf.root_command_context = library
-    wf.current_command_context = library.books["b1"]
+    wf.root = library
+    wf.record = library.books["b1"]
     # Agent mode as a live turn sets it (the parameter path reads it from the app context).
     ctx._cme_workflow.context["run_as_agent"] = True
     wf.context["run_as_agent"] = True
@@ -253,16 +256,16 @@ def test_token_is_256_bits_and_only_its_hash_is_compared():
 
 @pytest.mark.parametrize("annotation, origin, surface, unattended, awaiting, outcome", [
     (None, Origin.AGENT, Surface(), False, False, Outcome.RUN),                       # unannotated
-    ("mandatory", Origin.USER, Surface(), False, False, Outcome.ASK),                # user-typed: bound too (owner 2026-11-02)
-    ("delegatable", Origin.USER, Surface(), False, False, Outcome.RUN),              # user's own instruction
-    ("mandatory", Origin.AGENT, Surface(), False, False, Outcome.ASK),
-    ("delegatable", Origin.AGENT, Surface(), False, False, Outcome.ASK),              # asks until delegation exists
-    ("mandatory", Origin.AGENT, Surface(), True, False, Outcome.QUEUE),              # no human channel
-    ("mandatory", Origin.AGENT, Surface(), False, True, Outcome.QUEUE),              # behind another ask
-    ("mandatory", Origin.AGENT_DIRECT, Surface(), False, False, Outcome.ASK),        # MCP is agent-originated
-    ("mandatory", Origin.AGENT, Surface("host", verified=False, uid="u"), False, False, Outcome.REFUSE),
-    ("mandatory", Origin.AGENT, Surface("host", verified=True, uid=None), False, False, Outcome.REFUSE),
-    ("mandatory", Origin.AGENT, Surface("host", verified=True, uid="u"), False, False, Outcome.ASK),
+    (REQUIRED_ALWAYS, Origin.USER, Surface(), False, False, Outcome.ASK),                # user-typed: bound too (owner 2026-11-02)
+    (REQUIRED_UNTIL_DELEGATED, Origin.USER, Surface(), False, False, Outcome.RUN),              # user's own instruction
+    (REQUIRED_ALWAYS, Origin.AGENT, Surface(), False, False, Outcome.ASK),
+    (REQUIRED_UNTIL_DELEGATED, Origin.AGENT, Surface(), False, False, Outcome.ASK),              # asks until delegation exists
+    (REQUIRED_ALWAYS, Origin.AGENT, Surface(), True, False, Outcome.QUEUE),              # no human channel
+    (REQUIRED_ALWAYS, Origin.AGENT, Surface(), False, True, Outcome.QUEUE),              # behind another ask
+    (REQUIRED_ALWAYS, Origin.AGENT_DIRECT, Surface(), False, False, Outcome.ASK),        # MCP is agent-originated
+    (REQUIRED_ALWAYS, Origin.AGENT, Surface("host", verified=False, uid="u"), False, False, Outcome.REFUSE),
+    (REQUIRED_ALWAYS, Origin.AGENT, Surface("host", verified=True, uid=None), False, False, Outcome.REFUSE),
+    (REQUIRED_ALWAYS, Origin.AGENT, Surface("host", verified=True, uid="u"), False, False, Outcome.ASK),
 ])
 def test_the_policy_decision_point_returns_graded_outcomes(annotation, origin, surface, unattended,
                                                            awaiting, outcome):
@@ -273,21 +276,21 @@ def test_the_policy_decision_point_returns_graded_outcomes(annotation, origin, s
 
 def test_a_recorded_standing_approval_runs_without_a_prompt_on_any_surface():
     # The grant is an input: it yields run, and it satisfies delegatable as well as mandatory.
-    for annotation in ("mandatory", "delegatable"):
+    for annotation in (REQUIRED_ALWAYS, REQUIRED_UNTIL_DELEGATED):
         for origin in (Origin.AGENT, Origin.AGENT_DIRECT, Origin.USER):
             decision = ab.decide(annotation, origin=origin, surface=Surface(), unattended=True,
                                  awaiting_on_channel=True, auto_granted=True)
             assert decision.outcome is Outcome.RUN
     # ...but an unverifiable host still has no identity to grant to, so it is refused first.
-    refused = ab.decide("mandatory", origin=Origin.AGENT, surface=Surface("host", verified=False, uid="u"),
+    refused = ab.decide(REQUIRED_ALWAYS, origin=Origin.AGENT, surface=Surface("host", verified=False, uid="u"),
                         unattended=False, awaiting_on_channel=False, auto_granted=True)
     assert refused.outcome is Outcome.REFUSE
 
 
 def test_the_policy_accepts_consequence_and_uncertainty_without_changing_its_answer():
-    base = ab.decide("mandatory", origin=Origin.AGENT, surface=Surface(), unattended=False,
+    base = ab.decide(REQUIRED_ALWAYS, origin=Origin.AGENT, surface=Surface(), unattended=False,
                      awaiting_on_channel=False)
-    with_inputs = ab.decide("mandatory", origin=Origin.AGENT, surface=Surface(), unattended=False,
+    with_inputs = ab.decide(REQUIRED_ALWAYS, origin=Origin.AGENT, surface=Surface(), unattended=False,
                             awaiting_on_channel=False, consequence={"irreversible": True},
                             uncertainty=0.9)
     assert base == with_inputs
@@ -319,7 +322,7 @@ def test_the_store_keeps_at_most_one_awaiting_record_and_bounds_its_history():
 
 def _record(state, queued=False):
     return ab.PendingAction(
-        id=ab.uuid.uuid4().hex, token_hash="h", command="TodoList/set_properties", annotation="mandatory",
+        id=ab.uuid.uuid4().hex, token_hash="h", command="TodoList/set_properties", annotation=REQUIRED_ALWAYS,
         raw_command="set_properties", binding=_binding(), fingerprint=ab.fingerprint(_binding()),
         rendering="assign_to=Ann", rendering_hash="r", required_identity="channel", created_turn=1,
         turns_seen=0, ttl_turns=ab.TTL_TURNS, ttl_seconds=ab.TTL_SECONDS, created_at=time.time(),
@@ -411,7 +414,7 @@ def test_a_declined_prompt_never_runs_and_says_so(todo, annotated_library):
 def test_a_changed_target_between_prompt_and_yes_invalidates_and_does_not_run(todo, annotated_library):
     _ask(todo, "add_note <text>Ann</text>", steps=_finish())
     record = todo.store.active()
-    todo.wf.current_command_context = todo.other            # the target instance is now another list
+    todo.wf.record = todo.other            # the target instance is now another list
     todo.ctx.process_turn("yes")
     assert record.state == "invalidated"
     assert _added(todo.chores, todo.base) == [] and _added(todo.other, todo.base_other) == []
@@ -482,7 +485,7 @@ def test_a_delegatable_command_asks_with_the_framework_text(todo, annotated_libr
     assert out.status is TurnStatus.AWAITING_USER
     assert out.answer == ("The agent wants to run Record/show_notes with no parameters. "
                           "Reply yes to approve, no to decline, or always to approve this command from now on.")
-    assert todo.store.active().annotation == "delegatable"
+    assert todo.store.active().annotation == REQUIRED_UNTIL_DELEGATED
 
 
 def test_an_unannotated_command_is_never_gated(todo, annotated_library):
@@ -682,7 +685,7 @@ def test_a_standing_approval_belongs_to_one_user_only(grant_root, monkeypatch):
     bob = ag.identity_key(Surface("host", verified=True, uid="bob"), "c1")
     assert alice == "end_user:alice" and bob == "end_user:bob"
     assert ag.identity_key(Surface("host", verified=False, uid="alice"), "c1") is None   # unverified: none
-    ag.record(alice, "wf", "Record/add_note", "mandatory")
+    ag.record(alice, "wf", "Record/add_note", REQUIRED_ALWAYS)
     assert ag.find(alice, "wf", "Record/add_note") is not None
     assert ag.find(bob, "wf", "Record/add_note") is None
     assert ag.revoke(alice, "wf", "Record/add_note") is not None
@@ -696,7 +699,7 @@ def test_a_corrupt_grant_file_grants_nothing_and_fails_closed(grant_root):
     path.write_text("{not json")
     assert ag.find("channel:x", "wf", "Record/add_note") is None
     with pytest.raises(RuntimeError):
-        ag.record("channel:x", "wf", "Record/add_note", "mandatory")
+        ag.record("channel:x", "wf", "Record/add_note", REQUIRED_ALWAYS)
 
 
 # ----------------------------------------------------------------------
@@ -741,8 +744,8 @@ def test_a_planning_step_that_calls_an_annotated_command_gates_at_that_step_and_
     # annotated mandatory, so the step gates; the reply runs it exactly once, and the phase goes on.
     from fastworkflow.approval_annotations import planning_steps_needing_approval
     folder = str(annotated_library)
-    assert ("Record/add_note", "mandatory") in planning_steps_needing_approval(folder, "Library/note_member")
-    todo.wf.current_command_context = todo.library        # a planning command of the root library
+    assert ("Record/add_note", REQUIRED_ALWAYS) in planning_steps_needing_approval(folder, "Library/note_member")
+    todo.wf.record = todo.library        # a planning command of the root library
     member = todo.library.members["m1"]
     before = list(member.notes)
 
@@ -782,7 +785,7 @@ def test_an_approved_planning_step_run_is_seen_by_the_finish_check(todo, annotat
         return note
 
     monkeypatch.setattr(finish_check, "review_finish", spy)
-    todo.wf.current_command_context = todo.library
+    todo.wf.record = todo.library
     member = todo.library.members["m1"]
     before = list(member.notes)
     _ask(todo, "note_member <member>Ann Lee</member> <text>card renewed</text>", steps=_finish())

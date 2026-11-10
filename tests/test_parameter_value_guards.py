@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from typing import List, Optional
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from fastworkflow.utils import signatures
 from fastworkflow.utils.signatures import (
@@ -33,6 +33,17 @@ class ShowParams(BaseModel):
     filter: Optional[str] = Field(default=None, description="narrowing text")
     start: Optional[int] = Field(default=None, description="first row to show")
     limit: int = Field(default=20, description="rows to show")
+
+
+def _with_validator(base, check):
+    """*base* with one model validator (spec 3.1): ``check(self)`` runs on the validated arguments, and the
+    validator returns self. A stand-in for a command's Input validator, as a test subclass."""
+    class Checked(base):
+        @model_validator(mode="after")
+        def apply_check(self, info):
+            check(self)
+            return self
+    return Checked
 
 
 class TagParams(BaseModel):
@@ -59,6 +70,28 @@ def _validate(params, command="cmd", context=None, diagnostics=None, hook_class=
         command=command, input_for_param_extraction_class=hook_class)
     return extraction.validate_parameters(
         workflow, "Ctx/cmd", params, diagnostics=diagnostics)
+
+
+
+class EmailParams(BaseModel):
+    """validate_assignment on, as the retail workflow's Inputs are: a screened value written with a plain
+    assignment would be validated (and raise) there."""
+    model_config = ConfigDict(validate_assignment=True)
+    email: str = Field(description="the user's email address",
+                       pattern=r"^([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})$")
+
+
+
+class CountParams(BaseModel):
+    """validate_assignment on: a screened value that passes its field is stored as validated (coerced)."""
+    model_config = ConfigDict(validate_assignment=True)
+    count: int = Field(description="how many", ge=1)
+
+
+class PlainEmailParams(BaseModel):
+    """validate_assignment off, as messaging_app_1's Input: a screened value is stored as unwrapped."""
+    email: str = Field(description="the user's email address",
+                       pattern=r"^([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})$")
 
 
 # --- quotes ---------------------------------------------------------------------
@@ -105,19 +138,14 @@ def test_list_items_are_unwrapped_one_by_one():
 
 def test_validation_unwraps_quotes_and_records_them():
     seen = {}
+    Checked = _with_validator(ShowParams, lambda p: seen.__setitem__("filter", p.filter))
 
-    class Hook:
-        @staticmethod
-        def validate_extracted_parameters(workflow, command, cmd_parameters):
-            seen["filter"] = cmd_parameters.filter
-            return None
-
-    params = ShowParams.model_construct(
+    params = Checked.model_construct(
         group_name="Payroll", filter='"Ann Lee"', start=None, limit=20)
     diagnostics = {}
     is_valid, _, _, fields = _validate(
         params, command='show Payroll members filter "Ann Lee"',
-        diagnostics=diagnostics, hook_class=Hook)
+        diagnostics=diagnostics)
 
     assert is_valid and fields == []
     assert params.filter == "Ann Lee"
@@ -221,17 +249,12 @@ def test_sentinel_numbers(value, expected):
 
 def test_the_not_given_marker_on_an_optional_int_becomes_none():
     seen = {}
+    Checked = _with_validator(ShowParams, lambda p: seen.__setitem__("start", p.start))
 
-    class Hook:
-        @staticmethod
-        def validate_extracted_parameters(workflow, command, cmd_parameters):
-            seen["start"] = cmd_parameters.start
-            return None
-
-    params = ShowParams.model_construct(
+    params = Checked.model_construct(
         group_name="Payroll", filter=None, start=INVALID_INT_VALUE, limit=20)
     diagnostics = {}
-    is_valid, _, _, fields = _validate(params, diagnostics=diagnostics, hook_class=Hook)
+    is_valid, _, _, fields = _validate(params, diagnostics=diagnostics)
 
     assert is_valid and fields == []
     assert params.start is None
@@ -293,3 +316,36 @@ def test_in_range_numbers_validate_as_before():
     is_valid, message, _, _ = _validate(params)
     assert is_valid and message == "All required parameters are valid."
     assert params.start == 10 and params.limit == 5
+
+
+def test_a_quoted_invalid_value_is_unwrapped_checked_and_refused_not_stored():
+    """A value whose quotes the screen removes is checked against its field after unwrapping. An invalid
+    email is reported as an invalid field, and the unwrapped value is not written onto the parameters."""
+    params = EmailParams.model_construct(email="'not-an-email'")
+    diagnostics: dict = {}
+    is_valid, message, _, _ = _validate(
+        params, command="find the user with email 'not-an-email'", diagnostics=diagnostics)
+
+    assert not is_valid
+    assert "email 'not-an-email'" in message
+    assert "email" in diagnostics["invalid_fields"]
+    assert params.email == "'not-an-email'"
+
+
+def test_a_screened_value_that_passes_is_stored_as_validated_on_a_validate_assignment_input():
+    params = CountParams.model_construct(count="'3'")
+    is_valid, _, _, _ = _validate(params, command="show '3' items", diagnostics={})
+    assert is_valid
+    assert params.count == 3 and type(params.count) is int
+
+
+def test_a_screened_value_is_stored_unvalidated_on_an_input_without_validate_assignment():
+    """HEAD wrote the unwrapped value with a plain assignment, which validated nothing here: the value is
+    stored as unwrapped, and the pattern is reported by the ordinary check, not by the screen."""
+    params = PlainEmailParams.model_construct(email="'not-an-email'")
+    diagnostics: dict = {}
+    is_valid, message, _, _ = _validate(
+        params, command="find the user with email 'not-an-email'", diagnostics=diagnostics)
+    assert not is_valid
+    assert params.email == "not-an-email"
+    assert "email 'not-an-email'" in message

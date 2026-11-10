@@ -16,7 +16,7 @@ __result__ names the borrowers.
 """
 from pydantic import BaseModel, Field
 
-from fastworkflow.planning import full_list, listed, run
+from fastworkflow.planning import count_and_names_read, run
 
 from ..Book.list_loans import Signature as ListLoans
 from .book_by_title import Signature as BookByTitle
@@ -38,7 +38,7 @@ class Signature:
 
     class Input(BaseModel):
         title: str = Field(description="the book's title",
-                           json_schema_extra={"in_request": True})
+                           json_schema_extra={"copied_from_command_text": True})
 
 
 class PlanGenerator:
@@ -48,12 +48,12 @@ class PlanGenerator:
     def loans(self, book) -> ListLoans.Output:
         if not book.found:
             return []
-        return [full_list("list_loans")]
+        return [run("list_loans", all_pages=True)]
 
     def __result__(self, input, book, loans):
         if loans is None:
             return f"No book matches {input.title}."
-        return f"{book.title} is on loan to {listed(loans.borrowers, loans.total, 'borrower')}."
+        return f"{book.title} is on loan to {count_and_names_read(loans.borrowers, loans.total, 'borrower')}."
 ```
 
 ## Line by line
@@ -66,17 +66,17 @@ class PlanGenerator:
   command's. `BookByTitle` is `book_by_title`'s `Signature`, imported from its file.
 - **`title`** describes this command's own input. `book_by_title` takes a `title` too, and
   the preview shows its description beside this field, because the step passes `title` on.
-  Both carry `in_request` (page 2).
+  Both carry `copied_from_command_text` (page 2).
 - **The callee is a black box.** It contributes exactly one run to this phase: its name, its
   checked arguments and its `Output`. The runs inside it (`find_book`, `open_book`) are not
   this phase's runs, so the phase could not hand on `open_book`'s `Output` here. That is what
   the callee's `Output` is for.
 - **`def loans(self, book)`**: `book` is never skipped here. When the callee found nothing,
   `book.found` is false and `loans` skips itself.
-- **`full_list("list_loans")`** names no book. The callee left the workflow on the book it
+- **`run("list_loans", all_pages=True)`** names no book. The callee left the workflow on the book it
   opened (page 5), so `list_loans` runs on that book. The observation of the
   `book_by_title` step carries the note `now in context 'Book'`, as it would after
-  `open_book`. The library's `Book` context declares no instance label, so the note names the
+  `open_book`. The library's `Book` context declares no `instance_label_attr`, so the note names the
   context alone.
 - **`__result__`** reads both phases: `book` for the title as the library has it, `loans`
   for the borrowers, and `None` for `loans` when it was skipped.
@@ -85,8 +85,9 @@ class PlanGenerator:
 
 When the `book` phase's step is run:
 
-1. Its arguments are extracted from the step text, as any command's are, and checked with the
-   step text as the request (page 9): `book_by_title`'s `title` carries `in_request`, and
+1. Its arguments are extracted from the step text, as any command's are, and checked against the
+   step text as the command text (page 9): `book_by_title`'s `title` carries
+   `copied_from_command_text`, and
    `Dune` is written in `book_by_title title=Dune`, so the check passes.
 2. `book_by_title` runs in a frame of its own, with its own phases and its own executor
    runs. Its step numbers follow on from the caller's, so every step of the turn has its

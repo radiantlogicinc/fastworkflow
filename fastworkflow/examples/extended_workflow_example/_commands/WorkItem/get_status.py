@@ -35,7 +35,7 @@ class ResponseGenerator:
         base_output = base_generator._process_command(workflow)
         
         # Add enhanced analytics
-        workitem: WorkItem = workflow.command_context_for_response_generation
+        workitem: WorkItem = workflow.record
         analytics = self._generate_analytics(workitem)
         
         return Signature.Output(

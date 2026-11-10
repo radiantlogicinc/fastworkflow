@@ -43,7 +43,7 @@ class ResponseGenerator:
         command_parameters: Signature.Input,
     ) -> str:
         # Initialize the current command context
-        workflow.current_command_context = (
+        workflow.record = (
             PremiumUser(command_parameters.name) if command_parameters.is_premium_user else
             User(command_parameters.name)
         )

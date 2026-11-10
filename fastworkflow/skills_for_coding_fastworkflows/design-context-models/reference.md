@@ -49,7 +49,7 @@ trained, which is wasted work worth flagging if the framework does not skip them
 Scan each command module for the object assigned to the current context:
 
 ```python
-pat_ctx = re.compile(r"current_command_context\s*=\s*(\w+)")
+pat_ctx = re.compile(r"workflow\.record\s*=\s*(\w+)")
 pat_new = re.compile(r"(\w+)\s*=\s*(\w+)\(")   # resolve the local back to its class
 ```
 
@@ -59,13 +59,13 @@ returns for the live object.
 
 ### Which producers a context needs
 
-Collect the producer edges declared by each context's own commands: the `from_("<command>.<field>")`
-calls on their `Input` fields (`declare-parameter-producers`). Once `command preview` has resolved
+Collect the producer edges declared by each context's own commands: the `"from_command_output": "<command>.<field>"`
+entries of `json_schema_extra` on their `Input` fields (`declare-parameter-producers`). Once `command preview` has resolved
 them they are stored as `json_schema_extra["available_from"]`, which is what a script reads from a
-loaded command, so a source scan looks for the `from_` calls:
+loaded command, so a source scan looks for the `from_command_output` entries:
 
 ```python
-re.finditer(r"from_\(\s*(\[[^\]]*\]|['\"][^'\"]*['\"])", src)
+re.finditer(r"from_command_output\"\s*:\s*(\[[^\]]*\]|['\"][^'\"]*['\"])", src)
 ```
 
 Group by owning context. That is the minimum set of producers the context needs on its surface, and
@@ -153,7 +153,7 @@ the foreign seeds recorded in the head's training signature.
 A command's qualified name is `<Folder>/<command>`, so moving it is a rename. Update:
 
 - the module's location on disk, and the scaffold or generator that emits it
-- every `from_` producer edge naming it (`from_("<Context>/<command>...")`)
+- every `from_command_output` producer edge naming it (`"from_command_output": "<Context>/<command>..."`)
 - the seed-utterance table keyed by `(context, command)`
 - the inheritance model, and any `inherits:` prose in generated docs
 - benchmark and end-to-end case tables

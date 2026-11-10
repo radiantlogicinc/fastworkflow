@@ -15,7 +15,7 @@ A planning command file writes its phases as the methods of `class PlanGenerator
 documentation):
 
 ```python
-from fastworkflow.planning import full_list, pick, run
+from fastworkflow.planning import run
 
 
 class PlanGenerator:
@@ -27,8 +27,8 @@ class PlanGenerator:
         return [run("open_library"), run("find_book", query=input.name)]
 
     def book(self, input, find) -> BookFacts:
-        return [pick("open_book_by_uid", named=input.name),
-                full_list("list_loans")]
+        return [run("open_book_by_uid", named=input.name),
+                run("list_loans", all_pages=True)]
 
     def notes(self, book):
         return [run("count_notes", book_uid=book.uid)]

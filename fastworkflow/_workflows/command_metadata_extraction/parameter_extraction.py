@@ -18,7 +18,9 @@ from fastworkflow.observability.decision_signals import (
     slot_binding_source,
 )
 
+from fastworkflow.field_options import COMMAND_TEXT_AFTER_COMMAND_NAME
 from fastworkflow.utils import argument_checks
+from fastworkflow.utils.input_validation import bound_fields, field_checked_class
 from fastworkflow.utils.signatures import (
     InputForParamExtraction,
     INVALID, INVALID_INFORMATION_ERRMSG, MISSING_INFORMATION_ERRMSG,
@@ -39,7 +41,7 @@ INVALID_FLOAT_VALUE = -sys.float_info.max
 _STATIC_SLOT_BINDING_SIGNAL_VERSIONS = {
     "stored_merge": "param-extraction/stored-merge/1",
     "xml_regex": "param-extraction/xml-regex/1",
-    "validation_hook": "param-extraction/validation-hook/1",
+    "validation_hook": "param-extraction/validation-hook/2",
 }
 
 # Resolved lazily and once: env access on every extraction logs a warning per turn when the var is unset.
@@ -187,8 +189,8 @@ class ParameterExtraction:
         amended). The span records the extraction method (stored-merge /
         xml-regex / llm), whether this is a NOT_FOUND retry round, and the
         STRUCTURED validation outcome from ``validate_parameters`` —
-        missing/invalid fields, per-field db_lookup events, and the
-        validate_extracted_parameters verdict. A failed extraction is a
+        missing/invalid fields, the validation hook's facts (the Input's model validators), and the
+        validation_hook verdict. A failed extraction is a
         conversational state, not a span error: status stays ok and
         ``parameters_valid`` carries the signal; only an exception marks the
         span error. Emission never affects extraction (no-op without a host).
@@ -809,24 +811,23 @@ class ParameterExtraction:
                      converted: dict[str, Any]) -> Optional[BaseModel]:
         """The parameters model holding *converted* (already type-converted), or None.
 
-        The only validation errors allowed are fields that were not given and are
-        required: validation later reports those as missing. Fields not given take
-        their defaults.
+        Each given value is checked against its own field (``bound_fields``: type, constraints and
+        the field's own validators): a value that does not check is no binding. No model validator
+        runs here (an ``Input``'s validators need the validation context, and ``validate_parameters``
+        runs them with it), so a model validator's refusal reaches the caller as a refusal, with
+        the binding kept. Fields not given take their defaults; a required one not given is left
+        for validation to report as missing.
         """
         from pydantic import ValidationError
 
         try:
-            return command_parameters_class.model_validate(converted)
-        except ValidationError as exc:
-            if any(err.get("type") != "missing" or not err.get("loc")
-                   or err["loc"][0] in converted for err in exc.errors()):
-                return None
-        except Exception:
+            checked = bound_fields(command_parameters_class, converted)
+        except ValidationError:
             return None
         params_data: dict[str, Any] = {}
         for name, info in command_parameters_class.model_fields.items():
-            if name in converted:
-                params_data[name] = converted[name]
+            if name in checked:
+                params_data[name] = checked[name]
             elif info.default is not PydanticUndefined:
                 params_data[name] = info.default
             elif info.default_factory is not None:
@@ -954,16 +955,22 @@ class ParameterExtraction:
             return None
         if any(info.is_required() for info in command_parameters_class.model_fields.values()):
             return None
+        # The defaults are checked field by field, with no model validator: an Input's validators need
+        # the validation context, and a bare command's binding must not depend on them. A default that
+        # does not check is no binding.
         try:
-            return command_parameters_class()
+            checked = field_checked_class(command_parameters_class)()
         except Exception:  # noqa: BLE001 - a default that does not validate is no binding
             return None
+        return command_parameters_class.model_construct(
+            _fields_set=set(),
+            **{name: getattr(checked, name) for name in command_parameters_class.model_fields})
 
     @staticmethod
     def _is_positional_field(field_info) -> bool:
-        """A field marked ``json_schema_extra={'positional': True}``."""
+        """A field marked ``json_schema_extra={'command_text_after_command_name': True}``."""
         extra = getattr(field_info, "json_schema_extra", None)
-        return isinstance(extra, dict) and extra.get("positional") is True
+        return isinstance(extra, dict) and extra.get(COMMAND_TEXT_AFTER_COMMAND_NAME) is True
 
     @staticmethod
     def _extract_parameters_from_positional(
@@ -976,7 +983,7 @@ class ParameterExtraction:
         - The text has no ``=`` and no XML, its first token is *command_name*
           itself (short or qualified), and a value follows.
         - The value goes to one target field: the field marked
-          ``json_schema_extra={'positional': True}``, or else the class's only
+          ``json_schema_extra={'command_text_after_command_name': True}``, or else the class's only
           ``str`` field (other types, such as an int ``start``, do not count).
           Two marked fields, or two ``str`` fields and no mark, is no target.
         - A leading word naming the target (``uid 203b``, ``query Ann Lee``) is

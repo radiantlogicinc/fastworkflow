@@ -80,20 +80,24 @@ def execute(workflow, command_path, context, params):
     """Invoke one command the way the runtime does, and report where it left us."""
     module, command_name = module_for(command_path)
     generator = module.ResponseGenerator()
-    workflow.command_context_for_response_generation = context
-    workflow.current_command_context = context
+    workflow.record = context
     if not hasattr(module.Signature, "Input"):
-        return generator(workflow, command_name, None), workflow.current_command_context
+        return generator(workflow, command_name, None), workflow.record
 
-    parameters = module.Signature.Input(**params)
-    if hasattr(module.Signature, "validate_extracted_parameters"):
-        try:
-            module.Signature.validate_extracted_parameters(workflow, command_name, parameters)
-        except fastworkflow.Refused as refusal:
-            # A soft outcome, not an exception: the runtime turns the refusal into the call's answer
-            # and hands the message back to the caller to correct, so a bad call stays a conversation.
-            return refusal.as_output(), context
-    return generator(workflow, command_name, parameters), workflow.current_command_context
+    # The Input's model validators run here, with the validation context the runtime gives them
+    # (command_text, workflow, command). A Refused they raise is a soft outcome, not an exception.
+    try:
+        parameters = module.Signature.Input.model_validate(
+            params, context={"command_text": "", "workflow": workflow, "command": command_name})
+    except ValidationError as error:
+        refusal = next((e["ctx"]["error"] for e in error.errors()
+                        if isinstance(e.get("ctx", {}).get("error"), fastworkflow.Refused)), None)
+        if refusal is None:
+            raise
+        # The runtime turns the refusal into the call's answer and hands the message back to the
+        # caller to correct, so a bad call stays a conversation.
+        return refusal.as_output(), context
+    return generator(workflow, command_name, parameters), workflow.record
 ```
 
 ## Reading handles the way an agent does
@@ -162,11 +166,10 @@ def execute_any(workflow, command_path, context, params):
     """`execute` for workflow commands, the real core command for the rest."""
     if not command_path.startswith("IntentDetection/"):
         return execute(workflow, command_path, context, params)
-    workflow.current_command_context = context
-    workflow.command_context_for_response_generation = context
+    workflow.record = context
     output = core_module(command_path).ResponseGenerator()(
         _CmeShim(workflow), command_path)
-    return output, workflow.current_command_context
+    return output, workflow.record
 ```
 
 ## Static context planning

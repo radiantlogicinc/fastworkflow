@@ -7,7 +7,7 @@ from fastworkflow.workflow import Workflow
 
 def test_current_context_object_property(tmp_path):
     # sourcery skip: extract-duplicate-method
-    """Verify getter and setter for current_command_context work as expected."""
+    """Verify the workflow.record getter and setter (backed by _current_command_context) work as expected."""
     # Initialize FastWorkflow with a minimal set of env vars
     env_vars = {}
     fastworkflow.init(env_vars=env_vars)
@@ -22,22 +22,22 @@ def test_current_context_object_property(tmp_path):
     )
 
     # Initially, context should be None
-    assert workflow.current_command_context is None
+    assert workflow._current_command_context is None
 
     # Set a dummy context object and verify getter returns it
     dummy_obj = object()
-    workflow.current_command_context = dummy_obj
-    assert workflow.current_command_context is dummy_obj
+    workflow.record = dummy_obj
+    assert workflow._current_command_context is dummy_obj
 
     # Reset context to None and verify
-    workflow.current_command_context = None
-    assert workflow.current_command_context is None
+    workflow.record = None
+    assert workflow._current_command_context is None
 
     # Validate setting context again
     obj2 = object()
-    workflow.current_command_context = obj2
-    assert workflow.current_command_context is obj2
+    workflow.record = obj2
+    assert workflow._current_command_context is obj2
 
     # Reset context again
-    workflow.current_command_context = None
-    assert workflow.current_command_context is None 
+    workflow.record = None
+    assert workflow._current_command_context is None 

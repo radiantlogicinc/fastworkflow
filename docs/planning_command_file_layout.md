@@ -15,7 +15,7 @@ step-by-step tutorial, on a sample workflow:
 ```python
 from pydantic import BaseModel, Field
 
-from fastworkflow.planning import full_list, pick, run
+from fastworkflow.planning import run
 
 from .find_item import Signature as FindItem
 from .list_parts import Signature as ListParts
@@ -48,8 +48,8 @@ class PlanGenerator:                  # a command generates a response; a planni
     def item(self, input, find) -> Item:                  # phase 2 reads find's facts
         if not find.item_uids:
             return []                                     # skipped, decided when reached
-        return [pick("open_item_by_uid", named=input.name),
-                full_list("list_parts")]
+        return [run("open_item_by_uid", named=input.name),
+                run("list_parts", all_pages=True)]
 
     def __result__(self, input, item=None):               # the answer; None: item was skipped
         if item is None:
@@ -80,16 +80,18 @@ a `run()` step. With `__phases__` the order is explicit: `return [self.find, sel
 self.answer]` (default: every phase, in the order written).
 
 **Steps.** `run("command", k=v)` writes a step code runs when every value is given:
-`find_item query=Dune`. `full_list("command")` writes one that code reads through every page
-(`(full list)`). `pick("command", named=name)` opens the row a find listed, the one whose
-label matches `name` (`pick("command", x_uid=uid, named=name)` when the uid is known).
+`find_item query=Dune`. `run("command", all_pages=True)` writes one that code reads through every page
+(`(full list)`). `run("command", named=name)` opens the row a find listed, the one whose
+label matches `name` (`run("command", item_id=uid, named=name)` when the row id is known; `item_id`
+is the command's own input name). The reserved input names are `named` and `all_pages`.
 `when("condition", step)` writes a step the agent decides (`only when ...`), and
 `do_not_run("command")` a guard code passes over. `say that ...` is a verbatim line that writes no
 answer by itself in a phase before the last (only `__result__` can use its text); `apply no change`
 and `do not run X` are guards; any other line is the agent's. A last phase of only `say that` lines
 does not load: return the answer from `__result__(self, input, <phase facts...>)`. A note in parentheses
-after a step is never sent. Text helpers: `num(x)`, `count(n, "login")`, `listed(names, total,
-"group")`.
+after a step is never sent. Text helpers: `count(n, "login")` (use it rather than an inline `n == 1`, which the preview
+cannot render), and `count_and_names_read(names, total, "group")` for a counted list. The retired helpers
+`pick`, `full_list`, `listed` and `num` fail the import, each naming its replacement.
 
 **The shape of a call.** By default a call runs every phase. When the input changes it, write
 `def __phases__(self, input)` returning the phases, in order: `return [self.find, self.answer]`
@@ -143,19 +145,20 @@ steps a planning command writes stays in its file.
 ## Rules on the arguments
 
 - A rule that ties fields together, or a field to the request, is a pydantic validator on
-  `Input` (`model_validator(mode="after")`, or `field_validator`), written below the fields
-  in `Signature`. It raises `ValueError` with a message that tells the planner what to fix,
-  naming the field and the value that would fit: `"record_a and record_b are both 'Alpha';
-  record_b is the other record the request names"`.
-- The validator reads the request (and the workflow) from the validation context: declare
-  `info: ValidationInfo` and read `(info.context or {}).get("request", "")`. The request is
-  `""` when the template is rendered, so a rule on the request is silent there.
+  `Input` (`model_validator(mode="after")`, or `field_validator` for one field), written below the fields
+  in `Signature`. It is the one place for a cross-field rule. It corrects by assigning `self.<field>` and
+  returning `self`, or refuses with `raise fastworkflow.Refused(message, field=...)`. A plain `ValueError`
+  refuses with no field. Its message tells the planner what to fix, naming the field and the value that
+  would fit: `"record_a and record_b are both 'Alpha'; record_b is the other record the request names"`.
+- The validator reads the context from `info.context`: `"command_text"` (the request; `""` while the template
+  renders), `"workflow"` (`None` while the template renders) and `"command"` (the qualified name). It is
+  always present, so a rule on the command text is silent in the template.
 - Refuse only on a clear conflict. A refusal is shown to the planner, which fills the call
   once more. A second refusal is asked of the user as a question when the turn may ask
   (`refusal_question`); otherwise the planner plans from the template.
-- `validate_extracted_parameters` stays for normalising an argument that only means
-  something with others (resetting it to its default); its `(False, message)` is a refusal
-  as above.
+- Several model validators run in declaration order. **Upgrade step:** when a hook is moved into a validator,
+  declare the moved validator first, before the validators the `Input` already has. Pydantic runs them in
+  declaration order, so an existing check otherwise sees the value before the correction.
 
 ```python
 class Input(BaseModel):
@@ -163,35 +166,43 @@ class Input(BaseModel):
     second: str = Field(description="the second item's name")
 
     @model_validator(mode="after")
-    def _two_items(self):
+    def _two_items(self, info):
         if self.first.casefold() == self.second.casefold():
-            raise ValueError(f"first and second are both {self.first!r}; second is the other "
-                             "item the request names")
+            raise fastworkflow.Refused(f"first and second are both {self.first!r}; second is the other "
+                                       "item the request names", field="second")
         return self
 ```
 
 ## Field options
 
-An `Input` field takes options in `json_schema_extra` (an unknown key fails the load). They work
-on planning commands today; `fastworkflow.planning_commands` has the full rules.
+An `Input` field takes options in `json_schema_extra`: a key per behaviour, its value `True` or a dict of that
+key's own options. Combine keys by adding them. Plain pydantic `Field(...)`; there are no helper functions. An
+unknown key, a retired spelling, a value that is neither `True` nor a dict of known options, or two keys that
+conflict fails the load, naming the key to write instead. They work on planning commands today;
+`fastworkflow.planning_commands` has the full rules, and `fastworkflow.FieldOptions` (and its TypedDicts) gives IDE
+completion.
 
-There are two check options (the two-option form, fix-3rsq.two-options):
-
-- `in_request: True` (a `str`, an `int` or a `list[str]`): a `str` must appear in the request as a
+- `copied_from_command_text: True` (a `str`, an `int` or a `list[str]`): a `str` must appear in the request as a
   verbatim substring (per item for a `list[str]`, which keeps the items the request writes); an
   `int` must be a number the request writes. Otherwise the one value the request writes is taken,
   or the default when that is written; with several candidates the call is refused.
-- `in_request: "subject"` (a `str`): the argument names a record of the request (a person, a group,
-  a product, a code). It must be one of the request's subjects, a name-like word, or a name written
-  in lower case; one cut short at the start or end of a single subject becomes that subject. It
-  implies `in_request`.
-- `verify: True` (a `bool`, an enum, or a `str` with `in_request: "subject"`): a classifier model
+  `copied_from_command_text` checks the text the user wrote; it does not interpret the description.
+- `record_named_in_command_text: True` (a `str`): the argument names a record of the request (a person, a group,
+  a product, a code). It checks names already written in the command text; it does not interpret the
+  description. The parameter extractor (`LLM_PARAM_EXTRACTION`) proposes the value from the
+  field's description. The description says what the field holds. The framework appends "Copy it
+  exactly as the request writes it. It must name a record the request names." The check then matches
+  that proposal against names the request already writes: one of the request's subjects, a name-like
+  word, or a name written in lower case. One cut short at the start or end of a single subject
+  becomes that subject. A model chooses among those names again only when the field also has
+  `classifier_confirms` alongside, and only when `JEV_API_KEY` is set.
+- `classifier_confirms: True` (a `bool`, an enum, or a `str` with `record_named_in_command_text`): a classifier model
   decides the argument again from the request alone, and its answer replaces the planner's when it
   is sure enough. It needs `JEV_API_KEY`: without it nothing is checked, and the load logs one INFO
-  line that says so. On an enum, `verify` may instead be a dict giving each value's meaning, which
-  the check reads: `verify={"group": "a group of people", "unit": "an organisation unit"}`. Every
-  key must be one of the enum's values.
-- `verify: "alone"` (a `bool`): the classifier alone decides the field from the request. The typed
+  line that says so. On an enum, `classifier_confirms` may instead be a dict of each value's meaning,
+  `classifier_confirms: {"meanings": {"group": "a group of people", "unit": "an organisation unit"}}`, which the check
+  reads. Every key must be one of the enum's values.
+- `classifier_decides: True` (a `bool`): the classifier alone decides the field from the request. The typed
   planning call and the parameter extractor are not asked for it, and it keeps its default when the
   classifier is not sure or there is no `JEV_API_KEY`. Use it for a part of the job the request may
   leave out, worded as the exclusion with a false default, and read it in `__phases__`:
@@ -200,122 +211,98 @@ There are two check options (the two-option form, fix-3rsq.two-options):
   leave_out_risk: bool = Field(
       default=False,
       description="the request says to leave out the risk score, or asks only for other parts",
-      json_schema_extra={"verify": "alone"})
+      json_schema_extra={"classifier_decides": True})
   ```
 
   Word it as the exclusion, not as "the request asks for the risk score": asked of a part the
   request does not mention, that question would drop it.
-
-`in_request: {"ignore": [words]}` (a `str`): the named words are removed from either end of the value
-before the check, so a kind word the model appends to a name ("Payroll group" becomes "Payroll") is
-cleaned as the request writes it. This is the retired `strip` option, which fails the load. A field
-with no check is cleaned in code instead: `strip_words(text, words)` from `fastworkflow.planning_commands`,
-called in the field's validator or in `Signature.validate_extracted_parameters`.
+- `copied_from_command_text: {"ignore": [words]}` (a `str`; `record_named_in_command_text` takes the same `ignore`):
+  the named words are removed from either end of the value before the check, so a kind word the model appends to
+  a name ("Payroll group" becomes "Payroll") is cleaned as the request writes it. This is the cleanup the retired
+  `strip` option did. A field with no check is cleaned in code instead: `strip_words(text, words)` from
+  `fastworkflow.planning_commands`, called in the field's `field_validator`.
+- `command_text_after_command_name: True` (a `str`, at most one per `Input`; execution commands only): takes the text
+  after the command name. `from_command_output: "<command>.<field>"` (or a list) names the command that supplies the
+  value (see `declare-parameter-producers`). `converted_from_command_text: True` (execution commands) marks a value
+  converted from the command text, such as a date written "next Monday".
 
 An `Input` validator's returned value is written back to the arguments: a validator that cleans a
-value changes the argument, and a refusing one still refuses. The checks run first, then
-`validate_extracted_parameters`, then the validators.
+value changes the argument, and a refusing one still refuses. The option checks run first, then the
+model validators (in declaration order), then the roles.
 
-The retired options fail the load and name the new spelling: `subject` (write
-`in_request: "subject"`), `means` (write `verify: {value: meaning, ...}`) and `strip` (write
-`in_request: {"ignore": [...]}`, or call `strip_words(...)` for a field with no check).
+The retired options fail the load and name the new key: `in_request` (write `copied_from_command_text: True`,
+or `record_named_in_command_text: True` for `"subject"`), `verify` (write `classifier_confirms: True`, or
+`classifier_decides: True` for `"alone"`), `means` (write `classifier_confirms: {"meanings": {value: meaning}}`),
+`subject` (write `record_named_in_command_text: True`), `strip` (write `copied_from_command_text: {"ignore": [...]}`,
+or call `strip_words(...)` for a field with no check), `positional` (write `command_text_after_command_name: True`),
+and `from` (write `from_command_output`). The `validate_extracted_parameters` hook fails the load and names the
+model validator form.
 
-## Approval annotation (`approval`)
 
-A command may declare `approval` on its class: `ResponseGenerator` for an execution command,
-`PlanGenerator` for a planning command. It takes one of two values, and nothing else:
+## Naming a record: `get_displayname` and `instance_label_attr`
+
+A context class declares two things about the record it manages. They answer different questions, so keep them apart:
+
+| | `get_displayname(cls, record)` | `instance_label_attr = "<attribute or property>"` |
+|---|---|---|
+| What it is | a classmethod returning any free-form display string | a class attribute naming one attribute (or property) of the record |
+| Example | `"Book: Dune (b12)"` | `"uid"`, whose value on the record is `b12` |
+| Answers | how the record should look to a person | what the record's identity is |
+| Read by | `workflow.record_displayname` (for the record the command acts on), the CLI and chat context line, observability | `context_identity`: listing tags, `search_memory`, the extract step, the approval binding |
+| When absent | optional; without it the context name is shown | nothing is guessed; the record has no identity in those readers |
+| Derived from the other? | no: it may use the identity, but `instance_label_attr` is never read from it | no: it names an attribute, it does not compute one |
+
+`workflow.record_displayname` reads `get_displayname` for the record the command acts on. It is a reader of that
+declaration, not a third one. A computed identity is a property on the record, and `instance_label_attr` names
+that property. The `instance_label` classmethod is removed: a context that still defines one fails the load.
+
+## Approval annotation (`@user_approval_for_execution`)
+
+A command may carry `@user_approval_for_execution(...)` on its class: `ResponseGenerator` for an execution command,
+`PlanGenerator` for a planning command. It takes one of two values from `UserApproval`, and nothing else, and is
+imported from `fastworkflow` (or `fastworkflow.planning`):
 
 ```python
-class ResponseGenerator:           # or PlanGenerator
-    approval = "mandatory"         # the action cannot be undone, e.g. sending a critical email
+@user_approval_for_execution(UserApproval.REQUIRED_ALWAYS)   # the action cannot be undone, e.g. sending a critical email
+class ResponseGenerator:
+    ...
 ```
 
-- `approval = "mandatory"`: the framework asks before every run, and the run waits for the reply.
-- `approval = "delegatable"`: the framework asks until a standing approval for the user exists.
+- `UserApproval.REQUIRED_ALWAYS`: the framework asks before every run, and the run waits for the reply.
+- `UserApproval.REQUIRED_UNTIL_DELEGATED`: the framework asks until a standing approval for the user exists.
 - Absent: the agent decides, with no gate. Most commands are like this.
 
 The annotation is not read/write gating. An easy-to-undo write needs no annotation, and only the two
-values exist. The attribute is validated when the routing definition loads.
-An unknown value, or a value that is not a string, fails the load and names the command, its file
-and the two allowed values. The listings show a marker after the name: `(needs your approval before
-it runs)` for `mandatory`, `(may need your approval)` for `delegatable`. A workflow with no
+values exist. The decorator is validated when the routing definition loads. The stored value is
+`"required_always"` or `"required_until_delegated"` in `command_directory.json`. The old `approval = "mandatory"`
+and `approval = "delegatable"` attributes fail the load and name the decorator to write. A value that is not a
+`UserApproval` member fails the load and names the command, its file and the two allowed values. The listings show a marker after the name: `(needs your approval before
+it runs)` for `REQUIRED_ALWAYS`, `(may need your approval)` for `REQUIRED_UNTIL_DELEGATED`. A workflow with no
 annotation gets no marker.
 
-**What the user sees.** The prompt names the command and its parameters, and asks for a reply.
-`yes` runs the command once. `no` declines it, and it does not run. `always` runs it once and records
-a standing approval for that user, that workflow and that command. Only an exact reply counts. A reply
-that is not one of these words is not read as an approval.
 
-**What the framework checks.**
+## Write declaration (`@writes`)
 
-- A reply is bound to the exact parameters the prompt showed. Any change to a parameter invalidates
-  the approval, so the command does not run.
-- A reply works once. An approval expires after 2 turns or 15 minutes, whichever comes first.
-- Without a human channel (an unattended turn), the request waits in a queue and expires. It never
-  resolves by itself.
-- A `mandatory` command the user types directly also asks. A `delegatable` command the user types
-  runs without a prompt.
-- A recorded standing approval runs its command without a prompt, on any channel, including an
-  unattended turn. A standing approval is kept per user, per workflow and per command.
-
-**Managing standing approvals.** These messages are read by the framework, never by the agent:
-`/approvals` lists the standing approvals, `/revoke_approval <command>` revokes one, and
-`/cancel_pending` cancels the approval that is waiting, if any. A host (the FastAPI server) receives
-the approval token in the live response only. It is never stored, logged or sent again.
-
-**Switch.** `FW_APPROVAL_BINDING` is `enforce` (the default), `shadow` or `off`. `shadow` records and
-audits each decision but runs the command as before. `off` restores the earlier path.
-
-Intent confirmations and plan review are not approvals. Neither one lets an annotated command run.
-
-## Write declaration (`writes`)
-
-An execution command that changes the application's data declares `writes = True` on its
+An execution command that changes the application's data carries `@writes` on its
 `ResponseGenerator`. A planning command does not declare it: it writes when one of its steps (directly,
 or through a planning command it calls) runs a command that declares it, and it is read-only otherwise.
-`writes` on a `PlanGenerator`, or a value that is not a bool, is a load error naming the command and its
-file (`fastworkflow.command_writes`).
+`@writes` on a `PlanGenerator` is a load error naming the command and its file (`fastworkflow.command_writes`);
+the old `writes = True` attribute fails the load and names the decorator.
 
 Inside a planning command's phase, a command that writes runs only when a step of that phase names it.
 The phase's command listing leaves out the other write commands, and a call of one is refused unrun:
 the agent reads that the command changes the application's data and no step of this part of the job
-runs it. Outside a planning command's phase nothing changes. `writes` is independent of `approval`: an
-easy-to-undo write needs no approval, and still declares `writes`.
+runs it. Outside a planning command's phase nothing changes. `@writes` is independent of `UserApproval`: an
+easy-to-undo write needs no approval, and still carries `@writes`.
 
-## Return values of an execution command
 
-A `ResponseGenerator.__call__(self, workflow, command, input)` may return one of three forms. The
-framework wraps each one, so the command does not build the envelope itself:
-
-- its own `Signature.Output`: the output is the value, and its JSON is the response;
-- a `str`: the response, with no typed output;
-- a `fastworkflow.CommandResponse`, for artifacts, next actions, recommendations or output. It must
-  not set `success=False`.
-
-Any other type, including a hand-built `CommandOutput`, fails the call with a `TypeError` that names
-the command and the type. To decline a call, raise `fastworkflow.Refused(message)`; with `field=` it
-resets those fields to missing and asks the user for them again. `input` is the filled `Input`
-instance, or `None` when the command has no `Input`. A two-argument `__call__` is a load error.
-
-## Previews
-
-`fastworkflow command preview <workflow_folder> [--out <dir>] [--check]` writes one markdown
-file per planning command, `<dir>/<name>.md`, generated from the planning command files with the
-loader (`fastworkflow.command_preview`). The default `<dir>` is `docs/planning_command_previews` next to the
-workflow folder (`<workflow_folder>/../docs/planning_command_previews`), which for a workflow package
-inside its project is the project's `docs/planning_command_previews`.
-
-Known issue: `--check` looks for the bundled examples' previews in
-`fastworkflow/examples/docs/planning_command_previews`, a folder that is not committed, so it exits 1
-for the library example. That exit is not a sign that the previews are stale.
-
-A preview follows the order above:
 
 1. the planning command's name, its description and its kind (flat, phased, or fixed steps without
    inputs);
 2. the inputs table: name, type, default, the sample value it is rendered with, the
-   `verify` flag, the `in_request` column (`yes`, or `subject`) and the description, then the
-   verify meanings (a `verify` dict);
+   `classifier_confirms` / `classifier_decides` column, the `copied_from_command_text` /
+   `record_named_in_command_text` column and the description, then the classifier meanings (the
+   `classifier_confirms` dict);
 3. the example requests (`plain_utterances`);
 4. for a phased planning command, the phases (output model, when each runs, and how it fans out)
    and the facts each output model holds, with the command each one is typed by. When some inputs
@@ -366,7 +353,7 @@ input that decides a phase rather than every combination it holds for. With more
 different plans, the preview renders those that a pairwise cover of the inputs reaches
 (every two inputs' values together at least once) and one plan for each other phase
 layout, so a plan that needs two inputs changed is still shown; the phases table still
-covers every plan. A combination that `validate_extracted_parameters` changes or refuses
+covers every plan. A combination that the `Input`'s model validators change or refuse
 never reaches the `PlanGenerator`, so it is listed, not rendered ("every other combination" when all
 of them have one reason). In a phased plan, a phase that reads the same as in the first
 plan shown is one line ("As in the plan when ...").
@@ -399,7 +386,7 @@ shown by its source.
 come in declaration order and combinations in a fixed order, so the same files render the
 same bytes. `--check` writes nothing and exits 1 when a preview in `<dir>` differs from a
 fresh render, is missing, or is an extra `.md` file no planning command renders, or when a phase
-output's facts or ``from_`` fail the load (`command_preview.check_previews`). Run it in a test or in CI to keep committed
+output's facts or a `from_command_output` fail the load (`command_preview.check_previews`). Run it in a test or in CI to keep committed
 previews current. Both writing and `--check` fail, naming the file and its error, when a
 planning command file does not load (the loader logs and skips it at run time;
 `command_preview.render_previews`). Writing removes a stale preview (an `.md` file

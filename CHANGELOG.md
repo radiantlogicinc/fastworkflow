@@ -2,6 +2,133 @@
 
 ## Unreleased
 
+### Upgrading to the design idioms (BREAKING: every old spelling fails the load)
+
+Every BREAKING item below gives the old form and the new one. Each old form fails the load, or the call, with a
+message that names the replacement. Nothing is kept for compatibility. The release is 4.0.0 (see "Version").
+
+1. **BREAKING: field options are keys of `json_schema_extra`, one per behaviour (spec 2).** Plain pydantic
+   `Field(..., json_schema_extra={...})`; there are no helper functions. Optional TypedDicts (`FieldOptions`,
+   `CopiedOptions`, `RecordNamedOptions`, `ConfirmsOptions`) give IDE completion and are exported from `fastworkflow`
+   and `fastworkflow.planning`. The keys are named "command text" where they used to say "request".
+
+   | Old (in `json_schema_extra`) | New | Notes |
+   |---|---|---|
+   | `{"in_request": True}` | `{"copied_from_command_text": True}` | the text must be written in the command text |
+   | `{"in_request": {"ignore": [...]}}` | `{"copied_from_command_text": {"ignore": [...]}}` | `ignore` strips before the verbatim match |
+   | `{"in_request": "subject"}` | `{"record_named_in_command_text": True}` | names a record already written in the command text |
+   | `{"subject": True, "ignore": [...]}` | `{"record_named_in_command_text": {"ignore": [...]}}` | |
+   | `{"verify": True}` on a `bool` or `Literal` | `{"classifier_confirms": True}` | |
+   | `{"verify": {value: meaning}}` on a `Literal` | `{"classifier_confirms": {"meanings": {value: meaning}}}` | keys must be the enum's values |
+   | `{"verify": True}` on a subject `str` | `{"record_named_in_command_text": True, "classifier_confirms": True}` | a model re-picks a record name only with `JEV_API_KEY` |
+   | `{"means": {...}}` | `{"classifier_confirms": {"meanings": {...}}}` | |
+   | `{"verify": "alone"}` | `{"classifier_decides": True}` | |
+   | `{"positional": True}` | `{"command_text_after_command_name": True}` | at most one per `Input`; execution commands only |
+   | `{"from": "cmd.field"}` / `from_("cmd.field", ...)` | `{"from_command_output": "cmd.field"}` (or a list) | `from_` is removed: importing it fails |
+   | `{"strip": [...]}` with a check | `{"copied_from_command_text": {"ignore": [...]}}` | a field with no check: `strip_words(...)` in a `field_validator` |
+   | `{"in_request": False}` on an execution command's `Input` (a value converted from the text, e.g. a date) | `{"converted_from_command_text": True}` | |
+
+   Load rules: an old key fails naming the new key; an unknown key suggests the closest; a value must be `True` or a
+   dict of known options (`False` is rejected); conflicting pairs fail (`copied_from_command_text` with
+   `record_named_in_command_text`, `classifier_confirms` with `classifier_decides`); a wrong type fails naming the
+   accepted types; a hand-written `available_from` fails.
+
+2. **BREAKING: one validation mechanism, `@model_validator(mode="after")` on `Input` (spec 3).**
+   `Signature.validate_extracted_parameters` is removed; a `Signature` that still defines it fails the load, and the
+   message shows the validator form. `db_lookup` (the field key and the `Signature.db_lookup` method) stays retired.
+
+   | Old | New |
+   |---|---|
+   | `@staticmethod def validate_extracted_parameters(workflow, command, input)`, `return None`; corrects by assigning `input.<field>` | `@model_validator(mode="after") def <name>(self, info)`, corrects by assigning `self.<field>` and `return self` |
+   | `raise fastworkflow.Refused(message, field=...)` from the hook | the same raise, from the validator; a plain `ValueError` is a refusal with no field |
+   | `workflow` argument | `info.context["workflow"]` (`None` while a planning command's template renders) |
+   | `command` argument | `info.context["command"]` (the qualified name) |
+   | the raw text (`command_text` parameter) | `info.context["command_text"]` (`""` while a template renders) |
+
+   - **Upgrade step: declare the moved validator first.** The old order was option checks, then the hook (which could
+     correct fields), then the `Input`'s own model validators, then roles. Pydantic runs model validators in declaration
+     order, so a validator moved from the hook must be declared before the `Input`'s existing model validators. Otherwise
+     an existing check sees the uncorrected value. (In one workflow, a kind-fit check refused before the kind resolver ran.)
+   - `field_validator` is for one field's cleanup; `strip_words` stays public. A validator cannot replace "required" or
+     `ignore`: a missing required field fails before the validators, and `ignore` strips before the verbatim match.
+   - Order now: extraction, option checks, model validators (in declaration order), role checks.
+   - Building an `Input` directly (`Signature.Input(...)`) without a context fails with a clear message. In tests use
+     `Signature.Input.model_construct(...)` or `Input.model_validate(values, context={...})`.
+   - Known false positive: the library's `note_member` refuses a note that repeats the member's own name ("Mia Chen to
+     call back"). Document it or reword the note.
+
+3. **BREAKING: command class declarations are decorators (spec 4).**
+
+   | Old (class attribute) | New (decorator, from `fastworkflow`) |
+   |---|---|
+   | `approval = "mandatory"` | `@user_approval_for_execution(UserApproval.REQUIRED_ALWAYS)` |
+   | `approval = "delegatable"` | `@user_approval_for_execution(UserApproval.REQUIRED_UNTIL_DELEGATED)` |
+   | `writes = True` on `ResponseGenerator` | `@writes` on the execution command's `ResponseGenerator` (on a `PlanGenerator` it is a load error) |
+   | `descends_to = "X"` | `@descends_to("X")` |
+   | `descend_parameter = "p"` | `@descends_to("X", when_parameter="p")` |
+
+   The old attributes fail the load naming the decorator. Hand-written private attributes fail too. `always` remains
+   the reply that records the delegation for that user, workflow and command. `command_directory.json` stores
+   `"required_always"` and `"required_until_delegated"` (it stored `"mandatory"` and `"delegatable"`).
+
+4. **BREAKING: the record names (spec 5 and 6).**
+
+   | Old | New |
+   |---|---|
+   | `workflow.command_context_for_response_generation` (read) | `workflow.record` (the record this command acts on) |
+   | `workflow.current_command_context = x` (move) | `workflow.record = x` |
+   | `workflow.root_command_context` | `workflow.root` (set once, in the startup command) |
+   | `workflow.is_command_context_for_response_generation_root` | `workflow.is_record_root` |
+   | `workflow.current_command_context_displayname` | `workflow.record_displayname` |
+   | `command_context_object` parameter of `get_parent`, `get_displayname`, `get_state`, `get_locator` | `record` |
+   | `instance_label` classmethod on a context class | a property on the record, named by `instance_label_attr` (a context that defines `instance_label` fails the load) |
+
+   `find_by_locator(anchor, locator)` and `from_state(state, workflow, *, state_version)` are unchanged. "Context" still
+   names the kind of object (the folder, `base`, `class Context`). `get_displayname` and `instance_label_attr` are kept
+   side by side; see `docs/planning_command_file_layout.md`, "Naming a record".
+
+5. **BREAKING: planning step helpers (spec 7, section 13).**
+
+   | Old | New |
+   |---|---|
+   | `pick("cmd", named=n, item_uid=u)` | `run("cmd", named=n, item_uid=u)` (the command's own input name; `named` and `all_pages` are reserved input names) |
+   | `full_list("cmd", ...)` | `run("cmd", ..., all_pages=True)` (reads pages until the rows reach `Output.total`, up to `CODE_MAX_PAGES` = 20) |
+   | `listed(...)` | `count_and_names_read(...)` (same behaviour) |
+   | `num(...)` | an inline f-string, or `count(n, noun, plural=None)`, which is placeholder-safe (use it rather than an inline `n == 1`) |
+   | `from_(...)` | `json_schema_extra={"from_command_output": ...}` |
+
+   Removed: `pick`, `full_list`, `listed`, `num`, `from_` (importing them fails, the first four naming their replacement).
+   The paging parameter is `start` only. `run` takes `named=` and `all_pages=`, and a `None` value is left out.
+   `when`, `do_not_run`, plain strings and `@phase(...)` are unchanged. Skip a phase with `return []`. `__phases__` is
+   only for shared phases.
+
+6. **BREAKING: "request" is "command text" in every author-visible name.** The validation context key `"request"` is
+   `"command_text"`. The option keys, load errors and documentation say "command text". Text a model reads is unchanged:
+   the sentences the framework appends to field descriptions, refusal messages and step wording. A validator that still
+   reads `info.context["request"]` (or `.get("request")`) fails the call with `raised KeyError` and the message
+   `'request' is removed from the validation context: read info.context['command_text']`.
+
+7. **Diagnostics: SPAN_CONTRACT_VERSION 41.** The `validation_hook` record keeps its keys (`ran`, `is_valid`, `message`,
+   `changed_fields`, `refused_fields`), but its facts come from the `Input`'s model validators: `changed_fields` are the
+   fields a validator wrote back, and `refused_fields` the fields of a `fastworkflow.Refused` a validator raised. The
+   record is always emitted when the validation step runs, with `ran=False` when the `Input` declares no validator.
+   A span recorded before version 41 carries the same keys with the hook's meaning.
+
+8. **Binding and direct construction (`fastworkflow/utils/input_validation.py`).** A `name=value` binding whose value
+   fails its type or a field validator is dropped: the binding is no binding, and the LLM extracts the value instead.
+   A model validator runs later, with the context. Direct construction of an `Input` without context gives a clear
+   error naming the validator, not `'NoneType' object is not subscriptable`.
+
+9. **Retired spellings name their replacement in the load error.** For example:
+   `field 'who': in_request: "subject" is removed: write record_named_in_command_text: True`. Each old spelling in
+   the tables above fails the load in the same way; the planning-command troubleshooting tutorial
+   (`docs/tutorials/planning_commands/15-troubleshooting.md`) shows the load error for each.
+
+**Version.** 4.0.0. The change removes the authoring spellings every workflow uses, so it is breaking for every
+planning command and every command with an `Input` validator. The change-control skill reserves a major for the
+breaking wire/model collapse, and its version rules predate 3.x (it still says 2.22.2). The major is the team's call
+to confirm; the bump follows semver for a breaking public contract.
+
 ### Upgrading from copy edges (fact_from, "from" on a facts field) to typed facts (Phase 15)
 
 1. **BREAKING: copy edges are retired (design 2.33, 3.12).** `fact_from` is removed from
@@ -73,6 +200,11 @@ error that names the new form; there is no legacy support, except where an item 
    the app, the bundled examples, the test workflows or the tests returns a different value, so none
    changes its behaviour. A validator that refuses still refuses. The Facts models of the app's
    `_phase_facts.py` are outputs, not inputs.
+   A validator's wording is the hook's: a `fastworkflow.Refused` is `validate_extracted_parameters: <message>`
+   (with its `field`), and an exception is `validate_extracted_parameters raised <Type>: <text>` on the planning
+   path, `Exception in <command>'s validate_extracted_parameters function: <text>` on the execution path.
+   A plain `ValueError` or `AssertionError` is a refusal with no field, worded the same way; any other exception
+   is the call error `validate_extracted_parameters raised <Type>: <text>`.
 
 3. **BREAKING: short forms only.** Each old form is a load or call error that names the new form.
 

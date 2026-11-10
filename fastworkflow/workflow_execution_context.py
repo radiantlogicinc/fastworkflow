@@ -399,7 +399,7 @@ class WorkflowExecutionContext:
             ),
             consultation_path,
         )
-        self._consultation_workflow.current_command_context = (
+        self._consultation_workflow.record = (
             proposal_review_cb.ProposalReview()
         )
 
@@ -788,7 +788,7 @@ class WorkflowExecutionContext:
                     self._app_workflow.folderpath.split("/")[-1]
                 )
                 self._turn_entry_context = (
-                    self._app_workflow.current_command_context_name or ""
+                    self._app_workflow._current_command_context_name or ""
                 )
 
         # Context-mutation baseline (D3 as amended): a shallow snapshot of the
@@ -1392,8 +1392,8 @@ class WorkflowExecutionContext:
                 consultation_nlu_stage = str(consultation_nlu_stage)
 
         current_context_name = None
-        if self._app_workflow and self._app_workflow.current_command_context is not None:
-            current_context_name = self._app_workflow.current_command_context_name
+        if self._app_workflow and self._app_workflow._current_command_context is not None:
+            current_context_name = self._app_workflow._current_command_context_name
 
         from fastworkflow.conversation_history_io import extract_turns_from_history
 
@@ -1646,13 +1646,13 @@ class WorkflowExecutionContext:
         if (
             saved_context_name
             and self._app_workflow
-            and self._app_workflow.current_command_context is not None
-            and self._app_workflow.current_command_context_name != saved_context_name
+            and self._app_workflow._current_command_context is not None
+            and self._app_workflow._current_command_context_name != saved_context_name
         ):
             logger.debug(
                 "Command context name after rehydrate (%s) differs from saved (%s); "
                 "navigation depth may not match until workflow-specific restore is added",
-                self._app_workflow.current_command_context_name,
+                self._app_workflow._current_command_context_name,
                 saved_context_name,
             )
 
@@ -3491,7 +3491,7 @@ class WorkflowExecutionContext:
         active = self.get_active_workflow()
         if active is not None:
             output.workflow_name = active.folderpath.split("/")[-1]
-            output.context = active.current_command_context_displayname
+            output.context = active._current_command_context_displayname
         return output
 
     def _finish_framework_call(self, result) -> fastworkflow.CommandOutput:

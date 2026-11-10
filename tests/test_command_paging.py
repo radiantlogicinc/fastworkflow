@@ -1,6 +1,6 @@
 """Paging from the run (fix-3rsq.12.1; design 2.49, 3.14; plan Phase 12 step 3).
 
-A command is paged when its ``Input`` has an int ``start``, ``offset`` or ``skip``. A paged command's
+A command is paged when its ``Input`` has an int ``start``. A paged command's
 ``Output`` declares ``total: int`` (a load error otherwise). ``_next_page`` and ``_more_pages`` read the
 run's Input and Output, and the framework-written response ends with a paging line when rows remain.
 

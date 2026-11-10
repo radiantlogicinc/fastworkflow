@@ -1,7 +1,7 @@
-"""``occupiable`` and ``descends_to`` are read from the workflow's own classes.
+"""``occupiable`` and ``@descends_to`` are read from the workflow's own classes.
 
-``occupiable`` is declared on a context's callback class, and ``descends_to`` /
-``descend_parameter`` on a command's response-generator class. With neither
+``occupiable`` is declared on a context's callback class, and ``@descends_to`` (with its
+``when_parameter``) on a command's response-generator class. With neither
 declared, the context is listed and the command has no navigation effect.
 """
 from __future__ import annotations
@@ -78,14 +78,14 @@ def test_unreadable_context_is_not_declared(monkeypatch):
 
 
 # ----------------------------------------------------------------------
-# _declared_descend
+# _declared_descend (@descends_to)
 # ----------------------------------------------------------------------
 
 
 def test_descends_to_with_gate_is_declared_on_command_module():
+    @fastworkflow.descends_to("Permission", when_parameter="permission_uid")
     class ResponseGenerator:
-        descends_to = "Permission"
-        descend_parameter = "permission_uid"
+        pass
 
     routing = _FakeRouting({}, modules={"Account/list_permissions": ResponseGenerator})
     effect = context_navigation._declared_descend(routing, "Account/list_permissions")
@@ -94,8 +94,9 @@ def test_descends_to_with_gate_is_declared_on_command_module():
 
 
 def test_descends_to_without_gate_always_descends():
+    @fastworkflow.descends_to("Group")
     class ResponseGenerator:
-        descends_to = "Group"
+        pass
 
     routing = _FakeRouting({}, modules={"Application/open_group": ResponseGenerator})
     effect = context_navigation._declared_descend(routing, "Application/open_group")
@@ -133,9 +134,9 @@ def _patch_navigation(monkeypatch, routing, declared_occupiable):
 
 
 def test_descends_to_is_the_navigation_effect(monkeypatch):
+    @fastworkflow.descends_to("Permission", when_parameter="permission_uid")
     class ResponseGenerator:
-        descends_to = "Permission"
-        descend_parameter = "permission_uid"
+        pass
 
     routing = _FakeRouting({"Account": ["Account/list_permissions"]},
                            modules={"Account/list_permissions": ResponseGenerator})

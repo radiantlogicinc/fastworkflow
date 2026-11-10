@@ -100,8 +100,8 @@ def library(annotated_library):  # noqa: F811
 
     wf = _workflow(str(annotated_library))
     root = Library()
-    wf.root_command_context = root
-    wf.current_command_context = root
+    wf.root = root
+    wf.record = root
     return wf
 
 

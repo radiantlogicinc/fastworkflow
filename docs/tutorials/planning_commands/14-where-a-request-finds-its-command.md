@@ -86,7 +86,7 @@ with, or name the context in the request.
 A planning command of the Book context: it is found only while the workflow stands on a
 book. loans lists the book's loans; __result__ names each borrower with the due date.
 """
-from fastworkflow.planning import full_list
+from fastworkflow.planning import run
 
 from .list_loans import Signature as ListLoans
 
@@ -108,7 +108,7 @@ class Signature:
 
 class PlanGenerator:
     def loans(self) -> ListLoans.Output:
-        return [full_list("list_loans")]
+        return [run("list_loans", all_pages=True)]
 
     def __result__(self, loans):
         if not loans.borrowers:
@@ -155,7 +155,7 @@ between, "not here", or a bare value (a reply such as "Dune" that names no comma
   the part, by its description and `plain_utterances`, scope by scope along the same path, and the
   agent is shown that one first. Jev is TypeSafe's service, so this sends the request and the
   planning commands' descriptions to TypeSafe. The key is optional: without it the planner finds
-  the planning command in its list, and the `verify` option checks nothing (page 9).
+  the planning command in its list, and the `classifier_confirms` option checks nothing (page 9).
 - **An answer that is unsure between commands** stops the walk: the user is asked which one
   is meant. **A "not here" answer** moves the walk on to the next scope.
 
@@ -226,7 +226,7 @@ template, and may call one as a
 step or copy its steps. An INFO line naming `JEV_API_KEY` says so, once per workflow.
 
 So the declarations of page 5 tell the planner and the agent where values and contexts come
-from: a `from_` or a `descends_to` you leave out is a path neither of them is shown.
+from: a `from_command_output` or a `@descends_to` you leave out is a path neither of them is shown.
 
 ## What the planner is shown
 
@@ -256,11 +256,11 @@ command with its template, while the full list is 7000 characters or less. A lar
 heads is shown a shortlist instead, built like this for a request:
 
 1. **The commands that match**, in every scope on the path and in every context the library can
-   navigate into through a declared `descends_to` (`Book`, `Member`, and their base `Record`):
+   navigate into through a declared `@descends_to` (`Book`, `Member`, and their base `Record`):
    `find_member`, `list_member_loans`, `add_note`, and `member_report`, the planning command that
    covers part of it, with its template.
 2. **What those need**, added until nothing new comes in: the producers of their inputs, read from
-   producer `from_` edges (`open_member`'s `member_uid` comes from `find_member`); the commands that
+   producer `from_command_output` edges (`open_member`'s `member_uid` comes from `find_member`); the commands that
    navigate to their contexts (`open_member` enters `Member`); the callees of each planning command
    on the list; and the core commands.
 
@@ -270,10 +270,10 @@ bound to a plain command in a reviewed plan is shown that command, its producers
 whole list. The list follows the workflow: when a step moves it into
 another context, the list is shown again from there.
 
-So in a large workflow, **the edges you declare decide what the plan can reach**: a producer `from_`
-on an input brings its producer onto the shortlist, and a `descends_to` on a navigation command brings
+So in a large workflow, **the edges you declare decide what the plan can reach**: a producer `from_command_output`
+on an input brings its producer onto the shortlist, and a `@descends_to` on a navigation command brings
 in the way to its context. A navigation command that moves the workflow without declaring
-`descends_to` is reported the first time it does it (page 5). A command neither edge reaches is
+`@descends_to` is reported the first time it does it (page 5). A command neither edge reaches is
 still listed in the full list, and it is the shortlist that would leave it out.
 
 When a plan has a planning command as a step, that command's arguments are checked against
@@ -306,5 +306,5 @@ steps the request asks for beyond it; a value the request leaves out is asked fo
 attended turn. When the call fails, the planner adapts the command's template. Without the key,
 or for a part no planning command covers, the planner plans from the list of commands, which
 shows each planning command with its template. The planner is shown the full list of commands up to 7000
-characters; above that, the shortlist of a large workflow, which your producer `from_` and `descends_to`
+characters; above that, the shortlist of a large workflow, which your producer `from_command_output` and `@descends_to`
 declarations complete.

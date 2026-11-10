@@ -280,7 +280,7 @@ def test_a_real_turn_produces_exactly_the_pinned_public_shape(
     )
     ctx = WorkflowExecutionContext(run_as_agent=False)
     ctx.bind_app_workflow(workflow)
-    workflow.root_command_context = TodoListManager(str(tmp_path / "todo_list.json"))
+    workflow.root = TodoListManager(str(tmp_path / "todo_list.json"))
     try:
         turn_output = ctx.process_action_turn(
             fastworkflow.Action(command_name=LIST_COMMAND, command="list them")

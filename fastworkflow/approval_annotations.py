@@ -1,16 +1,15 @@
-"""The ``approval`` annotation: a command class attribute that marks a command as needing the user's say.
+"""The approval annotation: a decorator on a command class that marks a command as needing the user's say.
 
 A command's ``ResponseGenerator`` (or a planning command's ``PlanGenerator``) may declare::
 
-    approval = "mandatory"    # the action cannot be undone (e.g. sending a critical email)
-    approval = "delegatable"  # the user may delegate the decision
+    @user_approval_for_execution(UserApproval.REQUIRED_ALWAYS)            # cannot be undone (e.g. a critical email)
+    @user_approval_for_execution(UserApproval.REQUIRED_UNTIL_DELEGATED)   # the user may delegate the decision
 
-Absent means the agent decides, with no gate. This module only DECLARES and EXPOSES the annotation:
-it is read the way ``descends_to`` is, validated when the routing definition loads, stored on the
-command's metadata (so it lands in ``command_directory.json`` when present), and rendered as a short
-marker in the planner and executor listings. Nothing here enforces anything; enforcement is
-fix-3rsq.10.14. Owner guidance (2026-09-28): the annotation is not read/write gating; the two values
-are the only annotations that exist.
+Absent means the agent decides, with no gate. The decorator and the enum live in
+``fastworkflow.command_declarations``. This module VALIDATES and EXPOSES the annotation: it is read from
+the class, checked when the routing definition loads, stored on the command's metadata (so it lands in
+``command_directory.json`` as the enum's value), and rendered as a short marker in the planner and
+executor listings. Nothing here enforces anything; the approval gate in ``approval_binding`` reads it.
 """
 from __future__ import annotations
 
@@ -21,38 +20,35 @@ from typing import Optional
 
 import fastworkflow
 from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.command_declarations import CommandDeclarationError, UserApproval, declared_approval
 
 logger = logging.getLogger(__name__)
 
-#: The class attribute a command declares.
-APPROVAL_ATTRIBUTE = "approval"
-MANDATORY = "mandatory"
-DELEGATABLE = "delegatable"
-APPROVAL_VALUES = (MANDATORY, DELEGATABLE)
+#: The stored values (``CommandMetadata.approval``, ``command_directory.json``): the enum's values.
+REQUIRED_ALWAYS = UserApproval.REQUIRED_ALWAYS.value
+REQUIRED_UNTIL_DELEGATED = UserApproval.REQUIRED_UNTIL_DELEGATED.value
+APPROVAL_VALUES = tuple(member.value for member in UserApproval)
 
 #: The short markers the listings append to a command's line. Unannotated commands get none.
 APPROVAL_MARKERS = {
-    MANDATORY: " (needs your approval before it runs)",
-    DELEGATABLE: " (may need your approval)",
+    REQUIRED_ALWAYS: " (needs your approval before it runs)",
+    REQUIRED_UNTIL_DELEGATED: " (may need your approval)",
 }
 
 
 class ApprovalAnnotationError(ValueError):
-    """A command declares an ``approval`` value that is not one of the allowed values, or not a string."""
-
-
-def _allowed_text() -> str:
-    return " or ".join(f"'{value}'" for value in APPROVAL_VALUES)
+    """A command's approval declaration is not a ``UserApproval`` member (the decorator prevents this)."""
 
 
 def check_approval_annotations(workflow_folderpath: str, routing) -> None:
-    """Validate every command's ``approval`` declaration and store it on the command's metadata.
+    """Snapshot each command's ``@user_approval_for_execution`` value onto its metadata.
 
-    Raises :class:`ApprovalAnnotationError` naming the command, its file and the allowed values when a
-    declaration is an unknown value or not a string. Core commands carry no annotation and are skipped.
-    A command whose class cannot be read is left unannotated here (its load error is raised elsewhere).
-    The metadata is the snapshot: when an annotation changes, the command directory is re-saved so
-    ``command_directory.json`` carries it.
+    The decorator itself rejects a non-``UserApproval`` argument at import, so a value that is not an
+    enum member here is an internal error and raises :class:`ApprovalAnnotationError`. Retired spellings
+    and hand-written private attributes are rejected by ``command_declarations.check_command_spellings``.
+    Core commands carry no annotation and are skipped. A command whose class cannot be read is left
+    unannotated here (its load error is raised elsewhere). The metadata is the snapshot: when an
+    annotation changes, the command directory is re-saved so ``command_directory.json`` carries it.
     """
     problems: list[str] = []
     changed = False
@@ -66,21 +62,14 @@ def check_approval_annotations(workflow_folderpath: str, routing) -> None:
         except Exception:  # noqa: BLE001 - an unreadable class is reported by its own load path
             logger.debug("approval declaration unread for %r", command_name, exc_info=True)
             command_class = None
-        value = getattr(command_class, APPROVAL_ATTRIBUTE, None) if command_class is not None else None
-        if value is not None and not isinstance(value, str):
-            problems.append(
-                f"{_source_label(metadata, workflow_folderpath)}: {command_name}'s "
-                f"{APPROVAL_ATTRIBUTE} must be the string {_allowed_text()}, not {type(value).__name__}")
+        declared = declared_approval(command_class)
+        if declared is None and command_class is not None and "__fw_approval__" in vars(command_class):
+            problems.append(f"{_source_label(metadata, workflow_folderpath)}: {command_name}'s approval "
+                            "is not a UserApproval member")
             continue
-        if isinstance(value, str) and value not in APPROVAL_VALUES:
-            problems.append(
-                f"{_source_label(metadata, workflow_folderpath)}: {command_name}'s "
-                f"{APPROVAL_ATTRIBUTE} is {value!r}; the allowed values are {_allowed_text()} "
-                "(leave it out for the agent to decide, with no gate)")
-            continue
-        declared = value if isinstance(value, str) else None
-        if metadata.approval != declared:
-            metadata.approval = declared
+        stored = declared.value if declared is not None else None
+        if metadata.approval != stored:
+            metadata.approval = stored
             changed = True
     if problems:
         raise ApprovalAnnotationError("\n".join(problems))
@@ -96,13 +85,14 @@ def _source_label(metadata, workflow_folderpath: str) -> str:
 
 
 def command_approval(workflow_folderpath: str, qualified_name: str) -> Optional[str]:
-    """The ``approval`` a command declares: ``"mandatory"``, ``"delegatable"``, or None (agent discretion).
+    """The ``UserApproval`` value a command declares (``"required_always"``, ``"required_until_delegated"``),
+    or None (agent discretion).
 
     None also when the workflow or the command cannot be read. A load error in an annotation is raised.
     """
     try:
         routing = RoutingRegistry.get_definition(workflow_folderpath)
-    except ApprovalAnnotationError:
+    except (ApprovalAnnotationError, CommandDeclarationError):
         raise
     except Exception:  # noqa: BLE001 - no routing definition means no annotation
         logger.debug("routing definition unread for approval of %r", qualified_name, exc_info=True)

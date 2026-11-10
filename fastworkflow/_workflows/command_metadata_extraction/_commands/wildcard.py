@@ -153,14 +153,14 @@ class ResponseGenerator:
         input: None,
     ) -> Signature.Output:  # sourcery skip: hoist-if-from-if
         app_workflow = workflow.context["app_workflow"]   # type: fastworkflow.Workflow
-        cmd_ctxt_obj_name = app_workflow.current_command_context_name
+        cmd_ctxt_obj_name = app_workflow._current_command_context_name
         nlu_pipeline_stage = workflow.context.get(
             "NLU_Pipeline_Stage", 
             NLUPipelineStage.INTENT_DETECTION)
 
         # The record the command runs on: the current object, unless an exact command name
         # resolves to an enclosing record or the global scope on the lookup path (3.9).
-        bound_record = app_workflow.current_command_context
+        bound_record = app_workflow._current_command_context
         typed_name = False  # the first token is a command name (exact, or a core command)
         if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:
             from fastworkflow.context_navigation import command_on_path
@@ -193,15 +193,15 @@ class ResponseGenerator:
         # and today's flow runs unchanged. An exact name never reaches here (the lookup above).
         if (nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION
                 and not typed_name
-                and app_workflow.current_command_context_name != "*"
-                and app_workflow.current_command_context is not None
-                and app_workflow.root_command_context is not None
+                and app_workflow._current_command_context_name != "*"
+                and app_workflow._current_command_context is not None
+                and app_workflow.root is not None
                 and _global_head_trained(app_workflow)):
             global_output = predictor.predict("*", command, nlu_pipeline_stage)
             if _confident_global_command(global_output):
                 cnp_output = global_output
                 cmd_ctxt_obj_name = "*"
-                bound_record = app_workflow.root_command_context
+                bound_record = app_workflow.root
         if cnp_output is None:
             cnp_output = predictor.predict(cmd_ctxt_obj_name, command, nlu_pipeline_stage)
 
@@ -233,7 +233,7 @@ class ResponseGenerator:
                 NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
                 NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
             }:
-            app_workflow.command_context_for_response_generation = bound_record
+            app_workflow._command_context_for_response_generation = bound_record
 
             if cnp_output.command_name is None:
                 # The hint the first declining context composed.
@@ -245,12 +245,12 @@ class ResponseGenerator:
                 # bare value, so no ancestor is asked (design 2.18, 3.9 step 4).
                 while not cnp_output.command_name and \
                         not cnp_output.answered_bare_value and \
-                        app_workflow.command_context_for_response_generation is not None and \
-                            not app_workflow.is_command_context_for_response_generation_root:
-                    app_workflow.command_context_for_response_generation = \
-                        app_workflow.get_parent(app_workflow.command_context_for_response_generation)
+                        app_workflow.record is not None and \
+                            not app_workflow.is_record_root:
+                    app_workflow._command_context_for_response_generation = \
+                        app_workflow.get_parent(app_workflow.record)
                     cnp_output = predictor.predict(
-                        fastworkflow.Workflow.get_command_context_name(app_workflow.command_context_for_response_generation), 
+                        fastworkflow.Workflow.get_command_context_name(app_workflow.record), 
                         command, nlu_pipeline_stage)
                     routing_hint = routing_hint or cnp_output.routing_hint
             
@@ -380,8 +380,8 @@ class ResponseGenerator:
         # The walk bound an enclosing record: the command runs on that record, so it is
         # filed under it (design 3.9, "Filing the run"). Absent when it runs here.
         ran_on_name = ran_on_clause = None
-        ran_on = app_workflow.command_context_for_response_generation
-        if ran_on is not app_workflow.current_command_context:
+        ran_on = app_workflow.record
+        if ran_on is not app_workflow._current_command_context:
             from fastworkflow.context_identity import identity_of
             from fastworkflow.observation_offloading.labels import context_clause
 

@@ -89,7 +89,7 @@ def _workflow(folder: Path, root, workflow_tag: str):
     """The workflow at *folder*, its root context set as ``startup`` would set it."""
     RoutingRegistry.clear_registry()
     wf = fastworkflow.Workflow.create(str(folder), workflow_id_str=f"returns-{workflow_tag}-{uuid.uuid4().hex}")
-    wf.root_command_context = root
+    wf.root = root
     return wf
 
 
@@ -136,11 +136,11 @@ class TestOutputReturn:
         returned = _copy(EXAMPLE, tmp_path / "returned" / "example_workflow")
         built_copy = _copy(EXAMPLE, tmp_path / "built" / "example_workflow")
         _rewrite_call(returned, "TodoListManager/list_todo_lists.py", """
-            app = workflow.command_context_for_response_generation
+            app = workflow.record
             return Signature.Output(result=app.list_todo_lists())
             """)
         _rewrite_call(built_copy, "TodoListManager/list_todo_lists.py", """
-            app = workflow.command_context_for_response_generation
+            app = workflow.record
             output = Signature.Output(result=app.list_todo_lists())
             return fastworkflow.CommandResponse(response=output.model_dump_json(), output=output)
             """)
@@ -162,7 +162,7 @@ class TestOutputReturn:
     def test_a_command_that_declares_an_output_and_returns_it_is_not_warned_about(self, tmp_path, caplog):
         returned = _copy(EXAMPLE, tmp_path / "returned")
         _rewrite_call(returned, "TodoListManager/list_todo_lists.py", """
-            app = workflow.command_context_for_response_generation
+            app = workflow.record
             return Signature.Output(result=app.list_todo_lists())
             """)
         with caplog.at_level("WARNING"):
@@ -284,7 +284,7 @@ class TestLibraryCommandsRunThroughExecutor:
     def test_find_member_returns_its_output_through_the_executor(self, library_copy, tmp_path, caplog):
         library = Library()
         wf = _workflow(library_copy, library, "library-find")
-        wf.current_command_context = library
+        wf.record = library
         with caplog.at_level("WARNING"):
             out = CommandExecutor.perform_action(
                 wf, Action(command_name="Library/find_member", command="find the member Ann Lee",
@@ -303,7 +303,7 @@ class TestLibraryCommandsRunThroughExecutor:
         library = Library()
         book = library.books["b1"]
         wf = _workflow(library_copy, library, "library-notes")
-        wf.current_command_context = book
+        wf.record = book
         with caplog.at_level("WARNING"):
             out = CommandExecutor.perform_action(
                 wf, Action(command_name="Record/show_notes", command="show the notes on this record"))
@@ -352,7 +352,7 @@ class TestDeclaredOutputMustBeReturned:
 
     def test_a_command_response_carrying_the_output_is_the_structured_form(self, example_copy, tmp_path):
         _rewrite_call(example_copy, "TodoListManager/list_todo_lists.py", """
-            app = workflow.command_context_for_response_generation
+            app = workflow.record
             output = Signature.Output(result=app.list_todo_lists())
             return fastworkflow.CommandResponse(response="two lists", output=output)
             """)

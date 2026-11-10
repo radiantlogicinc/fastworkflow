@@ -111,7 +111,7 @@ def action_ctx(initialized_fastworkflow, todo_workflow_path, tmp_path):
     repository's todo_list.json fixture.
     """
     ctx = _make_ctx(todo_workflow_path, "action")
-    ctx.app_workflow.root_command_context = TodoListManager(
+    ctx.app_workflow.root = TodoListManager(
         str(tmp_path / "todo_list.json")
     )
     yield ctx

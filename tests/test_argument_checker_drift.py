@@ -63,8 +63,8 @@ class Signature:
     """List rows of the books, for the drift test."""
 
     class Input(BaseModel):
-        title: str = Field(default="", description="the book's title", json_schema_extra={"in_request": True})
-        count: int = Field(default=0, description="how many rows", json_schema_extra={"in_request": True})
+        title: str = Field(default="", description="the book's title", json_schema_extra={"copied_from_command_text": True})
+        count: int = Field(default=0, description="how many rows", json_schema_extra={"copied_from_command_text": True})
 
 
 class PlanGenerator:
@@ -80,7 +80,7 @@ class Signature:
     """Show a page of loans, for the drift test."""
 
     class Input(BaseModel):
-        size: int = Field(default=5, description="rows on the page", json_schema_extra={"in_request": True})
+        size: int = Field(default=5, description="rows on the page", json_schema_extra={"copied_from_command_text": True})
 
 
 class PlanGenerator:
@@ -96,9 +96,9 @@ class Signature:
     """Label a member's shelf, for the drift test."""
 
     class Input(BaseModel):
-        name: str = Field(description="a person's name", json_schema_extra={"in_request": True})
+        name: str = Field(description="a person's name", json_schema_extra={"copied_from_command_text": True})
         code: str = Field(default="", description="a shelf code", examples=["XY-12"],
-                          json_schema_extra={"in_request": True})
+                          json_schema_extra={"copied_from_command_text": True})
 
 
 class PlanGenerator:
@@ -114,9 +114,9 @@ class Signature:
     """Set a loan's due date, for the drift test."""
 
     class Input(BaseModel):
-        name: str = Field(default="", description="a person's name", json_schema_extra={"in_request": True})
+        name: str = Field(default="", description="a person's name", json_schema_extra={"copied_from_command_text": True})
         due: str = Field(default="", description="the due date, YYYY-MM-DD", examples=["2024-05-20"],
-                         json_schema_extra={"in_request": False})
+                         json_schema_extra={"converted_from_command_text": True})
 
 
 class PlanGenerator:
@@ -169,7 +169,7 @@ class Signature:
     """Show one record's books, for the drift test."""
 
     class Input(BaseModel):
-        name: str = Field(description="the record's name", json_schema_extra={"in_request": "subject"})
+        name: str = Field(description="the record's name", json_schema_extra={"record_named_in_command_text": True})
 
 
 class PlanGenerator:
@@ -187,9 +187,9 @@ class Signature:
     """Find a record of the kind the request means, for the drift test."""
 
     class Input(BaseModel):
-        name: str = Field(default="", description="the name to look for", json_schema_extra={"in_request": True})
+        name: str = Field(default="", description="the name to look for", json_schema_extra={"copied_from_command_text": True})
         kind: Literal["book", "member", "branch"] = Field(default="branch", description="the kind of record",
-                                                          json_schema_extra={"verify": True})
+                                                          json_schema_extra={"classifier_confirms": True})
 
 
 class PlanGenerator:

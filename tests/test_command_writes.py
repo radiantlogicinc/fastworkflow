@@ -1,4 +1,4 @@
-"""fix-fixv: a command that declares ``writes = True`` runs inside a planning command's phase only when a
+"""fix-fixv: a command that carries ``@writes`` runs inside a planning command's phase only when a
 step of that phase names it.
 
 Each case runs the library's real planning commands on a copy of the library, through the real phase
@@ -14,6 +14,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow import command_writes, tracing
+from fastworkflow.command_declarations import CommandDeclarationError
 from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_agent import _what_can_i_do
@@ -45,7 +46,7 @@ def writes_env(tmp_path, initialized_fastworkflow, monkeypatch):
 
 
 def _library(state):
-    return state.wf.root_command_context
+    return state.wf.root
 
 
 def _notes(state) -> dict[str, list[str]]:
@@ -60,7 +61,7 @@ def _outputs(state, name: str):
 
 def test_the_library_declares_add_note_as_its_one_write_and_note_member_writes_through_its_steps(
         initialized_fastworkflow):
-    # add_note declares writes = True; note_member's steps run add_note, so it writes too; author_books
+    # add_note carries @writes; note_member's steps run add_note, so it writes too; author_books
     # (find_book, open_book) reaches no write: it is read-only.
     RoutingRegistry.clear_registry()
     writes = command_writes.write_commands(LIBRARY)
@@ -113,7 +114,7 @@ def test_a_planning_command_whose_step_names_the_write_runs_it(writes_env):
 def test_the_listing_text_of_a_read_only_phase_has_no_add_note(writes_env):
     # The listing itself, read with a phase's steps in place: add_note is gone from the Book listing.
     library = _library(writes_env)
-    writes_env.wf.current_command_context = library.books["b3"]
+    writes_env.wf.record = library.books["b3"]
     assert "add_note" in _what_can_i_do(writes_env.ctx)
     writes_env.ctx._phase_run = {"plan": "1. open_book book_uid=b3"}
     try:
@@ -125,12 +126,14 @@ def test_the_listing_text_of_a_read_only_phase_has_no_add_note(writes_env):
         writes_env.ctx._phase_run = None
 
 
-def test_writes_must_be_a_bool_on_an_execution_command(tmp_path):
+def test_the_retired_writes_attribute_fails_the_load_naming_the_decorator(tmp_path):
     RoutingRegistry.clear_registry()
     path = os.path.join(LIBRARY, "_commands", "Record", "add_note.py")
-    text = open(path, encoding="utf-8").read().replace("writes = True", 'writes = "yes"')
+    text = open(path, encoding="utf-8").read().replace(
+        "@fastworkflow.writes\nclass ResponseGenerator:\n", "class ResponseGenerator:\n    writes = True\n", 1)
+    assert "writes = True" in text
     folder = _library_workflow(tmp_path, command_texts={"_commands/Record/add_note.py": text})
-    with pytest.raises(command_writes.WritesDeclarationError, match=r"Record/add_note's writes must be True or False"):
+    with pytest.raises(CommandDeclarationError, match=r"writes = True is removed: write @writes"):
         RoutingRegistry.get_definition(folder)
     RoutingRegistry.clear_registry()
 
@@ -139,7 +142,9 @@ def test_a_planning_command_may_not_declare_writes(tmp_path):
     RoutingRegistry.clear_registry()
     path = os.path.join(LIBRARY, "_commands", "Library", "note_member.py")
     text = open(path, encoding="utf-8").read().replace(
-        "class PlanGenerator:\n", "class PlanGenerator:\n    writes = True\n\n")
+        "class PlanGenerator:\n", "@fastworkflow.writes\nclass PlanGenerator:\n", 1)
+    text = "import fastworkflow\n" + text
+    assert "@fastworkflow.writes" in text
     folder = _library_workflow(tmp_path, command_texts={"_commands/Library/note_member.py": text},
                                extra_commands=WRITES_FILES)
     with pytest.raises(command_writes.WritesDeclarationError, match="note_member is a planning command"):

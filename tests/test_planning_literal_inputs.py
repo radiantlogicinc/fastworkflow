@@ -58,7 +58,7 @@ class Signature:
 
     class Input(BaseModel):
         name: str = Field(description="the name exactly as the request writes it",
-                          json_schema_extra={{"in_request": True}})
+                          json_schema_extra={{"copied_from_command_text": True}})
         kind: Literal[{_literal_args(KIND_MEMBERS)}] = Field(description="what the name is")
         connected: Literal[{_literal_args(CONNECTED_MEMBERS)}] = Field(
             default="none", description="one connected record to open")
@@ -188,7 +188,7 @@ def test_a_literal_argument_reaches_the_planning_command_as_its_member(literal_e
     ctx = literal_env.ctx
     literal_env.wf.context["run_as_agent"] = True
     ctx._cme_workflow.context["run_as_agent"] = True
-    literal_env.wf.current_command_context = None
+    literal_env.wf.record = None
 
     out = CommandExecutor.invoke_command(
         ctx, f'{ROOT_PLANNING} name="Jesse Rodgers-ADM" kind=login')
@@ -240,7 +240,7 @@ def test_a_planning_literal_member_that_looks_like_a_placeholder_is_accepted(age
 
 def test_a_literal_member_that_looks_like_a_placeholder_runs_end_to_end(agent_request):
     ctx = agent_request.ctx
-    agent_request.wf.current_command_context = None
+    agent_request.wf.record = None
 
     out = CommandExecutor.invoke_command(
         ctx, f'{ROOT_PLANNING} name="Jesse Rodgers-ADM" kind=login control_is=code')

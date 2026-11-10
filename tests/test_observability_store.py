@@ -1029,14 +1029,24 @@ class TestMaintenance:
 
         thread = threading.Thread(target=probe)
         thread.start()
+        deleted: dict[str, int] = {}
         try:
-            deleted = store.prune(retention_days=30, max_bytes=1)
+            # A pass stops early, by design, when its WAL checkpoint is busy (fix-ajir.27),
+            # and the next pass carries on. The probe keeps writing throughout, so under
+            # CPU load a single pass can stop before the turn records. Drive passes until
+            # one deletes nothing, and check the totals.
+            for _ in range(50):
+                pass_deleted = store.prune(retention_days=30, max_bytes=1)
+                for key, count in pass_deleted.items():
+                    deleted[key] = deleted.get(key, 0) + count
+                if not any(pass_deleted.values()):
+                    break
         finally:
             stop.set()
             thread.join()
 
         assert refused == []
-        assert deleted["spans"] == 15 and deleted["turns"] == 5
+        assert deleted["spans"] == 15 and deleted.get("turns", 0) == 5
         assert {r["span_id"] for r in _rows(db_path, "SELECT span_id FROM spans")} == {"bound"}
         assert {r["turn_key"] for r in _rows(db_path, "SELECT turn_key FROM turns")} == {
             "20000101T000007-running", "20000101T000009-exp",

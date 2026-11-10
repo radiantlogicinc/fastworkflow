@@ -95,7 +95,7 @@ Pydantic Input model
 
 Validation is a separate pass — `validate_parameters` (:315-670): type coercion
 (str/bool/int/float/Enum/list with JSON/Python/CSV parsing), regex `pattern` fullmatch,
-the command's own `validate_extracted_parameters` hook, which may fuzzy-match
+the command's own `Input` model validators, which may fuzzy-match
 against a DB and refuse with `fastworkflow.Refused`. Missing/invalid fields produce the clarification error
 message assembled from `MISSING_INFORMATION_ERRMSG` / `INVALID_INFORMATION_ERRMSG` —
 downstream code STRING-MATCHES on these messages (`parameter_extraction.py:147-157`), so

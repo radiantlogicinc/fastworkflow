@@ -1,8 +1,6 @@
 """Phase 3 steps 1 and 1a: ``__result__`` and a skipped phase is ``None``."""
 from __future__ import annotations
 
-pytest_plugins = ["tests.test_turn_result_capture"]
-
 import logging
 import os
 import sys
@@ -40,12 +38,13 @@ from fastworkflow.examples.library._commands.Library.book_by_title import Signat
 from fastworkflow.examples.library._commands.Library.find_book import Signature as FindBook
 from fastworkflow.examples.library._commands.Library.find_member import Signature as FindMember
 from fastworkflow.examples.library._commands.Library.open_book import Signature as OpenBook
-from fastworkflow.planning import full_list, pick, run
+from fastworkflow.planning import run
 from fastworkflow.planning import phase
 from fastworkflow.planning_commands import PlanningCommandFormatError
 from fastworkflow.turn import TurnStatus, reset_missing_declared_output_warnings
 from fastworkflow.utils import python_utils
 
+from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - the fixture, imported by name
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_field_sources import _build_workflow
 from tests.test_planning_command_contexts import LIBRARY_PLANNING_COMMAND, ROOT_PLANNING_COMMAND, RULE_CHECK, _with_rule_check
@@ -173,7 +172,7 @@ def test_result_output_json_is_the_response(library_env):
                 return [run("find_book", query=input.title)]
 
             def book(self, input, find) -> OpenedBook:
-                return [pick("open_book", named=input.title)]
+                return [run("open_book", named=input.title)]
 
             def __result__(self, input, find, book):
                 return output_cls(found=True, title=book.title)
@@ -557,7 +556,7 @@ def test_phase_annotated_find_book_output_hands_on_run(library_env):
 def test_full_list_step_joins_loan_pages(library_proof_env):
     class Plan:
         def loans(self) -> ListLoans.Output:
-            return [full_list("list_loans")]
+            return [run("list_loans", all_pages=True)]
 
     library_proof_env.runner(library_proof_env.ctx, "open_book book_uid=b1")
     library_proof_env.planning_command = _build_planning_command(Plan)
@@ -816,7 +815,7 @@ def test_library_author_books_from_real_module_runs_fan_out(library_proof_env):
         "open_book book_uid=b1",
         "open_book book_uid=b2",
     ]
-    assert library_proof_env.wf.current_command_context.uid == "b2"
+    assert library_proof_env.wf._current_command_context.uid == "b2"
     spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_PLANNING_COMMAND_PHASE)
     assert [s.attributes["phase"] for s in spans[:3]] == ["find", "book", "book"]
 
@@ -865,7 +864,7 @@ def test_library_member_report_from_real_module_lists_loans_and_notes(library_pr
 def test_library_note_member_from_real_module_writes_note_on_member(library_proof_env):
     sf = _real_planning_command("Library/note_member", "_commands/Library/note_member.py")
     member, text = "Ann Lee", "card renewed"
-    lib = library_proof_env.wf.root_command_context
+    lib = library_proof_env.wf.root
     before = list(lib.members["m1"].notes)
     library_proof_env.planning_command = sf.command
     library_proof_env.args = {"member": member, "text": text}
@@ -929,7 +928,7 @@ class Signature:
 
     class Input(BaseModel):
         title: str = Field(description="the book's title",
-                           json_schema_extra={"in_request": True})
+                           json_schema_extra={"copied_from_command_text": True})
 
 
 class PlanGenerator:
@@ -948,7 +947,7 @@ def test_in_request_on_a_str_field_loads(tmp_path):
     assert sf.command.param("title").in_request
 
 
-def test_in_request_on_a_bool_field_is_a_load_error(tmp_path):
+def test_copied_from_command_text_on_a_bool_field_is_a_load_error(tmp_path):
     bad = '''from pydantic import BaseModel, Field
 
 from fastworkflow.planning import run
@@ -959,7 +958,7 @@ class Signature:
 
     class Input(BaseModel):
         flag: bool = Field(default=False, description="whether",
-                           json_schema_extra={"in_request": True})
+                           json_schema_extra={"copied_from_command_text": True})
 
 
 class PlanGenerator:
@@ -967,12 +966,12 @@ class PlanGenerator:
         return [run("find_book")]
 '''
     folder = _library_workflow(tmp_path)
-    path = os.path.join(folder, "_commands", "Library", "bad_in_request.py")
+    path = os.path.join(folder, "_commands", "Library", "bad_copied_from_command_text.py")
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(bad)
     mod = python_utils.get_module(path, folder)
-    with pytest.raises(PlanningCommandFormatError, match=r"option in_request does not apply to field '\w+' of type \w+"):
-        planning_commands.command_from_module("Library/bad_in_request", mod, path)
+    with pytest.raises(PlanningCommandFormatError, match=r"option copied_from_command_text does not apply to field '\w+' of type \w+"):
+        planning_commands.command_from_module("Library/bad_copied_from_command_text", mod, path)
 
 
 def test_in_request_str_must_be_written_in_the_request(tmp_path):
@@ -1124,7 +1123,7 @@ def test_planning_command_in_executor_and_planner_catalogs_of_its_context(
     planner_text = planning_dispatch_library.api.get_all_contexts_command_display_text(
         subject_workflow_path=wf.folderpath,
         cme_workflow_path=cme_path,
-        active_context_name=wf.current_command_context_name,
+        active_context_name=wf._current_command_context_name,
     )
     assert "- count_books\n" in planner_text
     assert "find_book" in planner_text
@@ -1245,7 +1244,7 @@ def test_library_planning_command_in_planner_catalog_of_its_context_with_templat
     text = CommandMetadataAPI.get_all_contexts_command_display_text(
         subject_workflow_path=wf.folderpath,
         cme_workflow_path=planning_catalog_library.cme_path,
-        active_context_name=wf.current_command_context_name,
+        active_context_name=wf._current_command_context_name,
         navigation_workflow=wf,
     )
 
@@ -1262,7 +1261,7 @@ def test_deferred_planning_commands_in_planner_catalog_show_their_template(
     text = CommandMetadataAPI.get_all_contexts_command_display_text(
         subject_workflow_path=wf.folderpath,
         cme_workflow_path=planning_catalog_library.cme_path,
-        active_context_name=wf.current_command_context_name,
+        active_context_name=wf._current_command_context_name,
         navigation_workflow=wf,
     )
 
@@ -1495,7 +1494,7 @@ def test_a_planning_command_is_available_only_where_it_is_runnable(planning_cata
     assert "It is available in: 'Book', 'Member'." in _refusal(wf, "record_notes")
 
     LibraryRunner(wf)(planning_catalog_library.ctx, "open_book book_uid=b1")
-    assert wf.current_command_context_name == "Book"
+    assert wf._current_command_context_name == "Book"
     assert _explicit_agent_command("loan_report", wf) == "loan_report"
     assert _explicit_agent_command("record_notes", wf) == "record_notes"
     assert _explicit_agent_command("book_by_title", wf) == "book_by_title"

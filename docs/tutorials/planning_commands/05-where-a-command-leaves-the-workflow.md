@@ -11,7 +11,6 @@ after.
 ```python
 """open_book: make one book, by its uid, the current record."""
 import fastworkflow
-from fastworkflow import from_
 from pydantic import BaseModel, Field
 
 from ...application.library import Library
@@ -21,8 +20,11 @@ class Signature:
     """Open one book by its uid, so that the book's own commands act on it."""
 
     class Input(BaseModel):
-        book_uid: str = from_("find_book.book_uids", description="the uid of the book to open",
-                               pattern=r"^b[0-9]+$")
+        book_uid: str = Field(
+            description="the uid of the book to open",
+            json_schema_extra={"from_command_output": "find_book.book_uids"},
+            pattern=r"^b[0-9]+$",
+        )
 
     class Output(BaseModel):
         book_uid: str = Field(description="the uid of the book now open")
@@ -42,44 +44,44 @@ class Signature:
     ]
 
 
+@fastworkflow.descends_to("Book")
 class ResponseGenerator:
-    descends_to = "Book"
 
     def __call__(self, workflow: fastworkflow.Workflow, command: str,
                  input: Signature.Input) -> Signature.Output:
-        library: Library = workflow.command_context_for_response_generation
+        library: Library = workflow.record
         book = library.books.get(input.book_uid)
         if book is None:
             raise fastworkflow.Refused(
                 f"no book has the uid {input.book_uid}; find_book lists the uids")
-        workflow.current_command_context = book
+        workflow.record = book
         return Signature.Output(book_uid=book.uid, title=book.title, author=book.author,
                                 copies=book.copies)
 ```
 
-- **`workflow.current_command_context = book`** is the move. From here on, the workflow
+- **`workflow.record = book`** is the move. From here on, the workflow
   stands on that book, and the book's own commands act on it.
-- **`descends_to = "Book"`** declares the move, so the framework knows without running it
+- **`@descends_to("Book")`** declares the move, so the framework knows without running it
   that `open_book` leads from `Library` into `Book`. It is the one place this is declared:
   the agent is shown the way into a context it is not in, the list it plans from (page 14)
   uses these declarations to reach the commands of contexts a plan has not entered yet, and
   code checks each plan against them, so a step planned in a context the plan never enters
   gets a note. A command that moves the workflow into a context it does not declare gets a
   warning the first time it does it, naming the command and the context, so a missing
-  `descends_to` shows up in the first run.
-- **`book_uid: str = from_("find_book.book_uids", ...)`** points this field at another
-  command's `Output` field: the place its value comes from. On an `Input` field, `from_` is
-  a **producer** hint: "call `find_book` first; one of its `book_uids` is this value". The
+  `@descends_to` shows up in the first run.
+- **`json_schema_extra={"from_command_output": "find_book.book_uids"}`** points this field at
+  another command's `Output` field: the place its value comes from. On an `Input` field,
+  `from_command_output` is a **producer** hint: "call `find_book` first; one of its `book_uids` is this value". The
   agent reads it as `Library/find_book.book_uids`, field and all, as it plans and as it
   runs; code checks each plan against it, so a plan that opens a book before any
   `find_book` gets a note (page 14); and the message for a missing `book_uid` says "use the
   find_book command(s) to get book_uid information". The types are checked: a `str` filled
-  from one item of a `list[str]` is allowed. `from_` takes any other `Field` argument too,
-  such as the description.
+  from one item of a `list[str]` is allowed. The key sits beside the field's other `Field`
+  arguments, such as the description.
 - **A producer hint is only a hint.** It does not look the value up or check it. `open_book`
   refuses a uid no book has itself, with `fastworkflow.Refused`; the agent reads the message
   and can run `find_book`.
-- **`from_` is only for an `Input` field.** It names the `Output` field a value comes from,
+- **`from_command_output` is only for an `Input` field.** It names the `Output` field a value comes from,
   and that is all it does. A phase's facts never need it: they are typed with the commands
   they come from (pages 3 and 10).
 
@@ -92,17 +94,17 @@ from ...application.library import Book, Library
 
 class Context:
     @classmethod
-    def get_parent(cls, command_context_object: Book) -> Library:
-        return command_context_object.library
+    def get_parent(cls, record: Book) -> Library:
+        return record.library
 
     @classmethod
-    def get_displayname(cls, command_context_object: Book) -> str:
-        return f"Book: {command_context_object.title} ({command_context_object.uid})"
+    def get_displayname(cls, record: Book) -> str:
+        return f"Book: {record.title} ({record.uid})"
 ```
 
 `_Book.py` describes the `Book` context's object. `get_parent` is the record that encloses a
 book, the library; `get_displayname` is how a book is named to the agent. The context class
-says nothing about how to enter it: that is the navigation command's `descends_to`. And here
+says nothing about how to enter it: that is the navigation command's `@descends_to`. And here
 is one of the book's own commands:
 
 <!-- file: fastworkflow/examples/library/_commands/Book/list_loans.py -->
@@ -142,7 +144,7 @@ class Signature:
 class ResponseGenerator:
     def __call__(self, workflow: fastworkflow.Workflow, command: str,
                  input: Signature.Input) -> Signature.Output:
-        book: Book = workflow.command_context_for_response_generation
+        book: Book = workflow.record
         loans = book.library.loans_of_book(book.uid)
         rows = page(loans, input.start)
         return Signature.Output(borrowers=[m for m, _ in rows], due_dates=[d for _, d in rows],
@@ -150,7 +152,7 @@ class ResponseGenerator:
 ```
 
 `list_loans` takes no `book_uid`. It reads the book it acts on from
-`workflow.command_context_for_response_generation`: the book the workflow stands on. It is
+`workflow.record`: the book the workflow stands on. It is
 also **paged**, by its integer `start`; page 7 says what that asks of its `Output`.
 
 ## Every command leaves the workflow where it ends
@@ -194,8 +196,8 @@ import says which one.
 
 ## What you learned
 
-A navigation command sets `workflow.current_command_context` and declares `descends_to`, the
-one place the move is declared. `from_` on an `Input` field names the `Output` field a value
-comes from: a producer hint. Every command, of either kind, leaves the workflow where it
+A navigation command sets `workflow.record` and is decorated `@descends_to`, the one place the
+move is declared. `from_command_output` on an `Input` field names the `Output` field a value comes
+from: a producer hint. Every command, of either kind, leaves the workflow where it
 ends; the agent's observation says where that is, and nothing restores the context a command
 started in.

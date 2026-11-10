@@ -614,7 +614,7 @@ def test_the_current_context_is_never_its_own_foreign_owner(inventory_predictor)
 # ---------------------------------------------------------------------------
 
 def _declare_descends_to(workflow_path, command_file: str, context_name: str) -> None:
-    """Write `descends_to = "<Context>"` on a COPY's command, the one that enters the context.
+    """Write `@descends_to("<Context>")` on a COPY's command, the one that enters the context.
 
     Phase 10 (design 3.15): `enter_command` on the context class is a load error, so the
     entering command declares the move itself. The copy is what the fixture built in tmp_path,
@@ -626,7 +626,7 @@ def _declare_descends_to(workflow_path, command_file: str, context_name: str) ->
     marker = "class ResponseGenerator:\n"
     assert marker in source, path
     path.write_text(source.replace(
-        marker, f'class ResponseGenerator:\n    descends_to = "{context_name}"\n', 1))
+        marker, f'@fastworkflow.descends_to("{context_name}")\nclass ResponseGenerator:\n', 1))
 
 
 class TestTheHintTextItself:
@@ -764,7 +764,7 @@ class TestTheHintIsComposedAndRecorded:
 
 
 class TestTheDeclaredEnteringCommandIsRead:
-    """The entering command is read from the descend edges (`descends_to` on the command)."""
+    """The entering command is read from the descend edges (`@descends_to` on the command)."""
 
     @pytest.fixture
     def declared_workflows(self, tmp_path):
@@ -855,16 +855,20 @@ class TestTheHintReachesTheFailureMessage:
 
         def __init__(self, chain):
             self.chain = list(chain)
-            self.current_command_context = chain[0]
-            self.current_command_context_name = chain[0]
-            self.command_context_for_response_generation = chain[0]
+            self._current_command_context = chain[0]
+            self._current_command_context_name = chain[0]
+            self._command_context_for_response_generation = chain[0]
             # No root object: the global-first ask (3.9 owner-approved rule) needs one, so it is skipped.
-            self.root_command_context = None
+            self.root = None
             self.context = {}
 
         @property
-        def is_command_context_for_response_generation_root(self):
-            return (self.command_context_for_response_generation
+        def record(self):
+            return self._command_context_for_response_generation
+
+        @property
+        def is_record_root(self):
+            return (self.record
                     == self.chain[-1])
 
         def get_parent(self, context_object):
@@ -1016,7 +1020,7 @@ def test_a_foreign_name_in_the_misunderstanding_reply_is_declined_with_its_owner
 
 class TestTheHintPathOnARealWorkflow:
     """The real CME wildcard command, executor and `you_misunderstood`, over a
-    copy of `tests/todo_list_workflow` whose get_todo_list declares `descends_to`
+    copy of `tests/todo_list_workflow` whose get_todo_list declares `@descends_to`
     TodoList. Only the classifier is replaced; no LLM is called and no trained
     model is read.
 
@@ -1040,7 +1044,7 @@ class TestTheHintPathOnARealWorkflow:
             workflow_folderpath=str(workflow_path),
             workflow_id_str=f"hint-path-{tmp_path.name}",
         )
-        app_workflow.current_command_context = TodoListManager()
+        app_workflow.record = TodoListManager()
         cme_workflow = fastworkflow.Workflow.create(
             workflow_folderpath=fastworkflow.get_internal_workflow_path(
                 "command_metadata_extraction"
@@ -1072,7 +1076,7 @@ class TestTheHintPathOnARealWorkflow:
         assert stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION
         assert "command" not in cme_workflow.context
         following = CommandNamePrediction(cme_workflow).predict(
-            app_workflow.current_command_context_name, "get_todo_list 1", stage)
+            app_workflow._current_command_context_name, "get_todo_list 1", stage)
         assert following.command_name == "TodoListManager/get_todo_list"
 
     def test_free_text_still_ends_at_you_misunderstood_and_a_stray_reply_is_answered(
@@ -1095,7 +1099,7 @@ class TestTheHintPathOnARealWorkflow:
         assert stage == MISUNDERSTANDING
 
         following = CommandNamePrediction(cme_workflow).predict(
-            app_workflow.current_command_context_name, "none of those", stage)
+            app_workflow._current_command_context_name, "none of those", stage)
         assert following.command_name == "IntentDetection/what_can_i_do"
 
     def test_a_foreign_name_as_the_misunderstanding_reply_gets_the_hint(

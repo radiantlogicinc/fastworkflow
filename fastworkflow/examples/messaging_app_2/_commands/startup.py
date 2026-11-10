@@ -39,7 +39,7 @@ class ResponseGenerator:
         command_parameters: Signature.Input,
     ) -> str:
         # Initialize the root context
-        workflow.root_command_context = User(command_parameters.name)
+        workflow.root = User(command_parameters.name)
 
         response = (
             f"Root context set to User('{command_parameters.name}')."

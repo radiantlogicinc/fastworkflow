@@ -307,7 +307,7 @@ def _distillation_context(
         run_as_agent=True, generate_insights=True, trace_sink=sink
     )
     ctx.bind_app_workflow(workflow)
-    workflow.root_command_context = TodoListManager(str(tmp_path / "todo_list.json"))
+    workflow.root = TodoListManager(str(tmp_path / "todo_list.json"))
     # Distillation is guarded on a user_message_queue (Topology A / CLI only).
     ctx.set_transport_queues(user_message_queue=Queue())
     return ctx
@@ -629,7 +629,7 @@ def test_a_turn_with_no_distillation_records_no_pass_and_projects_whole(
     )
     ctx = WorkflowExecutionContext(run_as_agent=False, trace_sink=sink)
     ctx.bind_app_workflow(workflow)
-    workflow.root_command_context = TodoListManager(str(tmp_path / "todo_list.json"))
+    workflow.root = TodoListManager(str(tmp_path / "todo_list.json"))
     try:
         turn = ctx.process_action_turn(
             fastworkflow.Action(

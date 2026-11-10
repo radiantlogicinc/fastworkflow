@@ -31,15 +31,11 @@ class Signature:
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
-    @staticmethod
-    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> None:
-        return None
-
 class ResponseGenerator:
     def _process_command(self, workflow: Workflow) -> Signature.Output:
         """Get all children of this TodoList."""
         # Access the application class instance:
-        todolist = workflow.command_context_for_response_generation  # type: TodoList
+        todolist = workflow.record  # type: TodoList
         todoitems = todolist.get_all_children()
         return Signature.Output(todoitem_ids=[todoitem.id for todoitem in todoitems])
 

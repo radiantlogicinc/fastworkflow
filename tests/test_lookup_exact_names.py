@@ -36,7 +36,7 @@ from fastworkflow import CommandOutput, CommandResponse
 
 class ResponseGenerator:
     def __call__(self, workflow: fastworkflow.Workflow, command: str, input) -> CommandResponse:
-        bound = workflow.command_context_for_response_generation
+        bound = workflow.record
         return CommandResponse(response=f"global_probe bound to {type(bound).__name__}")
 '''
 
@@ -66,8 +66,8 @@ def chain(tmp_path):
     todo_list.parent = manager
     item = TodoItem(1, "milk")
     item.parent = todo_list
-    app.root_command_context = manager
-    app.current_command_context = item
+    app.root = manager
+    app.record = item
     return app, cme, item, todo_list, manager
 
 
@@ -124,11 +124,11 @@ def test_an_enclosing_context_command_by_exact_name_runs_bound_and_filed_under_i
 
     assert output.command_name == "TodoList/get_all_children"
     # Bound to the list, not the item: the command ran on the record it is filed under.
-    assert app.command_context_for_response_generation is todo_list
+    assert app.record is todo_list
     assert output.ran_on_context_name == "TodoList"
     assert output.ran_on_context_clause == "TodoList"
     # The current object does not move.
-    assert app.current_command_context is item
+    assert app._current_command_context is item
 
 
 def test_a_global_command_by_exact_name_from_inside_a_context_runs_bound_to_the_root(
@@ -140,9 +140,9 @@ def test_a_global_command_by_exact_name_from_inside_a_context_runs_bound_to_the_
 
     assert output.response == "global_probe bound to TodoListManager"
     # The global scope binds the root object, and the run is filed under it.
-    assert app.command_context_for_response_generation is manager
+    assert app.record is manager
     assert output.ran_on_context_name == "TodoListManager"
-    assert app.current_command_context is item
+    assert app._current_command_context is item
 
 
 def test_the_nearest_scope_wins_on_a_short_name_clash(chain, monkeypatch, setup_test_environment):
@@ -153,7 +153,7 @@ def test_the_nearest_scope_wins_on_a_short_name_clash(chain, monkeypatch, setup_
 
     assert output.command_name == "TodoItem/get_properties"
     assert output.ran_on_context_name is None
-    assert app.command_context_for_response_generation is item
+    assert app.record is item
 
 
 def test_a_qualified_name_on_the_path_runs_that_scope_even_when_a_nearer_scope_shares_the_short_name(
@@ -164,7 +164,7 @@ def test_a_qualified_name_on_the_path_runs_that_scope_even_when_a_nearer_scope_s
     output = _run(app, cme, monkeypatch, "TodoList/get_properties")
 
     assert output.command_name == "TodoList/get_properties"
-    assert app.command_context_for_response_generation is todo_list
+    assert app.record is todo_list
     assert output.ran_on_context_name == "TodoList"
 
 
@@ -172,7 +172,7 @@ def test_a_qualified_name_off_the_path_gets_the_navigation_message(
         chain, monkeypatch, setup_test_environment):
     """From the root, TodoItem is neither enclosing nor a base: its command is not called here."""
     app, _, _, _, manager = chain
-    app.current_command_context = manager
+    app.record = manager
     monkeypatch.setattr(intent_detection, "CommandRouter", _RefusingRouter)
 
     with pytest.raises(CommandNotFoundError) as refused:
@@ -188,7 +188,7 @@ def test_the_other_contexts_text_does_not_send_the_agent_into_a_context_for_a_co
     """From the list, the root is on the lookup path: its commands run here, so the other-contexts
     text says so instead of telling the agent to enter the root to run them."""
     app, _, _, todo_list, _ = chain
-    app.current_command_context = todo_list
+    app.record = todo_list
 
     text = CommandMetadataAPI.get_other_contexts_text(
         subject_workflow_path=app.folderpath,
@@ -206,7 +206,7 @@ def test_the_other_contexts_text_still_says_how_to_enter_a_context_off_the_path(
         chain, setup_test_environment):
     """From the root, the list is off the path: it is still entered, as before."""
     app, _, _, _, manager = chain
-    app.current_command_context = manager
+    app.record = manager
 
     text = CommandMetadataAPI.get_other_contexts_text(
         subject_workflow_path=app.folderpath,
@@ -226,10 +226,10 @@ def test_a_base_command_named_by_its_qualified_name_runs_on_the_derived_record(
     collapse onto the list's own get_properties: the collapse rule is checked within each scope, and
     TodoItem's scope has one get_properties."""
     app, cme, _, todo_list, _ = chain
-    app.current_command_context = todo_list
+    app.record = todo_list
 
     output = _run(app, cme, monkeypatch, "TodoItem/get_properties")
 
     assert output.command_name == "TodoItem/get_properties"
-    assert app.command_context_for_response_generation is todo_list
+    assert app.record is todo_list
     assert output.ran_on_context_name is None

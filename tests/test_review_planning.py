@@ -82,7 +82,7 @@ def test_review_subtasks_runs_end_to_end_with_scripted_replies_and_returns_the_a
     # The framework calls the planning command directly (not the agent's name resolution, which refuses it).
     from fastworkflow.utils.react import AskUserSuspend
 
-    todo.wf.current_command_context = todo.library
+    todo.wf.record = todo.library
     awaiting = todo.ctx.run_framework_planning_command(
         "review_subtasks", {"subtasks": "book a flight; tell Ann"}, "review the sub-tasks")
     assert awaiting.command_response.artifacts.get("awaiting_user") is True
@@ -108,7 +108,7 @@ def test_review_plan_runs_end_to_end_with_scripted_replies_and_returns_the_accep
     # plan is the typed Output.
     from fastworkflow.utils.react import AskUserSuspend  # noqa: F401 - the framework call may raise it
 
-    todo.wf.current_command_context = todo.library
+    todo.wf.record = todo.library
     awaiting = todo.ctx.run_framework_planning_command(
         "review_plan", {"goals": "book a flight = find_member query=Ann | say booked"}, "review the plan")
     assert awaiting.command_response.artifacts.get("awaiting_user") is True
@@ -260,7 +260,7 @@ def test_a_proposal_review_accepts_more_than_two_replies_and_expires_at_its_cap(
 
 
 def test_a_proposal_review_with_three_replies_is_still_open_and_accepts(todo):
-    todo.wf.current_command_context = todo.library
+    todo.wf.record = todo.library
     todo.ctx.run_framework_planning_command("review_subtasks", {"subtasks": "book a flight; tell Ann"},
                                             "review the sub-tasks")
     record = todo.store.active()

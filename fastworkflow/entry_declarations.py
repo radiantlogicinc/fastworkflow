@@ -1,7 +1,7 @@
 """Navigation facts a workflow declares on its classes, and the retired entry-command declaration.
 
-How a command enters a context is declared once, on the command: ``descends_to = "<Context>"``
-and ``descend_parameter = "<param>"`` on its ``ResponseGenerator`` class, read by
+How a command enters a context is declared once, on the command: ``@descends_to("<Context>")``, or
+``@descends_to("<Context>", when_parameter="<param>")``, on its ``ResponseGenerator`` class, read by
 ``context_navigation.collect_descend_edges`` (design 3.15). The context class used to declare it
 too, as ``enter_command`` / ``enter_commands``. Those shipped, so a context class that still
 declares either is a load error (:func:`check_retired_entry_declarations`), not a second source
@@ -33,7 +33,7 @@ def check_retired_entry_declarations(workflow_folderpath: str, context_model) ->
     """Raise ValueError when a context class declares ``enter_command`` or ``enter_commands``.
 
     One line per declaration, naming the file, the context, and the command the declaration's
-    leading token names, with the declaration to write instead: ``descends_to`` on that command's
+    leading token names, with the decorator to write instead: ``@descends_to`` on that command's
     ``ResponseGenerator``. Reads the context classes through *context_model* (the routing
     definition is still being built when this runs, so the routing registry is not consulted).
     """
@@ -52,8 +52,8 @@ def check_retired_entry_declarations(workflow_folderpath: str, context_model) ->
                 command = words[0] if words else "<command>"
                 problems.append(
                     f"{_source_label(context_class, workflow_folderpath)}: "
-                    f"Context.{attribute} is no longer read; declare descends_to = "
-                    f"\"{context_name}\" on {command}'s ResponseGenerator"
+                    f"Context.{attribute} is no longer read; declare @descends_to("
+                    f"\"{context_name}\") on {command}'s ResponseGenerator"
                 )
     if problems:
         raise ValueError("\n".join(problems))

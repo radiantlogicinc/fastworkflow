@@ -224,7 +224,7 @@ def test_the_switch_turns_the_checks_off(extract, monkeypatch):
 
 class _Fields(BaseModel):
     name: str = Field(description="a person's name")
-    due: str = Field(description="the due date, YYYY-MM-DD", json_schema_extra={"in_request": False})
+    due: str = Field(description="the due date, YYYY-MM-DD", json_schema_extra={"converted_from_command_text": True})
     kind: Optional[str] = Field(default=None, description="the kind of record. One of: book, member, branch")
     code: str = Field(default="", description="a code", examples=["XY-12"])
     count: int = Field(default=5, description="how many")
@@ -260,7 +260,7 @@ def test_a_copied_description_example_is_refused():
 
 
 class _Converted(BaseModel):
-    origin: str = Field(description="IATA code", examples=["JFK"], json_schema_extra={"in_request": False})
+    origin: str = Field(description="IATA code", examples=["JFK"], json_schema_extra={"converted_from_command_text": True})
     date: str = Field(description="YYYY-MM-DD", examples=["2024-05-20"], pattern=r"^\d{4}-\d{2}-\d{2}$")
 
 

@@ -11,11 +11,11 @@ Depth: 1 (lower bound; open steps name no command)
 
 ## Inputs
 
-| input | type | default | sample | verify | in_request | description |
+| input | type | default | sample | classifier_confirms / classifier_decides | copied_from_command_text / record_named_in_command_text | description |
 |---|---|---|---|---|---|---|
 | `query` | str | required | `<query>` |  | yes | the title or author words |
 
-- `query` must be written in the request (`in_request`).
+- `query` must be written in the command text (`copied_from_command_text`).
 
 ## Example requests
 

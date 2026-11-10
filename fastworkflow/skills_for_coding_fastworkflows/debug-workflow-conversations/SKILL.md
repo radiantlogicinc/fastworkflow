@@ -129,10 +129,10 @@ the `fw.nlu.intent` spans:
 
 | Observation | Diagnosis | Fix with |
 |---|---|---|
-| `missing_fields` non-empty | Extraction could not find the value in the utterance | Sharpen `Field(description=…, examples=…)` on `Signature.Input`; if the value is an opaque handle the user cannot know, declare its producer with `from_` — `declare-parameter-producers` |
+| `missing_fields` non-empty | Extraction could not find the value in the utterance | Sharpen `Field(description=…, examples=…)` on `Signature.Input`; if the value is an opaque handle the user cannot know, declare its producer with `from_command_output` — `declare-parameter-producers` |
 | `validation_hook` with `refused_fields` naming the field (a `Refused` with `field=`) | The typed value missed the live key set and the hook offered suggestions | `resolve-parameter-values` — check the key set and thresholds; a rejection of a *valid* value usually means the wrong candidate list |
 | `validation_hook` with `changed_fields` naming the field, but wrong result downstream | The fuzzy matcher rewrote the value incorrectly (auto-apply too loose, or label/uid mixup) | `resolve-parameter-values` — `auto_apply_threshold`, and return the value the *field* holds, not the label matched on |
-| `validation_hook.is_valid: false` | The command's own `validate_extracted_parameters` refused the call — `message` says why, `refused_fields` names the fields reset to missing; `raised` means the hook crashed with an exception that is not a `Refused` | `validate-command-parameters` |
+| `validation_hook.is_valid: false` | The command's `Input` model validators refused the call — `message` says why, `refused_fields` names the fields reset to missing; `raised` means a validator crashed with an exception that is not a `Refused` or a `ValueError` | `validate-command-parameters` |
 | `retry_round: true` on successive turns | The user is stuck in the NOT_FOUND correction loop — count the rounds; more than two means the error message is not actionable | `validate-command-parameters` (error-message quality) + field descriptions |
 | `extraction_method: llm` and the nested `fw.llm.call` shows `cache_hit: true` with a wrong completion | Cached output; the cache hit alone does not prove staleness | Verify request/model/cache provenance; use an isolated fresh cache for an authorized comparison |
 | A nested `fw.llm.call` with `status: error` and an `exception` (auth, timeout) | Environment problem — keys/env files — not workflow design | Fix the env/passwords files; nothing to change in the workflow |
@@ -170,9 +170,9 @@ name the feature, and load the companion skill before writing the change:
 | Seed utterances, context layout, `base` inheritance | `design-context-models` |
 | Near-duplicate commands | `detect-duplicate-capabilities` |
 | Measuring whether a routing change helped | `evaluate-intent-routing` |
-| `from_` producer edges (shown in the runtime as `available_from`) | `declare-parameter-producers` |
+| `from_command_output` producer edges (shown in the runtime as `available_from`) | `declare-parameter-producers` |
 | Value correction or "did you mean" in the validation hook (`changed_fields`, `refused_fields`) | `resolve-parameter-values` |
-| `validate_extracted_parameters` | `validate-command-parameters` |
+| a model validator on `Input` (its facts are the `validation_hook` span) | `validate-command-parameters` |
 | Skill files (`_commands/<name>.py`): phases, facts, step wording (`fw.skill.phase` failures) | [author-planning-commands](../author-planning-commands/SKILL.md) |
 | Training utterance realism | `supply-training-personas` |
 | Retraining mechanics after any of the above | `train-and-publish-models` |

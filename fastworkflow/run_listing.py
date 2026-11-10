@@ -174,7 +174,7 @@ def _reachable_contexts(folder: str, active: str) -> list[str]:
 
 def gather_contexts(workflow) -> list[str]:
     """The contexts gathering visits: the lookup-path scopes, then every context reachable by descend edges."""
-    active = workflow.current_command_context_name
+    active = workflow._current_command_context_name
     scopes = [scope.context_name for scope in exact_name_scopes(workflow)]
     return list(dict.fromkeys([*scopes, *_reachable_contexts(workflow.folderpath, active)]))
 
@@ -240,7 +240,7 @@ def expand(workflow, seeds: Iterable[str]) -> frozenset[str]:
     from fastworkflow.workflow_agent import core_command_names
 
     folder = workflow.folderpath
-    active = workflow.current_command_context_name
+    active = workflow._current_command_context_name
     crd = _routing_registry().get_definition(folder)
     resolution = planning_commands.resolve_field_sources(folder)
     known: set[str] = set()
@@ -465,7 +465,7 @@ def _other_lines(workflow, active: str, crd, skip: set[str], on_path: set[str]) 
 
 def _active_section(workflow, names: Sequence[str] | None) -> str:
     folder = workflow.folderpath
-    active = workflow.current_command_context_name
+    active = workflow._current_command_context_name
     cme = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
     if names is None:
         return CommandMetadataAPI.get_command_display_text(
@@ -483,7 +483,7 @@ def _active_section(workflow, names: Sequence[str] | None) -> str:
 def _scope_section(workflow, owner: str, qualified_names: Sequence[str]) -> str:
     """Commands of a scope on the lookup path, callable here by name (the production's section, 3.9)."""
     folder = workflow.folderpath
-    active = workflow.current_command_context_name
+    active = workflow._current_command_context_name
     cme = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
     where = "the global scope" if owner == "*" else f"the {owner} context"
     parts = [f"Commands available here from {where} (on your lookup path; run by name, no navigation):"]
@@ -498,7 +498,7 @@ def _scope_section(workflow, owner: str, qualified_names: Sequence[str]) -> str:
 def _deferred_section(workflow, owner: str, qualified_names: Sequence[str]) -> str:
     """Commands of a context not yet entered, each with its navigation line (the production's section, 3.10)."""
     folder = workflow.folderpath
-    active = workflow.current_command_context_name
+    active = workflow._current_command_context_name
     cme = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
     parts = [f"Commands available after entering the {owner} context (not callable until then):"]
     for qualified in qualified_names:
@@ -516,9 +516,9 @@ def _on_path(workflow) -> set[str]:
 def bound_command_names(workflow, name: str) -> frozenset[str]:
     """The commands a sub-task bound to command *name* needs in its listing (fix-3rsq.plan-review.2.11): the command, the
     producers its Input fields take their values from (``from_`` edges), and the navigation to its context (enter/open
-    commands and descends_to declarations). Producers and navigation are followed transitively, as expansion follows them."""
+    commands and @descends_to declarations). Producers and navigation are followed transitively, as expansion follows them."""
     folder = workflow.folderpath
-    active = workflow.current_command_context_name
+    active = workflow._current_command_context_name
     crd = _routing_registry().get_definition(folder)
     resolution = planning_commands.resolve_field_sources(folder)
     known: set[str] = set()
@@ -549,7 +549,7 @@ def command_shortlist_text(workflow, names: Iterable[str]) -> str:
     """The COMMAND_SHORTLIST listing: the shortlisted commands in full, a context with one of them as its section,
     every other context as one line."""
     folder = workflow.folderpath
-    active = workflow.current_command_context_name
+    active = workflow._current_command_context_name
     crd = _routing_registry().get_definition(folder)
     by_owner: dict[str, list[str]] = {}
     for name in sorted(names):

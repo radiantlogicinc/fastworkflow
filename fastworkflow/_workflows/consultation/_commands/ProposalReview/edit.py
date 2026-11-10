@@ -14,7 +14,7 @@ from fastworkflow.review_proposals import (
 from fastworkflow.review_engine import EditParseError, EditRefused
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from fastworkflow.workflow import Workflow
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from fastworkflow._workflows.consultation import _item_validation
 
@@ -25,6 +25,15 @@ class Signature:
         model_config = ConfigDict(extra="forbid")
         item: str
         edits: list[dict[str, Any]] = Field(default_factory=list)
+
+        @model_validator(mode="after")
+        def item_names_a_proposal_step(self, info):
+            workflow = info.context.get("workflow")
+            proposal = workflow.context.get("consultation_proposal")
+            if proposal is None:
+                return self
+            self.item = _item_validation.resolve_slot_item(proposal, str(self.item), field_name="item")
+            return self
 
     class Output(BaseModel):
         model_config = ConfigDict(extra="forbid")
@@ -60,19 +69,6 @@ class Signature:
         return [
             command_name.split("/")[-1].lower().replace("_", " ")
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
-
-    @staticmethod
-    def validate_extracted_parameters(workflow, command, cmd_parameters) -> None:
-        if not isinstance(cmd_parameters, Signature.SlotInput):
-            return None
-        proposal = workflow.context.get("consultation_proposal")
-        if proposal is None:
-            return None
-        item_text = str(cmd_parameters.item)
-        cmd_parameters.item = _item_validation.resolve_slot_item(
-            proposal, item_text, field_name="item"
-        )
-        return None
 
 
 def _expand_slot_edits(

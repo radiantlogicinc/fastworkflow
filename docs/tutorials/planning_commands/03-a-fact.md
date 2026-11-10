@@ -36,7 +36,7 @@ class Signature:
 
     class Input(BaseModel):
         query: str = Field(description="words of the title or the author's name",
-                           json_schema_extra={"in_request": True})
+                           json_schema_extra={"copied_from_command_text": True})
 
 
 class PlanGenerator:
@@ -71,8 +71,8 @@ class PlanGenerator:
 - **`count(find.total, 'book')`** writes "1 book" or "2 books" (page 7 has the other
   helpers).
 - **`query`** describes what this command takes, in its own words. Here that happens to be
-  what `find_book` takes too. Its `in_request` option makes it words the request writes
-  (page 2).
+  what `find_book` takes too. Its `copied_from_command_text` option makes it words the command text
+  writes (page 2).
 
 A command without `__result__` has its answer written by its last phase's agent, as on
 pages 1 and 2. When the facts a later phase or `__result__` needs come from more than one
@@ -86,7 +86,7 @@ that calls the app (page 1, Which kind to write). A sketch, not a file of the sa
 ```python
 class ResponseGenerator:
     def __call__(self, workflow, command, input: Signature.Input) -> str:
-        library: Library = workflow.command_context_for_response_generation
+        library: Library = workflow.record
         found = library.find_books(input.query)
         return f"{input.query} matches {count(len(found), 'book')}."
 ```

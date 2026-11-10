@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from fastworkflow.planning import listed, run
+from fastworkflow.planning import count_and_names_read, run
 
 from .find_book import Signature as FindBook
 from .find_member import Signature as FindMember
@@ -29,7 +29,7 @@ class Signature:
 
     class Input(BaseModel):
         name: str = Field(description="the name to look for",
-                          json_schema_extra={"in_request": True})
+                          json_schema_extra={"copied_from_command_text": True})
         kind: Literal["book", "member"] = Field(
             default="book", description="whether to look for a book or a member")
 
@@ -40,7 +40,7 @@ class PlanGenerator:
 
     def __result__(self, input, find):
         names = find.titles if input.kind == "book" else find.names
-        return f"{input.name} matches {listed(names, find.total, input.kind)}."
+        return f"{input.name} matches {count_and_names_read(names, find.total, input.kind)}."
 
 
 FIND = {"book": "find_book", "member": "find_member"}

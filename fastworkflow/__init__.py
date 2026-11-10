@@ -112,7 +112,7 @@ class Refused(ValueError):
     ``field`` (a field name, or a list of names), the framework resets those fields to
     missing, keeps the others, and asks the user for those fields again, with the message
     (the targeted re-ask a ``db_lookup`` rejection gave before it was retired). Raised from
-    a ``validate_extracted_parameters`` hook, it is a refusal of the arguments; raised from
+    a model validator of the command's ``Input`` (``@model_validator``), it is a refusal of the arguments; raised from
     a ``ResponseGenerator.__call__``, it is the call's answer. A ``ValueError``, so code
     that caught ``ValueError`` around a command's helpers keeps catching it.
     """
@@ -475,6 +475,15 @@ from fastworkflow.metrics import (
 # instead of publishing the descriptor, which is not the public object.
 del chat_session
 
+# Command class declarations (fastworkflow.command_declarations): the decorators a
+# ResponseGenerator or PlanGenerator carries. Stdlib-only, so imported eagerly.
+from fastworkflow.command_declarations import (
+    UserApproval,
+    descends_to,
+    user_approval_for_execution,
+    writes,
+)
+
 # First-use re-exports. Workflow pulls numpy via kvstore; ChatSession and
 # WorkflowExecutionContext pull dspy, litellm, fastapi, and starlette.
 _LAZY_ATTRS = {
@@ -488,7 +497,10 @@ _LAZY_ATTRS = {
         "fastworkflow.workflow_execution_context",
         "CommandCancelledError",
     ),
-    "from_": ("fastworkflow.planning_phases", "from_"),
+    "FieldOptions": ("fastworkflow.field_options", "FieldOptions"),
+    "CopiedOptions": ("fastworkflow.field_options", "CopiedOptions"),
+    "RecordNamedOptions": ("fastworkflow.field_options", "RecordNamedOptions"),
+    "ConfirmsOptions": ("fastworkflow.field_options", "ConfirmsOptions"),
 }
 
 __all__ = (
@@ -527,7 +539,11 @@ __all__ = (
     "TurnStatus",
     "Union",
     "UnsupportedStateVersion",
+    "UserApproval",
     "Workflow",
+    "descends_to",
+    "user_approval_for_execution",
+    "writes",
     "WorkflowExecutionContext",
     "active_workflow",
     "chat_session",
@@ -536,7 +552,10 @@ __all__ = (
     "contextlib",
     "dataclass",
     "datetime",
-    "from_",
+    "FieldOptions",
+    "CopiedOptions",
+    "RecordNamedOptions",
+    "ConfirmsOptions",
     "get_active_workflow",
     "get_env_var",
     "get_fastworkflow_package_path",

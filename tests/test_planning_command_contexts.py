@@ -61,12 +61,12 @@ BRANCH_CONTEXT = """from ...application.library import Branch, Library
 
 class Context:
     @classmethod
-    def get_parent(cls, command_context_object: Branch) -> Library:
-        return command_context_object.library
+    def get_parent(cls, record: Branch) -> Library:
+        return record.library
 
     @classmethod
-    def get_displayname(cls, command_context_object: Branch) -> str:
-        return f"Branch: {command_context_object.name}"
+    def get_displayname(cls, record: Branch) -> str:
+        return f"Branch: {record.name}"
 """
 
 BRANCH_COMMAND = """import fastworkflow
@@ -331,7 +331,7 @@ def _live_library(folder: str, workflow_id_str: str):
     lib_mod = python_utils.get_module(os.path.join(folder, "application", "library.py"), folder)
     wf = fastworkflow.Workflow.create(folder, workflow_id_str=workflow_id_str)
     library = lib_mod.Library()
-    wf.root_command_context = library
+    wf.root = library
     return wf, lib_mod, library
 
 
@@ -368,28 +368,28 @@ def test_planning_command_scopes_along_library_contexts_and_without_library(tmp_
     assert workflow_agent.planning_scopes(wf) == ("Library", "")
 
     # 2. A Book inside the Library: ("Book", "Record", "Library", "")
-    wf.current_command_context = library.books["b1"]
+    wf.record = library.books["b1"]
     assert workflow_agent.planning_scopes(wf) == ("Book", "Record", "Library", "")
 
     # 3. A Member inside the Library: ("Member", "Record", "Library", "")
-    wf.current_command_context = library.members["m1"]
+    wf.record = library.members["m1"]
     assert workflow_agent.planning_scopes(wf) == ("Member", "Record", "Library", "")
 
     # 4. A Branch whose base is Library and whose parent is also the Library:
     # Library is added via Branch's base and skipped when visited again as Branch's parent.
-    wf.current_command_context = lib_mod.Branch(library, "Central")
+    wf.record = lib_mod.Branch(library, "Central")
     assert workflow_agent.planning_scopes(wf) == ("Branch", "Library", "")
 
     # 5. Cases where Library is NOT on the path:
-    # (a) Bare root before startup (root_command_context and current_command_context are None -> "*").
+    # (a) Bare root before startup (workflow.root and _current_command_context are None -> "*").
     bare_wf = fastworkflow.Workflow.create(folder, workflow_id_str=f"bare-{tmp_path.name}")
-    assert bare_wf.current_command_context is None
+    assert bare_wf._current_command_context is None
     assert workflow_agent.planning_scopes(bare_wf) == ("",)
 
     # (b) A Book detached from any Library (book.library = None) when root is not set to a Library:
     # its context is Book, its base is Record, and its get_parent returns None, so Library is never reached.
     detached_wf = fastworkflow.Workflow.create(folder, workflow_id_str=f"detached-{tmp_path.name}")
-    detached_wf.current_command_context = lib_mod.Book(None, "b9", "Orphan", "Anon", 1, "Central")
+    detached_wf.record = lib_mod.Book(None, "b9", "Orphan", "Anon", 1, "Central")
     assert workflow_agent.planning_scopes(detached_wf) == ("Book", "Record", "")
 
 
@@ -403,7 +403,7 @@ def test_jev_library_and_root_planning_commands_match_only_where_visible(tmp_pat
     # 1. The Library context skill matches when Library is active, when a Branch is active,
     # and when a Book inside the Library is active; the root skill matches in each of them too.
     for active in (library, lib_mod.Branch(library, "Central"), library.books["b1"]):
-        wf.current_command_context = active
+        wf.record = active
         scopes = workflow_agent.planning_scopes(wf)
         matched_lib = workflow_agent.match_planning_command(dune_query, folder, scopes=scopes)
         assert matched_lib is not None and matched_lib[0] == "Library/dune_search"
@@ -417,7 +417,7 @@ def test_jev_library_and_root_planning_commands_match_only_where_visible(tmp_pat
     # the Library skill does not match, while the root skill still matches everywhere.
     bare_wf = fastworkflow.Workflow.create(folder, workflow_id_str=f"jev-bare-{tmp_path.name}")
     detached_wf = fastworkflow.Workflow.create(folder, workflow_id_str=f"jev-detached-{tmp_path.name}")
-    detached_wf.current_command_context = lib_mod.Book(None, "b9", "Orphan", "Anon", 1, "Central")
+    detached_wf.record = lib_mod.Book(None, "b9", "Orphan", "Anon", 1, "Central")
     for non_lib_wf in (bare_wf, detached_wf):
         scopes = workflow_agent.planning_scopes(non_lib_wf)
         assert "Library" not in scopes
@@ -654,11 +654,11 @@ class Signature:
 
     class Input(BaseModel):
         title: str = Field(description="the book's title",
-                           json_schema_extra={"in_request": "subject"})
+                           json_schema_extra={"record_named_in_command_text": True})
         copies: int = Field(default=1, description="how many copies the request asks about",
-                            json_schema_extra={"in_request": True})
+                            json_schema_extra={"copied_from_command_text": True})
         loaned: bool = Field(default=False, description="whether the request asks about loans",
-                             json_schema_extra={"verify": True})
+                             json_schema_extra={"classifier_confirms": True})
 
 
 class PlanGenerator:
@@ -692,7 +692,7 @@ def test_the_jev_info_line_names_the_verify_fields_and_is_logged_once_per_folder
         workflow_agent._warn_missing_jev_key(folder)
 
     expected = (f"{folder}: planning commands are matched by intent detection; without JEV_API_KEY, "
-                f"Jev's planning-match candidates and the verify checks of {RULE_CHECK}.loaned are off.")
+                f"Jev's planning-match candidates and the classifier checks of {RULE_CHECK}.loaned are off.")
     infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
     assert infos.count(expected) == 1
     assert not any(r.levelno >= logging.WARNING and "JEV_API_KEY" in r.getMessage()

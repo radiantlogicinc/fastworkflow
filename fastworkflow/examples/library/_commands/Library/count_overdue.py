@@ -29,5 +29,5 @@ class Signature:
 class ResponseGenerator:
     def __call__(self, workflow: fastworkflow.Workflow, command: str,
                  input: Signature.Input) -> Signature.Output:
-        library: Library = workflow.command_context_for_response_generation
+        library: Library = workflow.record
         return Signature.Output(total=library.overdue_count(input.branch))

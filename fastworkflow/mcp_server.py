@@ -138,7 +138,7 @@ class FastWorkflowMCPServer:
         routing = RoutingRegistry.get_definition(workflow_folderpath)
 
         # Get active context name from chat session
-        active_ctx_name = workflow.current_command_context_name
+        active_ctx_name = workflow._current_command_context_name
         active_ctx = active_ctx_name if active_ctx_name in routing.contexts else '*'
         command_names = routing.get_command_names(active_ctx)
         cmd_directory = CommandDirectory.load(workflow_folderpath)
@@ -315,7 +315,7 @@ class FastWorkflowMCPServer:
         Falls back to the first available path if the active context is none.
         """
         workflow = self._active_workflow()
-        return workflow.current_command_context_name
+        return workflow._current_command_context_name
 
 
 # Example usage

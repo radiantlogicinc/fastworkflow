@@ -55,7 +55,7 @@ NEEDS_AGENT_LIBRARY = {
 MECHANICAL_COUNT_MEMBERS = '''"""count_members: how many members match the words the request gives."""
 from pydantic import BaseModel, Field
 
-from fastworkflow.planning import count, run
+from fastworkflow.planning import run
 
 from .find_member import Signature as FindMember
 
@@ -67,7 +67,7 @@ class Signature:
 
     class Input(BaseModel):
         query: str = Field(description="words of the member's name",
-                           json_schema_extra={"in_request": True})
+                           json_schema_extra={"copied_from_command_text": True})
 
 
 class PlanGenerator:
@@ -75,7 +75,7 @@ class PlanGenerator:
         return [run("find_member", query=input.query)]
 
     def __result__(self, input, find):
-        return f"{input.query} matches {count(find.total, 'member')}."
+        return f"{input.query} matches {find.total} {'member' if find.total == 1 else 'members'}."
 '''
 
 # A needs-agent planning command: a prose step the agent carries out, with a __result__, so the one
@@ -95,7 +95,7 @@ class Signature:
 
     class Input(BaseModel):
         query: str = Field(description="words of the member's name",
-                           json_schema_extra={"in_request": True})
+                           json_schema_extra={"copied_from_command_text": True})
 
 
 class PlanGenerator:
@@ -111,7 +111,7 @@ class PlanGenerator:
 VERIFY_COUNT_MEMBERS = '''"""count_members_checked: the count of members, with a check on the request's wording."""
 from pydantic import BaseModel, Field
 
-from fastworkflow.planning import count, run
+from fastworkflow.planning import run
 
 from .find_member import Signature as FindMember
 
@@ -123,9 +123,9 @@ class Signature:
 
     class Input(BaseModel):
         query: str = Field(description="words of the member's name",
-                           json_schema_extra={"in_request": True})
+                           json_schema_extra={"copied_from_command_text": True})
         recent: bool = Field(default=False, description="the request asks for recent members",
-                             json_schema_extra={"verify": True})
+                             json_schema_extra={"classifier_confirms": True})
 
 
 class PlanGenerator:
@@ -133,7 +133,7 @@ class PlanGenerator:
         return [run("find_member", query=input.query)]
 
     def __result__(self, input, find):
-        return f"{input.query} matches {count(find.total, 'member')}."
+        return f"{input.query} matches {find.total} {'member' if find.total == 1 else 'members'}."
 '''
 
 
@@ -183,7 +183,7 @@ def test_copy_prose_step_planning_command_needs_agent_with_reason(tmp_path):
     assert needs is True
     assert reasons == [
         "phase 'find' has a prose step the agent carries out: 'say which members the request "
-        "names' (a code step (run, pick or full_list) would make it mechanical)",
+        "names' (a code step (run, run with named=, or run with all_pages=True) would make it mechanical)",
     ]
 
 

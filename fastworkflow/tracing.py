@@ -376,7 +376,16 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # v40: fw.skill.phase v7 (fix-variance) -- `reextracted`: True on the phases of a planning command call planned
 # again after its first phase's lookup found nothing (the arguments extracted once more, the call restarted once).
 # Null on every other phase. The attribute set gains this key; no other span changes.
-SPAN_CONTRACT_VERSION = 40
+#
+# v41: fw.nlu.param_extraction v11 (spec 3.1-3.7) -- the validation step is the Input's model validators
+# (`@model_validator(mode="after")`), and the Signature's `validate_extracted_parameters` hook is gone. The
+# `validation_hook` record keeps its keys (ran, is_valid, message, changed_fields, refused_fields), but its
+# facts now come from the Input's model validators: `changed_fields` are the fields a validator wrote back,
+# and `refused_fields` the fields of a fastworkflow.Refused a validator raised. The record is always emitted
+# when the validation step runs, with ran=False when the Input declares no validator (no facts to report).
+# The key and the attribute set are unchanged; a span recorded before this carries the same keys with the
+# hook's meaning.
+SPAN_CONTRACT_VERSION = 41
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -889,13 +898,16 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         # v9 (fix-jd9o.3): `fields_reset_not_given` ({field: probability}) records the fields an LLM
         # extraction filled that Jev judged the request does not give, reset to their not-given
         # value. Absent on earlier versions.
+        # v11 (spec 3.7): `validation_hook` is the Input's model validators' record (the Signature hook is
+        # removed). The keys and their meanings are the same; the producer changed. A span carrying v10
+        # recorded the hook's verdict under the same key.
         # v10 (fix-qjf4): `argument_check_refusals`, `argument_check_retry`,
         # `argument_check_refusals_final` and `argument_check_respelled` record the argument checks of
         # an LLM extraction (fastworkflow.utils.argument_checks): the refused values ("name='value'
         # why"), the one retry with the refusal appended, what was still refused after it (treated as
         # not given), and {field: value} for a value that took the request's or the declared spelling.
         # Absent on earlier versions.
-        version=10,
+        version=11,
         attributes=frozenset(
             {
                 "command_name",
@@ -1354,7 +1366,7 @@ def context_type(workflow: Any) -> Optional[str]:
     """The name of *workflow*'s active command context, or None. Never raises:
     a capture failure must not fail a turn."""
     try:
-        name = getattr(workflow, "current_command_context_name", None) if workflow else None
+        name = getattr(workflow, "_current_command_context_name", None) if workflow else None
         return str(name) if name else None
     except Exception as exc:
         logger.warning(f"context type read failed: {exc!r}")

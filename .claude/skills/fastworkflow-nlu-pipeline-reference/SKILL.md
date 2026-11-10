@@ -309,7 +309,7 @@ Run-time parameter extraction detail (`utils/signatures.py`):
 - Results are built with `model_construct(**param_dict)` — **no Pydantic validation** —
   with `NOT_FOUND` sentinels for gaps (:309-313); validation happens separately in
   `validate_parameters` (:315-670) which coerces types, checks regex `pattern`s, and runs
-  the `validate_extracted_parameters` hook (which holds any fuzzy lookup).
+  the `Input`'s model validators (which hold any fuzzy lookup).
 - Agent mode tries **regex XML extraction first** (`<field>value</field>` per
   `parameter_extraction.py:71-80, 296-357`); the LLM is only called if regex fails. All
   fields must be present or it falls back.

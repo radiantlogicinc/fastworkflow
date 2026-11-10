@@ -67,7 +67,7 @@ def test_wec_owns_consultation_workflow_and_cme(todo_workflow_path):
     ctx = _make_ctx(todo_workflow_path, channel)
     assert ctx._consultation_workflow is not None
     assert ctx._consultation_cme is not None
-    assert ctx._consultation_workflow.current_command_context_name == "ProposalReview"
+    assert ctx._consultation_workflow._current_command_context_name == "ProposalReview"
     assert ctx._consultation_cme.context["app_workflow"] is ctx._consultation_workflow
     assert "run_as_agent" not in ctx._consultation_workflow.context
     assert "run_as_agent" not in ctx._consultation_cme.context

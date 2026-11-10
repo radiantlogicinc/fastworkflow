@@ -646,7 +646,7 @@ class TestAgentLoopSpans:
         ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch, sink=sink)
         # The context `startup` leaves the workflow in: the agent tool only
         # dispatches command names available in the current context.
-        _wf.root_command_context = TodoListManager(str(tmp_path / "todo_list.json"))
+        _wf.root = TodoListManager(str(tmp_path / "todo_list.json"))
         ctx._begin_turn("add two numbers")
         monkeypatch.setattr(
             ctx,

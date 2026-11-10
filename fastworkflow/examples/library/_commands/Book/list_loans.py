@@ -33,7 +33,7 @@ class Signature:
 class ResponseGenerator:
     def __call__(self, workflow: fastworkflow.Workflow, command: str,
                  input: Signature.Input) -> Signature.Output:
-        book: Book = workflow.command_context_for_response_generation
+        book: Book = workflow.record
         loans = book.library.loans_of_book(book.uid)
         rows = page(loans, input.start)
         return Signature.Output(borrowers=[m for m, _ in rows], due_dates=[d for _, d in rows],

@@ -1,11 +1,11 @@
 """list_books: how many books match the words the request gives, and their titles.
 
-count_books with its answer worded by listed(): "2 books (Dune, Dune Messiah)", "none (0
+count_books with its answer worded by count_and_names_read(): "2 books (Dune, Dune Messiah)", "none (0
 books)", or "12 books (...; 10 of 12 shown)" when the page read holds fewer than all.
 """
 from pydantic import BaseModel, Field
 
-from fastworkflow.planning import listed, run
+from fastworkflow.planning import count_and_names_read, run
 
 from .find_book import Signature as FindBook
 
@@ -24,4 +24,4 @@ class PlanGenerator:
         return [run("find_book", query=input.query)]
 
     def __result__(self, input, find):
-        return f"{input.query} matches {listed(find.titles, find.total, 'book')}."
+        return f"{input.query} matches {count_and_names_read(find.titles, find.total, 'book')}."

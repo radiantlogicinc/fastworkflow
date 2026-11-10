@@ -75,8 +75,8 @@ class _Workflow:
 def _app_workflow(run_as_agent: bool = False) -> SimpleNamespace:
     context = {"run_as_agent": True} if run_as_agent else {}
     return SimpleNamespace(context=context, folderpath="/nonexistent-workflow",
-                           current_command_context_name="ChatRoom", current_command_context=None,
-                           root_command_context=None)
+                           _current_command_context_name="ChatRoom", _current_command_context=None,
+                           root=None)
 
 
 def _pending(app_workflow=None, stored=None) -> _Workflow:
@@ -365,6 +365,9 @@ def jev_env():
         yield
     finally:
         fastworkflow.init(env_vars=previous)
+        # The live Jev LM this test cached must not outlive it: _jev_lm() is process-wide, and a cached
+        # LM makes every later turn take the jev_tiebreak path (fix-5voz).
+        workflow_agent._jev_lm.cache_clear()
 
 
 @pytest.mark.parametrize("reply, expected", [

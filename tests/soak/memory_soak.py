@@ -290,7 +290,7 @@ def build_pinned_fixture(paths: Paths) -> Fixture:
     Nothing under the repo's committed fixtures is touched. That workflow is
     chosen because it satisfies the other half of §16.5's arm B requirement that
     the bundled examples do not — ``_commands/startup.py`` assigns
-    ``root_command_context``, so the session pins from turn 1 (§1.4, and the
+    ``root``, so the session pins from turn 1 (§1.4, and the
     §16.5 note that arm B "must pin from turn 1 to be the adversarial case").
     Its ``___command_info`` is copied too, so no training step is needed.
     """
@@ -303,14 +303,14 @@ def build_pinned_fixture(paths: Paths) -> Fixture:
             raise SoakError(
                 f"Arm B needs {source}/{relpath}, which is missing. That workflow is "
                 f"the harness's pinned fixture donor; pick another workflow whose "
-                f"_commands/startup.py assigns root_command_context and adjust "
+                f"_commands/startup.py assigns root and adjust "
                 f"build_pinned_fixture()."
             )
 
     with open(os.path.join(source, startup_relpath), encoding="utf-8") as handle:
-        if "root_command_context" not in handle.read():
+        if "root" not in handle.read():
             raise SoakError(
-                f"{source}/{startup_relpath} no longer assigns root_command_context, so "
+                f"{source}/{startup_relpath} no longer assigns root, so "
                 f"the fixture would not pin from turn 1 and arm B would measure the "
                 f"wrong thing (§16.5 arm B, §1.4)."
             )
@@ -356,7 +356,7 @@ def build_pinned_fixture(paths: Paths) -> Fixture:
         base_parameters={},
         expect_pinned=True,
         note=(f"copy of tests/todo_list_workflow with get_state renamed to "
-              f"{DISABLED_HOOK_NAME}; root_command_context is assigned in startup, "
+              f"{DISABLED_HOOK_NAME}; root is assigned in startup, "
               f"so every channel pins from turn 1 (§16.5 arm B, §1.4)"),
         tempdir=tempdir,
     )

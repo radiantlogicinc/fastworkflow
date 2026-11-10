@@ -9,14 +9,14 @@ import uuid
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 import fastworkflow
 from fastworkflow import command_directory, planning_commands, workflow_agent
 from fastworkflow.command_executor import call_response_generator
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
-from fastworkflow.planning import (StepFormError, count, listed, num, phase, pick,
-                                picks_noted, planned, planning_command_parts)
+from fastworkflow.planning import (StepFormError, command_inputs_for_steps, count,
+                                count_and_names_read, phase, planned, planning_command_parts, run)
 from fastworkflow.planning_phases import (Placeholder, check_bindings, concatenated_steps,
                                        phase_steps, runs_now, stops_after)
 from tests.test_planning_commands import HOURS_RECIPE, _match_only, recipe_env  # noqa: F401 - recipe_env is a fixture
@@ -81,37 +81,39 @@ def _module(signature=Signature, plan=PlanGenerator):
     return module
 
 
-def test_pick_writes_the_uid_or_the_match_wording():
-    assert pick("open_item_by_uid", item_uid="u1", named="Dune") == "open_item_by_uid item_uid=u1"
+def test_run_named_writes_the_id_or_the_match_wording():
+    assert run("open_item_by_uid", item_uid="u1", named="Dune") == "open_item_by_uid item_uid=u1"
     # A uid containing "(" or ";" is quoted, so the chain keeps it (fix-ajir.40).
-    assert pick("open_item_by_uid", item_uid="b1(eu)", named="Acme") == \
+    assert run("open_item_by_uid", item_uid="b1(eu)", named="Acme") == \
         'open_item_by_uid item_uid="b1(eu)"'
-    assert pick("open_item_by_uid", item_uid="west;1", named="Sales") == \
+    assert run("open_item_by_uid", item_uid="west;1", named="Sales") == \
         'open_item_by_uid item_uid="west;1"'
-    assert pick("open_item_by_uid", item_uid='say "hi";', named="Note") == \
+    assert run("open_item_by_uid", item_uid='say "hi";', named="Note") == \
         """open_item_by_uid item_uid='say "hi";'"""
-    assert pick("open_item_by_uid", item_uid=None, named="Dune") == \
+    assert run("open_item_by_uid", item_uid=None, named="Dune") == \
         "open_item_by_uid with the uid of the Dune match"
-    assert pick("open_item_by_uid", item_uid=Placeholder("find.only_uid()"), named="Dune") == \
+    assert run("open_item_by_uid", item_uid=Placeholder("find.only_uid()"), named="Dune") == \
         "open_item_by_uid with the uid of the Dune match"
+    # Without a row id declared (checked in test_run_step_helper.py), named= needs the id input.
+    with command_inputs_for_steps({"open_x": types.SimpleNamespace(
+            Input=type("I", (BaseModel,), {"__annotations__": {"x_uid": int}}))}):
+        with pytest.raises(StepFormError):
+            run("open_x", named="Dune")
     with pytest.raises(StepFormError):
-        pick("open_x", label="u1", named="Dune")
-    with pytest.raises(StepFormError):
-        pick("open_x", x_uid="u1", named=" ")
+        run("open_x", named=" ")
 
 
 def test_filters():
-    assert num(5000000.0) == "5000000" and num(5000000.0, grouped=True) == "5,000,000"
-    assert num(2.5) == "2.5" and num(None) == "none recorded" and num(None, none="none") == "none"
-    assert count(1, "login") == "1 login" and count(2, "person", "people") == "2 people"
-    assert listed([], 0, "group") == "none (0 groups)"
-    assert listed(["a"], 3, "group") == "3 groups (a; 1 of 3 shown)"
-    assert listed(["a", "b"], 2, "right", ("names as above", ["b", "a"])) == \
+    assert count_and_names_read([], 0, "group") == "none (0 groups)"
+    assert count_and_names_read(["a"], 3, "group") == "3 groups (a; 1 of 3 shown)"
+    assert count_and_names_read(["a", "b"], 2, "right", ("names as above", ["b", "a"])) == \
         "2 rights (the same names as above)"
-    assert num(Placeholder("x.n")) == "<x.n>"
-    assert count(Placeholder("x.n"), "login") == "<x.n> logins"
-    assert listed(Placeholder("x.names"), Placeholder("x.total"), "group") == \
+    assert count_and_names_read(Placeholder("x.names"), Placeholder("x.total"), "group") == \
         "<x.total> groups (<x.names>)"
+    # count stays public (placeholder-safe); num is removed: write an f-string (test_run_step_helper.py checks the load message)
+    assert count(1, "book") == "1 book"
+    with pytest.raises(ImportError, match="num is removed"):
+        from fastworkflow.planning import num  # noqa: F401
 
 
 def test_a_placeholder_reads_as_where_the_fact_comes_from_and_every_test_on_it_is_true():
@@ -157,7 +159,7 @@ def test_return_empty_is_decided_when_the_phase_is_reached_calling_the_method_on
             calls.append(find)
             if not find.uids:
                 return []
-            return [pick("open_item_by_uid", item_uid=find.uids[0], named=input.name)]
+            return [run("open_item_by_uid", item_uid=find.uids[0], named=input.name)]
 
     find, opened = planned(Gate)(_input())
     assert callable(opened.when) and opened.when.only_when() == ["find.uids"]
@@ -359,11 +361,12 @@ def test_refused_from_a_planning_command_hook_is_its_refusal():
     class Refusing(Signature):
         """Find a named item."""
 
-        @staticmethod
-        def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
-            if cmd_parameters.name == "Nope":
-                raise fastworkflow.Refused("name the item")
-            return None
+        class Input(Signature.Input):
+            @model_validator(mode="after")
+            def refuse_nope(self, info):
+                if self.name == "Nope":
+                    raise fastworkflow.Refused("name the item")
+                return self
 
     module = types.ModuleType("skill")
     module.Signature, module.PlanGenerator = Refusing, PlanGenerator
@@ -413,7 +416,7 @@ def test_the_step_check_names_unknown_commands_and_parameters():
                     "go_up, then find_item other=1", "say that find_item ran", "apply no change"]
 
         def open(self, input, find):
-            return [pick("open_item_by_uid", itme_uid=find.only_uid(input.name), named=input.name)]
+            return [run("open_item_by_uid", itme_uid=find.only_uid(input.name), named=input.name)]
 
     command = planning_commands.command_from_module("typos", _module(plan=Typos),
                                                  "_commands/typos.py").command
@@ -423,9 +426,10 @@ def test_the_step_check_names_unknown_commands_and_parameters():
         "a step passes qeury to 'find_item', whose Signature.Input has no such field",
         "a step runs 'go_up', which is not a command of the workflow",
         "a step passes itme_uid to 'open_item_by_uid', whose Signature.Input has no such field"]
-    with picks_noted() as picks:
-        pick("open_x_by_uid", x_uid=None, named="A")
-    assert picks == [("open_x_by_uid", "x_uid")]
+    with command_inputs_for_steps({"open_x_by_uid": types.SimpleNamespace(
+            Input=type("I", (BaseModel,), {"__annotations__": {"x_uid": str}}))}, collect=True) as (_, steps):
+        run("open_x_by_uid", x_uid=None, named="A")
+    assert steps == [("open_x_by_uid", ("x_uid",))]
 
 
 # ------------------------------------------------- a PlanGenerator subclassing another skill's
@@ -442,7 +446,7 @@ class Lookup:
     def item(self, input, find) -> "Item":                 # a string annotation: base's model
         if not find.uids:
             return []
-        return [pick("open_item_by_uid", item_uid=find.uids[0], named=input.name)]
+        return [run("open_item_by_uid", item_uid=find.uids[0], named=input.name)]
 
     def __result__(self, input, item=None):
         return f"{input.name} is {self._uid(item)}."

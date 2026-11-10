@@ -29,12 +29,12 @@ class Signature:
     class Input(BaseModel):
         branch: str = Field(default="", description="the branch asked about, if named (such as Central "
                                                     "or Riverside); empty for all",
-                            json_schema_extra={"in_request": {"ignore": ["the", "branch"]}})
+                            json_schema_extra={"copied_from_command_text": {"ignore": ["the", "branch"]}})
 
         @field_validator("branch")
         @classmethod
         def a_branch_of_the_library(cls, value: str, info: ValidationInfo) -> str:
-            if not value.strip() or not (info.context or {}).get("request"):
+            if not value.strip() or not (info.context or {}).get("command_text"):
                 return value      # no branch, or a placeholder of the template
             if value.strip().casefold() in EVERY_BRANCH:
                 return ""

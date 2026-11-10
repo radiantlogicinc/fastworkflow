@@ -13,7 +13,7 @@ these holds:
 - a parameter carries ``verify``: a classifier model decides it from the request;
 - the planning command has no ``__result__``: the agent writes the answer from the last phase's facts.
 
-Code steps (``run``, ``pick``, ``full_list``, ``do_not_run``), fan-outs over an input or an earlier
+Code steps (``run``, ``run(..., named=...)``, ``run(..., all_pages=True)``, ``do_not_run``), fan-outs over an input or an earlier
 phase's list, input-only conditions and ``__result__`` are mechanical.
 
 Nothing here calls a model or runs a step. The phases are built as the planner sees them (placeholder
@@ -35,7 +35,7 @@ __all__ = [
 ]
 
 #: The author's fix for each rule, appended to its reason so the reason says what to change.
-PROSE_HINT = "a code step (run, pick or full_list) would make it mechanical"
+PROSE_HINT = "a code step (run, run with named=, or run with all_pages=True) would make it mechanical"
 WHEN_HINT = "a fixed step, or a condition on the input rather than a fact"
 RUN_TIME_HINT = "a step that depends on the input alone, not on what an earlier phase found"
 VERIFY_HINT = "a parameter the request states outright, without verify"

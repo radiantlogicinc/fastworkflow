@@ -38,7 +38,7 @@ changes no verdict on a ``str`` value.
   converted on purpose, or (lists) are not checked by design, as on the planning side.
 - A field exempted from grounding (its value is legitimately converted from the request: a date
   written "next Monday", an amount, a code the request spells another way). The marker is the
-  existing check option, set to false: ``json_schema_extra={"in_request": False}``. A field with a
+  ``converted_from_command_text`` option: ``json_schema_extra={"converted_from_command_text": True}``. A field with a
   declared ``pattern`` is exempt too: it declares a format the value is converted into (``#W123`` of
   "order W123"). An exempt field still gets the placeholder and allowed-values checks, but not the
   description-example check: a converted value can equal an example legitimately (tau-bench airline:
@@ -65,6 +65,8 @@ from pydantic import BaseModel
 
 import fastworkflow
 from fastworkflow import planning_commands
+from fastworkflow.field_options import CONVERTED_FROM_COMMAND_TEXT
+from fastworkflow.utils.input_validation import set_field_unvalidated
 from fastworkflow.utils.signatures import (
     NOT_FOUND,
     _is_filled,
@@ -135,9 +137,9 @@ class ExtractionCheck:
         fields = type(params).model_fields
         for name, (_, spelled) in self.respelled.items():
             if name not in self.refused:
-                setattr(params, name, spelled)
+                set_field_unvalidated(params, name, spelled)
         for name in self.refused:
-            setattr(params, name, not_given_value(fields[name]))
+            set_field_unvalidated(params, name, not_given_value(fields[name]))
 
 
 def _extra(field_info: Any) -> dict:
@@ -177,11 +179,17 @@ def not_allowed_why(allowed: Tuple[str, ...]) -> str:
     return f"is not one of {', '.join(allowed)}"
 
 
+def is_converted(field_info: Any) -> bool:
+    """Whether a field carries ``json_schema_extra={"converted_from_command_text": True}``: its value is converted
+    from the command text, so the text is not checked against it (spec 2.0a, the converted option)."""
+    return _extra(field_info).get(CONVERTED_FROM_COMMAND_TEXT) is True
+
+
 def is_grounding_exempt(field_info: Any) -> bool:
     """Whether a ``str`` field's value need not be written in the request: it carries
-    ``json_schema_extra={"in_request": False}``, or declares a ``pattern`` (a format the value is
+    ``json_schema_extra={"converted_from_command_text": True}``, or declares a ``pattern`` (a format the value is
     converted into)."""
-    if _extra(field_info).get("in_request") is False:
+    if is_converted(field_info):
         return True
     if "pattern" in _extra(field_info):
         return True
@@ -322,7 +330,7 @@ def check_extracted_values(params: BaseModel, request: Optional[str]) -> Extract
             text = _str_check(name, field_info, value, request, folded, check)
             if text:
                 texts.append(text)
-        elif _is_int_field(field_info) and _extra(field_info).get("in_request") is not False:
+        elif _is_int_field(field_info) and not is_converted(field_info):
             number = _as_int(value)
             if number is not None and not is_sentinel_number(number):
                 numbers.append((name, value, number))
