@@ -29,6 +29,7 @@ from fastworkflow.utils.fuzzy_match import (
     best_window_distance, find_best_matches, normalize_text, normalized_levenshtein_distance,
 )
 from fastworkflow.utils import dspy_utils
+from fastworkflow.utils.extraction_attempts import FirstAttemptGreedy
 from fastworkflow.utils.input_validation import bound_fields, is_pydantic_model, set_field_unvalidated
 from fastworkflow.utils.dspy_logger import DSPyForward
 from fastworkflow.command_directory import CommandDirectory
@@ -1430,8 +1431,9 @@ Today's date is {today}.
                         return 0.0
                 return 1.0
 
-            # Create a refined module that tries up to 3 times
-            best_of_3 = dspy.BestOfN(
+            # Up to 3 attempts: the first at temperature 0, the retries (reward 0)
+            # at temperature 1.0 with distinct rollout ids.
+            best_of_3 = FirstAttemptGreedy(
                 module=compiled_model, 
                 N=3, 
                 reward_fn=basic_checks, 

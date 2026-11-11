@@ -214,7 +214,7 @@ def test_dspy_result_missing_a_plain_required_field_is_asked_not_passed_on(workf
     monkeypatch.setattr(signatures, "get_trainset", lambda *_a, **_k: [])
     monkeypatch.setattr(signatures.dspy_utils, "get_lm", lambda *_a, **_k: None)
     monkeypatch.setattr(signatures.dspy, "LabeledFewShot", _FakeOptimizer)
-    monkeypatch.setattr(signatures.dspy, "BestOfN", _FakeBestOfN)
+    monkeypatch.setattr(signatures, "FirstAttemptGreedy", _FakeBestOfN)
     monkeypatch.setattr(signatures.dspy, "context", lambda **_k: contextlib.nullcontext())
 
     params = InputForParamExtraction.extract_parameters(

@@ -1108,6 +1108,7 @@ error that names the new form; there is no legacy support, except where an item 
 
 ### Changed
 
+- **The first parameter-extraction attempt now runs at temperature 0 (greedy); retries keep temperature 1.0** (`FirstAttemptGreedy`, `FIRST_ATTEMPT_TEMPERATURE` in `fastworkflow/utils/extraction_attempts.py`; under test). Before, `dspy.BestOfN` ran every attempt, the first included, at temperature 1.0 with a fresh rollout id. Retries (reward 0 or an exception) still use temperature 1.0 and distinct rollout ids.
 - **The finish check reviews up to two finishes per run** (`react.FINISH_REVIEWS_PER_RUN`, `finish_check`): a second note reopens the loop once more, a third finish ends the run; the note's closing line tells the agent to run an unmet step, and to report one not done only when its command ran and failed.
 - **Drafting is on by default, and a bound sub-task runs with the inputs its review showed** (fix-48np.1).
   `FW_DRAFT_ARGUMENTS` now defaults to on; `FW_DRAFT_ARGUMENTS=off` (or 0, false, no) restores the previous
