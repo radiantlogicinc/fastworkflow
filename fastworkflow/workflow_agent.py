@@ -1363,6 +1363,9 @@ _NUMBERED_LINE = re.compile(r"^\s*\d+[.)]\s+(.*\S)\s*$")
 _INLINE_MARKER = re.compile(r"(?<!\S)(\d{1,2})[.)]\s+")
 #: Typographic hyphens a model writes into names it was asked to copy exactly.
 _HYPHENS = str.maketrans({"\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-"})
+#: A DSPy field marker ("[[ ## completed ## ]]") a splitter reply carried into a sub-task's text
+#: (the same pattern planning_phases.clean_answer removes from answers). No request holds one.
+_FIELD_MARKER = re.compile(r"[ \t]*\[\[\s*##\s*[A-Za-z0-9_ ]*?\s*##\s*\]\]")
 
 
 def _split_items(reply: str) -> list[str]:
@@ -1370,9 +1373,11 @@ def _split_items(reply: str) -> list[str]:
     written inline on a line ("1. A 2. B 3. C", possibly after reasoning a model wrote in the same field).
 
     An inline list is the last run that starts at "1." and counts up without a gap; text before it is not a
-    sub-task. A stray opening brace or bracket left by the reply's JSON is cut from the end of each item.
+    sub-task. A stray opening brace or bracket left by the reply's JSON is cut from the end of each item,
+    and a DSPy field marker (``[[ ## completed ## ]]``) from anywhere in the reply.
     """
     items: list[str] = []
+    reply = _FIELD_MARKER.sub("", reply)
     for line in reply.splitlines():
         markers = list(_INLINE_MARKER.finditer(line))
         parts: list[str] = []

@@ -1170,3 +1170,18 @@ def test_the_reduction_asks_jev_no_more_than_its_budget_and_decides_without_it()
         assert any(name in item for item in with_jev.items) and any(name in item for item in without.items)
     # at or under the cap nothing is touched and nothing is asked
     assert reduce_to_cap(query, items[:10], 10, label=jev_label).items == items[:10]
+
+
+def test_a_dspy_field_marker_in_the_split_reply_is_not_part_of_a_sub_task():
+    """A splitter reply once carried "[[ ## completed ## ]]" into the last sub-task's text, which
+    the plan review then showed the user. The marker is cut; the item's own words are kept."""
+    from fastworkflow.workflow_agent import _split_items
+
+    reply = ("1. Audit the right Library_Archivist across the systems it appears in.\n"
+             "2. Dana Reyes has asked for the right Library_Curator 1: what it exposes, who holds it, "
+             "and what Dana Reyes can reach today. [[ ## completed ## ]]")
+    assert _split_items(reply) == [
+        "Audit the right Library_Archivist across the systems it appears in.",
+        "Dana Reyes has asked for the right Library_Curator 1: what it exposes, who holds it, "
+        "and what Dana Reyes can reach today."]
+    assert _split_items("1. Show A [[ ## completed ## ]] 2. Show B [b2]") == ["Show A", "Show B [b2]"]

@@ -1221,3 +1221,4 @@
 {"id":"int-5c845174fedd509da42a1e7dfda2aa56","kind":"field_change","created_at":"2026-11-11T16:38:47.610151993Z","actor":"Dhar Rawal","issue_id":"fix-swgf","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-a5ed4903563cd1413c70c6bda039bff2","kind":"field_change","created_at":"2026-11-11T16:38:47.892393631Z","actor":"Dhar Rawal","issue_id":"fix-li50","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-f074c33901979db2360f833aee7b716b","kind":"field_change","created_at":"2026-11-11T17:23:52.100336026Z","actor":"Dhar Rawal","issue_id":"fix-b5lx","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
+{"id":"int-74f89be7aee682ff2d4bf8daea0bb3ac","kind":"field_change","created_at":"2026-11-11T20:43:41.476282065Z","actor":"Dhar Rawal","issue_id":"fix-l6mu","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
