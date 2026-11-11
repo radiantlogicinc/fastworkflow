@@ -3132,6 +3132,34 @@ def _check_subjects(command: PlanningCommandCommand, request: str) -> list[str]:
     return out
 
 
+def _subject_without_extra_words(request: str, a: int, b: int, spans: list[tuple[int, int]]) -> str | None:
+    """The subject *request[a:b]* holds when the value is that subject with extra words run on: the first subject it
+    holds whole, when only lower-case words come before it ("snapshot of IT Support", "access to Confluence") or
+    several lower-case words or punctuation follow it ("IT Operations end to end", "X: what it exposes, ..."), else
+    None. One extra lower-case word after it stays ("Bamboo HR admins": a word that is part of a name)."""
+    held = sorted((s, e) for s, e in set(spans) if a <= s and e <= b and (s, e) != (a, b))
+    if not held:
+        return None
+    s, e = held[0]
+    if (e < len(request) and (request[e].isalnum() or request[e] == "_")) or \
+            (s > 0 and (request[s - 1].isalnum() or request[s - 1] == "_")):
+        return None                      # the subject is part of a longer identifier ("GitLab" of "GitLab_Admin")
+    before, after = request[a:s].split(), request[e:b]
+    if any(_name_like_word(w) for w in before):
+        return None
+    value = request[a:b]
+    if any(f"{q}{value}{q}" in request for q in ("'", '"', "\u2018", "\u201c", "`")) or \
+            (request[a - 1:a] in ("'", '"', "\u2018", "\u201c", "`")):
+        return None                      # the request quotes the whole value: it is one name as written
+    tail = after.split()
+    punctuated = bool(after) and not after[0].isspace() and after[0] in ":,;.-\u2014"
+    if s == a and len(request[s:e].split()) == 1 and not punctuated:
+        return None                      # one capitalized word opening a sentence-case title ("Active identities who ...")
+    if before or len(tail) >= 2 or punctuated:
+        return request[s:e]
+    return None
+
+
 def _as_subject(request: str, text: str, subjects: list[str],
                 kinds: frozenset[str] = frozenset()) -> tuple[str | None, str]:
     """``(argument, why)`` of a ``subject`` argument: ``text`` when it names a record of the
@@ -3156,6 +3184,9 @@ def _as_subject(request: str, text: str, subjects: list[str],
     for a, b in whole_words:
         if (a, b) in parts:
             return text, ""
+        trimmed = _subject_without_extra_words(request, a, b, spans)
+        if trimmed is not None:
+            return trimmed, ""
         cut = [(s, e) for s, e in spans if s < b and a < e and not (a <= s and e <= b)]
         if not cut and (any(a <= s and e <= b for s, e in spans) or any(_name_like_word(w) for w in text.split())
                         or _plain_name(request, a, b, kinds)):
