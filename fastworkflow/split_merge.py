@@ -75,7 +75,7 @@ from __future__ import annotations
 import functools
 import re
 import unicodedata
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 __all__ = ["merge_subtasks", "request_subjects", "subjects_in"]
 
@@ -558,6 +558,122 @@ def _drop_contained(items: list[str], known: list[str], identifiers: tuple[re.Pa
         if not contained or not w:
             keep.append(i)
     return [items[i] for i in keep]
+
+
+#: Jev calls (near-copy checks, same-request joins, job-type labels) one over-cap reduction may make together.
+#: The caller adds at most two per remaining sub-task for referents (``resolve_referents``).
+REDUCTION_JEV_CALLS = 60
+#: Two sub-tasks are near copies only when they name the same subjects and share this much of their content words.
+NEAR_COPY_OVERLAP = 0.5
+
+JobLabel = Callable[[str], Optional[str]]
+
+
+class Reduction(NamedTuple):
+    items: list[str]
+    #: True once ``merge_subtasks`` has run on ``items`` (the caller then must not merge them again)
+    merged: bool
+    #: Jev calls made (near-copy checks, same-request joins, labels)
+    jev_calls: int
+
+
+class JoinedSubtask(str):
+    """A sub-task that ``reduce_to_cap`` made by joining others, to keep the list within the cap. It is its text (a
+    str) and carries ``parts``, the original sub-tasks it joins, which the run may take as jobs of their own
+    (``review_proposals.expand_joined_parts``). Parts are leaves: a part is never a JoinedSubtask."""
+
+    parts: tuple[str, ...]
+
+    def __new__(cls, text: str, parts: tuple[str, ...] = ()):
+        item = super().__new__(cls, text)
+        item.parts = tuple(str(part) for part in parts)
+        return item
+
+    def __getnewargs__(self):
+        return (str(self), self.parts)
+
+
+def _concatenate(first: str, second: str) -> str:
+    """Both texts whole, the first ended as a sentence. ``_join`` is not used: it cuts a clause the second text shares
+    with the first, and with it a name that follows the clause."""
+    first = first.strip()
+    return (first if re.search(r"[.?!]$", first) else first + ".") + " " + second.strip()
+
+
+def reduce_to_cap(user_query: str, subtasks: list[str], cap: int, identifiers: tuple[re.Pattern, ...] = (), *,
+                  context: str = "", same_job: SameJob | None = None,
+                  near_copy: SameJob | None = None, label: JobLabel | None = None,
+                  max_jev_calls: int = REDUCTION_JEV_CALLS) -> Reduction:
+    """``subtasks`` brought to at most ``cap`` jobs, never given up on for their number. Stops as soon as it fits.
+
+    The ladder: (1) exact copies; (2) a sub-task contained in another; (3) near copies, a pair naming the same
+    subjects with ``NEAR_COPY_OVERLAP`` of their words in common that ``near_copy`` (Jev, optional) confirms,
+    the later one dropped; (4) ``merge_subtasks`` with ``same_job``; (5) adjacent sub-tasks joined, first those
+    ``label`` (the planning command matcher, optional) gives the same job type, then the adjacent pair with the
+    most content words in common. A joined text holds both parts, so every subject stays named. The three Jev
+    callbacks share ``max_jev_calls``; past it they are not asked and the deterministic rule decides.
+    """
+    calls = 0
+
+    def budgeted(callback):
+        if callback is None:
+            return None
+
+        def ask(*args):
+            nonlocal calls
+            if calls >= max_jev_calls:
+                return None
+            calls += 1
+            return callback(*args)
+        return ask
+
+    items = [t for t in subtasks if t and t.strip()]
+    if len(items) <= cap:
+        return Reduction(items, False, 0)
+    items = list(dict.fromkeys(items))
+    known = request_subjects(user_query, identifiers)
+    if len(items) > cap:
+        items = _drop_contained(items, known, identifiers)
+    ask_near = budgeted(near_copy)
+    if len(items) > cap and ask_near is not None:
+        subjects = [subjects_in(t, known, identifiers) for t in items]
+        words = [_content(t) for t in items]
+        dropped: set[int] = set()
+        kept: list[int] = []
+        for j in range(len(items)):
+            if len(items) - len(dropped) <= cap:
+                break
+            for i in kept:
+                if subjects[i] and subjects[i] == subjects[j] and _jaccard(words[i], words[j]) >= NEAR_COPY_OVERLAP \
+                        and ask_near(items[i], items[j]) is True:
+                    dropped.add(j)
+                    break
+            else:
+                kept.append(j)
+        items = [t for k, t in enumerate(items) if k not in dropped]
+    if len(items) <= cap:
+        return Reduction(items, False, calls)
+    items = merge_subtasks(user_query, items, identifiers, same_job=budgeted(same_job), context=context)
+    if len(items) <= cap:
+        return Reduction(items, True, calls)
+    labels: list[str | None] = [None] * len(items)
+    ask_label = budgeted(label)
+    if ask_label is not None:
+        labels = [ask_label(t) for t in items]
+    parts = [1] * len(items)
+    while len(items) > cap:
+        # the smallest pair first, so that no job swallows the list: among adjacent pairs of one job type, else
+        # among all adjacent pairs, the one with the fewest parts, then the most words in common, then the earliest
+        words = [_content(t) for t in items]
+        pairs = range(len(items) - 1)
+        same = [k for k in pairs if labels[k] and labels[k] == labels[k + 1]]
+        at = min(same or pairs, key=lambda k: (parts[k] + parts[k + 1], -_jaccard(words[k], words[k + 1]), k))
+        leaves = tuple(getattr(items[at], "parts", None) or (str(items[at]),)) + \
+            tuple(getattr(items[at + 1], "parts", None) or (str(items[at + 1]),))
+        items[at:at + 2] = [JoinedSubtask(_concatenate(items[at], items[at + 1]), leaves)]
+        labels[at:at + 2] = [labels[at]]
+        parts[at:at + 2] = [parts[at] + parts[at + 1]]
+    return Reduction(items, True, calls)
 
 
 #: A run of this many words written twice in one sub-task is a copied clause, not a phrase of the request.

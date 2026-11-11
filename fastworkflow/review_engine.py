@@ -1175,7 +1175,7 @@ _AFFIRMATIVE_UNROUTED_PREFIX = re.compile(
 _CONFIRM_CORRECTIVE = re.compile(
     r"\b(?:"
     r"but\s+(?:in\s+step|for\s+step|step\s+\d+|also|instead|change|make|use|set|drop|remove|add|only|"
-    r"do\s+not|don'?t|not\s+just|not\s+only)|"
+    r"do\s+not|don'?t|not\s+just|not\s+only|(?:the|that|this)\s+(?:step|plan|list)\s+(?:must|should|needs?|has\s+to))|"
     r"except|however|though|although|instead|also|not\s+just|not\s+only|only\s+want|"
     r"change|drop|"
     r"add\s+(?:a\s+)?(?:step|item|sub-?task|another)|"
@@ -1200,8 +1200,24 @@ _AFFIRMATIVE_PARAPHRASE = re.compile(
 )
 
 
+#: A qualifier on a yes that asks for no edit: the plan's steps only read, and the user says nothing is to be applied
+#: (``yes, go ahead, but do not run any of the actions``, ``yes, and apply no corrections``). It names what must not be
+#: changed (actions, corrections, anything), never a step, so it does not edit the plan.
+_NO_EFFECT_OBJECT = (
+    r"(?:any|anything|none|nothing|no)(?:\s+of)?(?:\s+(?:the|these|those))?"
+    r"(?:\s+(?:actions?|corrections?|remediations?|fixes|changes|updates|writes|modifications?))?"
+    r"|(?:the\s+)?(?:actions?|corrections?|remediations?|fixes|changes|updates)")
+_NO_EFFECT_QUALIFIER = re.compile(
+    r"[,;.]?\s*(?:(?:but|and|just|only)\s+)*(?:"
+    rf"(?:do\s+not|don'?t|never)\s+(?:run|apply|execute|perform|make|record|write|modify|change)\s+(?:{_NO_EFFECT_OBJECT})"
+    rf"|(?:run|apply|make)\s+no\s+(?:actions?|corrections?|remediations?|fixes|changes|updates)"
+    r")\s*[.!]?\s*$",
+    re.I,
+)
+
+
 def _scrub_benign_confirm_phrases(text: str) -> str:
-    return _BENIGN_BUT_NOT_APPLIED.sub("", text or "")
+    return _NO_EFFECT_QUALIFIER.sub("", _BENIGN_BUT_NOT_APPLIED.sub("", text or ""))
 
 
 def _affirmative_accept_cue(text: str) -> bool:

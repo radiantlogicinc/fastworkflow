@@ -30,8 +30,8 @@ from fastworkflow.planning_commands import (
     PlanningCommandCommand, PlanningCommandFormatError, PlanningCommandInputError, typed_planning_call, refusal_question,
     refusal_names_an_input)
 from fastworkflow.split_merge import (
-    definite_descriptions, merge_subtasks, request_subjects, subjects_in, unnamed_subjects, with_referent,
-    without_repeated_clauses)
+    JoinedSubtask, Reduction, definite_descriptions, merge_subtasks, reduce_to_cap, request_subjects, subjects_in,
+    unnamed_subjects, with_referent, without_repeated_clauses)
 from fastworkflow.utils.logging import logger
 from fastworkflow.policy_runtime import policy_of
 from fastworkflow.workflow_execution_context import CommandCancelledError
@@ -2449,7 +2449,16 @@ def split_into_subtasks(user_query: str, planner_lm=None,
         #     # A non-empty sub-tasks field with no numbered item ("it") is a visibly broken reply: retried once.
         #     logger.warning("the split listed no numbered sub-task; retrying once")
         #     continue
-        if not subtasks or len(subtasks) > MAX_SUBTASKS:
+        if len(subtasks) > MAX_SUBTASKS:
+            # The number of items is never a reason to run the request whole: the list is brought down to the cap
+            # (copies dropped, then parts joined). Only a split that listed nothing, or a reduction that failed, is whole.
+            reduction = _reduced_to_cap(user_query, subtasks, workflow_folderpath, conversation)
+            if reduction is None:
+                return [user_query]
+            if reduction.merged:
+                return _with_referents(user_query, reduction.items, workflow_folderpath)
+            subtasks = reduction.items
+        if not subtasks:
             return [user_query]
         if not _visibly_broken(subtasks):
             return _merged(user_query, subtasks, workflow_folderpath, conversation)
@@ -2461,6 +2470,42 @@ def split_into_subtasks(user_query: str, planner_lm=None,
         return [user_query]
     best = min(usable, key=lambda subtasks: _breakage(user_query, subtasks, workflow_folderpath))
     return _merged(user_query, best, workflow_folderpath, conversation)
+
+
+def _with_referents(user_query: str, items: list[str], workflow_folderpath: str | None) -> list[str]:
+    """``resolve_referents`` on the sub-tasks that are not joined. A joined one (``JoinedSubtask``) keeps its text and parts."""
+    if len(items) < 2:
+        return items
+    plain = [item for item in items if not isinstance(item, JoinedSubtask)]
+    resolved = iter(resolve_referents(user_query, plain, workflow_folderpath))
+    return [item if isinstance(item, JoinedSubtask) else next(resolved) for item in items]
+
+
+def _reduced_to_cap(user_query: str, subtasks: list[str], workflow_folderpath: str | None,
+                    conversation: str) -> Reduction | None:
+    """``split_merge.reduce_to_cap`` on a split of more than MAX_SUBTASKS items, with Jev's checks when there is
+    a key (near copies, same request, the item's planning command); None if it fails.
+
+    Jev calls: at most ``REDUCTION_JEV_CALLS`` here, plus at most two per remaining sub-task in ``resolve_referents``.
+    """
+    try:
+        identifiers = identifier_patterns(workflow_folderpath) if workflow_folderpath else ()
+
+        def label(text: str) -> str | None:
+            matched = match_planning_command(text, workflow_folderpath) if workflow_folderpath else None
+            return matched[0] if matched else None
+
+        reduction = reduce_to_cap(
+            user_query, subtasks, MAX_SUBTASKS, identifiers, context=conversation,
+            same_job=_same_request_check(user_query),
+            near_copy=_same_request_check(user_query, NEAR_COPY_THRESHOLD),
+            label=label if _jev_lm() is not None else None)
+        logger.info(f"the split listed {len(subtasks)} sub-tasks, over {MAX_SUBTASKS}: reduced to "
+                    f"{len(reduction.items)} ({reduction.jev_calls} Jev calls)")
+        return reduction
+    except Exception:  # noqa: BLE001 - never fail the turn
+        logger.warning("could not reduce a split over the cap", exc_info=True)
+        return None
 
 
 def _merged(user_query: str, subtasks: list[str], workflow_folderpath: str | None = None,
@@ -2490,6 +2535,9 @@ def _merged(user_query: str, subtasks: list[str], workflow_folderpath: str | Non
 #: of one job 0.27-0.99, so the bar is low and only a confident "separate" keeps two parts apart.
 SAME_REQUEST_THRESHOLD = 0.2
 
+#: A near copy (over the cap) is dropped only when Jev says it is one request with at least this probability.
+NEAR_COPY_THRESHOLD = 0.9
+
 _SAME_REQUEST_OPTIONS = (
     ("separate", "Two separate requests: each part asks for something of its own and gets its own answer, "
                  "and either could be asked alone."),
@@ -2509,7 +2557,7 @@ class SameRequest(dspy.Signature):
              "later part is a step of the earlier one?")
 
 
-def _same_request_check(user_query: str):
+def _same_request_check(user_query: str, threshold: float = SAME_REQUEST_THRESHOLD):
     """The merge's rule 3 decision (``split_merge.SameJob``) on Jev, or None without a Jev key.
 
     ``(earlier, later) -> True`` when Jev says the two parts are one request with probability at least
@@ -2529,7 +2577,7 @@ def _same_request_check(user_query: str):
             logger.warning("could not ask whether two sub-tasks are one request", exc_info=True)
             return None
         logger.info(f"same request? {earlier!r} / {later!r}: {value} (one: {one:.2f})")
-        return one >= SAME_REQUEST_THRESHOLD
+        return one >= threshold
 
     return same_job
 

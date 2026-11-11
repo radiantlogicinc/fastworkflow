@@ -2616,6 +2616,12 @@ class WorkflowExecutionContext:
         sub-task plan (accepted, or the draft) runs through _run_subtasks_from, which binds each goal to its means."""
         plan = self._turn_subtask_plan
         planned = plan is not None and len(plan.items) == len(subtasks)
+        if planned and any(item.parts for item in plan.items):
+            # A joined item (a split over the cap) that the review left as drafted runs its parts as jobs of their own.
+            from fastworkflow import review_proposals
+            subtasks, plan = review_proposals.expand_joined_parts(
+                self._app_workflow, subtasks, plan, planner_lm=getattr(self, "_current_planner_lm", None))
+            self._turn_subtask_plan = plan
         if len(subtasks) > 1 or planned:
             self._subtasks = subtasks
             self._origins = list(range(len(subtasks)))

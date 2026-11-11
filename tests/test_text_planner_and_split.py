@@ -219,12 +219,14 @@ def test_a_numbered_answer_becomes_the_subtasks():
         "Audit right A.", "Audit right B.", "Sweep Hubbard."]
 
 
-def test_an_unusable_or_too_long_split_leaves_the_request_whole():
+def test_an_unusable_split_leaves_the_request_whole():
     from fastworkflow.workflow_agent import MAX_SUBTASKS
 
     assert _split({"reasoning": "r", "subtasks": "no numbered lines here"}) == ["the request"]
     many = "\n".join(f"{n}. part {n}" for n in range(1, MAX_SUBTASKS + 2))
-    assert _split({"reasoning": "r", "subtasks": many}) == ["the request"]
+    # too many sub-tasks is no reason to run the request whole: the list is reduced to the cap (see
+    # test_a_split_over_the_cap_is_reduced_never_run_whole)
+    assert len(_split({"reasoning": "r", "subtasks": many})) <= MAX_SUBTASKS
 
 
 def test_a_failing_split_leaves_the_request_whole(monkeypatch):
@@ -1073,3 +1075,98 @@ def _last_prompt() -> str:
 
     entry = next(h for h in reversed(GLOBAL_HISTORY) if "subtasks" in str(h.get("messages")))
     return "\n".join(str(m.get("content", "")) for m in entry["messages"])
+
+
+# The splitter's reply to benchmark pass 9, task 5.10, round 2 (Nemotron Nano), as recorded: the five
+# leavers listed once, the unit review and the control, then the five leavers again word for word. 12 lines, 7 jobs.
+RECORDED_QUERY_5_10 = "HR has sent me five names for this month's offboarding: Aaron Garrison, Alexander Herrera, David Farrell, Amy Walsh and April Watts. Before I sign the batch off I want the quarterly review of Gardner Robinson and Lawrence LLC 2, the unit picking their work up — the first three people on its roster who have a login, each taken down to logins, rights and collections, and the first of those people's logins opened on its own permissions and custodians. Then each of the five: what they can reach, their first login listed walked down to the first entitlement it carries, and the corrections available on them, with none applied. Work the finding for the control 'Identities who are contractors set as inactive or whose departure date has passed and owning active accounts' through to the first identity it names as well, down to logins, rights and collections."
+RECORDED_REPLY_5_10 = "1. Aaron Garrison leaves: what Aaron Garrison can reach, their first login listed walked down to the first entitlement it carries, and the corrections available on them, with none applied.\n2. Alexander Herrera leaves: what Alexander Herrera can reach, their first login listed walked down to the first entitlement it carries, and the corrections available on them, with none applied.\n3. David Farrell leaves: what David Farrell can reach, their first login listed walked down to the first entitlement it carries, and the corrections available on them, with none applied.\n4. Amy Walsh leaves: what Amy Walsh can reach, their first login listed walked down to the first entitlement it carries, and the corrections available on them, with none applied.\n5. April Watts leaves: what April Watts can reach, their first login listed walked down to the first entitlement it carries, and the corrections available on them, with none applied.\n6. Quarterly review of Gardner Robinson and Lawrence LLC 2, the unit picking their work up — the first three people on its roster who have a login, each taken down to logins, rights and collections, and the first of those people's logins opened on its own permissions and custodians.\n7. Work the finding for the control 'Identities who are contractors set as inactive or whose departure date has passed and owning active accounts' through to the first identity it names as well, down to logins, rights and collections.\n8. Aaron Garrison leaves: what Aaron Garrison can reach, their first login listed walked down to the first entitlement it carries, and the corrections available on them, with none applied.\n9. Alexander Herrera leaves: what Alexander Herrera can reach, their first login listed walked down to the first entitlement it carries, and the corrections available on them, with none applied.\n10. David Farrell leaves: what David Farrell can reach, their first login listed walked down to the first entitlement it carries, and the corrections available on them, with none applied.\n11. Amy Walsh leaves: what Amy Walsh can reach, their first login listed walked down to the first entitlement it carries, and the corrections available on them, with none applied.\n12. April Watts leaves: what April Watts can reach, their first login listed walked down to the first entitlement it carries, and the corrections available on them, with none applied."
+
+_LEAVERS = ["Aaron Garrison", "Alexander Herrera", "David Farrell", "Amy Walsh", "April Watts", "Bill Brown",
+            "Billy Avila", "Brad Miller", "Barry Jones", "Bethany Oconnor", "Heidi Turner", "Gary Edwards"]
+
+
+def _numbered(items):
+    return "\n".join(f"{n}. {text}" for n, text in enumerate(items, 1))
+
+
+def _leaves(name):
+    return f"{name} leaves: what {name} can reach, their first login listed walked down to its first right."
+
+
+@pytest.fixture
+def no_jev(monkeypatch):
+    from fastworkflow import workflow_agent
+    monkeypatch.delenv("JEV_API_KEY", raising=False)
+    assert workflow_agent._jev_lm() is None, "this test needs a process without a Jev key"
+
+
+def _split_with(query, reply):
+    from fastworkflow.workflow_agent import split_into_subtasks
+    return split_into_subtasks(query, planner_lm=DummyLM([{"reasoning": "r", "subtasks": reply}]))
+
+
+def test_a_split_over_the_cap_only_because_it_repeats_jobs_is_still_split(no_jev):
+    from fastworkflow.workflow_agent import MAX_SUBTASKS, _split_items
+
+    assert len(_split_items(RECORDED_REPLY_5_10)) > MAX_SUBTASKS
+    parts = _split_with(RECORDED_QUERY_5_10, RECORDED_REPLY_5_10)
+    assert len(parts) == 7
+    assert [part.split(" leaves")[0] for part in parts[:5]] == [
+        "Aaron Garrison", "Alexander Herrera", "David Farrell", "Amy Walsh", "April Watts"]
+
+
+def test_a_split_over_the_cap_is_reduced_never_run_whole(no_jev):
+    from fastworkflow.workflow_agent import MAX_SUBTASKS
+
+    query = "Offboard " + ", ".join(_LEAVERS) + ". Also audit the right Jira_IT Support Specialist."
+    items = [_leaves(name) for name in _LEAVERS] + ["Audit the right Jira_IT Support Specialist."]
+    parts = _split_with(query, _numbered(items))
+    assert 1 < len(parts) <= MAX_SUBTASKS
+    for name in _LEAVERS + ["Jira_IT Support Specialist"]:
+        assert any(name in part for part in parts), f"{name} is named by no job"
+
+
+def test_a_long_split_of_copies_paraphrases_and_jobs_keeps_every_subject(no_jev):
+    from fastworkflow.workflow_agent import MAX_SUBTASKS
+
+    names = _LEAVERS[:8]
+    rights = ["Jira_IT Support Specialist", "GitLab_Technical Leads", "Active Directory_Cloud Administrator"]
+    query = "Offboard " + ", ".join(names) + ". Audit " + ", ".join(rights) + "."
+    items = []
+    for name in names:
+        items += [_leaves(name), f"Please check what access {name} holds and take their first login down to its first right."]
+    items += [f"Audit the right {right} across the systems it appears in." for right in rights]
+    items += [f"For {right}, tell me who holds it and which system publishes it." for right in rights]
+    items += [items[0], items[2]]                       # two exact copies on top
+    assert len(items) == 24
+    parts = _split_with(query, _numbered(items))
+    assert 1 < len(parts) <= MAX_SUBTASKS
+    for name in names + rights:
+        assert any(name in part for part in parts), f"{name} is named by no job"
+
+
+def test_the_reduction_asks_jev_no_more_than_its_budget_and_decides_without_it():
+    from fastworkflow.split_merge import reduce_to_cap
+
+    asked = []
+
+    def jev_same(earlier, later):
+        asked.append(("same", earlier))
+        return False
+
+    def jev_label(text):
+        asked.append(("label", text))
+        return "leave"
+
+    names = [f"{first} {last}" for first in ("Aaron", "Brad", "Cara", "Dev", "Elin") for last in ("Smith", "Jones", "Brown", "Klein")]
+    query = "Offboard " + ", ".join(names) + "."
+    items = [_leaves(name) for name in names]
+    with_jev = reduce_to_cap(query, items, 10, same_job=jev_same, near_copy=jev_same, label=jev_label, max_jev_calls=7)
+    assert len(with_jev.items) == 10 and len(asked) <= 7 and with_jev.jev_calls == len(asked)
+    without = reduce_to_cap(query, items, 10)
+    assert len(without.items) == 10 and without.jev_calls == 0
+    for name in names:
+        assert any(name in item for item in with_jev.items) and any(name in item for item in without.items)
+    # at or under the cap nothing is touched and nothing is asked
+    assert reduce_to_cap(query, items[:10], 10, label=jev_label).items == items[:10]

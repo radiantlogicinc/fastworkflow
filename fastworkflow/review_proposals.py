@@ -145,6 +145,12 @@ class SubTask(BaseModel):
     #: fix-48np.1: a sub-task whose means is still the drafted one is not drafted again at run time
     #: (``reviewed_arguments``). Not shown.
     drafted_means: str = Field(default="", json_schema_extra={"review_hidden": True})
+    #: The sub-tasks this one joins, when the split had more than MAX_SUBTASKS and ``split_merge.reduce_to_cap`` joined some
+    #: (``JoinedSubtask``): the review shows the joined item, and a run whose item is still as drafted runs each part as
+    #: a job of its own (``expand_joined_parts``). ``parts_fingerprint`` is the item as drafted; an edit of the goal, outcome,
+    #: inputs or means makes it differ, and the item then runs as the one job it reads. Not shown.
+    parts: list[str] = Field(default_factory=list, json_schema_extra={"review_hidden": True})
+    parts_fingerprint: str = Field(default="", json_schema_extra={"review_hidden": True})
     #: The item this one came from before this reply (set by ``apply_edits``; not serialized).
     _before_item: Optional["SubTask"] = PrivateAttr(default=None)
     #: This reply asked for look_up on this item (set by ``apply_edits``; not serialized).
@@ -264,11 +270,27 @@ def _input_edit_parts(stripped: str) -> list[str]:
     return [stripped]
 
 
+#: An input's value that clears the input: ``kind=none`` removes ``kind``.
+_CLEARING_VALUES = frozenset({"none", "null"})
+
+
+def _is_clearing_change(edit: Change) -> bool:
+    """A one-input clearing change (``name=none``): it is applied on its own, never merged with other input edits."""
+    if edit.field != "inputs":
+        return False
+    parts = _input_edit_parts((edit.value or "").strip())
+    return (len(parts) == 1 and _input_edit_part_key(parts[0]) is not None
+            and (SubTaskInput.from_text(parts[0]).value or "").strip().lower() in _CLEARING_VALUES)
+
+
 def _merge_one_subtask_input(existing: list[SubTaskInput], text: str) -> list[SubTaskInput]:
     """Update or add one input by name and keep the item's other inputs."""
     new_input = SubTaskInput.from_text(text)
     result = list(existing)
     if new_input.name:
+        if (new_input.value or "").strip().lower() in _CLEARING_VALUES:
+            # ``name=none`` clears that one input (``inputs=none`` clears them all).
+            return [each for each in result if each.name != new_input.name]
         for position, each in enumerate(result):
             if each.name == new_input.name:
                 result[position] = new_input
@@ -642,8 +664,49 @@ def draft_round1_proposal(workflow, subtasks: list[str], planner_lm=None) -> Sub
     proposal = build_round1_proposal(subtasks, candidates)
     items: list[SubTask] = []
     for item, sub_task in zip(proposal.items, subtasks):
-        items.append(drafted_item(workflow, item, sub_task, items, planner_lm=planner_lm))
+        drafted = drafted_item(workflow, item, sub_task, items, planner_lm=planner_lm)
+        if parts := list(getattr(sub_task, "parts", ()) or ()):
+            drafted = drafted.model_copy(update={"parts": parts})
+            drafted = drafted.model_copy(update={"parts_fingerprint": _fingerprint(drafted)})
+        items.append(drafted)
     return SubTaskProposal(items=items)
+
+
+def _fingerprint(item: SubTask) -> str:
+    """The item as the draft made it: what an edit of the goal, outcome, inputs or means changes."""
+    return json.dumps([item.goal, item.outcome, item.means.render(), [each.model_dump() for each in item.inputs]],
+                      sort_keys=True, default=str)
+
+
+def expand_joined_parts(workflow, subtasks: list[str], plan: Optional[SubTaskProposal], planner_lm=None
+                        ) -> tuple[list[str], Optional[SubTaskProposal]]:
+    """``(subtasks, plan)`` with each joined item that is still as drafted replaced by its parts, in order.
+
+    One level only: each part is drafted on its own (``draft_round1_proposal``, as a split sub-task is) and is a leaf. An
+    item whose goal, outcome, inputs or means the review changed runs as the one job it now reads. ``from sub-task N``
+    inputs of the other items follow the renumbering (N names the first part of a joined item N). Nothing changes when
+    no item has parts, so a split within the cap is run exactly as before.
+    """
+    if plan is None or len(plan.items) != len(subtasks) or not any(item.parts for item in plan.items):
+        return subtasks, plan
+    first_number: dict[int, int] = {}
+    expanded: list[SubTask] = []
+    goals: list[str] = []
+    for number, item in enumerate(plan.items, 1):
+        first_number[number] = len(expanded) + 1
+        if item.parts and item.parts_fingerprint == _fingerprint(item):
+            for leaf in draft_round1_proposal(workflow, list(item.parts), planner_lm=planner_lm).items:
+                expanded.append(leaf.model_copy(update={"parts": [], "parts_fingerprint": ""}))
+                goals.append(leaf.goal)
+        else:
+            expanded.append(item.model_copy(update={"parts": [], "parts_fingerprint": ""}))
+            goals.append(subtasks[number - 1])
+    renumbered = []
+    for item in expanded:
+        inputs = [each.model_copy(update={"from_subtask": first_number.get(each.from_subtask, each.from_subtask)})
+                  if each.from_subtask is not None else each for each in item.inputs]
+        renumbered.append(item.model_copy(update={"inputs": inputs}))
+    return goals, SubTaskProposal(items=renumbered)
 
 
 def drafted_item(workflow, item: SubTask, sub_task: str, earlier: list[SubTask], planner_lm=None) -> SubTask:
@@ -1217,7 +1280,10 @@ def _dedupe_engine_edits(
             merge_indexes.update(edit.indexes)
             others.append(edit)
         elif isinstance(edit, Change):
-            changes.append(edit)
+            if _is_clearing_change(edit):
+                others.append(edit)
+            else:
+                changes.append(edit)
         else:
             others.append(edit)
 
@@ -1349,11 +1415,11 @@ def _best_quoted_match(value: str, quoted: list[str]) -> Optional[str]:
     return None
 
 
-def _repair_change_inputs_value(value: str, quoted: list[str]) -> str:
+def _repair_change_inputs_value(value: str, quoted: list[str], reply_text: str = "") -> str:
     parts = _split_input_assignments(value)
     if len(parts) <= 1:
         match = _best_quoted_match(_strip_outer_quotes(value), quoted)
-        if match and "=" in value:
+        if match and "=" in value and not _said_literally(_strip_outer_quotes(value.partition("=")[2]), reply_text, quoted):
             name, _, _rest = value.partition("=")
             return f"{name.strip()}={match}"
         return value
@@ -1362,7 +1428,7 @@ def _repair_change_inputs_value(value: str, quoted: list[str]) -> str:
         inp = SubTaskInput.from_text(part)
         if inp.name and inp.value:
             match = _best_quoted_match(inp.value, quoted)
-            if match:
+            if match and not _said_literally(inp.value, reply_text, quoted):
                 inp = inp.model_copy(update={"value": match})
             repaired.append(inp.render())
         else:
@@ -1465,7 +1531,7 @@ def _apply_quoted_names_from_reply(
     for edit in edits:
         if isinstance(edit, Change) and edit.field == "inputs":
             repaired.append(
-                edit.model_copy(update={"value": _repair_change_inputs_value(edit.value, quoted)})
+                edit.model_copy(update={"value": _repair_change_inputs_value(edit.value, quoted, reply_text)})
             )
         elif isinstance(edit, Change) and edit.field == "goal":
             repaired.append(
@@ -1475,7 +1541,8 @@ def _apply_quoted_names_from_reply(
             repaired.append(edit)
 
     dropped_indexes = {edit.index for edit in repaired if isinstance(edit, Drop)}
-    for quoted_name in quoted:
+    reader_edits = list(repaired)
+    for quoted_name in _wanted_quoted_names(reply_text, quoted):
         if _quoted_already_in_edits(repaired, quoted_name):
             continue
         target_index = _target_index_for_quoted(proposal, reply_text, quoted_name, dropped_indexes)
@@ -1483,7 +1550,7 @@ def _apply_quoted_names_from_reply(
             continue
         target_item = proposal.items[target_index - 1]
         primary_key = _primary_entity_key(target_item)
-        if not primary_key:
+        if not primary_key or _reader_touches_input(reader_edits, target_index, primary_key):
             continue
         clause = _clause_containing_quote(reply_text, quoted_name)
         kv = [f"{primary_key}={quoted_name}"]
@@ -1495,6 +1562,314 @@ def _apply_quoted_names_from_reply(
     return repaired
 
 
+# ----------------------------------------------------------------------
+# Deterministic guards on the reader's edits: the reader (a small model) misreads plain-English corrections in a few
+# recurring ways. These act on what it returned, never on the prompt: a drop of a whole step that the reply aimed at an
+# input becomes a clearing of that input; an edit for a step the reply never names, whose inputs another named step
+# holds, goes to that step; a drop the reply does not ask for is not applied.
+# ----------------------------------------------------------------------
+
+#: Generic input names (they hold the entity a step is about): a bare mention of one in a reply does not select it.
+_GENERIC_INPUT_NAMES = frozenset(_ENTITY_INPUT_KEYS | {"scope", "fact"})
+_NAME_PREFIXES = ("include_", "with_", "is_", "has_", "show_")
+_REMOVE_VERBS = r"(?:drop|remove|delete|skip|omit|cut|leave\s+out|take\s+out|get\s+rid\s+of|replace)"
+_STEP_WORD = r"(?:steps?|items?|sub-?tasks?)"
+_STEP_LIST = r"#?\d+(?:\s*(?:,|and|to|through|&|-|–)\s*#?\d+)*"
+_REMOVE_STEP_OBJECT = re.compile(
+    rf"\b{_REMOVE_VERBS}\s+(?:(?:the|these|those|this|that|both|all|extra|duplicate|stray|separate)\s+)*"
+    rf"(?:{_STEP_WORD}\s+)?(?P<list>{_STEP_LIST})\b", re.I)
+_REMOVE_STEP_PRONOUN = re.compile(rf"\b{_REMOVE_VERBS}\s+(?:it|them|those|these|that|this|both)\b", re.I)
+_STEP_NOT_WANTED = re.compile(
+    rf"\b{_STEP_WORD}\s+(?P<list>{_STEP_LIST})\s+(?:(?:should|must|can|could|needs?\s+to)\s+"
+    r"(?:not\s+be\s+there|go|be\s+(?:removed|dropped|deleted))|"
+    r"(?:is|are)\s+(?:a\s+|an\s+)?(?:duplicates?|stray|extra|unneeded|unnecessary|not\s+needed|not\s+wanted|not\s+there)|"
+    r"(?:isn'?t|aren'?t)\s+needed)", re.I)
+_KEEP_ONLY_STEP = re.compile(rf"\b(?:keep|retain)\s+(?:only|just)\s+(?:the\s+)?{_STEP_WORD}\s+#?(?P<n>\d+)\b", re.I)
+_MERGE_REPLY = re.compile(
+    r"\b(?:merge|combine|join|single\s+step|one\s+step|one\s+single|a\s+single|just\s+one|only\s+one|"
+    r"one\s+(?:name|entity|organi[sz]ation|record)|not\s+two)\b", re.I)
+_CLEAR_CUE_BODY = (
+    r"drop|remove|delete|clear|omit|skip|leave\s+(?:it\s+|those\s+|them\s+)?out|take\s+out|get\s+rid\s+of|without|"
+    r"no\s+longer|(?:did\s+not|didn'?t|never)\s+ask(?:ed)?\s+for|not\s+asked\s+for")
+_CLEAR_CUE_STRONG = re.compile(rf"\b(?:{_CLEAR_CUE_BODY})\b", re.I)
+_CLEAR_CUE_WEAK = re.compile(rf"\b(?:{_CLEAR_CUE_BODY}|not\s+(?:the|its|their)|not\s+just|not\s+only)\b", re.I)
+
+
+def _norm_phrase(text: str) -> str:
+    return re.sub(r"[\s_\-]+", " ", (text or "").lower()).strip()
+
+
+def _list_numbers(text: str, count: int) -> list[int]:
+    """The step numbers in a list text such as '2, 3 and 5' or '4 to 6' (1..count)."""
+    found: list[int] = []
+    for lo, hi in re.findall(r"(\d+)\s*(?:to|through|-|–)\s*(\d+)", text):
+        found.extend(range(int(lo), int(hi) + 1))
+    found.extend(int(each) for each in re.findall(r"\d+", text))
+    return [number for number in dict.fromkeys(found) if 1 <= number <= count]
+
+
+def _leading_step_numbers(clause: str, count: int) -> list[int]:
+    match = re.search(rf"{_STEP_WORD}\s+(?P<list>{_STEP_LIST})", clause, re.I)
+    return _list_numbers(match.group("list"), count) if match else []
+
+
+def _input_mentioned(clause: str, inp: SubTaskInput) -> bool:
+    """The clause names this input: its name as a phrase (include_risk: 'risk', whole_list: 'whole list'; generic
+    entity names such as unit or right never count) or its value (4 or more characters, not true/false)."""
+    text = _norm_phrase(clause)
+    name = (inp.name or "").lower()
+    if name and name not in _GENERIC_INPUT_NAMES:
+        variants = {_norm_phrase(name)}
+        for prefix in _NAME_PREFIXES:
+            if name.startswith(prefix):
+                variants.add(_norm_phrase(name[len(prefix):]))
+        if any(re.search(rf"(?<![a-z0-9]){re.escape(variant)}(?![a-z0-9])", text) for variant in variants if variant):
+            return True
+    value = _norm_phrase(inp.value or "")
+    if len(value) >= 4 and value not in ("true", "false", "none") and inp.from_subtask is None:
+        if re.search(rf"(?<![a-z0-9]){re.escape(value)}", text):
+            return True
+    return False
+
+
+def _explicit_removed_steps(reply_text: str, count: int, proposal: Optional["SubTaskProposal"] = None) -> set[int]:
+    """Steps the reply explicitly asks to remove ('remove step 2', 'step 2 should not be there', 'keep only step 1').
+    'drop it' counts only when the clause does not name an input of the step it follows ('I did not ask for risk, so
+    drop it' is about the risk setting)."""
+    removed: set[int] = set()
+    previous: list[int] = []
+    for clause in _reply_clauses(reply_text):
+        for match in _REMOVE_STEP_OBJECT.finditer(clause):
+            removed.update(_list_numbers(match.group("list"), count))
+        for match in _STEP_NOT_WANTED.finditer(clause):
+            removed.update(_list_numbers(match.group("list"), count))
+        if _REMOVE_STEP_PRONOUN.search(clause):
+            lead = _leading_step_numbers(clause, count) or previous
+            if proposal is not None:
+                lead = [step for step in lead
+                        if not any(inp.name and _input_mentioned(clause, inp) for inp in proposal.items[step - 1].inputs)]
+            removed.update(lead)
+        previous = _leading_step_numbers(clause, count) or previous
+    for match in _KEEP_ONLY_STEP.finditer(reply_text or ""):
+        keep = int(match.group("n"))
+        removed.update(step for step in range(1, count + 1) if step != keep)
+    return removed
+
+
+def _mentioned_steps(reply_text: str, count: int) -> set[int]:
+    return set(_extract_step_numbers(_STEP_FINE_CLAUSE.sub("", reply_text or ""), count))
+
+
+_OBJECT_END = re.compile(r"[,;:.!?]|\s+(?:and|but|so|then|because|since|which|instead|as)\b", re.I)
+_PRONOUN_OBJECT = re.compile(r"^\s*(?:it|them|those|these|that|this|both|too|as\s+well)?\s*$", re.I)
+
+
+def _removal_objects(clause: str, *, weak: bool) -> list[str]:
+    """The text a removal cue in *clause* points at ('drop the whole-list setting' -> 'the whole-list setting'). A cue
+    that points at a pronoun ('set tags to false, or remove it') points at what comes before it. A cue inside a quote
+    is not one, and an object that names a step ('the separate Ann step') is a step, not an input."""
+    masked = re.sub(r"(['\"])[^'\"]*\1", lambda m: " " * len(m.group(0)), clause)
+    cue = _CLEAR_CUE_WEAK if weak else _CLEAR_CUE_STRONG
+    objects: list[str] = []
+    for match in cue.finditer(masked):
+        rest = clause[match.end():]
+        end = _OBJECT_END.search(masked[match.end():])
+        obj = rest[:end.start()] if end else rest
+        if _PRONOUN_OBJECT.match(obj):
+            obj = clause[max(0, match.start() - 60):match.start()]
+        if re.search(r"\b(?:steps?|items?)\b", obj, re.I):
+            continue
+        objects.append(obj)
+    return objects
+
+
+def _clear_requests(proposal: "SubTaskProposal", reply_text: str, *, weak: bool = False) -> list[tuple[int, str]]:
+    """``(step, input name)`` pairs the reply asks to clear: a removal cue whose object names the input (its setting
+    name or its value), in a clause that names the step (or the one step there is)."""
+    count = len(proposal.items)
+    found: list[tuple[int, str]] = []
+    for clause in _reply_clauses(reply_text):
+        objects = _removal_objects(clause, weak=weak)
+        if not objects:
+            continue
+        steps = _extract_step_numbers(clause, count)
+
+        def mentioned(inp: SubTaskInput) -> bool:
+            return any(_input_mentioned(obj, inp) for obj in objects)
+
+        for step in steps or ([1] if count == 1 else []):
+            for inp in proposal.items[step - 1].inputs:
+                if inp.name and mentioned(inp) and (step, inp.name) not in found:
+                    found.append((step, inp.name))
+        if not steps and count > 1:
+            holders: dict[str, list[int]] = {}
+            for index, item in enumerate(proposal.items, 1):
+                for inp in item.inputs:
+                    if inp.name and mentioned(inp):
+                        holders.setdefault(inp.name, []).append(index)
+            for name, where in holders.items():
+                if len(where) == 1 and (where[0], name) not in found:
+                    found.append((where[0], name))
+    return found
+
+
+def _clear_edit(step: int, name: str) -> ProposedEdit:
+    return ProposedEdit(op="change", index=step, field="inputs", value=f"{name}=none")
+
+
+def _edit_input_keys(edit: ProposedEdit) -> list[str]:
+    field = (edit.field or "").strip().lower()
+    if edit.op != "change":
+        return []
+    if field == "inputs":
+        keys = [key for key in (_input_edit_part_key(part) for part in _input_edit_parts((edit.value or "").strip())) if key]
+        return [key for key in keys if key not in _META_INPUT_KEYS]
+    if field.startswith("inputs."):
+        return [field[len("inputs."):]]
+    if field and field not in ("goal", "outcome", "means", "check", "desired outcome", "desired_outcome"):
+        return [field.replace(" ", "_")]
+    return []
+
+
+def _guard_drops_to_clears(proposal: "SubTaskProposal", proposed: list[ProposedEdit], reply_text: str) -> list[ProposedEdit]:
+    """A drop of step N the reply does not ask for ('remove step N', 'step N should not be there'), where the reply
+    names one of N's inputs (a setting or a value) with a removal cue, clears that input instead."""
+    count = len(proposal.items)
+    if any(edit.op == "drop" for edit in proposed) and not _MERGE_REPLY.search(reply_text):
+        explicit = _explicit_removed_steps(reply_text, count, proposal)
+        requests = _clear_requests(proposal, reply_text, weak=True)
+        result: list[ProposedEdit] = []
+        for edit in proposed:
+            if edit.op == "drop" and edit.index is not None and 1 <= edit.index <= count and edit.index not in explicit:
+                wanted = [name for step, name in requests if step == edit.index]
+                if wanted:
+                    result.extend(_clear_edit(edit.index, name) for name in wanted)
+                    continue
+            result.append(edit)
+        return result
+    return proposed
+
+
+def _guard_unasked_drops(
+    proposal: "SubTaskProposal", proposed: list[ProposedEdit], reply_text: str, refused: Optional[list[int]] = None,
+) -> list[ProposedEdit]:
+    """A drop the reply does not ask for goes to the one step it does ask to remove and the reader did not drop, or,
+    when the reply never names that step, is not applied (its step numbers are added to *refused*)."""
+    count = len(proposal.items)
+    if count < 2 or not any(edit.op == "drop" for edit in proposed) or _MERGE_REPLY.search(reply_text):
+        return proposed
+    explicit = _explicit_removed_steps(reply_text, count, proposal)
+    mentioned = _mentioned_steps(reply_text, count)
+    uncovered = [step for step in sorted(explicit)
+                 if not any(each.op == "drop" and each.index == step for each in proposed)]
+    result: list[ProposedEdit] = []
+    for edit in proposed:
+        if edit.op == "drop" and edit.index is not None and 1 <= edit.index <= count and edit.index not in explicit:
+            if len(uncovered) == 1 and edit.index not in mentioned:
+                result.append(edit.model_copy(update={"index": uncovered.pop()}))
+                continue
+            if mentioned and edit.index not in mentioned:
+                if refused is not None:
+                    refused.append(edit.index)
+                continue
+        result.append(edit)
+    return result
+
+
+def _guard_retarget_changes(proposal: "SubTaskProposal", proposed: list[ProposedEdit], reply_text: str) -> list[ProposedEdit]:
+    """An input change for a step the reply never names, whose inputs the step lacks, goes to the one named step that
+    holds them."""
+    count = len(proposal.items)
+    mentioned = _mentioned_steps(reply_text, count)
+    if count < 2 or not mentioned:
+        return proposed
+    result: list[ProposedEdit] = []
+    for edit in proposed:
+        if edit.op == "change" and edit.index is not None and 1 <= edit.index <= count and edit.index not in mentioned:
+            keys = _edit_input_keys(edit)
+            if keys and not set(keys) & {inp.name for inp in proposal.items[edit.index - 1].inputs}:
+                holders = [step for step in sorted(mentioned)
+                           if set(keys) <= {inp.name for inp in proposal.items[step - 1].inputs}]
+                if len(holders) == 1:
+                    edit = edit.model_copy(update={"index": holders[0]})
+        result.append(edit)
+    return result
+
+
+def _guard_unreported_clears(proposal: "SubTaskProposal", proposed: list[ProposedEdit], reply_text: str) -> list[ProposedEdit]:
+    """An input the reply asks to clear and no edit of the reader touches is cleared."""
+    touched = {(each.index, key) for each in proposed for key in _edit_input_keys(each)}
+    gone = {each.index for each in proposed if each.op in ("drop", "split")}
+    gone.update(step for each in proposed if each.op == "merge" for step in each.indexes)
+    result = list(proposed)
+    for step, name in _clear_requests(proposal, reply_text):
+        if (step, name) not in touched and step not in gone:
+            result.append(_clear_edit(step, name))
+            touched.add((step, name))
+    return result
+
+
+def _guard_reader_edits(
+    proposal: Proposal, proposed: list[ProposedEdit], reply_text: Optional[str],
+) -> list[ProposedEdit]:
+    """The deterministic guards on the reader's edits, in order. Raises ``EditRefused`` (a question for the user) when
+    every edit left was a drop the reply does not ask for."""
+    if not reply_text or not isinstance(proposal, SubTaskProposal) or not proposed:
+        return proposed
+    if len(proposal.items) == 1:
+        proposed = [edit.model_copy(update={"index": 1}) if edit.index is None and edit.op in ("change", "drop") else edit
+                    for edit in proposed]
+    refused: list[int] = []
+    proposed = _guard_drops_to_clears(proposal, proposed, reply_text)
+    proposed = _guard_retarget_changes(proposal, proposed, reply_text)
+    proposed = _guard_unasked_drops(proposal, proposed, reply_text, refused)
+    proposed = _guard_unreported_clears(proposal, proposed, reply_text)
+    if not proposed and refused:
+        raise EditRefused(
+            f"I read that as removing step {refused[0]}, but you did not ask for that. "
+            "Which step or setting do you mean?")
+    return proposed
+
+
+def _reader_touches_input(edits: list, index: int, key: str) -> bool:
+    """Whether the reader's own edits already set or clear input *key* of step *index*."""
+    for edit in edits:
+        if isinstance(edit, Change) and edit.index == index and edit.field == "inputs":
+            for part in _input_edit_parts((edit.value or "").strip()):
+                if _input_edit_part_key(part) == key.lower():
+                    return True
+    return False
+
+
+def _negated_before(text: str, start: int) -> bool:
+    return bool(re.search(
+        r"(?:\bnot|\bwithout|\binstead\s+of|\brather\s+than|\bno\s+longer|\bnor)\b[^'\"]{0,18}$", text[:start], re.I))
+
+
+def _wanted_quoted_names(reply_text: str, quoted: list[str]) -> list[str]:
+    """The quoted names the reply asks for: one it rules out ('not 'X'', 'without 'X'') is not wanted."""
+    wanted: list[str] = []
+    for name in quoted:
+        positions = [m.start() for m in re.finditer(re.escape(name), reply_text)]
+        if positions and all(_negated_before(reply_text, pos) for pos in positions):
+            continue
+        wanted.append(name)
+    return wanted
+
+
+def _said_literally(value: str, reply_text: str, quoted: list[str]) -> bool:
+    """The user wrote *value* as such (outside quotes, and not as 'not just VALUE'): a quoted name is not its completion."""
+    if not value or not reply_text:
+        return False
+    text = reply_text
+    for name in quoted:
+        text = text.replace(name, " " * len(name))
+    for match in re.finditer(rf"(?<![A-Za-z0-9_]){re.escape(value)}(?![A-Za-z0-9_])", text, re.I):
+        if not re.search(r"\b(?:not|without|instead\s+of)\s+(?:just\s+|only\s+)?$", text[:match.start()], re.I):
+            return True
+    return False
+
+
 def _proposed_edits_to_engine(
     proposal: Proposal,
     proposed: list[ProposedEdit],
@@ -1504,6 +1879,7 @@ def _proposed_edits_to_engine(
     proposed = _normalize_reader_edits(proposal, proposed, reply_text=reply_text)
     proposed = _infer_missing_indexes_from_reply(proposal, proposed, reply_text)
     proposed = _dedupe_proposed_edits(proposed)
+    proposed = _guard_reader_edits(proposal, proposed, reply_text)
     count = len(proposal.items)
     if count > 1 and any(
         edit.op in ("change", "drop", "split") and edit.index is None for edit in proposed
