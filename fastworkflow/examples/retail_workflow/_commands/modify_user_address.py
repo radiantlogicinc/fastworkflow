@@ -3,7 +3,6 @@ from typing import List
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.workflow import Workflow
-from fastworkflow import CommandOutput, CommandResponse
 
 from ..retail_data import load_data
 from ..tools.modify_user_address import ModifyUserAddress
@@ -13,28 +12,23 @@ class Signature:
     """Modify user address"""
     class Input(BaseModel):
         user_id: str = Field(
-            default="NOT_FOUND",
             description="The user ID to modify",
-            pattern=r"^([a-z]+_[a-z]+_\d+|NOT_FOUND)$",
+            json_schema_extra={"from_command_output": ["find_user_id_by_email.user_id", "find_user_id_by_name_zip.user_id"]},
+            pattern=r"^([a-z]+_[a-z]+_\d+)$",
             examples=["sara_doe_496"],
-            json_schema_extra={
-                "available_from": ["find_user_id_by_email", "find_user_id_by_name_zip"]
-            }
         )
-        address1: str = Field(default="NOT_FOUND", description="First line of address", examples=["123 Main St"])
-        address2: str = Field(default="NOT_FOUND", description="Second line of address", examples=["Apt 1"])
-        city: str = Field(default="NOT_FOUND", description="City name", examples=["San Francisco"])
+        address1: str = Field(description="First line of address", examples=["123 Main St"])
+        address2: str = Field(description="Second line of address", examples=["Apt 1"])
+        city: str = Field(description="City name", examples=["San Francisco"])
         state: str = Field(
-            default="NOT_FOUND",
             description="State code",
-            pattern=r"^([A-Z]{2}|NOT_FOUND)$",
+            pattern=r"^([A-Z]{2})$",
             examples=["CA"],
         )
-        country: str = Field(default="NOT_FOUND", description="Country name", examples=["USA"])
+        country: str = Field(description="Country name", examples=["USA"])
         zip: str = Field(
-            default="NOT_FOUND",
             description="ZIP code",
-            pattern=r"^(\d{5}|NOT_FOUND)$",
+            pattern=r"^(\d{5})$",
             examples=["12345"],
         )
 
@@ -66,14 +60,9 @@ class Signature:
 
 
 class ResponseGenerator:
-    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandOutput:
+    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> Signature.Output:
         output = self._process_command(workflow, command_parameters)
-        response = (
-            f'Response: Modified details: {output.status}'
-        )
-        return CommandOutput(
-            command_response=CommandResponse(response=response),
-        )
+        return output
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()

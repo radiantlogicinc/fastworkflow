@@ -1,9 +1,8 @@
 from typing import List
 
 import fastworkflow
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 from fastworkflow.workflow import Workflow
-from fastworkflow import CommandOutput, CommandResponse
 
 # Domain helpers
 from ..retail_data import load_data
@@ -14,18 +13,21 @@ class Signature:
     """Get order details"""
     class Input(BaseModel):
         order_id: str = Field(
-            default="NOT_FOUND",
             description=(
                 "The order ID to get details for"
             ),
-            pattern=r"^(#?[\w\d]+|NOT_FOUND)$",
+            json_schema_extra={"from_command_output": "get_user_details"},
+            pattern=r"^(#?[\w\d]+)$",
             examples=["#W0000000"],
-            json_schema_extra={
-                "available_from": ["get_user_details"]
-            }
         )
 
         model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
+
+        @model_validator(mode="after")
+        def order_id_has_hash(self, info):
+            if not self.order_id.startswith('#'):
+                self.order_id = f'#{self.order_id}'
+            return self
 
     class Output(BaseModel):
         order_details: str = Field(
@@ -66,28 +68,15 @@ class Signature:
 
         return generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
 
-    @staticmethod
-    def validate_extracted_parameters(
-        workflow: fastworkflow.Workflow, 
-        command: str, cmd_parameters: "Signature.Input"
-    ) -> tuple[bool, str]:
-        if not cmd_parameters.order_id.startswith('#'):
-            cmd_parameters.order_id = f'#{cmd_parameters.order_id}'
-        return (True, '')
-
-
 class ResponseGenerator:
     def __call__(
         self,
         workflow: Workflow,
         command: str,
         command_parameters: Signature.Input,
-    ) -> CommandOutput:
+    ) -> Signature.Output:
         output = self._process_command(workflow, command_parameters)
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=f"Order details: {output.order_details}"),
-        )
+        return output
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()

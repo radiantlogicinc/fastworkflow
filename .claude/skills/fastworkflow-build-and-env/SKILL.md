@@ -18,7 +18,7 @@ description: >
 Runbook to go from `git clone` to a machine that can run the test suite, train the
 examples, and serve the FastAPI/MCP server. Every command below was executed or
 source-verified on 2026-07-09 against v2.22.2 (commit c33b9a5). Repo root is assumed to be
-`~/rl/fastworkflow` in examples; substitute your own absolute path.
+`<repo>` in examples (the clone's absolute path); substitute your own.
 
 Jargon used once, defined once:
 

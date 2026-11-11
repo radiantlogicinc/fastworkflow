@@ -10,7 +10,7 @@ import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_ut
 import dspy
 
 from fastworkflow import context_budget
-from fastworkflow.utils.dspy_utils import get_lm
+from fastworkflow.utils.dspy_utils import call_dropping_rejected_params, get_lm
 from fastworkflow.observation_offloading.archive import (
     RuntimeHandleArchive,
     RuntimeHandleScope,
@@ -152,10 +152,17 @@ def search_memory(
     try:
         lm = get_lm(model_env, key_env,
                     temperature=0, max_tokens=2048, timeout=120, num_retries=1)
-        with dspy.context(lm=lm, disable_history=False, max_history_size=1):
-            prediction = dspy.Predict(ObservationSearchSignature)(
-                question=question.strip(), subject=subject,
-                observation=handle["text"])
+
+        def search(model):
+            nonlocal lm
+            lm = model  # the LM that answered, for its history below
+            with dspy.context(lm=model, disable_history=False, max_history_size=1):
+                return dspy.Predict(ObservationSearchSignature)(
+                    question=question.strip(), subject=subject,
+                    observation=handle["text"])
+
+        # A model that refuses temperature 0 is asked again without it (fix-z62t).
+        prediction = call_dropping_rejected_params(lm, search)
         answer = str(prediction.answer).strip()
         if not answer:
             raise ValueError("observation search returned an empty answer")

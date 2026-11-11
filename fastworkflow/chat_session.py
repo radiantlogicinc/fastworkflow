@@ -178,6 +178,14 @@ class ChatSession:
         if startup_command and startup_action:
             raise ValueError("Cannot provide both startup_command and startup_action")
 
+        # Phase 9 step 4: artifacts trained before the sparse "not here" construction are refused
+        # at load, for the app and for the internal CME workflow whose heads it also loads.
+        # Training never comes through here, so `fastworkflow train` can still retrain them.
+        from fastworkflow.train.artifact_versioning import require_construction_record
+        require_construction_record(workflow_folderpath)
+        require_construction_record(
+            fastworkflow.get_internal_workflow_path("command_metadata_extraction"))
+
         litellm.drop_params = True  # See https://docs.litellm.ai/docs/completion/drop_params
 
         # Create the workflow
@@ -241,13 +249,13 @@ class ChatSession:
         except Exception as warm_err:  # pragma: no cover – warm-up must never fail
             logger.debug(f"Model warm-up skipped due to error: {warm_err}")
 
-        # Skills and command utterances: read on the first request otherwise (~2 s).
+        # Planning commands and command utterances: read on the first request otherwise (~2 s).
         # Keyed by the folder path string, so the same one the turn path passes.
         try:
-            from fastworkflow.workflow_agent import warm_skills
-            warm_skills(workflow.folderpath)
+            from fastworkflow.workflow_agent import warm_planning_commands
+            warm_planning_commands(workflow.folderpath)
         except Exception as warm_err:  # pragma: no cover – warm-up must never fail
-            logger.debug(f"Skill warm-up skipped due to error: {warm_err}")
+            logger.debug(f"Planning command warm-up skipped due to error: {warm_err}")
 
         self._core.bind_app_workflow(workflow)
         self._core.keep_alive = self._keep_alive
@@ -332,6 +340,10 @@ class ChatSession:
     def append_ask_user_entry(self, question: str) -> fastworkflow.CommandOutput:
         """Delegate ask_user entry creation to the core (duck-typed by workflow_agent)."""
         return self._core.append_ask_user_entry(question)
+
+    def run_planning_command(self, qualified_name: str, params, step_text: str) -> fastworkflow.CommandOutput:
+        """Delegate a planning command's run to the core (command_executor dispatches to it)."""
+        return self._core.run_planning_command(qualified_name, params, step_text)
 
     def complete_ask_user_entry(self, answer: str) -> None:
         """Delegate ask_user answer fill to the core (duck-typed by workflow_agent)."""
@@ -443,7 +455,7 @@ class ChatSession:
     #         mcp_result = self._CommandExecutor.perform_mcp_tool_call(
     #             workflow, 
     #             tool_call, 
-    #             command_context=workflow.current_command_context_name
+    #             command_context=workflow._current_command_context_name
     #         )
             
     #         # Convert MCPToolResult back to CommandOutput for consistency

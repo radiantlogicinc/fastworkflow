@@ -106,6 +106,12 @@ ATTR_CONTEXT_AFTER = "context_after"
 # version where the store actually keeps it.
 ATTR_SPAN_CONTRACT_VERSION = "span_contract_version"
 
+# The alias of the planning-command frame a span was opened under (design 3.5): "" for
+# the turn frame. It is stamped by `start_span` from the host's top frame, so no emitter
+# writes it and a span opened inside a nested frame keeps that frame's alias when it
+# closes after the frame has been popped.
+ATTR_FRAME_ALIAS = "frame_alias"
+
 _current_call_id: contextvars.ContextVar = contextvars.ContextVar(
     "fw_command_call_id", default=None
 )
@@ -251,13 +257,13 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 #
 # v14: fw.planner.plan / fw.planner.replan v4 -- `plan_source` may be
 # "skill_call", and the spans gain `skill`, `skill_args` and `skill_fallback`
-# (skills as parameterized commands).
+# (planning commands as parameterized commands).
 #
 # v15: fw.nlu.param_extraction v4 -- `unwrapped_quoted_values`,
 # `defaulted_sentinel_values` and `out_of_range_values` (fix-7t0q).
 #
 # v16: fw.skill.phase added (fix-hia1.2) -- one span per phase run of a phased
-# skill call (`fastworkflow.skill_phases`). No existing span changed.
+# planning command call (`fastworkflow.planning_phases`). No existing span changed.
 #
 # v17: fw.skill.phase v2 (fix-hia1.7, fix-hia1.3) -- `answer_only` (a phase whose
 # steps name no command, answered by one model call with no tools), and for one
@@ -283,8 +289,103 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # code wrote its answer from its steps (every step verbatim or a guard), no model call.
 #
 # v23: fw.planner.plan / fw.planner.replan v5 (fix-hia1.34) -- `skill_notes`: what
-# the argument guards and verify verdicts changed in a skill call's arguments.
-SPAN_CONTRACT_VERSION = 23
+# the argument guards and verify verdicts changed in a planning command call's arguments.
+#
+# v24: `frame_alias` on every span (design 3.5, Phase 4 of fix-3rsq, fix-3rsq.4.6): the
+# alias of the planning-command frame the span was opened under, "" for the turn frame.
+# It is an envelope attribute, stamped by the emission machinery rather than declared by
+# an emitter, so no per-emitter version moved for it. fw.skill.phase v6 (fix-3rsq.4.10)
+# declares `uses_result`, which it has written since Phase 3 without declaring it.
+#
+# v25: fw.planner.plan / fw.planner.replan v6 (Phase 6 arm selector, fix-3rsq.6.7) --
+# `experiment_arm` (the measurement arm in force: "A" today's path, "B" the fast path)
+# and `fast_path` (this initial plan is one planning-command call the fast path runs), and
+# `recipe_choice` (arm B: the planner's yes or no on whether a matched recipe covers the request;
+# None when no check ran). All three are logged on every planner span; a span recorded before
+# this carries none of them.
+#
+# v26: fw.planner.plan / fw.planner.replan v7 -- `skill_refusal_asked`: a refused planning command call's
+# question was put to the user, and the turn suspends on it (see the contract's v7 note). A span
+# recorded before this carries no such key, which reads as "not asked".
+#
+# v27: fw.nlu.param_extraction v6 (command-name guard) -- `command_name_values`: a parameter value
+# that was the name of a command (the called command's own, or another's in identifier form) and
+# was treated as not given. A span recorded before this carries no such key.
+#
+# v28: fw.agent.execute v2 -- `fast_path_refusal_asked`: the fast path's one planning-command call
+# (arm B) was refused for a missing argument, and the question was put to the user, so the run
+# suspends on it instead of the agent going on from its plan. The fast path has no span of its
+# own: its planner span closes before the run, so the run's executor span carries the fact. A span
+# recorded before this carries no such key, which reads as "not asked".
+#
+# v29: fw.nlu.param_extraction v7 (word screens) -- `word_screen_values`: a free-text value that was
+# only a pronoun or only a kind word or field name of the workflow, and was treated as not given. A
+# span recorded before this carries no such key.
+#
+# v34: fw.skill.answer v1 (fix-3rsq.p14.6) -- new: the deferred model call that writes a planning
+# command call's answer when its __result__ returns None (3.16). One span per call, a child of the
+# turn's planning command work; a call whose answer is text or __result__'s makes no such span.
+#
+# v33: fw.nlu.intent v4 (fix-jd9o.1) -- `jev_tiebreak`: Jev's choice among an ambiguous intent's
+# candidates, with `matcher_layer` "jev_tiebreak" when it routed. fw.nlu.param_extraction v9
+# (fix-jd9o.3) -- `fields_reset_not_given`: fields an LLM extraction filled that Jev judged not given,
+# reset to their not-given value. A span recorded before this carries neither key.
+#
+# v32: fw.nlu.param_extraction v8 (fix-3rsq.one-hook) -- the validation hook replaces db_lookup as the one
+# place a parameter is corrected or refused. `db_lookup` is no longer written; `validation_hook` records
+# `changed_fields` (a value the hook rewrote in place binds the slot, signal "validation_hook") and
+# `refused_fields` (the fields of a fastworkflow.Refused). A span recorded before this carries `db_lookup`
+# and no change list.
+# v31: fw.approval v1 (new) -- one span per approval-binding transition (ADR-EXP-025 section 12):
+# the gate's refuse, queue, ask, shadow and each resolution. It carries hashes, state and the
+# identity class and reference, never the token or the raw parameters.
+# v30: fw.planner.plan / fw.planner.replan v8 and fw.agent.execute v3 -- the Phase 6 arms were removed
+# by owner decision 2026-10-30. `experiment_arm`, `fast_path` and `recipe_choice` (the v25 keys of the
+# planner span) and `fast_path_refusal_asked` (the v28 key of the executor span) are no longer declared
+# or written. A span recorded before this carries them as it wrote them; nothing reads them as a live path.
+#
+# v35: fw.turn v3 (fix-3rsq.plan-review.2.8) -- `subtask_review`: how the turn's sub-tasks were reviewed before they
+# ran: "fast_path" (one sub-task, a confident head or an exact name: no review), "open" (the review was asked and
+# the turn was still awaiting it), "reviewed" (accepted), "declined", "expired", "not_reviewed" (no one could answer:
+# the draft ran as proposed), or "not_applicable" (the turn never reached the gate). A span recorded before this
+# carries no such key.
+#
+# v36: fw.nlu.param_extraction v10 (fix-qjf4) -- the argument checks of an LLM extraction
+# (``fastworkflow.utils.argument_checks``): `argument_check_refusals` (the values the first extraction
+# gave that were refused), `argument_check_retry` (the extractor was asked once more with the refusal),
+# `argument_check_refusals_final` (the values still refused after it, treated as not given) and
+# `argument_check_respelled` ({field: value}: the request's or the declared spelling taken). A span
+# recorded before this carries none of them.
+#
+# v37: fw.turn v4 (fix-48np.1) -- `subtask_bindings`: with drafting on (FW_DRAFT_ARGUMENTS), one record per bound
+# sub-task the turn ran: `subtask`, `means`, `shown` (the values the review showed), `ran` (the arguments the bound
+# command ran with, or null), `match` and `deviation` (why the run did not use the shown values: refused or unbound,
+# so the agent ran it; drafted at run time; a value other than the one shown). Null when there is none. A span
+# recorded before this carries no such key.
+#
+# v38: fw.agent.step v8 (main's policy verifiers, merged into the unified command architecture) -- the
+# policy verifier's decision on a step it rewrote (fastworkflow.policy_runtime): `policy_mode`, `policy_outcome`,
+# `policy_source`, `policy_table_version`, `policy_intent`, `policy_requests`, `policy_judgement`, and `answer`
+# (the answer a finish policy sent back). Main numbered this v24; on this line it follows v37.
+#
+# v39: fw.planner.plan / fw.planner.replan v9 (fix-verify-finish) -- `skill_notes` also carries one note per verify
+# verdict the planning command call read ("verify <param>=<value> (<probability>, sure | not sure, not used)"), so a
+# verdict that changed no argument is still on the span. The attribute set is unchanged; the content is. The
+# classifier calls behind the verdicts now run under the turn's context, so each leaves an fw.llm.call span.
+#
+# v40: fw.skill.phase v7 (fix-variance) -- `reextracted`: True on the phases of a planning command call planned
+# again after its first phase's lookup found nothing (the arguments extracted once more, the call restarted once).
+# Null on every other phase. The attribute set gains this key; no other span changes.
+#
+# v41: fw.nlu.param_extraction v11 (spec 3.1-3.7) -- the validation step is the Input's model validators
+# (`@model_validator(mode="after")`), and the Signature's `validate_extracted_parameters` hook is gone. The
+# `validation_hook` record keeps its keys (ran, is_valid, message, changed_fields, refused_fields), but its
+# facts now come from the Input's model validators: `changed_fields` are the fields a validator wrote back,
+# and `refused_fields` the fields of a fastworkflow.Refused a validator raised. The record is always emitted
+# when the validation step runs, with ran=False when the Input declares no validator (no facts to report).
+# The key and the attribute set are unchanged; a span recorded before this carries the same keys with the
+# hook's meaning.
+SPAN_CONTRACT_VERSION = 41
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -320,10 +421,15 @@ SPAN_AGENT_STEP = "fw.agent.step"
 
 AGENT_LOOP_SPAN_NAMES = frozenset({SPAN_AGENT_EXECUTE, SPAN_AGENT_STEP})
 
-# One phase of a phased skill call (``fastworkflow.skill_phases``): a bounded
+# One phase of a phased planning command call (``fastworkflow.planning_phases``): a bounded
 # sub-plan run by a fresh executor. Its fw.agent.execute span is its child, so a
 # grader reads each phase's steps, budget and filled facts in one place.
-SPAN_SKILL_PHASE = "fw.skill.phase"
+SPAN_PLANNING_COMMAND_PHASE = "fw.skill.phase"
+
+# The deferred answer of a planning command call (3.16): one model call with the phases' facts,
+# made only when the call's __result__ returned None, or when the call has no __result__ answer
+# to give. It is the answer's own step, not a phase, so it is its own span.
+SPAN_PLANNING_COMMAND_ANSWER = "fw.skill.answer"
 
 # Originally reserved-for-v2 so the schema needed no migration when the deeper
 # emitters landed. They have (D3 amendment, 2026-08-26): fw.nlu.* emit inside
@@ -359,6 +465,9 @@ RESERVED_V2_SPAN_NAMES = frozenset(
 # insight extraction runs after both passes have closed, so its LLM calls parent
 # to the turn root and no pass's cost roll-up can claim them.
 SPAN_DISTILLATION_PASS = "fw.distillation.pass"
+
+# One span per approval-binding transition (approval_binding._audit).
+SPAN_APPROVAL = "fw.approval"
 
 # The attribute a pass-stamping producer records, and the one
 # `comparison.discover_pass_selectors` / `selection_api.DEFAULT_PASS_ATTRIBUTE`
@@ -410,8 +519,10 @@ class SpanContract:
 
 SPAN_CONTRACTS: dict[str, SpanContract] = {
     # v2: `unattended` (the turn ran with no ask_user tool).
+    # v3: `subtask_review` (SPAN_CONTRACT_VERSION v35): the sub-task review gate's outcome for the turn.
+    # v4: `subtask_bindings` (SPAN_CONTRACT_VERSION v37): shown == run per bound sub-task (fix-48np.1).
     SPAN_TURN: SpanContract(
-        version=2,
+        version=4,
         attributes=frozenset(
             {
                 "turn_key",
@@ -424,6 +535,32 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "failure_reason",
                 "suspended_ms",
                 "context_mutations",
+                "subtask_review",
+                "subtask_bindings",
+            }
+        ),
+    ),
+    # v1: one per approval-binding transition (ADR-EXP-025 section 12).
+    SPAN_APPROVAL: SpanContract(
+        version=1,
+        attributes=frozenset(
+            {
+                "approval_record_id",
+                "approval_command",
+                "approval_annotation",
+                "approval_state_before",
+                "approval_state_after",
+                "approval_reason",
+                "approval_outcome",
+                "approval_fingerprint",
+                "approval_rendering_hash",
+                "approval_channel",
+                "approval_identity_class",
+                "approval_identity_ref",
+                "approval_surface",
+                "approval_origin",
+                "approval_mode",
+                "approval_shadow",
             }
         ),
     ),
@@ -482,8 +619,11 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
             }
         ),
     ),
+    # v2: `fast_path_refusal_asked` (SPAN_CONTRACT_VERSION v28): the fast path's refused call's
+    # question was put to the user, and the run suspended on it. None otherwise.
+    # v3: `fast_path_refusal_asked` is withdrawn with the Phase 6 arms (SPAN_CONTRACT_VERSION v30).
     SPAN_AGENT_EXECUTE: SpanContract(
-        version=1,
+        version=3,
         attributes=frozenset(
             {
                 "agent_input",
@@ -498,7 +638,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
             }
         ),
     ),
-    # One phase run of a phased skill call. Opened with the phase (`skill`,
+    # One phase run of a phased planning command call. Opened with the phase (`skill`,
     # `phase`, `phase_index` of `phase_count`, its executor `step_budget`, the
     # `first_step` of its run, `resumed` after an ask_user); closed with `steps`
     # (the phase's numbered plan), `steps_used`, whether it reached its budget
@@ -523,13 +663,26 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # could be read).
     # Absent on an answer-only phase and on a resumed run.
     # v5 (fix-hia1.30): `answer_by_code` on an answer-only phase only: true when code
-    # wrote its answer from its steps with no model call (`skill_phases.answer_by_code`).
-    SPAN_SKILL_PHASE: SpanContract(
-        version=5,
+    # wrote its answer from its steps with no model call (`planning_phases.answer_by_code`).
+    # v6 (fix-3rsq.4.10): `uses_result`, written on an answer-only phase of a command with
+    # a result method when that phase is skipped (no executor, no model call). It was
+    # written from Phase 3 without being declared here.
+    # v1 (fix-3rsq.p14.6): the deferred answer of a planning command call (3.16). `skill`, `phase`
+    # and `phase_index` name the phase whose facts it writes from; `phase_count` the call's phases.
+    # `error_type` is written only when the model call raised.
+    SPAN_PLANNING_COMMAND_ANSWER: SpanContract(
+        version=1,
+        attributes=frozenset({"skill", "phase", "phase_index", "phase_count", "error_type"}),
+    ),
+    # v7: `reextracted` (SPAN_CONTRACT_VERSION v40): True on the phases of a call planned again after its first
+    # phase's lookup found nothing; None otherwise.
+    SPAN_PLANNING_COMMAND_PHASE: SpanContract(
+        version=7,
         attributes=frozenset(
             {
                 "answer_only",
                 "answer_by_code",
+                "uses_result",
                 "skipped",
                 "stop_condition_met",
                 "steps_by_code",
@@ -546,6 +699,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "step_budget",
                 "first_step",
                 "resumed",
+                "reextracted",
                 "steps",
                 "steps_used",
                 "exhausted",
@@ -571,10 +725,16 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # v6: `folded_command` (fix-5jss) is the command text the command tool built
     # from parameters the model passed as tool arguments beside `command`;
     # `tool_args` is still what the model sent.
-    # v7 (fix-6llp): `by_code` (true) on a step code ran (skill_phases.CodeSteps),
+    # v7 (fix-6llp): `by_code` (true) on a step code ran (planning_phases.CodeSteps),
     # not the model; `thought` then says "run by code".
+    # v8: written on a step the policy verifier rewrote (fastworkflow.policy_runtime):
+    # `policy_source` names the row that fired, `policy_outcome` / `policy_mode` /
+    # `policy_table_version` what it decided under which table, `policy_intent` /
+    # `policy_requests` the intent reader's state, `policy_judgement` the question
+    # judge's reason (ask_user only), and `answer` the answer a finish policy sent
+    # back; the step's `observation` is the rewrite the agent read.
     SPAN_AGENT_STEP: SpanContract(
-        version=7,
+        version=8,
         attributes=frozenset(
             {
                 "step_index",
@@ -589,6 +749,14 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "repaired_tool_name",
                 "folded_command",
                 "by_code",
+                "policy_mode",
+                "policy_outcome",
+                "policy_source",
+                "policy_table_version",
+                "policy_intent",
+                "policy_requests",
+                "policy_judgement",
+                "answer",
             }
         ),
     ),
@@ -606,22 +774,36 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # `plan_source` "text" or "none"; older records may still hold "structured"
     # / "text_fallback" and a `subjects` list.
     # v3: `subjects` is no longer written (see SPAN_CONTRACT_VERSION v12).
-    # v4: skills as parameterized commands. `plan_source` may be "skill_call" (the
-    # planner filled a skill's typed parameters and code expanded its steps);
-    # `skill` names the matched skill with params or phases (None otherwise, and on a replan),
-    # `skill_args` holds the arguments of a skill call, `skill_fallback` why a
-    # skill call fell back to the text planner.
-    # v5: `skill_notes`, the notes of a skill call (``SkillCallPlan.notes``: an argument
+    # v4: planning commands as parameterized commands. `plan_source` may be "skill_call" (the
+    # planner filled a planning command's typed parameters and code expanded its steps);
+    # `skill` names the matched planning command with params or phases (None otherwise, and on a replan),
+    # `skill_args` holds the arguments of a planning command call, `skill_fallback` why a
+    # planning command call fell back to the text planner.
+    # v5: `skill_notes`, the notes of a planning command call (``PlanningCommandCallPlan.notes``: an argument
     # a guard or a sure verify verdict replaced, dropped extra steps); None otherwise.
+    # v6: `experiment_arm`, `fast_path` and `recipe_choice` (SPAN_CONTRACT_VERSION v25; Phase 6 arm
+    # selector). `plan_source` may be "recipe_choice" (arm B: the recipe covers the request, so the
+    # plan is its one call).
+    # v7: `skill_refusal_asked` (SPAN_CONTRACT_VERSION v26): True when the planner's refusal of a
+    # planning command call's arguments was put to the user, so the turn suspends on the question instead of
+    # falling back to the text planner; `plan_source` is then "none" and `skill_fallback` still
+    # says why. None otherwise.
+    # v8: the v6 keys `experiment_arm`, `fast_path` and `recipe_choice` are withdrawn: the Phase 6
+    # arms were removed by owner decision 2026-10-30 (SPAN_CONTRACT_VERSION v30). A span recorded at
+    # v6 or v7 still carries them.
+    # v9: `skill_notes` also carries each verify verdict read (SPAN_CONTRACT_VERSION v39). A span recorded
+    # at v8 carries only the notes of the changes.
     SPAN_PLANNER_PLAN: SpanContract(
-        version=5,
+        version=9,
         attributes=frozenset({"model", "replan_trigger", "plan", "plan_source",
-                              "skill", "skill_args", "skill_notes", "skill_fallback"}),
+                              "skill", "skill_args", "skill_notes", "skill_fallback",
+                              "skill_refusal_asked"}),
     ),
     SPAN_PLANNER_REPLAN: SpanContract(
-        version=5,
+        version=9,
         attributes=frozenset({"model", "replan_trigger", "plan", "plan_source",
-                              "skill", "skill_args", "skill_notes", "skill_fallback"}),
+                              "skill", "skill_args", "skill_notes", "skill_fallback",
+                              "skill_refusal_asked"}),
     ),
     # One distillation pass. `fw.pass` is the membership stamp every descendant
     # inherits through ancestry; the rest is the pass's OWN content, recorded
@@ -643,8 +825,11 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # `known_name_*` keys before they were declared here.
     # v3: `auto_navigation_enabled` is absent. Auto-navigation was removed, so
     # there is no flag and no composed step for a measured run to carry.
+    # v4 (fix-jd9o.1): `jev_tiebreak` records Jev's choice among an ambiguous
+    # intent's candidates ({choice, probability, threshold, candidates when it
+    # routed}); `matcher_layer` is then "jev_tiebreak". Absent on earlier versions.
     SPAN_NLU_INTENT: SpanContract(
-        version=3,
+        version=4,
         attributes=frozenset(
             {
                 "context",
@@ -665,6 +850,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "classifier_signal_version",
                 "candidates",
                 "escalation_labels_discarded",
+                "jev_tiebreak",
                 "reducible",
                 "decision_uncertainty",
                 "command_name",
@@ -698,7 +884,30 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         # after the command name and every field defaulted; absent for XML tags), and
         # `unbound_value` is a lone value that bound to no field and was
         # refused. Absent on earlier versions.
-        version=5,
+        # v6 (command-name guard): `command_name_values` records a parameter value
+        # that was the name of a command (the called command's own, or another's in
+        # identifier form) and was treated as not given. Absent on earlier versions.
+        # v7 (word screens): `word_screen_values` records a free-text value that was
+        # only a pronoun or only a kind word or field name of the workflow and was
+        # treated as not given. Absent on earlier versions.
+        # v8 (fix-3rsq.one-hook): `db_lookup` is no longer written (the lookup moved into the
+        # validate_extracted_parameters hook, and db_lookup is a load error). `validation_hook`
+        # now also carries `changed_fields` (fields the hook rewrote in place) and `refused_fields`
+        # (the fields a fastworkflow.Refused named). A span carrying v7 has `db_lookup` and no
+        # `validation_hook` change list, and a reader must not read one as the other.
+        # v9 (fix-jd9o.3): `fields_reset_not_given` ({field: probability}) records the fields an LLM
+        # extraction filled that Jev judged the request does not give, reset to their not-given
+        # value. Absent on earlier versions.
+        # v11 (spec 3.7): `validation_hook` is the Input's model validators' record (the Signature hook is
+        # removed). The keys and their meanings are the same; the producer changed. A span carrying v10
+        # recorded the hook's verdict under the same key.
+        # v10 (fix-qjf4): `argument_check_refusals`, `argument_check_retry`,
+        # `argument_check_refusals_final` and `argument_check_respelled` record the argument checks of
+        # an LLM extraction (fastworkflow.utils.argument_checks): the refused values ("name='value'
+        # why"), the one retry with the refusal appended, what was still refused after it (treated as
+        # not given), and {field: value} for a value that took the request's or the declared spelling.
+        # Absent on earlier versions.
+        version=11,
         attributes=frozenset(
             {
                 "command_name",
@@ -714,10 +923,16 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "extraction_method",
                 "missing_fields",
                 "invalid_fields",
-                "db_lookup",
                 "validation_hook",
                 "decision_uncertainty",
                 "parameters_valid",
+                "command_name_values",
+                "word_screen_values",
+                "fields_reset_not_given",
+                "argument_check_refusals",
+                "argument_check_retry",
+                "argument_check_refusals_final",
+                "argument_check_respelled",
             }
         ),
     ),
@@ -756,7 +971,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
 
 # Written by the emission machinery rather than by an emitter, so it is not part
 # of any emitter's declared set: it describes the record, not the thing recorded.
-ENVELOPE_ATTRIBUTES = frozenset({ATTR_SPAN_CONTRACT_VERSION})
+ENVELOPE_ATTRIBUTES = frozenset({ATTR_SPAN_CONTRACT_VERSION, ATTR_FRAME_ALIAS})
 
 
 def span_contract_versions() -> dict[str, int]:
@@ -991,6 +1206,12 @@ def _get_stack(host: Any) -> Optional[list]:
     return _resolve(host, "trace_span_stack")
 
 
+def get_frame_alias(host: Any) -> str:
+    """The alias of the planning frame on top of *host*; "" for the turn frame."""
+    alias = _resolve(host, "current_frame_alias")
+    return alias if isinstance(alias, str) else ""
+
+
 # ----------------------------------------------------------------------
 # Emission helpers — never raise to the caller
 # ----------------------------------------------------------------------
@@ -1073,7 +1294,7 @@ def start_span(
             context=context,
             start_ns=time.time_ns(),
             status=STATUS_OPEN,
-            attributes=_capped(attributes),
+            attributes=_capped(attributes) | {ATTR_FRAME_ALIAS: get_frame_alias(host)},
             experiment_id=claim.get("experiment_id"),
             task_id=claim.get("task_id"),
             attempt=claim.get("attempt"),
@@ -1123,6 +1344,10 @@ def end_span(
 
         sink = get_sink(host)
         if sink is not None:
+            # A span rebuilt to close across a suspension was never opened here, so it
+            # has no alias yet and takes the frame on top at close. A span from
+            # start_span already has its own, and keeps it.
+            span.attributes.setdefault(ATTR_FRAME_ALIAS, get_frame_alias(host))
             _emit(sink, span)
     except Exception as exc:
         logger.warning(f"end_span({span.name}) failed: {exc!r}")
@@ -1141,7 +1366,7 @@ def context_type(workflow: Any) -> Optional[str]:
     """The name of *workflow*'s active command context, or None. Never raises:
     a capture failure must not fail a turn."""
     try:
-        name = getattr(workflow, "current_command_context_name", None) if workflow else None
+        name = getattr(workflow, "_current_command_context_name", None) if workflow else None
         return str(name) if name else None
     except Exception as exc:
         logger.warning(f"context type read failed: {exc!r}")

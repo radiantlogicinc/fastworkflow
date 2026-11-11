@@ -20,7 +20,12 @@ feed, a control, a tag). The rules, applied in order:
    exactly the same subjects as the sub-task before it, is joined to the one
    before it (a leading subject-less sub-task is joined to the one after it).
    "How risky is Ann Lee?" + "Which findings are driving that?" is one
-   job; "Confirm whether Raj Patel is among its holders" names a person
+   job. The caller may pass ``same_job``, a decision on these two joins (no subject, or the same
+   subjects): ``same_job(earlier, later)`` returns True (join), False (keep apart: "Who wrote Dune?" +
+   "Who has Dune out?" are two questions with two answers) or None (no opinion: join). A limit
+   ("Apply none of them.") is joined without asking. The workflow
+   agent passes Jev's verdict (``workflow_agent._same_request_check``); this module makes no call
+   itself. "Confirm whether Raj Patel is among its holders" names a person
    of its own and stays separate. A name that extends a name of the group
    before it ("Payroll_Approver" after "Payroll": the shorter name
    followed by ``_ - / . :`` or a space) is no new subject either when the
@@ -57,7 +62,7 @@ Fewer than two sub-tasks left means the request is one job: ``[user_query]``.
 
 Subjects are found without any catalog: back-ticked and quoted spans,
 uids, the identifiers the workflow declares (``identifiers``: compiled patterns, e.g. from
-``identifier_patterns`` of its ``_skills/_split.py``), and capitalised name spans (common words that open a
+``identifier_patterns`` of its ``_commands/_split.py``), and capitalised name spans (common words that open a
 sentence, weekdays and months are not names). "X and Y Ltd", "X and Sons":
 a chain of names joined by "and" or commas whose last word is a company
 suffix is one name (a business unit). A sub-task mentions a subject when it
@@ -70,6 +75,7 @@ from __future__ import annotations
 import functools
 import re
 import unicodedata
+from typing import Callable, NamedTuple, Optional
 
 __all__ = ["merge_subtasks", "request_subjects", "subjects_in"]
 
@@ -554,6 +560,153 @@ def _drop_contained(items: list[str], known: list[str], identifiers: tuple[re.Pa
     return [items[i] for i in keep]
 
 
+#: Jev calls (near-copy checks, same-request joins, job-type labels) one over-cap reduction may make together.
+#: The caller adds at most two per remaining sub-task for referents (``resolve_referents``).
+REDUCTION_JEV_CALLS = 60
+#: Two sub-tasks are near copies only when they name the same subjects and share this much of their content words.
+NEAR_COPY_OVERLAP = 0.5
+
+JobLabel = Callable[[str], Optional[str]]
+
+
+class Reduction(NamedTuple):
+    items: list[str]
+    #: True once ``merge_subtasks`` has run on ``items`` (the caller then must not merge them again)
+    merged: bool
+    #: Jev calls made (near-copy checks, same-request joins, labels)
+    jev_calls: int
+
+
+class JoinedSubtask(str):
+    """A sub-task that ``reduce_to_cap`` made by joining others, to keep the list within the cap. It is its text (a
+    str) and carries ``parts``, the original sub-tasks it joins, which the run may take as jobs of their own
+    (``review_proposals.expand_joined_parts``). Parts are leaves: a part is never a JoinedSubtask."""
+
+    parts: tuple[str, ...]
+
+    def __new__(cls, text: str, parts: tuple[str, ...] = ()):
+        item = super().__new__(cls, text)
+        item.parts = tuple(str(part) for part in parts)
+        return item
+
+    def __getnewargs__(self):
+        return (str(self), self.parts)
+
+
+def _concatenate(first: str, second: str) -> str:
+    """Both texts whole, the first ended as a sentence. ``_join`` is not used: it cuts a clause the second text shares
+    with the first, and with it a name that follows the clause."""
+    first = first.strip()
+    return (first if re.search(r"[.?!]$", first) else first + ".") + " " + second.strip()
+
+
+def reduce_to_cap(user_query: str, subtasks: list[str], cap: int, identifiers: tuple[re.Pattern, ...] = (), *,
+                  context: str = "", same_job: SameJob | None = None,
+                  near_copy: SameJob | None = None, label: JobLabel | None = None,
+                  max_jev_calls: int = REDUCTION_JEV_CALLS) -> Reduction:
+    """``subtasks`` brought to at most ``cap`` jobs, never given up on for their number. Stops as soon as it fits.
+
+    The ladder: (1) exact copies; (2) a sub-task contained in another; (3) near copies, a pair naming the same
+    subjects with ``NEAR_COPY_OVERLAP`` of their words in common that ``near_copy`` (Jev, optional) confirms,
+    the later one dropped; (4) ``merge_subtasks`` with ``same_job``; (5) adjacent sub-tasks joined, first those
+    ``label`` (the planning command matcher, optional) gives the same job type, then the adjacent pair with the
+    most content words in common. A joined text holds both parts, so every subject stays named. The three Jev
+    callbacks share ``max_jev_calls``; past it they are not asked and the deterministic rule decides.
+    """
+    calls = 0
+
+    def budgeted(callback):
+        if callback is None:
+            return None
+
+        def ask(*args):
+            nonlocal calls
+            if calls >= max_jev_calls:
+                return None
+            calls += 1
+            return callback(*args)
+        return ask
+
+    items = [t for t in subtasks if t and t.strip()]
+    if len(items) <= cap:
+        return Reduction(items, False, 0)
+    items = list(dict.fromkeys(items))
+    known = request_subjects(user_query, identifiers)
+    if len(items) > cap:
+        items = _drop_contained(items, known, identifiers)
+    ask_near = budgeted(near_copy)
+    if len(items) > cap and ask_near is not None:
+        subjects = [subjects_in(t, known, identifiers) for t in items]
+        words = [_content(t) for t in items]
+        dropped: set[int] = set()
+        kept: list[int] = []
+        for j in range(len(items)):
+            if len(items) - len(dropped) <= cap:
+                break
+            for i in kept:
+                if subjects[i] and subjects[i] == subjects[j] and _jaccard(words[i], words[j]) >= NEAR_COPY_OVERLAP \
+                        and ask_near(items[i], items[j]) is True:
+                    dropped.add(j)
+                    break
+            else:
+                kept.append(j)
+        items = [t for k, t in enumerate(items) if k not in dropped]
+    if len(items) <= cap:
+        return Reduction(items, False, calls)
+    items = merge_subtasks(user_query, items, identifiers, same_job=budgeted(same_job), context=context)
+    if len(items) <= cap:
+        return Reduction(items, True, calls)
+    labels: list[str | None] = [None] * len(items)
+    ask_label = budgeted(label)
+    if ask_label is not None:
+        labels = [ask_label(t) for t in items]
+    parts = [1] * len(items)
+    while len(items) > cap:
+        # the smallest pair first, so that no job swallows the list: among adjacent pairs of one job type, else
+        # among all adjacent pairs, the one with the fewest parts, then the most words in common, then the earliest
+        words = [_content(t) for t in items]
+        pairs = range(len(items) - 1)
+        same = [k for k in pairs if labels[k] and labels[k] == labels[k + 1]]
+        at = min(same or pairs, key=lambda k: (parts[k] + parts[k + 1], -_jaccard(words[k], words[k + 1]), k))
+        leaves = tuple(getattr(items[at], "parts", None) or (str(items[at]),)) + \
+            tuple(getattr(items[at + 1], "parts", None) or (str(items[at + 1]),))
+        items[at:at + 2] = [JoinedSubtask(_concatenate(items[at], items[at + 1]), leaves)]
+        labels[at:at + 2] = [labels[at]]
+        parts[at:at + 2] = [parts[at] + parts[at + 1]]
+    return Reduction(items, True, calls)
+
+
+#: A run of this many words written twice in one sub-task is a copied clause, not a phrase of the request.
+REPEATED_CLAUSE_WORDS = 8
+
+
+def without_repeated_clauses(text: str, min_words: int = REPEATED_CLAUSE_WORDS) -> str:
+    """``text`` with each clause of ``min_words`` or more words that it already holds cut out at its later copy.
+
+    A model that copies a sub-task can write one clause twice inside it ("A has asked for R: triage it, and A
+    has asked for R: triage it, and ..."). The first copy is kept, the words after the copy continue the
+    sentence, and ``text`` comes back unchanged when no clause repeats (the same object's text, unnormalised).
+    """
+    words = text.split()
+    kept: list[str] = []
+    seen: dict[tuple[str, ...], int] = {}
+    i = 0
+    while i < len(words):
+        key = tuple(words[i:i + min_words])
+        start = seen.get(key) if len(key) == min_words else None
+        if start is None:
+            kept.append(words[i])
+            i += 1
+            if len(kept) >= min_words:
+                seen.setdefault(tuple(kept[-min_words:]), len(kept) - min_words)
+            continue
+        k = 0
+        while i + k < len(words) and start + k < len(kept) and words[i + k] == kept[start + k]:
+            k += 1
+        i += k
+    return text if len(kept) == len(words) else " ".join(kept)
+
+
 def _join(texts: list[str]) -> str:
     out: list[str] = []
     seen: set[str] = set()
@@ -566,7 +719,7 @@ def _join(texts: list[str]) -> str:
             out[-1] += "."
         out.append(t[:1].upper() + t[1:] if out else t)
         seen |= w
-    return " ".join(out)
+    return without_repeated_clauses(" ".join(out))
 
 
 def _sentences(text: str) -> list[str]:
@@ -931,19 +1084,43 @@ def _carry_limits(user_query: str, texts: list[str], known: list[str],
     return out
 
 
+#: Rule 3's join decision, from the caller: ``(earlier, later) -> True`` (one job), ``False`` (two jobs) or
+#: ``None`` (no opinion: the lexical rule joins them).
+SameJob = Callable[[str, str], Optional[bool]]
+
+
 def merge_subtasks(user_query: str, subtasks: list[str],
-                   identifiers: tuple[re.Pattern, ...] = ()) -> list[str]:
+                   identifiers: tuple[re.Pattern, ...] = (),
+                   same_job: SameJob | None = None, context: str = "") -> list[str]:
     """``subtasks`` with the parts that are not independent jobs joined; ``[user_query]`` when one job is left.
 
-    Pure: no model and no I/O. Fewer than two sub-tasks are returned unchanged. ``identifiers``
+    Pure: no model and no I/O of its own. Fewer than two sub-tasks are returned unchanged. ``identifiers``
     are the workflow's identifier patterns (``identifier_patterns``); each match is a subject.
+    ``same_job`` (optional) decides rule 3's joins of a sub-task naming no subject, or exactly the
+    subjects of the group before it: it gets the group's text so far and the sub-task, and the two are
+    joined unless it returns False. Without it, rule 3 joins them as before.
+    ``context`` (optional) is the earlier turns the splitter was shown: a name or value a sub-task takes from
+    it ("Who has Dune out?" for "Who has it out?" after a turn about Dune) is not an invention (rule 1). It is
+    never the request: ``user_query`` alone is what is returned when one job is left.
     """
+
+    def joins(texts: list[str], text: str) -> bool:
+        # A limit ("Apply none of them.") is never a job of its own: it is joined as before, without asking
+        # (rule 5 carries it to the jobs it limits). Statements were placed by rule 3a already.
+        earlier = _join(texts)
+        if same_job is None or _is_limit(earlier) or _is_limit(text):
+            return True
+        return same_job(earlier, text) is not False
+
     items = [t for t in subtasks if t and t.strip()]
     if len(items) < 2:
         return list(subtasks)
     known = request_subjects(user_query, identifiers)
-    items = [t for t in items if not _is_meta(t) and not _invents_value(t, user_query, known)
-             and not _invents_record(t, user_query, known, identifiers)]
+    # rule 1 reads the request and the earlier turns: what the splitter took from either is not invented
+    source = f"{user_query}\n{context}" if context else user_query
+    given = request_subjects(source, identifiers) if context else known
+    items = [t for t in items if not _is_meta(t) and not _invents_value(t, source, given)
+             and not _invents_record(t, source, given, identifiers)]
     items = _drop_contained(items, known, identifiers)
     if len(items) < 2:
         return [user_query]
@@ -957,14 +1134,15 @@ def merge_subtasks(user_query: str, subtasks: list[str],
     groups: list[tuple[list[str], frozenset[str]]] = []
     for text in items:
         subj = subjects_in(text, known, identifiers)
-        if groups and (not subj or subj == groups[-1][1]):
+        if groups and (not subj or subj == groups[-1][1]) and joins(groups[-1][0], text):
             groups[-1][0].append(text)
         elif groups and subj < groups[-1][1] and _observes_change(text):
             groups[-1][0].append(text)
         elif groups and _extends_group(subj, groups[-1][1]) and (
                 _refers_back(text) or _request_refers_back(user_query, subj - groups[-1][1])):
             groups[-1] = (groups[-1][0] + [text], groups[-1][1] | subj)
-        elif groups and not groups[-1][1]:          # a leading subject-less part joins the next one
+        elif groups and not groups[-1][1] and subj and joins(groups[-1][0], text):
+            # a leading subject-less part joins the next one
             groups[-1] = (groups[-1][0] + [text], subj)
         else:
             groups.append(([text], subj))

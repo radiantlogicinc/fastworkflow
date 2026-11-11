@@ -53,24 +53,24 @@ def test_context_change_notifies_and_unsubscribe(todo_list_env):
     seen: list[object] = []
 
     def on_change():
-        seen.append(workflow.current_command_context)
+        seen.append(workflow._current_command_context)
 
     workflow.add_context_change_listener(on_change)
     marker_a = object()
     marker_b = object()
 
-    workflow.current_command_context = marker_a
+    workflow.record = marker_a
     assert seen == [marker_a]
 
     # Same object identity: no notification
-    workflow.current_command_context = marker_a
+    workflow.record = marker_a
     assert seen == [marker_a]
 
-    workflow.current_command_context = marker_b
+    workflow.record = marker_b
     assert seen == [marker_a, marker_b]
 
     workflow.remove_context_change_listener(on_change)
-    workflow.current_command_context = marker_a
+    workflow.record = marker_a
     assert seen == [marker_a, marker_b]
 
 
@@ -90,10 +90,10 @@ def test_context_change_listener_exception_swallowed(todo_list_env, caplog):
     workflow.add_context_change_listener(ok)
 
     with caplog.at_level(logging.WARNING):
-        workflow.current_command_context = object()
+        workflow.record = object()
 
     assert good == [1]
-    assert workflow.current_command_context is not None
+    assert workflow._current_command_context is not None
     assert any("context-change listener failed" in r.message for r in caplog.records)
 
 
@@ -109,11 +109,11 @@ def test_bound_method_listener_can_be_removed(todo_list_env):
 
     obs = Observer()
     workflow.add_context_change_listener(obs.on_change)
-    workflow.current_command_context = object()
+    workflow.record = object()
     assert hits == [1]
 
     workflow.remove_context_change_listener(obs.on_change)
-    workflow.current_command_context = object()
+    workflow.record = object()
     assert hits == [1]
 
 
@@ -205,7 +205,11 @@ def test_deferred_context_sections_omit_parameters_and_name_navigation(
     current, _, deferred = text.partition(
         "Commands available after entering the TodoListManager context"
     )
-    assert "type:" in current
+    # The global commands declare no Output any more (CME what_can_i_do's dead Output was removed
+    # with fix-3rsq.declared-output-required), so the global section renders no type line.
+    assert "- what_can_i_do" in current
+    assert "outputs:" not in current
+    assert "type:" not in current
     assert "type:" not in deferred
     assert "outputs:" not in deferred.lower()
     assert "- create_todo_list" in deferred or "- get_todo_list" in deferred
@@ -323,12 +327,12 @@ def test_agent_system_prompt_refreshes_with_parameters_on_context_change(
         return system.get("content", "")
 
     at_root = system_text()
-    assert "type:" in at_root
+    assert "type:" not in at_root  # no global command declares an Output or a typed input now
 
     class TodoListManager:
         pass
 
-    workflow.current_command_context = TodoListManager()
+    workflow.record = TodoListManager()
     in_manager = system_text()
     assert in_manager != at_root
     assert "TodoListManager" in in_manager or "create_todo_list" in in_manager.lower()
@@ -383,7 +387,7 @@ def test_refresh_agent_available_commands_on_context_change(todo_list_env):
     class TodoListManager:
         pass
 
-    workflow.current_command_context = TodoListManager()
+    workflow.record = TodoListManager()
     refreshed = host.workflow_tool_agent.inputs["available_commands"]
     assert refreshed != "INITIAL"
     assert isinstance(refreshed, str)
@@ -391,7 +395,7 @@ def test_refresh_agent_available_commands_on_context_change(todo_list_env):
 
     # No-op when agent has no available_commands key
     host.workflow_tool_agent.inputs = {"query": "x"}
-    workflow.current_command_context = object()
+    workflow.record = object()
     assert host.workflow_tool_agent.inputs == {"query": "x"}
 
 
@@ -472,11 +476,11 @@ def test_wec_close_removes_context_change_listener(todo_list_env):
     workflow.add_context_change_listener(wec._on_app_context_change)
     wec._context_change_listener = wec._on_app_context_change
 
-    workflow.current_command_context = object()
+    workflow.record = object()
     assert hits == [1]
 
     wec.close()
-    workflow.current_command_context = object()
+    workflow.record = object()
     assert hits == [1]
 
     # Real WEC.close path also clears the listener attribute when present

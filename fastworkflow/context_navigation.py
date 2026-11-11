@@ -13,16 +13,17 @@ from __future__ import annotations
 
 import heapq
 import logging
-import re
 from dataclasses import dataclass
 
+from typing import Iterable
+
 import fastworkflow
+from fastworkflow.command_context_model import CommandContextModel
+from fastworkflow.command_declarations import declared_descend
 from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.entry_declarations import declared_entry_commands, declared_occupiable
+from fastworkflow.entry_declarations import declared_occupiable
 
 logger = logging.getLogger(__name__)
-
-_PLACEHOLDER = re.compile(r"<([A-Za-z_][A-Za-z0-9_]*)>")
 
 #: ``go_up`` is tried before ``reset_context`` when both cost the same, because
 #: ``go_up`` is the move that lands on the live parent. ``reset_context`` still
@@ -71,20 +72,27 @@ def live_context_chain(workflow) -> tuple[str, ...]:
     the object in hand, which has one parent. A path that climbed a parent the
     live object does not have would send the caller the wrong way.
     """
-    current = getattr(workflow, "current_command_context_name", "*")
+    current = getattr(workflow, "_current_command_context_name", "*")
     if current == "*":
         return ("*",)
     names = [current]
     seen = {current}
-    obj = getattr(workflow, "current_command_context", None)
-    root = getattr(workflow, "root_command_context", None)
+    obj = getattr(workflow, "_current_command_context", None)
+    root = getattr(workflow, "root", None)
     while obj is not None and obj is not root:
         try:
             parent = workflow.get_parent(obj)
         except Exception:
             logger.debug("parent walk stopped at %r", names[-1], exc_info=True)
             break
-        if parent is None or parent is root or parent is obj:
+        if parent is None or parent is obj:
+            break
+        if parent is root:
+            # The root object is a context of its own (library: Library), and go_up reaches it.
+            # Named as the exact-name path names it (exact_name_scopes), before the global scope.
+            root_name = fastworkflow.Workflow.get_command_context_name(root)
+            if root_name not in seen:
+                names.append(root_name)
             break
         parent_name = type(parent).__name__
         if parent_name in seen:
@@ -95,6 +103,138 @@ def live_context_chain(workflow) -> tuple[str, ...]:
     if names[-1] != "*":
         names.append("*")
     return tuple(names)
+
+
+def lookup_scopes(workflow_folderpath: str, context_names: Iterable[str]) -> tuple[str, ...]:
+    """The planning command scopes of the lookup path (3.9) that visits *context_names*, in order.
+
+    Each context is followed by its bases in ``CommandContextModel`` order, transitively; a scope
+    already on the path is skipped; ``""`` (the root) ends it. Without a readable model the
+    bases are none. ``workflow_agent.planning_scopes`` reads the path here.
+    """
+    base_contexts: dict[str, tuple[str, ...]] = {}
+    if workflow_folderpath:
+        try:
+            base_contexts = CommandContextModel.load_base_contexts(workflow_folderpath)
+        except Exception as error:  # noqa: BLE001 - carry on without bases
+            logger.warning(f"planning_scopes: could not load CommandContextModel for {workflow_folderpath}: "
+                           f"{type(error).__name__}: {error}")
+    scopes: list[str] = []
+    seen: set[str] = set()
+
+    def add_with_bases(ctx_name: str) -> None:
+        if not ctx_name or ctx_name == "*":
+            return
+        if ctx_name not in seen:
+            seen.add(ctx_name)
+            scopes.append(ctx_name)
+        for base in base_contexts.get(ctx_name, ()):
+            if base and base != "*" and base not in seen:
+                seen.add(base)
+                scopes.append(base)
+
+    for name in context_names:
+        add_with_bases(name)
+    scopes.append("")
+    return tuple(scopes)
+
+
+@dataclass(frozen=True)
+class LookupScope:
+    """One scope of the exact-name path (design 3.9): a context, and the record a command there runs on.
+
+    ``record`` is the object the command runs on: the current object for its own context and
+    bases, the enclosing record for that record's context and bases, and the root object for
+    the global scope ``*``.
+    """
+
+    context_name: str
+    record: object | None
+
+
+def exact_name_scopes(workflow) -> tuple[LookupScope, ...]:
+    """The scopes an exact command name is looked up in, nearest first (design 3.9, "The path").
+
+    The current object's context, then its bases (``CommandContextModel.ordered_base_contexts``,
+    transitively), then each record on the LIVE chain (``workflow.get_parent``) with its bases, up to
+    and including the root object, then the global scope ``*``. A scope already on the path is
+    skipped, and ``*`` listed as a base is the global scope at the end. The root edge is settled as
+    ``planning_scopes`` settles it: a parent of None, or a parent already on the path, ends the chain.
+    With no current object there is only the global scope.
+    """
+    folder = getattr(workflow, "folderpath", None)
+    root = getattr(workflow, "root", None)
+    obj = getattr(workflow, "_current_command_context", None)
+    records: list[tuple[str, object]] = []
+    if obj is not None:
+        records.append((fastworkflow.Workflow.get_command_context_name(obj), obj))
+        visited: set[int] = {id(obj)}
+        while obj is not root:
+            try:
+                parent = workflow.get_parent(obj)
+            except Exception:  # noqa: BLE001 - never fail a lookup on the parent walk
+                logger.debug("exact-name lookup parent walk stopped at %r", obj, exc_info=True)
+                break
+            if parent is None or id(parent) in visited:
+                break
+            visited.add(id(parent))
+            records.append((fastworkflow.Workflow.get_command_context_name(parent), parent))
+            if parent is root:
+                break
+            obj = parent
+
+    model = None
+    if folder and records:
+        try:
+            model = fastworkflow.RoutingRegistry.get_definition(folder).context_model
+        except Exception:  # noqa: BLE001 - without a model the scopes are the contexts alone
+            logger.debug("exact-name lookup: no context model for %s", folder, exc_info=True)
+
+    scopes: list[LookupScope] = []
+    seen: set[str] = set()
+
+    def add(context_name: str, record: object) -> None:
+        if context_name and context_name != "*" and context_name not in seen:
+            seen.add(context_name)
+            scopes.append(LookupScope(context_name, record))
+
+    for context_name, record in records:
+        add(context_name, record)
+        if model is not None:
+            for base in model.ordered_base_contexts(context_name):
+                add(base, record)
+    scopes.append(LookupScope("*", root))
+    return tuple(scopes)
+
+
+def scope_command_names(workflow_folderpath: str, context_name: str) -> tuple[str, ...]:
+    """The qualified command names a scope offers: its commands, inherited ones and planning commands."""
+    crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
+    return tuple(sorted({*crd.get_command_names(context_name),
+                         *crd.get_planning_command_names(context_name)}))
+
+
+def token_names_command(token: str, name: str) -> bool:
+    """Whether a typed command token names *name*: a qualified token must match the whole name."""
+    return token.lower() == (name if "/" in token else name.split("/")[-1]).lower()
+
+
+def command_on_path(workflow, token: str) -> tuple[LookupScope, tuple[str, ...]] | None:
+    """The nearest scope on the exact-name path that has a command the token names, with those names.
+
+    The names are the matching qualified names within that one scope: one, unless the token is
+    ambiguous there. The caller answers a framework core command name first (it is always in the
+    current scope); this lookup does not know the core set. None when no scope names the token.
+    """
+    folder = getattr(workflow, "folderpath", None)
+    if not token or not isinstance(folder, str) or not folder:
+        return None
+    for scope in exact_name_scopes(workflow):
+        names = scope_command_names(folder, scope.context_name)
+        hits = tuple(name for name in names if token_names_command(token, name))
+        if hits:
+            return scope, hits
+    return None
 
 
 def plan_navigation(
@@ -320,14 +460,16 @@ def unavailable_command_message(
 def home_contexts(workflow, token: str) -> list[str]:
     """The most specific contexts that define the command ``token`` (short or qualified).
 
-    A context another home context inherits from is a base, not somewhere to
+    Planning commands count as commands here, as they do for the agent: a planning
+    command is refused from a context it is not runnable in, and named by the same
+    refusal. A context another home context inherits from is a base, not somewhere to
     navigate to, so only the most specific ones are named.
     """
     app = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
     wanted = token.lower()
     homes = {context for context, names in app.contexts.items()
              if any(wanted == (name if "/" in token else name.split("/")[-1]).lower()
-                    for name in names)}
+                    for name in (*names, *app.get_planning_command_names(context)))}
     inherited = set().union(*(app.context_model.inherited_base_contexts(c) for c in homes))
     return sorted(homes - inherited)
 
@@ -340,7 +482,7 @@ def code_path(workflow, command: str) -> list[str] | None:
     ``reset_context``, an opener with no parameters): anything else is the agent's.
     """
     try:
-        current = workflow.current_command_context_name
+        current = workflow._current_command_context_name
         homes = home_contexts(workflow, command)
         paths = plan_navigation(current, homes, live_context_chain(workflow),
                                 collect_descend_edges(workflow.folderpath))
@@ -396,11 +538,12 @@ def render_already_in_context(token: str, current: str, workflow) -> str:
 
 
 def collect_descend_edges(workflow_folderpath: str) -> tuple[DescendEdge, ...]:
-    """Descend commands declared by ``descends_to`` and by ``enter_command``.
+    """The navigation edges, declared by ``@descends_to`` on each command and nothing else.
 
-    ``enter_command`` supplies the parameter names ``descends_to`` does not
-    (``open_account_by_uid <account_uid>``). It is an edge into its context unless
-    the command's own ``descends_to`` names a different context.
+    ``when_parameter`` on ``@descends_to`` makes the edge conditional: the parameter is then required to
+    enter (``required_to_enter``). The parameters the command needs to run come from its required
+    ``Input`` fields (``needs``), as ``_required_parameters`` reads them (design 3.15). A context
+    class's ``enter_command`` is no longer read; it is a load error (``entry_declarations``).
     """
     try:
         routing = RoutingRegistry.get_definition(workflow_folderpath)
@@ -422,37 +565,42 @@ def collect_descend_edges(workflow_folderpath: str) -> tuple[DescendEdge, ...]:
                 if source == target:
                     continue
                 shown = _shown_command(source, command_key, contexts)
-                _put(raw, _RawEdge(source, shown, command_key, target, gate, ()))
-
-    for context_name, names in contexts.items():
-        if not _enterable(context_name, occupiable):
-            continue
-        for declaration in declared_entry_commands(workflow_folderpath, context_name):
-            token, placeholders = _parse_enter(declaration)
-            if not token:
-                continue
-            effect = _effect_for_token(token, effects, contexts)
-            if effect is not None and context_name not in effect.declared_targets():
-                continue
-            for source, routing_name in _sources_for_token(token, contexts):
-                if source == context_name:
-                    continue
-                shown = _shown_command(source, routing_name, contexts)
-                _put(raw, _RawEdge(
-                    source, shown, routing_name, context_name, None, placeholders))
+                _put(raw, _RawEdge(source, shown, command_key, target, gate))
 
     schema: dict[str, tuple[str, ...] | None] = {}
     edges: dict[tuple[str, str, str], DescendEdge] = {}
     for record in raw.values():
         if record.routing_name not in schema:
             schema[record.routing_name] = _required_parameters(routing, record.routing_name)
-        needs, required = _classify(
-            schema[record.routing_name], record.placeholders, record.gate)
+        needs, required = _classify(schema[record.routing_name], record.gate)
         key = (record.source, record.command, record.target)
-        edge = DescendEdge(record.source, record.command, record.target, needs, required)
-        existing = edges.get(key)
-        edges[key] = edge if existing is None else _merge_edge(existing, edge)
+        edges[key] = DescendEdge(record.source, record.command, record.target, needs, required)
     return tuple(edges.values())
+
+
+def entering_commands(workflow_folderpath: str, context_name: str) -> list[str]:
+    """The commands that enter *context_name*, as a hint shows them: the name, then the values it needs.
+
+    Read from the descend edges, so a command's parameters are the ones its ``Input`` declares
+    (``get_todo_list <id>``). Empty when no command declares that it enters the context.
+    """
+    try:
+        edges = collect_descend_edges(workflow_folderpath)
+    except Exception:
+        logger.debug("entering commands unread for %r", context_name, exc_info=True)
+        return []
+    shown = {
+        " ".join([edge.command, *(f"<{name}>" for name in _union(edge.needs, edge.required_to_enter))])
+        for edge in edges
+        if edge.target == context_name
+    }
+    return sorted(shown)
+
+
+def declared_descends_to(routing, command_name: str) -> str | None:
+    """The context a command declares it enters with ``@descends_to``, or None."""
+    descend = _declared_descend(routing, command_name)
+    return descend.target if descend is not None else None
 
 
 @dataclass(frozen=True)
@@ -462,7 +610,6 @@ class _RawEdge:
     routing_name: str
     target: str
     gate: str | None
-    placeholders: tuple[str, ...]
 
 
 def _put(raw: dict[tuple[str, str, str], _RawEdge], record: _RawEdge) -> None:
@@ -477,13 +624,12 @@ def _put(raw: dict[tuple[str, str, str], _RawEdge], record: _RawEdge) -> None:
         existing.routing_name or record.routing_name,
         record.target,
         existing.gate or record.gate,
-        _union(existing.placeholders, record.placeholders),
     )
 
 
 @dataclass(frozen=True)
 class _DeclaredDescend:
-    """A command's ``descends_to`` attribute."""
+    """A command's ``@descends_to`` declaration."""
 
     target: str
     when_parameter_present: str | None = None
@@ -493,10 +639,10 @@ class _DeclaredDescend:
 
 
 def _declared_descend(routing, command_name: str) -> _DeclaredDescend | None:
-    """The ``descends_to`` a command declares on its response-generator class, or None.
+    """The ``@descends_to`` a command declares on its response-generator class, or None.
 
     The class is read through the same routing lookup as the other command
-    facts. ``descend_parameter`` is the parameter whose presence makes the command
+    facts. ``when_parameter`` is the parameter whose presence makes the command
     descend; without it the command always descends.
     """
     try:
@@ -505,19 +651,18 @@ def _declared_descend(routing, command_name: str) -> _DeclaredDescend | None:
     except Exception:
         logger.debug("descend declaration unread for %r", command_name, exc_info=True)
         return None
-    target = getattr(module, "descends_to", None)
-    if not isinstance(target, str) or not target.strip():
+    declared = declared_descend(module)
+    if declared is None:
         return None
-    gate = getattr(module, "descend_parameter", None)
-    gate = gate.strip() if isinstance(gate, str) and gate.strip() else None
-    return _DeclaredDescend(target.strip(), gate)
+    target, gate = declared
+    return _DeclaredDescend(target, gate)
 
 
 def _navigation_effects(workflow_folderpath: str):
-    """The ``descends_to`` commands and the ``occupiable`` contexts of a workflow.
+    """The ``@descends_to`` commands and the ``occupiable`` contexts of a workflow.
 
     Both are read from the workflow's own classes: ``occupiable`` on a context's
-    callback class, ``descends_to`` on a command's response-generator class. A
+    callback class, ``@descends_to`` on a command's response-generator class. A
     context or command that declares nothing is absent from the result.
     """
     effects: dict = {}
@@ -550,27 +695,6 @@ def _contexts_for_command_key(
     return tuple(name for name, names in contexts.items() if command_key in names)
 
 
-def _sources_for_token(
-    token: str, contexts: dict[str, list[str]],
-) -> tuple[tuple[str, str], ...]:
-    found: list[tuple[str, str]] = []
-    for context_name, names in contexts.items():
-        for name in names:
-            if name.split("/")[-1] == token:
-                found.append((context_name, name))
-                break
-    return tuple(found)
-
-
-def _effect_for_token(token: str, effects: dict, contexts: dict[str, list[str]]):
-    for command_key, effect in effects.items():
-        if command_key.split("/")[-1] != token:
-            continue
-        if _contexts_for_command_key(command_key, contexts):
-            return effect
-    return None
-
-
 def _shown_command(
     source: str, routing_name: str, contexts: dict[str, list[str]],
 ) -> str:
@@ -585,13 +709,6 @@ def _shown_command(
     if routing_name in collisions:
         return routing_name
     return collisions[0]
-
-
-def _parse_enter(declaration: str) -> tuple[str, tuple[str, ...]]:
-    parts = declaration.split(None, 1)
-    if not parts:
-        return "", ()
-    return parts[0], tuple(_PLACEHOLDER.findall(declaration))
 
 
 def _required_parameters(routing, command_name: str) -> tuple[str, ...] | None:
@@ -620,26 +737,18 @@ def _required_parameters(routing, command_name: str) -> tuple[str, ...] | None:
 
 def _classify(
     schema_required: tuple[str, ...] | None,
-    placeholders: tuple[str, ...],
     gate: str | None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Split parameters into 'must pass to run' and 'must pass to enter'.
 
-    A required input is ``needs``. ``when_parameter_present`` on an optional
-    field is the second kind: the command runs without it and stays put.
-    Placeholders on ``enter_command`` join that second kind when the schema
-    does not already call them required, so a signature that failed to import
-    still names the value.
+    A required input is ``needs``. ``when_parameter`` on an optional field is the
+    second kind: the command runs without it and stays put.
     """
     needs = tuple(schema_required or ())
-    required: list[str] = []
+    required: tuple[str, ...] = ()
     if gate and gate not in needs:
-        required.append(gate)
-    for name in placeholders:
-        if name in needs or name in required:
-            continue
-        required.append(name)
-    return needs, tuple(required)
+        required = (gate,)
+    return needs, required
 
 
 def _union(left: tuple[str, ...], right: tuple[str, ...]) -> tuple[str, ...]:
@@ -650,15 +759,6 @@ def _union(left: tuple[str, ...], right: tuple[str, ...]) -> tuple[str, ...]:
             seen.add(name)
             merged.append(name)
     return tuple(merged)
-
-
-def _merge_edge(left: DescendEdge, right: DescendEdge) -> DescendEdge:
-    needs = _union(left.needs, right.needs)
-    required = tuple(
-        name for name in _union(left.required_to_enter, right.required_to_enter)
-        if name not in needs
-    )
-    return DescendEdge(left.source, left.command, left.target, needs, required)
 
 
 def _format_step(step: NavStep) -> str:

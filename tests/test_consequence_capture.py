@@ -34,7 +34,7 @@ from tests.todo_list_workflow.application.todo_manager import TodoListManager
 # TodoList (create_todo_list.py line 55).
 NAVIGATING_COMMAND = "TodoListManager/create_todo_list"
 
-# Reads and returns; never touches current_command_context.
+# Reads and returns; never assigns workflow.record.
 NON_NAVIGATING_COMMAND = "TodoListManager/list_todo_lists"
 
 
@@ -83,7 +83,7 @@ def ctx(initialized_fastworkflow, todo_workflow_path, tmp_path, sink):
     )
     context = WorkflowExecutionContext(run_as_agent=False, trace_sink=sink)
     context.bind_app_workflow(workflow)
-    workflow.root_command_context = TodoListManager(str(tmp_path / "todo_list.json"))
+    workflow.root = TodoListManager(str(tmp_path / "todo_list.json"))
     yield context
     with suppress(Exception):
         context.close()
@@ -136,7 +136,7 @@ def test_the_prose_path_records_context_types_too(
     )
     context = WorkflowExecutionContext(run_as_agent=False, trace_sink=sink)
     context.bind_app_workflow(workflow)
-    workflow.root_command_context = TodoListManager(str(tmp_path / "todo_list.json"))
+    workflow.root = TodoListManager(str(tmp_path / "todo_list.json"))
 
     real_perform_action = CommandExecutor.perform_action
 

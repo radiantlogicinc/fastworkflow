@@ -31,13 +31,13 @@ class ResponseGenerator:
     """Call the Chatroom.broadcast instance method."""
 
     def _process_command(self, workflow: fastworkflow.Workflow, input: Signature.Input) -> None:
-        chatroom: ChatRoom = workflow.command_context_for_response_generation
+        chatroom: ChatRoom = workflow.record
         chatroom.broadcast(input.message)
 
     def __call__(self, workflow: 
                  fastworkflow.Workflow, 
                  command: str, 
-                 command_parameters: Signature.Input) -> fastworkflow.CommandOutput:
+                 command_parameters: Signature.Input) -> str:
         """The framework will call this function to process the command"""
         self._process_command(workflow, command_parameters)
         
@@ -45,7 +45,4 @@ class ResponseGenerator:
             f'Response: Message has been broadcast'
         )
 
-        return fastworkflow.CommandOutput(
-            command_response=
-                fastworkflow.CommandResponse(response=response)
-        )
+        return response

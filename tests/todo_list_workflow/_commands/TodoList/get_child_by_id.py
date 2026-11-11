@@ -2,7 +2,6 @@
 from pydantic import ConfigDict
 
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
 from fastworkflow.workflow import Workflow
 from fastworkflow.utils.signatures import InputForParamExtraction
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
@@ -41,18 +40,15 @@ class ResponseGenerator:
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         """Get a child by its ID."""
         # Access the application class instance:
-        app_instance = workflow.command_context_for_response_generation  # type: TodoList
+        app_instance = workflow.record  # type: TodoList
         if todoitem := app_instance.get_child_by_id(child_id=input.todoitem_id):
-            workflow.current_command_context = todoitem
+            workflow.record = todoitem
             return Signature.Output(description=todoitem.description)
         return Signature.Output(description='NOT_FOUND')
 
-    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandOutput:
-        output = self._process_command(workflow, command_parameters)
+    def __call__(self, workflow: Workflow, command: str, input: Signature.Input) -> fastworkflow.CommandResponse:
+        output = self._process_command(workflow, input)
         response = (
             f'Response: {output.model_dump_json()}'
         )
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=response)
-        )
+        return fastworkflow.CommandResponse(response=response, output=output)

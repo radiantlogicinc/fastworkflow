@@ -32,9 +32,10 @@ def todo_item_class():
     return class_info
 
 
-def test_validate_extracted_parameters_is_static_method(temp_dir, todo_item_class):
-    """validate_extracted_parameters is a @staticmethod returning (is_valid, message): the
-    framework calls it on the Signature class as hook(workflow, command, cmd_parameters)."""
+def test_validate_extracted_parameters_is_absent_unless_the_command_writes_one(temp_dir, todo_item_class):
+    """The generator emits no trivial validate_extracted_parameters stub (fix-3rsq.one-hook): a command
+    with no check has no hook, and the framework accepts it. The hook, when a command writes one, is a
+    @staticmethod taking (workflow, command, input) and returning None (fix-3rsq.one-hook)."""
     output_dir = temp_dir / "TodoItem"
     output_dir.mkdir(exist_ok=True)
     file_path = create_command_file(
@@ -51,25 +52,22 @@ def test_validate_extracted_parameters_is_static_method(temp_dir, todo_item_clas
 
     signature_class = next(node for node in ast.walk(tree)
                            if isinstance(node, ast.ClassDef) and node.name == 'Signature')
-    hook = next(node for node in signature_class.body
-                if isinstance(node, ast.FunctionDef) and node.name == 'validate_extracted_parameters')
+    hooks = [node for node in signature_class.body
+             if isinstance(node, ast.FunctionDef) and node.name == 'validate_extracted_parameters']
+    assert hooks == [], "the generator must not emit a trivial validate_extracted_parameters stub"
+    assert "validate_extracted_parameters" not in file_content
 
-    assert [d.id for d in hook.decorator_list if isinstance(d, ast.Name)] == ['staticmethod']
-    assert [a.arg for a in hook.args.args] == ['workflow', 'command', 'cmd_parameters']
-    assert ast.unparse(hook.returns) == 'tuple[bool, str]'
-
-    # Compiled with the file's absolute imports and called on the class as
-    # utils/signatures.py calls it, the generated hook accepts.
+    # Compiled with the file's absolute imports, the Signature class has no hook for the framework to call.
     imports = [node for node in tree.body
                if isinstance(node, ast.Import) or (isinstance(node, ast.ImportFrom) and node.level == 0)]
     namespace = {}
     exec(compile(ast.Module(body=imports + [signature_class], type_ignores=[]), file_path, 'exec'), namespace)
-    assert namespace['Signature'].validate_extracted_parameters(None, 'TodoItem/complete', None) == (True, '')
+    assert not hasattr(namespace['Signature'], 'validate_extracted_parameters')
 
 
-def test_generate_utterances_is_static_method(temp_dir, todo_item_class):
-    """Test that generate_utterances is defined as a static method."""
-    # Generate the command file
+def test_generated_signature_leaves_utterances_to_the_framework_default(temp_dir, todo_item_class):
+    """A generated Signature defines no generate_utterances and no template_utterances: the
+    framework's default (command_directory.default_generate_utterances) gives the utterances."""
     output_dir = temp_dir / "TodoItem"
     output_dir.mkdir(exist_ok=True)
     file_path = create_command_file(
@@ -79,37 +77,18 @@ def test_generate_utterances_is_static_method(temp_dir, todo_item_class):
         file_name="complete.py",
         source_dir="."
     )
-    
-    # Read the generated file
+
     with open(file_path, 'r') as f:
-        file_content = f.read()
-    
-    # Parse the file
-    tree = ast.parse(file_content)
-    
-    # Find the Signature class
-    signature_class = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef) and node.name == 'Signature':
-            signature_class = node
-            break
-    
+        tree = ast.parse(f.read())
+
+    signature_class = next(
+        (node for node in ast.walk(tree) if isinstance(node, ast.ClassDef) and node.name == 'Signature'),
+        None)
     assert signature_class is not None, "Could not find Signature class"
-    
-    # Find the generate_utterances method
-    generate_method = None
-    for node in signature_class.body:
-        if isinstance(node, ast.FunctionDef) and node.name == 'generate_utterances':
-            generate_method = node
-            break
-    
-    assert generate_method is not None, "Could not find generate_utterances method"
-    
-    # Check if it's a static method
-    is_static_method = False
-    for decorator in generate_method.decorator_list:
-        if isinstance(decorator, ast.Name) and decorator.id == 'staticmethod':
-            is_static_method = True
-            break
-    
-    assert is_static_method, "generate_utterances should be decorated with @staticmethod" 
+
+    defined = {node.name for node in signature_class.body if isinstance(node, ast.FunctionDef)}
+    assigned = {t.id for node in signature_class.body if isinstance(node, ast.Assign)
+                for t in node.targets if isinstance(t, ast.Name)}
+    assert "generate_utterances" not in defined, "generated Signature must not define generate_utterances"
+    assert "template_utterances" not in assigned, "generated Signature must not define template_utterances"
+    assert "plain_utterances" in assigned

@@ -23,6 +23,7 @@ from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.observability import store as obs
 from fastworkflow.utils.react import AskUserSuspend, fastWorkflowReAct
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
 
@@ -645,7 +646,7 @@ class TestAgentLoopSpans:
         ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch, sink=sink)
         # The context `startup` leaves the workflow in: the agent tool only
         # dispatches command names available in the current context.
-        _wf.root_command_context = TodoListManager(str(tmp_path / "todo_list.json"))
+        _wf.root = TodoListManager(str(tmp_path / "todo_list.json"))
         ctx._begin_turn("add two numbers")
         monkeypatch.setattr(
             ctx,

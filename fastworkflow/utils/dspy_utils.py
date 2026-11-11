@@ -12,6 +12,14 @@ import fastworkflow
 from fastworkflow.utils.logging import logger
 
 
+def lm_cache_enabled() -> bool:
+    """Whether model responses may come from the DSPy response cache: False when ``FW_LM_CACHE`` is 0 or
+    false (the env file ``init`` loaded, else the process environment). Every LM the framework builds asks
+    this, so one switch turns the cache off for all of them (an experiment's repeated attempts must not
+    replay an earlier attempt's answers)."""
+    return fastworkflow.get_env_var("FW_LM_CACHE", default="1") not in ("0", "false", "False")
+
+
 def get_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):
     """
     Get the dspy LM object.
@@ -57,7 +65,7 @@ def get_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):
     # Unset leaves today's behavior exactly as it was. The value is the env file
     # ``init`` loaded, else the process environment (``get_env_var``, fix-hia1.40),
     # so a harness can set ``FW_LM_CACHE=0`` without calling ``init``.
-    if fastworkflow.get_env_var("FW_LM_CACHE", default="1") in ("0", "false", "False"):
+    if not lm_cache_enabled():
         kwargs.setdefault("cache", False)
     # Without one, a provider request that stalls blocks the turn for minutes.
     kwargs.setdefault(
@@ -100,6 +108,60 @@ def get_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):
         if api_key
         else dspy.LM(model=model, **kwargs)
     )
+
+#: Models litellm refused a parameter for in this process (``params_rejected``). Their later calls
+#: go with ``drop_params`` from the start (``call_dropping_rejected_params``).
+_PARAMS_REJECTED: set[str] = set()
+
+
+def params_rejected(error: BaseException) -> bool:
+    """Whether ``error`` is litellm refusing, before it sends anything, a parameter the model does not take.
+
+    That is ``litellm.UnsupportedParamsError`` anywhere in the cause chain (DSPy wraps it twice). Bedrock
+    Claude Haiku 5.5, for one, takes only ``temperature=1``, so ``temperature=0.0`` is refused (fix-z62t).
+    """
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        if isinstance(error, litellm.UnsupportedParamsError):
+            return True
+        seen.add(id(error))
+        error = error.__cause__ or error.__context__
+    return False
+
+
+def drops_rejected_params(lm) -> bool:
+    """Whether calls on ``lm`` leave out the parameters its model does not take (so its temperature may not apply)."""
+    return bool((getattr(lm, "kwargs", None) or {}).get("drop_params")) or getattr(lm, "model", None) in _PARAMS_REJECTED
+
+
+def call_dropping_rejected_params(lm, call):
+    """``call(lm)``; when litellm refuses one of ``lm``'s parameters, ``call`` once more with ``drop_params=True``.
+
+    With ``drop_params`` litellm leaves out what the model does not take (a temperature other than 1 on a
+    model that takes only 1) and sends the rest. The refusal is raised before anything is sent, so the
+    first try costs no tokens. The model is remembered for the process: its later calls go with
+    ``drop_params`` from the start, and the first refusal is logged once at WARNING.
+
+    A model that takes the parameters is called exactly as before: ``drop_params`` is never added to
+    it. Adding it to every LM is not neutral: DSPy sends an LM with ``drop_params`` through LiteLLM
+    even when it would call the provider natively (``openai/``, ``anthropic/``). An LM litellm refused
+    is already on LiteLLM.
+    """
+    dropping = bool((getattr(lm, "kwargs", None) or {}).get("drop_params"))
+    if getattr(lm, "model", None) in _PARAMS_REJECTED and not dropping:
+        return call(lm.copy(drop_params=True))
+    try:
+        return call(lm)
+    except Exception as error:  # noqa: BLE001 - re-raised unless litellm refused a parameter
+        if dropping or not params_rejected(error):
+            raise
+        if lm.model not in _PARAMS_REJECTED:
+            _PARAMS_REJECTED.add(lm.model)
+            reason = str(error).strip().splitlines()[0] if str(error).strip() else type(error).__name__
+            logger.warning(f"{lm.model} refused a parameter ({reason}); its calls now leave out the "
+                           "parameters it does not take")
+    return call(lm.copy(drop_params=True))
+
 
 def _process_field(field_info, is_input: bool) -> Tuple[Any, Any, bool]:
     """Process a single field and return its type, DSPy field, and optional status."""

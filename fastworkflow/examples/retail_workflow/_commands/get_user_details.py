@@ -3,7 +3,6 @@ from typing import List
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.workflow import Workflow
-from fastworkflow import CommandOutput, CommandResponse
 
 from ..retail_data import load_data
 from ..tools.get_user_details import GetUserDetails
@@ -13,13 +12,10 @@ class Signature:
     """Get user details"""
     class Input(BaseModel):
         user_id: str = Field(
-            default="NOT_FOUND",
             description="The user ID to get details for",
-            pattern=r"^([a-z]+_[a-z]+_\d+|NOT_FOUND)$",
+            json_schema_extra={"from_command_output": ["find_user_id_by_email.user_id", "find_user_id_by_name_zip.user_id"]},
+            pattern=r"^([a-z]+_[a-z]+_\d+)$",
             examples=["sara_doe_496"],
-            json_schema_extra={
-                "available_from": ["find_user_id_by_email", "find_user_id_by_name_zip"]
-            }
         )
 
         model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
@@ -63,14 +59,9 @@ class Signature:
 
 
 class ResponseGenerator:
-    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandOutput:
+    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> Signature.Output:
         output = self._process_command(workflow, command_parameters)
-        response = (
-            f'Response: {output.user_details}'
-        )
-        return CommandOutput(
-            command_response=CommandResponse(response=response),
-        )
+        return output
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()

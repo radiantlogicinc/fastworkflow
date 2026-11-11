@@ -19,6 +19,7 @@ import pytest
 import fastworkflow
 from fastworkflow.command_directory import CommandDirectory
 from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
+from fastworkflow import model_pipeline_training
 from fastworkflow.model_pipeline_training import TrainingDataError
 from fastworkflow.train import __main__ as train_orchestration
 from fastworkflow.train import artifact_versioning as av
@@ -88,10 +89,12 @@ def cme_copy(tmp_path: Path, setup_test_environment):
     with _FASTWORKFLOW_GLOBAL_STATE_LOCK:
         package_root = Path(fastworkflow.__file__).parent
         source = package_root / "_workflows" / "command_metadata_extraction"
+        consultation_source = package_root / "_workflows" / "consultation"
         copied_package_root = tmp_path / "fastworkflow"
         destination = (
             copied_package_root / "_workflows" / "command_metadata_extraction"
         )
+        consultation_destination = copied_package_root / "_workflows" / "consultation"
         destination.parent.mkdir(parents=True)
         shutil.copytree(
             source,
@@ -103,6 +106,19 @@ def cme_copy(tmp_path: Path, setup_test_environment):
                 "__pycache__",
             ),
         )
+        if consultation_source.is_dir():
+            shutil.copytree(
+                consultation_source,
+                consultation_destination,
+                ignore=shutil.ignore_patterns(
+                    "___command_info",
+                    "___workflow_contexts",
+                    "___convo_info",
+                    "__pycache__",
+                ),
+            )
+            RoutingDefinition.build(str(consultation_destination))
+            CommandDirectory.load(str(consultation_destination)).save()
         RoutingRegistry.clear_registry()
         RoutingDefinition.build(str(destination))
         CommandDirectory.load(str(destination)).save()
@@ -175,6 +191,35 @@ def test_missing_training_report_refuses_publication_with_training_data_error():
         train_orchestration._require_publishable_training_report(None)
 
 
+def _stamp_internal_workflow_trained(workflow: Path) -> None:
+    trainable_contexts = selective_training.contexts_for_training(str(workflow))
+    command_info = workflow / "___command_info"
+    for context_name in trainable_contexts:
+        context_folder = (
+            train_orchestration.GLOBAL_CONTEXT_FOLDER
+            if context_name == "*"
+            else context_name
+        )
+        context_dir = command_info / context_folder
+        context_dir.mkdir(parents=True, exist_ok=True)
+        for artifact_name in selective_training.REQUIRED_CONTEXT_ARTIFACTS:
+            artifact_path = context_dir / artifact_name
+            if artifact_name.endswith(".pth"):
+                artifact_path.mkdir()
+            else:
+                artifact_path.write_text("{}", encoding="utf-8")
+    version_id = av.new_version_id()
+    signature, _ = selective_training.compute_training_signature(
+        str(workflow), trainable_contexts
+    )
+    selective_training.save_training_signature(str(workflow), version_id, signature)
+    av._write_pointer(str(workflow), version_id, "test")
+    record_fields, _ = model_pipeline_training.construction_records(
+        folderpath=str(workflow)
+    )
+    av.write_manifest(str(workflow), version_id, **record_fields)
+
+
 def test_cme_readiness_checks_only_contexts_the_trainer_produces(cme_copy):
     package_root, cme_workflow = cme_copy
     trainable_contexts = selective_training.contexts_for_training(str(cme_workflow))
@@ -205,6 +250,19 @@ def test_cme_readiness_checks_only_contexts_the_trainer_produces(cme_copy):
     )
     selective_training.save_training_signature(str(cme_workflow), version_id, signature)
     av._write_pointer(str(cme_workflow), version_id, "test")
+
+    # The not-here construction record is part of readiness (Phase 9 step 4, design 2.23):
+    # a version without it is refused at load, so the CME is not "trained" either.
+    av.write_manifest(str(cme_workflow), version_id)
+    assert not train_orchestration.is_fast_workflow_trained(str(package_root))
+    record_fields, _ = model_pipeline_training.construction_records(
+        folderpath=str(cme_workflow)
+    )
+    av.write_manifest(str(cme_workflow), version_id, **record_fields)
+
+    consultation_workflow = package_root / "_workflows" / "consultation"
+    if consultation_workflow.is_dir():
+        _stamp_internal_workflow_trained(consultation_workflow)
 
     assert train_orchestration.is_fast_workflow_trained(str(package_root))
     assert not (command_info / "ErrorCorrection").exists()
@@ -304,6 +362,27 @@ def test_nonempty_full_retrain_plan_is_always_formatted():
     )
 
 
+def test_trains_the_fastworkflow_package_is_a_path_test_not_a_substring_test(tmp_path):
+    """A workflow inside a checkout named 'fastworkflow' must still get the CME check.
+
+    The old substring test skipped the CME check for every such workflow, which made the
+    CME unretrainable through `fastworkflow train <app>` there (fix-3rsq.9.6).
+    """
+    decoy = tmp_path / "fastworkflow" / "my_app"
+    decoy.mkdir(parents=True)
+
+    assert not train_orchestration._trains_the_fastworkflow_package(str(decoy))
+    assert train_orchestration._trains_the_fastworkflow_package(
+        os.path.realpath(fastworkflow.get_fastworkflow_package_path())
+    )
+    assert train_orchestration._trains_the_fastworkflow_package(
+        fastworkflow.get_internal_workflow_path("command_metadata_extraction")
+    )
+    assert train_orchestration._trains_the_fastworkflow_package(
+        fastworkflow.get_internal_workflow_path("consultation")
+    )
+
+
 def test_regeneration_flag_is_forwarded_only_inside_existing_cme_condition():
     function = _function_tree(train_orchestration.train_main)
     cme_if = next(
@@ -314,7 +393,10 @@ def test_regeneration_flag_is_forwarded_only_inside_existing_cme_condition():
         in ast.unparse(node.test)
     )
     condition = ast.unparse(cme_if.test)
-    assert "'fastworkflow' not in workflow_path" in condition
+    # Phase 9 step 4 (fix-3rsq.9.6): the old substring test ("'fastworkflow' not in
+    # workflow_path") is replaced by _trains_the_fastworkflow_package, which compares
+    # resolved paths and the internal CME folder. See test below for the behaviour.
+    assert "not _trains_the_fastworkflow_package(workflow_path)" in condition
     assert "not is_fast_workflow_trained(fastworkflow_folderpath)" in condition
 
     calls = [

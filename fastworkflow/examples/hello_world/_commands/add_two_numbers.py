@@ -1,5 +1,4 @@
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
 from fastworkflow.workflow import Workflow
 from fastworkflow.utils.signatures import InputForParamExtraction
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
@@ -33,10 +32,6 @@ class Signature:
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
-    @staticmethod
-    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> tuple[bool, str]:
-        return (True, '')
-
 class ResponseGenerator:
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         """Execute add_two_numbers function"""
@@ -44,12 +39,6 @@ class ResponseGenerator:
         sum_of_two_numbers = add_two_numbers(a=input.first_num, b=input.second_num)
         return Signature.Output(sum_of_two_numbers=sum_of_two_numbers)
 
-    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandOutput:
+    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> Signature.Output:
         output = self._process_command(workflow, command_parameters)
-        response = (
-            f'Response: {output.model_dump_json()}'
-        )
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=response)
-        )
+        return output

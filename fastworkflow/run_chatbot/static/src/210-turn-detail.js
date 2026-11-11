@@ -655,8 +655,27 @@ function buildRecordedStepNode(span, ordinal, incomingObservation, kids, byId) {
       appendAttrSection(container, "observation out", attrs.observation);
       appendAttrSection(container, "question asked of the user", attrs.clarification);
       appendAttrSection(container, "tool error", attrs.tool_error);
+      appendPolicySection(container, attrs);
     }
   });
+}
+
+/* A step the policy verifier rewrote (fastworkflow.policy_runtime): which rule
+   fired under which table, what the intent reader and question judge read, and
+   the answer a finish check sent back. The step's "observation out" above is
+   the rewrite the agent read. Nothing is shown on a step no rule touched. */
+function appendPolicySection(container, attrs) {
+  if (!attrs.policy_source) { return; }
+  container.appendChild(el("div", "levelLead",
+    "A policy rule rewrote this step: the tool did not run, and the agent " +
+    "read the rule's text as the observation."));
+  appendAttrSection(container, "policy rule",
+    attrs.policy_source + " (" + (attrs.policy_outcome || "rewrite") + ", table " +
+    (attrs.policy_table_version || "?") + ", " + (attrs.policy_mode || "enforce") + ")");
+  appendAttrSection(container, "answer sent back", attrs.answer);
+  appendAttrSection(container, "question judge", attrs.policy_judgement);
+  appendAttrSection(container, "requested (intent reader)", attrs.policy_requests);
+  appendAttrSection(container, "enforced intent", attrs.policy_intent);
 }
 
 function buildRecordedExecutionNode(span, kids, byId, ordinalLabel) {

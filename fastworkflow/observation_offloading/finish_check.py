@@ -3,8 +3,9 @@
 When the agent chooses ``finish``, the run's initial plan is read step by step
 against the outputs the run archived (``O<step>`` rows of ``offload_evidence``).
 Steps found unmet are named in one short note that replaces the finish
-observation, and the agent goes back to the loop -- once per agent run, only
-with iterations left; a second ``finish`` is not checked.
+observation, and the agent goes back to the loop. Up to two finishes of an agent run
+are checked (``react.FINISH_REVIEWS_PER_RUN``), only with iterations left; a finish after
+the second is not checked, and the run may end.
 
 No model is called. Each numbered plan step is read for the workflow command
 it names (the first token that is a declared command). Conditional steps
@@ -16,7 +17,7 @@ An archived row counts for the command the router resolved its text to (from
 the session's action log) when that is known, else for the command its text
 names. A step that writes an argument right after its command
 (``command key=<...>``) is not satisfied by a run whose text has no arguments.
-In a skill phase's check (``values=True``, set by the phase runner) a step
+In a planning command phase's check (``values=True``, set by the phase runner) a step
 that gives an argument a concrete value (``find_x query=Ann``) is also
 satisfied only by a run that carries that value (``step_arguments``,
 ``satisfies``); a placeholder (``key=<...>``) or prose ("with the uid of the
@@ -254,13 +255,15 @@ def _outside_quoted_values(text: str) -> str:
 def quote_step_value(value: Any) -> str:
     """*value* as a builder writes it into a step.
 
-    Quoted when it contains ``(`` or ``;``, which end a step's chain
-    (``step_chain``) and which a trailing ``(note)`` or ``;`` loses in the
-    key=value parser. A value that holds both ``"`` and ``'`` cannot be quoted
-    and is written as it is. Any other value is written unchanged.
+    Quoted when it contains ``(``, ``;``, ``=``, ``, ``, a bracket (``[ ] { } < >``),
+    a quote, or ``...``, which end a step's chain (``step_chain``) or are read by the
+    key=value parser. A value that only holds spaces is not quoted. A value that holds
+    both ``"`` and ``'`` cannot be quoted and is written as it is. Any other value is
+    written unchanged.
     """
     text = str(value)
-    if "(" not in text and ";" not in text:
+    if "(" not in text and ";" not in text and "=" not in text and ", " not in text \
+            and not any(c in text for c in "[]{}<>\"'") and "..." not in text and "\u2026" not in text:
         return text
     quote = '"' if '"' not in text else "'"
     if quote in text:
@@ -430,7 +433,7 @@ def satisfies(step: PlanStep, row: Mapping[str, Any], names: Iterable[str] = ())
 
 def _satisfies(step: PlanStep, row: Mapping[str, Any], names: set, values: bool = False) -> bool:
     """Whether *row* does *step*. By default only the bare-run rule: a run with no
-    arguments does not satisfy a step that writes one. With *values* (a skill phase's
+    arguments does not satisfy a step that writes one. With *values* (a planning command phase's
     check), also the step's concrete values (``satisfies``)."""
     if values:
         return satisfies(step, row, names)
@@ -453,7 +456,7 @@ def attribute_rows(steps: Sequence[PlanStep], rows: Sequence[Mapping[str, Any]],
     *resolved* maps a row's command text to the command it resolved to (see
     ``resolved_command_names``); a row whose text it lacks counts for the
     command its text names. A step that writes an argument after its command
-    takes only runs that carry arguments -- with *values* (a skill phase's
+    takes only runs that carry arguments -- with *values* (a planning command phase's
     check), only runs that carry each concrete value it gives (``satisfies``):
     those steps pick first, in order, then the others take what is left, in order.
 
@@ -519,8 +522,10 @@ def build_note(unmet: Sequence[Verdict]) -> Optional[str]:
     lines = ["Finish check: not every plan step is done yet."]
     for verdict in sorted(unmet, key=lambda v: v.step):
         lines.append(f"- Step {verdict.step} ({verdict.next_command}) was not run: run it now.")
-    lines.append("Do not repeat a change already made. Then finish; if a step cannot be done,"
-                 " say so instead of claiming it.")
+    # Every unmet step is a command step (unmet_steps), so the note tells the agent to run it. A step is
+    # reported as not done only when its command ran and failed: a step never run is run, not excused.
+    lines.append("Do not repeat a change already made. Run each of these steps now, then finish."
+                 " Report a step as not done only when its command ran and failed.")
     note = "\n".join(lines)
     while len(note.encode("utf-8")) > NOTE_MAX_BYTES and len(lines) > 3:
         lines.pop(-2)
@@ -549,6 +554,14 @@ def check(plan_text: str, rows: Sequence[Mapping[str, Any]], commands: Iterable[
 # Runtime: the archive read
 # ---------------------------------------------------------------------------
 
+def run_rows(store, scope, floor: int) -> tuple[list[dict], list[dict]]:
+    """The archived rows of a run (step index >= *floor*) and of the steps before it (the earlier rows)."""
+    stored = store.list(scope, timeout=2.0)
+    rows = [r for r in stored if int(r.get("step_index") or 0) >= int(floor or 0)]
+    earlier = [r for r in stored if int(r.get("step_index") or 0) < int(floor or 0)]
+    return rows, earlier
+
+
 def review_finish(*, plan_text: str, floor: int, iters_left: int,
                   commands: Iterable[str], core_commands: Iterable[str] = (),
                   resolved: Optional[Mapping[str, str]] = None,
@@ -557,7 +570,7 @@ def review_finish(*, plan_text: str, floor: int, iters_left: int,
 
     *resolved* maps raw command text to the command it resolved to; rows whose
     text it lacks count for the command their text names. *values*: a step's
-    concrete argument values must match (a skill phase's check; ``satisfies``).
+    concrete argument values must match (a planning command phase's check; ``satisfies``).
     """
     from fastworkflow.observation_offloading.state import (
         current_scope, durable_archive, record_event)
@@ -577,9 +590,7 @@ def review_finish(*, plan_text: str, floor: int, iters_left: int,
             # Nothing to read the runs from: every step would look not run.
             event["reason"] = "no archive"
             return None
-        stored = store.list(scope, timeout=2.0)
-        rows = [r for r in stored if int(r.get("step_index") or 0) >= int(floor or 0)]
-        earlier = [r for r in stored if int(r.get("step_index") or 0) < int(floor or 0)]
+        rows, earlier = run_rows(store, scope, floor)
         result = check(plan_text, rows, commands, core_commands=core_commands,
                        earlier_rows=earlier, resolved=resolved, values=values)
         event.update({

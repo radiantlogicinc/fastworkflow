@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from pydantic_core import PydanticUndefined
 
 import fastworkflow
+import dspy
 from fastworkflow.utils.logging import logger
 from fastworkflow import ModuleType, tracing
 from fastworkflow.observability.decision_signals import (
@@ -17,18 +18,17 @@ from fastworkflow.observability.decision_signals import (
     slot_binding_source,
 )
 
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.field_options import COMMAND_TEXT_AFTER_COMMAND_NAME
+from fastworkflow.utils import argument_checks
+from fastworkflow.utils.input_validation import bound_fields, field_checked_class
+from fastworkflow.utils.signatures import (
+    InputForParamExtraction,
+    INVALID, INVALID_INFORMATION_ERRMSG, MISSING_INFORMATION_ERRMSG,
+    NOT_FOUND, PARAMETER_EXTRACTION_ERROR_MSG, _planning_command_of)
 
 
 INVALID_INT_VALUE = -sys.maxsize
 INVALID_FLOAT_VALUE = -sys.float_info.max
-
-MISSING_INFORMATION_ERRMSG = fastworkflow.get_env_var("MISSING_INFORMATION_ERRMSG")
-INVALID_INFORMATION_ERRMSG = fastworkflow.get_env_var("INVALID_INFORMATION_ERRMSG")
-
-NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
-INVALID = fastworkflow.get_env_var("INVALID")
-PARAMETER_EXTRACTION_ERROR_MSG = None
 
 # Versions of the mechanisms that bind a parameter, one per member of
 # ``SLOT_BINDING_SOURCES``. ``signal_version`` identifies the producer of a value,
@@ -41,11 +41,10 @@ PARAMETER_EXTRACTION_ERROR_MSG = None
 _STATIC_SLOT_BINDING_SIGNAL_VERSIONS = {
     "stored_merge": "param-extraction/stored-merge/1",
     "xml_regex": "param-extraction/xml-regex/1",
-    "db_lookup": "param-extraction/db-lookup/1",
+    "validation_hook": "param-extraction/validation-hook/2",
 }
 
-# Resolved lazily and once, the same way PARAMETER_EXTRACTION_ERROR_MSG above is:
-# env access on every extraction logs a warning per turn when the var is unset.
+# Resolved lazily and once: env access on every extraction logs a warning per turn when the var is unset.
 LLM_PARAM_EXTRACTION_MODEL = None
 
 
@@ -89,24 +88,20 @@ def slot_binding_uncertainty(diagnostics: dict) -> Optional[DecisionUncertainty]
         )
     ]
 
-    db_lookup_events = diagnostics.get("db_lookup") or []
-    # `applied` alone means the catalogue agreed with the extracted value; only a
-    # rewrite makes db_lookup the thing that bound the slot, which is the sense in
-    # which SLOT_BINDING_SOURCES admits it as a source.
-    if any(event.get("corrected") for event in db_lookup_events):
+    # Only a value the hook rewrote in place makes the hook the thing that bound the slot,
+    # which is the sense in which SLOT_BINDING_SOURCES admits "validation_hook" as a source.
+    # A refusal binds nothing and is recorded as an invalid field.
+    if (diagnostics.get("validation_hook") or {}).get("changed_fields"):
         signals.append(
             slot_binding_source(
-                "db_lookup",
-                signal_version=_slot_binding_signal_version("db_lookup"),
+                "validation_hook",
+                signal_version=_slot_binding_signal_version("validation_hook"),
             )
         )
 
-    # The extractor produces one binding per slot and enumerates no alternatives to
-    # it; a db_lookup that rejected a value did enumerate some, and each suggestion
-    # is a value the slot could have taken instead.
-    candidate_count = 1 + sum(
-        len(event.get("suggestions") or []) for event in db_lookup_events
-    )
+    # The extractor produces one binding per slot and enumerates no alternatives to it: a
+    # refusal's suggestions are words in its message, not structured candidates.
+    candidate_count = 1
 
     # Requirements §4.14: uncertainty is reducible when evidence gathered inside the
     # task can lower it. A missing or invalid field is re-prompted and the next
@@ -147,6 +142,17 @@ def _recorded_slot_binding_uncertainty(span, diagnostics: dict) -> Optional[dict
     return None if uncertainty is None else uncertainty.model_dump(mode="json")
 
 
+#: A backslash before a character that is neither a letter, a digit, a backslash nor a space: an escape a model
+#: writes in a tool call (``name\@domain``), which the value means without (fix-variance).
+_ESCAPED_PUNCTUATION = re.compile(r"\\([^A-Za-z0-9\\\s])")
+
+
+def unescape_punctuation(value: str) -> str:
+    """*value* with each backslash escape of a non-alphanumeric character removed (``\\@`` -> ``@``, ``\\_`` -> ``_``).
+    Other backslashes stay: ``C:\\new`` and a doubled backslash are not escapes of punctuation."""
+    return _ESCAPED_PUNCTUATION.sub(r"\1", value)
+
+
 def _unwrap_optional(field_type):
     """
     Unwrap ``Optional[X]`` / ``Union[X, None]`` to its underlying type.
@@ -183,8 +189,8 @@ class ParameterExtraction:
         amended). The span records the extraction method (stored-merge /
         xml-regex / llm), whether this is a NOT_FOUND retry round, and the
         STRUCTURED validation outcome from ``validate_parameters`` —
-        missing/invalid fields, per-field db_lookup events, and the
-        validate_extracted_parameters verdict. A failed extraction is a
+        missing/invalid fields, the validation hook's facts (the Input's model validators), and the
+        validation_hook verdict. A failed extraction is a
         conversational state, not a span error: status stays ok and
         ``parameters_valid`` carries the signal; only an exception marks the
         span error. Emission never affects extraction (no-op without a host).
@@ -235,10 +241,12 @@ class ParameterExtraction:
                 self.command_name, ModuleType.COMMAND_PARAMETERS_CLASS
             )
         )
-        if not command_parameters_class:
-            return self.Output(parameters_are_valid=True)
-
         stored_params = self._get_stored_parameters(self.cme_workflow)
+        if not command_parameters_class:
+            if stored_params is not None:
+                command_parameters_class = type(stored_params)
+            else:
+                return self.Output(parameters_are_valid=True)
 
         # The caller prefixes "<command_name>: " (wildcard.py). Strip exactly that,
         # so the parsers below see the text as sent ("cmd k=v", not ": cmd k=v")
@@ -289,7 +297,8 @@ class ParameterExtraction:
                 # does not change; ``deterministic_form`` says which one bound.
                 if new_params is None:
                     new_params = self._extract_parameters_from_key_values(
-                        self.command, command_parameters_class, self.command_name)
+                        self.command, command_parameters_class, self.command_name,
+                        code_written=bool(self.app_workflow.context.get("by_code")))
                     if new_params is not None:
                         diagnostics["deterministic_form"] = "key_value"
                 if new_params is None:
@@ -305,11 +314,9 @@ class ParameterExtraction:
 
                 # If regex extraction fails, fall back to LLM-based extraction
                 if new_params is None:
-                    new_params = input_for_param_extraction.extract_parameters(
-                        command_parameters_class,
-                        self.command_name,
-                        app_workflow_folderpath)
-                    diagnostics["extraction_method"] = "llm"
+                    new_params = self._llm_extract(
+                        input_for_param_extraction, command_parameters_class,
+                        app_workflow_folderpath, diagnostics)
 
                 # A lone value that bound to nothing is refused, not dropped: run
                 # with defaults, the command does something other than what was
@@ -327,11 +334,9 @@ class ParameterExtraction:
                         cmd_parameters=new_params)
             else:
                 # Use LLM-based extraction for assistant mode
-                new_params = input_for_param_extraction.extract_parameters(
-                    command_parameters_class,
-                    self.command_name,
-                    app_workflow_folderpath)
-                diagnostics["extraction_method"] = "llm"
+                new_params = self._llm_extract(
+                    input_for_param_extraction, command_parameters_class,
+                    app_workflow_folderpath, diagnostics)
 
         is_valid, error_msg, suggestions, missing_invalid_fields = \
             input_for_param_extraction.validate_parameters(
@@ -361,6 +366,9 @@ class ParameterExtraction:
         self._store_parameters(self.cme_workflow, new_params)
 
         if not is_valid:
+            if refusals := diagnostics.get("argument_check_refusals_final"):
+                # Why a value the request seemed to give is asked for again (fix-qjf4).
+                error_msg = "Values not used: " + "; ".join(refusals) + "\n" + error_msg
             if params_str := self._format_parameters_for_display(new_params):
                 error_msg = f"Extracted parameters so far:\n{params_str}\n\n{error_msg}"
 
@@ -379,6 +387,55 @@ class ParameterExtraction:
         return self.Output(
             parameters_are_valid=True,
             cmd_parameters=new_params)
+
+    def _llm_extract(self, input_for_param_extraction: InputForParamExtraction,
+                     command_parameters_class: type[BaseModel], app_workflow_folderpath: str,
+                     diagnostics: dict) -> BaseModel:
+        """The LLM extractor's values, checked against the command text it read (fix-qjf4).
+
+        ``argument_checks.check_extracted_values`` checks the values (grounding, placeholders,
+        allowed values, numbers). When it refuses one, the extractor is asked once more with the
+        refusal appended to the command text (``REFUSED_EXTRACTION_NOTE``, as ``typed_planning_call``
+        does); the second answer is checked against the original command text, and a value still
+        refused takes the field's not-given value, so a required field is asked for (the NOT_FOUND
+        path) and an optional one takes its default. A planning command's ``Input`` is left to
+        ``check_arguments``; ``FW_EXTRACTION_ARGUMENT_CHECKS=off`` turns the checks off.
+        """
+        def extract() -> BaseModel:
+            params = input_for_param_extraction.extract_parameters(
+                command_parameters_class, self.command_name, app_workflow_folderpath)
+            diagnostics["extraction_method"] = "llm"
+            if reset := getattr(input_for_param_extraction, "fields_reset_not_given", None):
+                diagnostics["fields_reset_not_given"] = {n: float(p) for n, p in reset.items()}
+            return params
+
+        params = extract()
+        if not argument_checks.checks_enabled() or \
+                _planning_command_of(self.app_workflow, self.command_name) is not None:
+            return params
+        # The request is the command text the extractor read (self.command, prefix stripped, which
+        # InputForParamExtraction.create was given): see argument_checks for why it is not more.
+        request = self.command
+        check = argument_checks.check_extracted_values(params, request)
+        if check.refused:
+            diagnostics["argument_check_refusals"] = check.refusal_texts()
+            diagnostics["argument_check_retry"] = True
+            input_for_param_extraction.command = f"{request}\n\n{check.note()}"
+            try:
+                params = extract()
+            except Exception as exc:  # noqa: BLE001 - the retry is an extra: the first answer stands
+                logger.warning(f"parameter extraction retry failed: {exc!r}")
+            finally:
+                # validate_parameters reads the request from here: the original command text
+                input_for_param_extraction.command = request
+            check = argument_checks.check_extracted_values(params, request)
+            if check.refused:
+                diagnostics["argument_check_refusals_final"] = check.refusal_texts()
+        if check.respelled:
+            diagnostics["argument_check_respelled"] = {
+                name: str(spelled) for name, (_, spelled) in check.respelled.items()}
+        check.apply(params)
+        return params
 
     @staticmethod
     def _get_stored_parameters(cme_workflow: fastworkflow.Workflow):
@@ -574,10 +631,6 @@ class ParameterExtraction:
 
     @staticmethod
     def _apply_missing_fields(command: str, default_params: BaseModel, missing_fields: list):
-        global PARAMETER_EXTRACTION_ERROR_MSG
-        if not PARAMETER_EXTRACTION_ERROR_MSG:
-            PARAMETER_EXTRACTION_ERROR_MSG = fastworkflow.get_env_var("PARAMETER_EXTRACTION_ERROR_MSG")
-
         # Work on plain dict to avoid validation during assignment
         params_data = {
             field_name: getattr(default_params, field_name, None)
@@ -758,24 +811,23 @@ class ParameterExtraction:
                      converted: dict[str, Any]) -> Optional[BaseModel]:
         """The parameters model holding *converted* (already type-converted), or None.
 
-        The only validation errors allowed are fields that were not given and are
-        required: validation later reports those as missing. Fields not given take
-        their defaults.
+        Each given value is checked against its own field (``bound_fields``: type, constraints and
+        the field's own validators): a value that does not check is no binding. No model validator
+        runs here (an ``Input``'s validators need the validation context, and ``validate_parameters``
+        runs them with it), so a model validator's refusal reaches the caller as a refusal, with
+        the binding kept. Fields not given take their defaults; a required one not given is left
+        for validation to report as missing.
         """
         from pydantic import ValidationError
 
         try:
-            return command_parameters_class.model_validate(converted)
-        except ValidationError as exc:
-            if any(err.get("type") != "missing" or not err.get("loc")
-                   or err["loc"][0] in converted for err in exc.errors()):
-                return None
-        except Exception:
+            checked = bound_fields(command_parameters_class, converted)
+        except ValidationError:
             return None
         params_data: dict[str, Any] = {}
         for name, info in command_parameters_class.model_fields.items():
-            if name in converted:
-                params_data[name] = converted[name]
+            if name in checked:
+                params_data[name] = checked[name]
             elif info.default is not PydanticUndefined:
                 params_data[name] = info.default
             elif info.default_factory is not None:
@@ -787,7 +839,7 @@ class ParameterExtraction:
     @staticmethod
     def _extract_parameters_from_key_values(
             command: str, command_parameters_class: type[BaseModel],
-            command_name: str = "") -> Optional[BaseModel]:
+            command_name: str = "", *, code_written: bool = False) -> Optional[BaseModel]:
         """Parameters from a ``name=value`` command (``query=Ann Lee start=2``), or None.
 
         Parsed in code, before the LLM fallback, only when the form is plain:
@@ -804,17 +856,24 @@ class ParameterExtraction:
           validate, and the only errors allowed are fields that were not given
           and are required (validation later reports those as missing).
 
-        Any doubt -- a ``word=`` that is not a field, an XML tag, a placeholder
-        (``<...>``), an example value, an empty value, a validation error --
-        returns None, and extraction goes on as before.
+        With *code_written* (``planning_phases.code_step`` and ``pick_step``), the examples
+        guard is skipped and a quoted value is taken whole, with nothing inside it read
+        as a key, a placeholder or a note (3.13). Without it, any doubt -- a ``word=``
+        that is not a field, an XML tag, a placeholder (``<...>``), an example value, an
+        empty value, a validation error -- returns None, and extraction goes on as before.
         """
         from pydantic import TypeAdapter, ValidationError
+        from fastworkflow.observation_offloading.finish_check import _QUOTED_VALUE_RE
 
         fields = command_parameters_class.model_fields
         text = (command or "").strip()
-        if not fields or "=" not in text or re.search(r"</?[A-Za-z_][\w.-]*>", text):
+        if not fields or "=" not in text:
             return None
-        keys = list(re.finditer(r"(?:^|(?<=\s))([A-Za-z_][A-Za-z0-9_]*)\s*=", text))
+        probe = (_QUOTED_VALUE_RE.sub(lambda m: "=" + "x" * (len(m.group(0)) - 1), text)
+                 if code_written else text)
+        if re.search(r"</?[A-Za-z_][\w.-]*>", probe):
+            return None
+        keys = list(re.finditer(r"(?:^|(?<=\s))([A-Za-z_][A-Za-z0-9_]*)\s*=", probe))
         if not keys:
             return None
         lead = text[:keys[0].start()].strip()
@@ -831,17 +890,37 @@ class ParameterExtraction:
         for i, match in enumerate(keys):
             end = keys[i + 1].start() if i + 1 < len(keys) else len(text)
             value = text[match.end():end].strip()
-            if i + 1 == len(keys):
-                value = re.sub(r"\s*\([^()]*\)\s*\.?$", "", value)
-            value = value.strip().rstrip(",;").strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'`":
-                value = value[1:-1].strip()
-            if not value or re.search(r"[<>{}]|\.\.\.|\u2026", value):
+            was_quoted = False
+            if code_written and len(value) >= 2 and value[0] in "\"'":
+                q = re.match(r"""^("[^"\n]*"|'[^'\n]*')\s*$""", value)
+                if q:
+                    value = q.group(1)[1:-1]
+                    was_quoted = True
+                elif i + 1 == len(keys):
+                    # Try stripping a trailing parenthetical note after the closing quote
+                    trimmed = re.sub(r"\s*\([^()]*\)\s*\.?$", "", value).strip()
+                    q = re.match(r"""^("[^"\n]*"|'[^'\n]*')\s*$""", trimmed)
+                    if q:
+                        value = q.group(1)[1:-1]
+                        was_quoted = True
+            if not was_quoted:
+                if i + 1 == len(keys):
+                    value = re.sub(r"\s*\([^()]*\)\s*\.?$", "", value)
+                value = value.strip().rstrip(",;").strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'`":
+                    value = value[1:-1].strip()
+                if not value or re.search(r"[<>{}]|\.\.\.|\u2026", value):
+                    return None
+                if not code_written:
+                    examples = getattr(fields[match.group(1)], "examples", None)
+                    if examples and value in examples:
+                        return None
+            elif not value:
                 return None
-            examples = getattr(fields[match.group(1)], "examples", None)
-            if examples and value in examples:
-                return None
-            raw[match.group(1)] = None if value in ("None", "null") else value
+            # unescape_punctuation (fix-6lt7) disabled after benchmark pass 4, where no escaped value occurred:
+            # raw[match.group(1)] = (None if (not was_quoted and value in ("None", "null"))
+            #                        else unescape_punctuation(value))
+            raw[match.group(1)] = None if (not was_quoted and value in ("None", "null")) else value
 
         converted: dict[str, Any] = {}
         for name, value in raw.items():
@@ -876,16 +955,22 @@ class ParameterExtraction:
             return None
         if any(info.is_required() for info in command_parameters_class.model_fields.values()):
             return None
+        # The defaults are checked field by field, with no model validator: an Input's validators need
+        # the validation context, and a bare command's binding must not depend on them. A default that
+        # does not check is no binding.
         try:
-            return command_parameters_class()
+            checked = field_checked_class(command_parameters_class)()
         except Exception:  # noqa: BLE001 - a default that does not validate is no binding
             return None
+        return command_parameters_class.model_construct(
+            _fields_set=set(),
+            **{name: getattr(checked, name) for name in command_parameters_class.model_fields})
 
     @staticmethod
     def _is_positional_field(field_info) -> bool:
-        """A field marked ``json_schema_extra={'positional': True}``."""
+        """A field marked ``json_schema_extra={'command_text_after_command_name': True}``."""
         extra = getattr(field_info, "json_schema_extra", None)
-        return isinstance(extra, dict) and extra.get("positional") is True
+        return isinstance(extra, dict) and extra.get(COMMAND_TEXT_AFTER_COMMAND_NAME) is True
 
     @staticmethod
     def _extract_parameters_from_positional(
@@ -898,7 +983,7 @@ class ParameterExtraction:
         - The text has no ``=`` and no XML, its first token is *command_name*
           itself (short or qualified), and a value follows.
         - The value goes to one target field: the field marked
-          ``json_schema_extra={'positional': True}``, or else the class's only
+          ``json_schema_extra={'command_text_after_command_name': True}``, or else the class's only
           ``str`` field (other types, such as an int ``start``, do not count).
           Two marked fields, or two ``str`` fields and no mark, is no target.
         - A leading word naming the target (``uid 203b``, ``query Ann Lee``) is
@@ -1095,3 +1180,152 @@ class ParameterExtraction:
 
         # Return a new instance without validation
         return stored_params.__class__.model_construct(**params_data)
+
+
+# ---------------------------------------------------------------------------
+# Jev's reading of a reply to a missing-value prompt (fix-jd9o.6).
+#
+# In assistant mode the PARAMETER_EXTRACTION stage asks for the missing values and
+# merges the next message as an answer. Jev reads that message first: an answer
+# is merged as before; a hesitation waits; a request to stop, a wrong-command
+# report or a different request leaves the pending round (wildcard.py dispatches it).
+# ---------------------------------------------------------------------------
+
+#: A non-answer intent applies only at or above this Jev probability (measured: 30/30 hesitations).
+MISSING_VALUE_REPLY_THRESHOLD = 0.5
+_MISSING_VALUE_REPLY_OFF = frozenset({"off", "0", "false"})
+MISSING_VALUE_REPLY_OPTIONS = (
+    ("answer", "The reply gives the value asked for, even if unsure or with a question tag ('X, I think?'); it may add or change other values."),
+    ("different_command", "The reply asks the system to do something else instead, even when phrased as a question ('can you show me the users?')."),
+    ("misunderstood", "The reply says the system picked the wrong command."),
+    ("abort", "The reply asks to stop or cancel."),
+    ("wait", "The reply asks for a moment or says the user is checking; it gives no value and asks nothing."),
+)
+
+
+def missing_value_reply_enabled() -> bool:
+    """False when FW_JEV_MISSING_VALUE_REPLY is set to off, 0 or false (case-insensitive)."""
+    value = str(fastworkflow.get_env_var("FW_JEV_MISSING_VALUE_REPLY", default="on"))
+    return value.strip().lower() not in _MISSING_VALUE_REPLY_OFF
+
+
+def missing_value_question(command_name: str, missing_fields: list[str]) -> str:
+    """The missing-value prompt as the user saw it, reconstructed from stored state.
+
+    The prompt's text is not stored, so this rebuilds its lead line and its
+    'Missing parameter values' line from the command name and the stored fields.
+    """
+    return (f"PARAMETER EXTRACTION ERROR FOR COMMAND '{command_name}'\n"
+            f"{MISSING_INFORMATION_ERRMSG}{', '.join(missing_fields)}")
+
+
+def pending_missing_fields(app_workflow, command_name: str, stored_params: BaseModel,
+                           command: str) -> list[str]:
+    """The fields the pending round still asks for, read from the markers it stored.
+
+    No validation is run: validation can call the workflow's hooks (database or backend
+    lookups), and this runs on every reply to the prompt. ``_extract_impl`` stored each
+    missing or invalid field with a "not given" marker, which ``_is_asked_field`` reads.
+    """
+    fields = type(stored_params).model_fields
+    return [name for name, info in fields.items()
+            if ParameterExtraction._is_asked_field(info, getattr(stored_params, name, None))]
+
+
+def classify_missing_value_reply(question: str, reply: str) -> str:
+    """Jev's intent for a reply to the missing-value prompt: a non-answer intent at or above
+    MISSING_VALUE_REPLY_THRESHOLD, otherwise "answer". Never raises: no Jev LM or any failure
+    means "answer", which is the behaviour before this check.
+    """
+    try:
+        from dspy.experimental import Choice
+        from fastworkflow.workflow_agent import _jev_lm
+
+        jev_lm = _jev_lm()
+        if jev_lm is None:
+            return "answer"
+
+        class ClassifyMissingValueReply(dspy.Signature):
+            """Decide what a user's reply to the system's question does."""
+
+            question: str = dspy.InputField(desc="the question the system asked the user")
+            reply: str = dspy.InputField(desc="the user's reply")
+            intent: Choice[MISSING_VALUE_REPLY_OPTIONS] = dspy.OutputField(desc="What does the reply do?")
+
+        with dspy.context(lm=jev_lm):
+            choice = dspy.Predict(ClassifyMissingValueReply)(question=question, reply=reply).intent
+        value = str(choice.value)
+        probability = (choice.probabilities or {}).get(value, choice.confidence)
+        logger.info(f"missing-value reply {reply!r}: {value} (probability {float(probability):.2f})")
+        if value != "answer" and probability >= MISSING_VALUE_REPLY_THRESHOLD:
+            return value
+        return "answer"
+    except Exception:  # noqa: BLE001 - the reply is then an answer; never fail the turn
+        logger.warning("could not classify the missing-value reply; treating it as an answer",
+                       exc_info=True)
+        return "answer"
+
+
+class ExtractedArguments(BaseModel):
+    """What ``extract_arguments`` found: the checked values (``params``, None when the command takes none),
+    whether they are valid, and why not (``refusal``: a refused value, or the missing required fields)."""
+
+    params: Optional[BaseModel] = None
+    valid: bool = True
+    refusal: Optional[str] = None
+    missing: List[str] = []
+    retried: bool = False
+
+
+def extract_arguments(app_workflow: fastworkflow.Workflow, command_name: str, text: str,
+                      diagnostics: Optional[dict] = None) -> ExtractedArguments:
+    """The shared extractor's arguments for *command_name* on *text*, outside the CME workflow (fix-48np).
+
+    The extraction a command's parameters get on the LLM path (``ParameterExtraction._llm_extract``: the
+    DSPy extractor on LLM_PARAM_EXTRACTION, and for an execution command ``argument_checks`` with its one
+    retry) and the validation they then get (``InputForParamExtraction.validate_parameters``: the screen,
+    and for a planning command ``check_arguments``, its hook and its ``Input``'s rules, the checks
+    ``typed_planning_call`` runs). Nothing is read from or written to a CME workflow: no stored parameters,
+    no NLU stage, no xml/key=value parsing (that is for the agent's own command text). The app workflow's
+    context is read as validation reads it (``raw_user_message``, ``run_as_agent``) and is not written.
+
+    A planning command whose values are refused, or miss a required one, is extracted once more with the
+    refusal after the text (``argument_checks.REFUSED_EXTRACTION_NOTE``, as ``typed_planning_call`` fills
+    its call once more); the second answer is checked against *text* alone.
+    """
+    if diagnostics is None:    # a plain assignment, so the span-contract scan can follow the bag
+        diagnostics = {}
+    folder = app_workflow.folderpath
+    params_class = fastworkflow.RoutingRegistry.get_definition(folder).get_command_class(
+        command_name, ModuleType.COMMAND_PARAMETERS_CLASS)
+    if not params_class:
+        return ExtractedArguments()
+    extraction = ParameterExtraction(None, app_workflow, command_name, text)
+    extractor = InputForParamExtraction.create(app_workflow, command_name, text)
+
+    def validated(params: BaseModel) -> ExtractedArguments:
+        valid, message, _, fields = extractor.validate_parameters(
+            app_workflow, command_name, params, diagnostics)
+        missing = list(diagnostics.get("missing_fields") or []) if not valid else []
+        refusal = None
+        if not valid:
+            refusal = ("missing required argument " + ", ".join(missing)) if missing and not \
+                diagnostics.get("invalid_fields") else (message or "").strip()
+        return ExtractedArguments(params=params, valid=valid, refusal=refusal, missing=missing)
+
+    result = validated(extraction._llm_extract(extractor, params_class, folder, diagnostics))
+    if result.valid or _planning_command_of(app_workflow, command_name) is None:
+        return result
+    extractor.command = f"{text}\n\n{argument_checks.REFUSED_EXTRACTION_NOTE.format(refusal=result.refusal)}"
+    try:
+        params = extractor.extract_parameters(params_class, command_name, folder)
+    except Exception as exc:  # noqa: BLE001 - the retry is an extra: the first answer stands
+        logger.warning(f"argument extraction retry failed: {exc!r}")
+        return result
+    finally:
+        extractor.command = text      # validation reads the request from here
+    diagnostics.pop("missing_fields", None)
+    diagnostics.pop("invalid_fields", None)
+    second = validated(params)
+    second.retried = True
+    return second

@@ -1,0 +1,480 @@
+{
+ "fixed": [
+  {
+   "request": "Chelsea Cox has asked for the right GitLab_Security Analyst: what the right exposes, who holds it, its risk, and what Chelsea Cox can reach today.",
+   "value": "GitLab_Security Analyst: what the right exposes, who holds it, its risk, and what",
+   "expected": "GitLab_Security Analyst",
+   "field": "right"
+  },
+  {
+   "request": "Walk Blake and Sons and Sons and every person on the roster down to their logins, rights and collections.",
+   "value": "Blake and Sons",
+   "expected": "Blake and Sons and Sons",
+   "field": "unit"
+  },
+  {
+   "request": "Ian Morales has asked for the right Confluence_System Analyst 2: what it exposes, who holds it, its risk, and what Ian Morales can reach today.",
+   "value": "Confluence_System Analyst 2: what it exposes, who holds it, its risk, and what Ian Morales can reach today",
+   "expected": "Confluence_System Analyst 2",
+   "field": "right"
+  },
+  {
+   "request": "A snapshot of IT Support: who is on the roster, the unit's risk with its drivers, and the controls it trips.",
+   "value": "snapshot of IT Support",
+   "expected": "IT Support",
+   "field": "name"
+  },
+  {
+   "request": "Work the open finding for 'Active contractor identities without manager' through to the first identity it names: why it was flagged, how many people it names, and that first identity opened on its logins, rights and collections.",
+   "value": "open finding for 'Active contractor identities without manager'",
+   "expected": "Active contractor identities without manager",
+   "field": "control"
+  },
+  {
+   "request": "Walk Blake and Sons and Sons: every person on the roster down to their logins, rights and collections.",
+   "value": "Blake and Sons",
+   "expected": "Blake and Sons and Sons",
+   "field": "unit"
+  },
+  {
+   "request": "Mcclain Miller and Henderson and Sons 1 is being folded into another unit. Walk the whole roster — every person on it, down to their logins, rights and collections.",
+   "value": "Henderson and Sons 1",
+   "expected": "Mcclain Miller and Henderson and Sons 1",
+   "field": "unit"
+  },
+  {
+   "request": "Walk IT Operations end to end — every identity on the roster, down to logins, rights and collections.",
+   "value": "IT Operations end to end",
+   "expected": "IT Operations",
+   "field": "unit"
+  },
+  {
+   "request": "Walk the whole roster of Henderson and Sons 1, down to their logins, rights and collections.",
+   "value": "Henderson and Sons",
+   "expected": "Henderson and Sons 1",
+   "field": "unit"
+  },
+  {
+   "request": "Walk the whole roster of Garcia-James and Sons 1, down to logins, rights and collections.",
+   "value": "Garcia-James and Sons",
+   "expected": "Garcia-James and Sons 1",
+   "field": "unit"
+  },
+  {
+   "request": "Franklin Smith has asked for the right DrChrono_Medical Records Specialist 1: what it exposes, who holds it, and what Franklin Smith can reach today.",
+   "value": "DrChrono_Medical Records Specialist 1: what it exposes, who holds it, and what Franklin Smith can reach today",
+   "expected": "DrChrono_Medical Records Specialist 1",
+   "field": "right"
+  },
+  {
+   "request": "Audit GitLab_Backup Administrator wherever they appear, each with the system that publishes it, the feed and the collection.",
+   "value": "Audit GitLab_Backup Administrator",
+   "expected": "GitLab_Backup Administrator",
+   "field": "right"
+  },
+  {
+   "request": "Then walk IT Operations end to end - every identity on the roster, down to logins, rights and collections.",
+   "value": "IT Operations end to end",
+   "expected": "IT Operations",
+   "field": "unit"
+  },
+  {
+   "request": "Garcia-James and Sons 1 is being restructured and I need the access picture before it happens. Walk the whole roster — every identity on it, down to logins, rights and collections.",
+   "value": "1",
+   "expected": "Garcia-James and Sons 1",
+   "field": "unit"
+  },
+  {
+   "request": "Ian Morales has access to Confluence: what it exposes, who already holds it, its risk, and what Ian Morales can reach today. I do not need the full population.",
+   "value": "access to Confluence",
+   "expected": "Confluence",
+   "field": "right"
+  },
+  {
+   "request": "Chelsea Cox has access to Confluence: what it exposes, who already holds it, its risk, and what Chelsea Cox can reach today. I do not need the full population.",
+   "value": "access to Confluence: what it exposes, who already holds it, its risk, and what Chelsea Cox can reach today",
+   "expected": "Confluence",
+   "field": "right"
+  },
+  {
+   "request": "Walk the whole roster of Davis and Sons PLC, every identity on it opened down to logins, rights and collections.",
+   "value": "roster of Davis and Sons PLC",
+   "expected": "Davis and Sons PLC",
+   "field": "unit"
+  },
+  {
+   "request": "Walk Blake and Sons and Sons and Sons: every person on the roster down to their logins, rights and collections.",
+   "value": "Sons",
+   "expected": "Blake and Sons and Sons and Sons",
+   "field": "unit"
+  },
+  {
+   "request": "Walk the whole roster of Davis and Sons PLC, every identity on it, each one opened down to logins, rights and collections.",
+   "value": "roster of Davis and Sons PLC",
+   "expected": "Davis and Sons PLC",
+   "field": "unit"
+  }
+ ],
+ "kept": [
+  {
+   "request": "Quarterly packet for Henderson Ramirez and Lewis Ltd 1: the unit and the first three people on its roster who have a login, each down to logins, rights and collections, with the first of those people's logins opened on its own permissions and custodians.",
+   "value": "Henderson Ramirez and Lewis Ltd 1",
+   "expected": "Henderson Ramirez and Lewis Ltd 1",
+   "field": "unit"
+  },
+  {
+   "request": "Audit the right Allscripts Sunrise_Medical Records Specialist across the systems it appears in: who holds it, the system that publishes it, the feed its logins arrive on and the collection that confers it.",
+   "value": "Allscripts Sunrise_Medical Records Specialist",
+   "expected": "Allscripts Sunrise_Medical Records Specialist",
+   "field": "right"
+  },
+  {
+   "request": "Jessica Fuentes comes off the books on Friday: what Jessica Fuentes can reach, the first login listed walked through to the first right it carries, and a proposed fix on the record. Do not apply a remediation to any of them.",
+   "value": "Jessica Fuentes",
+   "expected": "Jessica Fuentes",
+   "field": "person"
+  },
+  {
+   "request": "Elizabeth Calderon is leaving the unit: what Elizabeth Calderon can reach, their first login listed walked to the first entitlement it carries, and the corrections available, with none applied.",
+   "value": "Elizabeth Calderon",
+   "expected": "Elizabeth Calderon",
+   "field": "person"
+  },
+  {
+   "request": "Alan Cooper down to their logins, rights and collections.",
+   "value": "Alan Cooper",
+   "expected": "Alan Cooper",
+   "field": "name"
+  },
+  {
+   "request": "Heidi Turner comes off the books on Friday: what Heidi Turner can reach, their first login listed walked through to the first right it carries, and a proposed fix on the record, without applying any remediation. Do not apply a remediation to any of them.",
+   "value": "Heidi Turner",
+   "expected": "Heidi Turner",
+   "field": "person"
+  },
+  {
+   "request": "AzureDevOps_Administrator is on my privileged-group list. Who is in it, what is it nested under, and which controls does it trip?",
+   "value": "AzureDevOps_Administrator",
+   "expected": "AzureDevOps_Administrator",
+   "field": "name"
+  },
+  {
+   "request": "GitLab logins that no person owns, with their count.",
+   "value": "GitLab",
+   "expected": "GitLab",
+   "field": "name"
+  },
+  {
+   "request": "Tag the unit named exactly Davis and Sons (not Davis and Sons LLC or Davis and Sons PLC) as `restructure-2026` ahead of the reorganisation.",
+   "value": "Davis and Sons",
+   "expected": "Davis and Sons",
+   "field": "name"
+  },
+  {
+   "request": "Work the open finding for 'Active contractor identities without manager' through to the first identity it names: why it was flagged, how many people it names, and that first identity opened on its logins, rights and collections.",
+   "value": "Active contractor identities without manager",
+   "expected": "Active contractor identities without manager",
+   "field": "control"
+  },
+  {
+   "request": "David Farrell leaves on Friday: what David Farrell can reach, their first login walked down to the first entitlement it carries, and the corrections available on them, with none applied.",
+   "value": "David Farrell",
+   "expected": "David Farrell",
+   "field": "person"
+  },
+  {
+   "request": "David Farrell: what David Farrell can reach, their first login listed walked down to the first entitlement it carries, and the corrections available on them, with none applied.",
+   "value": "David Farrell",
+   "expected": "David Farrell",
+   "field": "person"
+  },
+  {
+   "request": "Amy Walsh leaves on Friday: what Amy Walsh can reach, their first login walked down to the first entitlement it carries, and the corrections available on them, with none applied.",
+   "value": "Amy Walsh",
+   "expected": "Amy Walsh",
+   "field": "person"
+  },
+  {
+   "request": "Triage the request: what the right GitLab_Security Analyst exposes, who holds it, its risk, and what Chelsea Cox can reach today.",
+   "value": "Chelsea Cox",
+   "expected": "Chelsea Cox",
+   "field": "person"
+  },
+  {
+   "request": "Compare Chelsea Cox and Chelsea Evans on logins, rights, collections, the systems those rights belong to, findings and risk (for GitLab_Security Analyst).",
+   "value": "Chelsea Cox",
+   "expected": "Chelsea Cox",
+   "field": "person_a"
+  },
+  {
+   "request": "What is the risk score of the right Azure DevOps_DevOps Engineer?",
+   "value": "Azure DevOps_DevOps Engineer",
+   "expected": "Azure DevOps_DevOps Engineer",
+   "field": "name"
+  },
+  {
+   "request": "Dorothy Bates leaves at the end of the week: what Dorothy Bates can reach, the first login listed walked to the first right it carries, and the corrections on offer, with none applied.",
+   "value": "Dorothy Bates",
+   "expected": "Dorothy Bates",
+   "field": "person"
+  },
+  {
+   "request": "Confirm whether Barbara Sanchez is among Active Directory_Network Administrator's holders.",
+   "value": "Barbara Sanchez",
+   "expected": "Barbara Sanchez",
+   "field": "person"
+  },
+  {
+   "request": "Identify who is on the roster of the unit IT Support.",
+   "value": "IT Support",
+   "expected": "IT Support",
+   "field": "name"
+  },
+  {
+   "request": "Pull the portrait of Alan Cooper - set up Alan Cooper's logins, rights and collections.",
+   "value": "Alan Cooper",
+   "expected": "Alan Cooper",
+   "field": "name"
+  },
+  {
+   "request": "Tag Alexis Thomas with `leaver-pending` so the offboarding team picks the record up.",
+   "value": "Alexis Thomas",
+   "expected": "Alexis Thomas",
+   "field": "name"
+  },
+  {
+   "request": "Heidi Bowen, the second off the payroll: their first login listed and the first entitlement it carries, with the corrections available on the record and none applied.",
+   "value": "Heidi Bowen",
+   "expected": "Heidi Bowen",
+   "field": "person"
+  },
+  {
+   "request": "Who is the owner of GitLab?",
+   "value": "GitLab",
+   "expected": "GitLab",
+   "field": "name"
+  },
+  {
+   "request": "David Barker is on this month's leaver list: their first login listed and the first entitlement it carries, with the corrections available and none applied.",
+   "value": "David Barker",
+   "expected": "David Barker",
+   "field": "person"
+  },
+  {
+   "request": "What is the risk score of Enterprise Admins?",
+   "value": "Enterprise Admins",
+   "expected": "Enterprise Admins",
+   "field": "name"
+  },
+  {
+   "request": "Christopher Walker is one of the two who do not move with it: put him through an offboarding: what he can reach, his first login listed taken down to the first right it carries, and a proposed fix on the record, with nothing applied (for Mcclain Miller and Henderson and Sons 1).",
+   "value": "Christopher Walker",
+   "expected": "Christopher Walker",
+   "field": "person"
+  },
+  {
+   "request": "Andrea Roberts from that unit is leaving, so take Andrea Roberts through an offboarding sweep: what Andrea Roberts can reach, the first login listed walked to the first right it carries, and the corrections on offer, without applying any of them. Apply none of them.",
+   "value": "Andrea Roberts",
+   "expected": "Andrea Roberts",
+   "field": "person"
+  },
+  {
+   "request": "Which remediation actions are available for Garcia-James PLC 2?",
+   "value": "Garcia-James PLC 2",
+   "expected": "Garcia-James PLC 2",
+   "field": "name"
+  },
+  {
+   "request": "Is there an open finding for the control 'Active contractor identities without manager'?",
+   "value": "Active contractor identities without manager",
+   "expected": "Active contractor identities without manager",
+   "field": "control"
+  },
+  {
+   "request": "Explain the control ctrl_UIbUA0H40FhbRTkKjqOihB, including its reason and tags.",
+   "value": "ctrl_UIbUA0H40FhbRTkKjqOihB",
+   "expected": "ctrl_UIbUA0H40FhbRTkKjqOihB",
+   "field": "control"
+  },
+  {
+   "request": "Jessica Fuentes comes off the books on Friday: what Jessica Fuentes can reach, her first login listed walked through to the first right it carries, and a proposed fix on the record. Do not apply a remediation to any of them.",
+   "value": "Jessica Fuentes",
+   "expected": "Jessica Fuentes",
+   "field": "person"
+  },
+  {
+   "request": "Heidi Bowen is one of the first two off the payroll: down to her first login listed and the first entitlement it carries, with the corrections available on the record and none applied.",
+   "value": "Heidi Bowen",
+   "expected": "Heidi Bowen",
+   "field": "person"
+  },
+  {
+   "request": "Which remediation actions are available for the HR feed?",
+   "value": "HR",
+   "expected": "HR",
+   "field": "name"
+  },
+  {
+   "request": "Compare Chelsea Cox with Chelsea Evans, who already holds it, side by side on logins, rights, collections, the systems those rights belong to, findings and risk, so I can see whether the request fits the peer's footprint (for GitLab_Security Analyst).",
+   "value": "Chelsea Evans",
+   "expected": "Chelsea Evans",
+   "field": "person_b"
+  },
+  {
+   "request": "Alexander Herrera appears more than once in the access report. List every account on file for Alexander Herrera.",
+   "value": "Alexander Herrera",
+   "expected": "Alexander Herrera",
+   "field": "name"
+  },
+  {
+   "request": "Check whether Brent Walker has access to Confluence. I do not need the full population.",
+   "value": "Brent Walker",
+   "expected": "Brent Walker",
+   "field": "person"
+  },
+  {
+   "request": "Franklin Smith has asked for the right DrChrono_Medical Records Specialist 1 — what it exposes, who holds it, and what Franklin Smith can reach today.",
+   "value": "Franklin Smith",
+   "expected": "Franklin Smith",
+   "field": "person"
+  },
+  {
+   "request": "Gary Edwards comes off the books on Friday: what Gary Edwards can reach, his first login listed walked through to the first right it carries, and a proposed fix on the record. Do not apply a remediation to any of them.",
+   "value": "Gary Edwards",
+   "expected": "Gary Edwards",
+   "field": "person"
+  },
+  {
+   "request": "Andrea Roberts from that unit is leaving, so take Andrea Roberts through an offboarding sweep: what Andrea Roberts can reach, the first login listed walked to the first right it carries, and the corrections on offer, without applying any. Apply none of them.",
+   "value": "Andrea Roberts",
+   "expected": "Andrea Roberts",
+   "field": "person"
+  },
+  {
+   "request": "Daniel Wilson down to Daniel Wilson's first login listed and the first entitlement it carries, with the corrections available and none applied.",
+   "value": "Daniel Wilson",
+   "expected": "Daniel Wilson",
+   "field": "person"
+  },
+  {
+   "request": "What is AzureDevOps_Technical Lead nested under, and what does it contain?",
+   "value": "AzureDevOps_Technical Lead",
+   "expected": "AzureDevOps_Technical Lead",
+   "field": "name"
+  },
+  {
+   "request": "Explain the control 'ctrl_Ug6A17H6389PRTCiJ1MeSH', with its reason and tags, and also list the groups its finding names and open the first group on its members and nesting.",
+   "value": "ctrl_Ug6A17H6389PRTCiJ1MeSH",
+   "expected": "ctrl_Ug6A17H6389PRTCiJ1MeSH",
+   "field": "control"
+  },
+  {
+   "request": "Give me the relational picture of the RLIQA feed.",
+   "value": "RLIQA",
+   "expected": "RLIQA",
+   "field": "name"
+  },
+  {
+   "request": "Audit Allscripts Sunrise_Medical Records Specialist across the systems it appears in, including its publishing application, feed and group.",
+   "value": "Allscripts Sunrise_Medical Records Specialist",
+   "expected": "Allscripts Sunrise_Medical Records Specialist",
+   "field": "right"
+  },
+  {
+   "request": "GitLab recertification: give me the full recertification: owner, logins, rights with the first one opened on its sensitivity, the GitLab_Administrators group with its members and nesting, and the application's risk.",
+   "value": "GitLab_Administrators",
+   "expected": "GitLab_Administrators",
+   "field": "group"
+  },
+  {
+   "request": "Confirm whether Barbara Sanchez is among the holders of the right Active Directory_Network Administrator.",
+   "value": "Active Directory_Network Administrator",
+   "expected": "Active Directory_Network Administrator",
+   "field": "name"
+  },
+  {
+   "request": "Brad Miller leaves at the end of the month: what Brad Miller can reach, his first login listed walked down to the first entitlement it carries, and the corrections available before I sign, with none applied.",
+   "value": "Brad Miller",
+   "expected": "Brad Miller",
+   "field": "person"
+  },
+  {
+   "request": "How risky is the RLDEVENTRA feed, and why?",
+   "value": "RLDEVENTRA",
+   "expected": "RLDEVENTRA",
+   "field": "name"
+  },
+  {
+   "request": "Compare Chelsea Cox with Chelsea Evans, who already holds it, side by side on logins, rights, collections, the systems those rights belong to, findings and risk, so I can see whether the request fits the peer's footprint (for GitLab_Security Analyst).",
+   "value": "Chelsea Cox",
+   "expected": "Chelsea Cox",
+   "field": "person_a"
+  },
+  {
+   "request": "Catherine Taylor leaves: what Catherine Taylor can reach, the first login listed walked to the first right it carries, and the corrections available, with none applied. Apply none of them.",
+   "value": "Catherine Taylor",
+   "expected": "Catherine Taylor",
+   "field": "person"
+  },
+  {
+   "request": "Who is on the IT Support roster?",
+   "value": "IT Support",
+   "expected": "IT Support",
+   "field": "name"
+  },
+  {
+   "request": "What is the risk score of the RLIQA feed?",
+   "value": "RLIQA",
+   "expected": "RLIQA",
+   "field": "name"
+  },
+  {
+   "request": "Amy Walsh leaves on this month's offboarding: what Amy Walsh can reach, the first login of Amy Walsh walked down to the first entitlement it carries, and the corrections available on Amy Walsh, with none applied.",
+   "value": "Amy Walsh",
+   "expected": "Amy Walsh",
+   "field": "person"
+  },
+  {
+   "request": "Show me the core attributes of GitLab_Application Developers, including the feed it comes from.",
+   "value": "GitLab_Application Developers",
+   "expected": "GitLab_Application Developers",
+   "field": "name"
+  },
+  {
+   "request": "April Watts leaves: what April Watts can reach, their first login walked down to the first entitlement it carries, and the corrections available on them, with none applied.",
+   "value": "April Watts",
+   "expected": "April Watts",
+   "field": "person"
+  },
+  {
+   "request": "Heidi Turner comes off the books on Friday: what Heidi Turner can reach, their first login listed walked through to the first right it carries, and a proposed fix on the record. Do not apply a remediation to any of them.",
+   "value": "Heidi Turner",
+   "expected": "Heidi Turner",
+   "field": "person"
+  },
+  {
+   "request": "Run the offboarding sweep: what Dorothy Bates can reach, the first login listed walked to the first right it carries, and the corrections on offer, with none applied.",
+   "value": "Dorothy Bates",
+   "expected": "Dorothy Bates",
+   "field": "person"
+  },
+  {
+   "request": "List the Jira logins and their reconciliation state. I want to know which ones nobody owns.",
+   "value": "Jira",
+   "expected": "Jira",
+   "field": "name"
+  },
+  {
+   "request": "An audit of the right Jira_IT Support Specialist across the systems it appears in: who holds it, the system that publishes it, the feed its logins arrive on and the collection that confers it.",
+   "value": "Jira_IT Support Specialist",
+   "expected": "Jira_IT Support Specialist",
+   "field": "right"
+  },
+  {
+   "request": "Work the finding of the control 'Active contractor identities whom manager left': why it was flagged and how many people it names.",
+   "value": "Active contractor identities whom manager left",
+   "expected": "Active contractor identities whom manager left",
+   "field": "control"
+  }
+ ]
+}

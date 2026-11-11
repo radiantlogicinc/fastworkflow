@@ -10,11 +10,11 @@ class Context:
     state_version = 1
 
     @classmethod
-    def get_parent(cls, command_context_object: TodoListManager) -> None:
+    def get_parent(cls, record: TodoListManager) -> None:
         return None
 
     @classmethod
-    def get_state(cls, command_context_object: TodoListManager) -> dict[str, Any]:
+    def get_state(cls, record: TodoListManager) -> dict[str, Any]:
         """Snapshot the manager so a session holding it can be evicted.
 
         Without this hook the session is pinned: a TodoListManager is an
@@ -22,7 +22,7 @@ class Context:
         fastworkflow.EPHEMERAL instead to declare deliberately that this
         context is not worth persisting.
         """
-        return command_context_object.to_state_dict()
+        return record.to_state_dict()
 
     @classmethod
     def from_state(cls, state: dict[str, Any], workflow: fastworkflow.Workflow,
@@ -46,7 +46,7 @@ class Context:
         return TodoListManager.from_state_dict(state, filepath)
 
     @classmethod
-    def get_locator(cls, command_context_object: Union[TodoList, TodoItem]) -> str:
+    def get_locator(cls, record: Union[TodoList, TodoItem]) -> str:
         """Identify a list or item within the manager, as a path of ids.
 
         The current context is usually a node *inside* the snapshotted manager,
@@ -56,7 +56,7 @@ class Context:
         unambiguous.
         """
         ids = []
-        node = command_context_object
+        node = record
         while isinstance(node, TodoItem):
             ids.append(str(node.id))
             node = node.parent

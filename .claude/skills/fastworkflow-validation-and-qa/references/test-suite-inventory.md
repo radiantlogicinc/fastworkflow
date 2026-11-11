@@ -84,7 +84,7 @@ Chain of nondeterminism: LLM generates synthetic utterances (litellm, real key) 
 
 ### tests/test_streaming_endpoint.py (dead manual script)
 - Line 11: `BASE_URL = "http://localhost:8000"` — assumes a manually started server.
-- Line 44: `"workflow_path": "/home/drawal/rl/fastworkflow/fastworkflow/examples/todo_list"` — absolute path to a directory removed by d679c38; wrong on every machine including the owner's.
+- Line 44: `"workflow_path"` set to an absolute path of the checkout's `fastworkflow/examples/todo_list` — absolute path to a directory removed by d679c38; wrong on every machine including the owner's.
 - Lines 50-56 and 113-117: `except Exception: print(...); return` — pytest sees a function that returns `None` ⇒ pass.
 - Has an `if __name__ == "__main__"` block: it was written as a manual smoke script. Under pytest it is a permanently green no-op.
 - Correct future states (owner's call): convert to skip-if-no-server integration test, or move out of `tests/`. Do not delete without approval.

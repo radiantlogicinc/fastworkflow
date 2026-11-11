@@ -13,8 +13,6 @@ from fastworkflow.command_metadata_api import CommandMetadataAPI
 
 class Signature:
     """List all the commands available in the current context along with their metadata"""
-    class Output(BaseModel):
-        valid_command_names: list[str]
 
     # Constants from plain_utterances.json
     plain_utterances = [
@@ -49,8 +47,8 @@ class ResponseGenerator:
 
     #     # Get the current context information
     #     context_info = {
-    #         "name": app_workflow.current_command_context_name,
-    #         "display_name": app_workflow.current_command_context_displayname,
+    #         "name": app_workflow._current_command_context_name,
+    #         "display_name": app_workflow._current_command_context_displayname,
     #         "description": "",
     #         "inheritance": [],
     #         "containment": []
@@ -75,7 +73,7 @@ class ResponseGenerator:
     #     meta = CommandMetadataAPI.get_enhanced_command_info(
     #         subject_workflow_path=app_workflow.folderpath,
     #         cme_workflow_path=workflow.folderpath,
-    #         active_context_name=app_workflow.current_command_context_name,
+    #         active_context_name=app_workflow._current_command_context_name,
     #     )
 
     #     return {
@@ -108,7 +106,7 @@ class ResponseGenerator:
 
     #     candidate_commands: set[str] = (
     #         set(cme_command_names)
-    #         | set(subject_crd.get_command_names(app_workflow.current_command_context_name))
+    #         | set(subject_crd.get_command_names(app_workflow._current_command_context_name))
     #     )
 
     #     def _has_utterances(fq_cmd: str) -> bool:
@@ -134,7 +132,8 @@ class ResponseGenerator:
         self,
         workflow: fastworkflow.Workflow,
         command: str,
-    ) -> fastworkflow.CommandOutput:
+        input: None,
+    ) -> str:
         # Check if we're in agent mode by looking for chat session run_as_agent flag
         is_agent_mode = False
         with contextlib.suppress(Exception):
@@ -151,7 +150,7 @@ class ResponseGenerator:
         commands_text = CommandMetadataAPI.get_command_display_text(
             subject_workflow_path=app_workflow.folderpath,
             cme_workflow_path=workflow.folderpath,
-            active_context_name=app_workflow.current_command_context_name,
+            active_context_name=app_workflow._current_command_context_name,
             for_agents=is_agent_mode,
         )
         
@@ -161,10 +160,6 @@ class ResponseGenerator:
             "NLU_Pipeline_Stage", 
             fastworkflow.NLUPipelineStage.INTENT_DETECTION)
         success = nlu_pipeline_stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION
-        return fastworkflow.CommandOutput(
-            command_response=
-                fastworkflow.CommandResponse(
-                    response=response,
-                    success=success
-                )
-        ) 
+        if not success:
+            raise fastworkflow.Refused(response)
+        return response 

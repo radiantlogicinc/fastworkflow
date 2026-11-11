@@ -49,10 +49,10 @@ def test_what_can_i_do_global(monkeypatch):
     
     # Call the __call__ method which is the current implementation
     generator = ResponseGenerator()
-    response = generator(mock_workflow, "what can i do")
+    response = generator(mock_workflow, "what can i do", None)
     
     # Check that the response contains the commands header
-    assert "Commands available" in response.command_response.response
+    assert "Commands available" in response
 
 
 def test_what_can_i_do_context(monkeypatch):
@@ -70,7 +70,7 @@ def test_what_can_i_do_context(monkeypatch):
     
     # Use TodoListManager as context
     from tests.todo_list_workflow.application.todo_manager import TodoListManager
-    app_workflow.current_command_context = TodoListManager()
+    app_workflow.record = TodoListManager()
     
     # Create a command metadata extraction workflow
     workflow_type = "command_metadata_extraction"
@@ -91,18 +91,18 @@ def test_what_can_i_do_context(monkeypatch):
     
     # Call the __call__ method which is the current implementation
     generator = ResponseGenerator()
-    response = generator(mock_workflow, "what can i do")
+    response = generator(mock_workflow, "what can i do", None)
     
     # Check that the response contains commands header (context name may not be displayed)
-    assert "Commands available" in response.command_response.response
+    assert "Commands available" in response
     
     # Test reset_context functionality
     reset_gen = ResetGen()
-    reset_gen(mock_workflow, "reset context")
+    reset_gen(mock_workflow, "reset context", None)
     
     # After reset, verify the commands header is still present (context name may not be displayed)
-    resp2 = generator(mock_workflow, "what can i do")
-    assert "Commands available" in resp2.command_response.response
+    resp2 = generator(mock_workflow, "what can i do", None)
+    assert "Commands available" in resp2
 
     # Mock the RoutingRegistry.get_definition method
     mock_utterance_def = MagicMock()

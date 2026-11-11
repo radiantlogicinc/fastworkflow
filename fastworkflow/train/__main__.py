@@ -4,6 +4,7 @@ import functools
 import os
 import json
 import shutil
+import sys
 import time
 from datetime import datetime, timezone
 from dotenv import dotenv_values
@@ -13,8 +14,9 @@ from colorama import Fore, Style
 
 import fastworkflow
 from fastworkflow.utils.logging import logger
-from fastworkflow.utils import python_utils
+from fastworkflow.utils import python_utils, workflow_vocabulary
 from fastworkflow import ModuleType
+from fastworkflow import model_pipeline_training
 from fastworkflow.model_pipeline_training import (
     CommandRouter,
     TrainingDataError,
@@ -80,7 +82,7 @@ def _validate_command_inputs(
     cmd_dir = crd.command_directory
     core_commands = set(cmd_dir.core_command_names)
     thin: list[tuple[str, int]] = []
-    for command_name in sorted(cmd_dir.get_commands()):
+    for command_name in sorted(cmd_dir.get_execution_commands()):
         if (
             command_name in core_commands
             or command_name.split("/")[-1]
@@ -387,7 +389,9 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
         print(f"{Fore.YELLOW}Migrated existing artifacts into version "
               f"{migrated}{Style.RESET_ALL}")
 
-    seed = determinism.get_training_seed()
+    # The planning signature and the manifest carry the MODEL seed, so a run under another
+    # --train-seed is never carried forward as if it were the same training.
+    seed = determinism.get_model_seed()
     previous_version = artifact_versioning.resolve_current_version(workflow_path)
     cache_mode = (
         utterance_cache.MODE_REGENERATE
@@ -420,6 +424,12 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
     if param_cache.enabled:
         print(f"{Fore.CYAN}{param_cache.format_summary()}{Style.RESET_ALL}")
 
+    # EXPERIMENT-ONLY (Phase 9 step 1). The arm is part of every context's signature, so a
+    # switch of arm marks every head dirty and a same-arm rerun is selective as usual.
+    arm = model_pipeline_training.active_experiment_arm()
+    # EXPERIMENT-ONLY (Phase 9 step 3). The head layout is part of every context's signature, so
+    # artifacts of the flattened and scoped layouts never mix. None is today's layout.
+    head_scope = model_pipeline_training.active_experiment_head_scope()
     try:
         plan, training_signature = selective_training.compute_training_plan(
             workflow_path,
@@ -428,6 +438,8 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
             seed=seed,
             carry_forward_from=previous_version,
             cache_mode=cache_mode,
+            reserved_class_arm=arm,
+            head_scope=head_scope,
         )
     except Exception:
         workflow.close()
@@ -442,16 +454,24 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
     print(f"{Fore.CYAN}{selective_training.format_plan(plan)}{Style.RESET_ALL}")
 
     version_id = artifact_versioning.new_version_id()
+    # Phase 9 step 4: every version records the not-here construction it was built with, which
+    # is what `artifact_versioning.construction_record_problem` checks at load.
+    manifest_record, run_metadata = model_pipeline_training.construction_records(
+        arm, head_scope, workflow_path)
     artifact_versioning.write_manifest(
         workflow_path,
         version_id,
         seed=seed,
         previous_version=previous_version,
+        **manifest_record,
     )
 
     # generate_diverse_utterances cannot return provenance (its signature is public API
     # called from user-authored command files), so it pushes into this recorder instead.
     recorder = determinism.ProvenanceRecorder(workflow_path)
+    # Always recorded, shipped runs included: score_not_here and the provenance readers take the
+    # arm from here, and the resolved name (sparse_1 for a shipped run) is what it should say.
+    recorder.run_metadata = run_metadata
     determinism.set_provenance_recorder(recorder)
     # Same reason, same shape: generation reaches the cache through a module-level handle
     # because it cannot be handed a workflow path. This is what makes two runs at the same
@@ -467,14 +487,30 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
         workflow_path, plan.carry_forward_from
     )
     started = time.monotonic()
+    model_pipeline_training._HOLDOUT_EXPORT = {} if arm is not None else None
     try:
-        train(
+        # The samples the signature records (design 2.50) are the samples the heads train on.
+        used_samples = train(
             workflow,
             contexts_to_train=(
                 None if plan.is_full_retrain else set(plan.contexts_to_train)
             ),
+            not_here_samples={
+                context_name: context_signature.not_here_samples
+                for context_name, context_signature in training_signature.contexts.items()
+            },
         )
+        for context_name, samples in used_samples.items():
+            recorded = training_signature.contexts[context_name].not_here_samples
+            if samples != recorded:
+                raise RuntimeError(
+                    f"context {context_name!r} trained on not-here samples that differ from "
+                    f"the ones its signature records; nothing was published"
+                )
+        if arm is not None:
+            model_pipeline_training.write_holdout_export(workflow_path, arm, seed)
     finally:
+        model_pipeline_training._HOLDOUT_EXPORT = None
         set_active_artifact_version(workflow_path, None)
         determinism.set_provenance_recorder(None)
         utterance_cache.set_utterance_cache(None)
@@ -560,30 +596,37 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
     # previous, complete ___command_info intact and runnable.
     _prune_stale_artifacts(workflow_path)
 
+#: Parameter-example settings of the trainer. The cache-report reads these too, so the
+#: variant key it checks is the one the trainer would ask for.
+PARAM_EXAMPLE_COUNT = 15
+PARAM_VALIDATION_THRESHOLD = 0.3
+
+
+def parameter_model_of(folderpath: str, command_metadata: dict):
+    """The command's parameter model class, or None when its module cannot be loaded."""
+    module = python_utils.get_module(command_metadata["parameter_path"], folderpath)
+    if not module:
+        return None
+    module_class_name = command_metadata["parameters_class"]
+    if "." in module_class_name:
+        (outer, inner) = module_class_name.split(".")
+        return getattr(getattr(module, outer), inner)
+    return getattr(module, module_class_name)
+
+
 def _generate_dspy_examples_helper(workflow):
     json_path=get_route_layer_filepath_model(workflow.folderpath,"command_directory.json")
     # json_path = "./examples/sample_workflow/___command_info/command_directory.json"
     commands = _get_commands_with_parameters(json_path)
     for command_name in commands.keys():
         command_metadata = commands[command_name]
-        module_file_path = command_metadata["parameter_path"]
-        if module := python_utils.get_module(
-            module_file_path, workflow.folderpath
-        ):
-            module_class_name = command_metadata["parameters_class"]
-
-            if "." in module_class_name:
-                (outer, inner) = module_class_name.split(".")
-                outer_cls = getattr(module, outer)
-                fields = getattr(outer_cls, inner)
-            else:
-                fields = getattr(module, module_class_name)
-
+        fields = parameter_model_of(workflow.folderpath, command_metadata)
+        if fields is not None:
             examples, rejected_examples = generate_dspy_examples(
             field_annotations=fields.model_fields,
             command_name=command_name,
-            num_examples=15,
-            validation_threshold=0.3  # You can adjust this threshold as needed
+            num_examples=PARAM_EXAMPLE_COUNT,
+            validation_threshold=PARAM_VALIDATION_THRESHOLD  # You can adjust this threshold as needed
             )
             # Appended after generation so the example cache is unchanged, and only
             # beside real examples: alone it would teach "every field is missing".
@@ -605,6 +648,10 @@ def _generate_dspy_examples_helper(workflow):
                 json.dump(examples_data, f, indent=2)
         else:
             None
+
+    # The workflow's vocabulary: a top-level, unversioned snapshot derived from command metadata.
+    # The runtime reads it while its fingerprint matches and derives it in memory otherwise.
+    workflow_vocabulary.write_workflow_vocabulary(workflow.folderpath)
 
 def _prune_stale_artifacts(workflow_path: str):
     """Remove orphaned per-command and per-context training artifacts.
@@ -692,6 +739,9 @@ def _get_commands_with_parameters(json_path):
     
     # Iterate through each command entry
     for command_key, metadata in commands_metadata.items():
+        if metadata.get("framework") or metadata.get("is_planning"):
+            # Framework machinery is never trained; a planning command has no parameter examples here.
+            continue
         # Check if command_parameters_class is not null
         if metadata.get("command_parameters_class") is not None:
             # We want to train on the full command path including the ContextFolder prefix
@@ -710,55 +760,83 @@ def _get_commands_with_parameters(json_path):
     
     return commands_with_parameters
 
-def is_fast_workflow_trained(fastworkflow_folderpath: str):
-    # Check the artifacts for exactly the contexts that the CME trainer produces.
-    cme_workflow_folderpath = os.path.join(
-        fastworkflow_folderpath,
-        '_workflows',
-        'command_metadata_extraction',
+def _trains_the_fastworkflow_package(workflow_path: str) -> bool:
+    """True when *workflow_path* is the fastworkflow package root or its CME workflow.
+
+    Those train the CME themselves (the root recurses into ``_workflows``), so the automatic
+    CME check is skipped for them. This used to be a substring test on the path, which skipped
+    the CME check for every workflow inside a checkout named ``fastworkflow``; that made the
+    CME unretrainable through ``fastworkflow train <app>`` there.
+    """
+    from fastworkflow.model_pipeline_training import (
+        is_internal_cme_folder,
+        is_internal_consultation_folder,
     )
+
+    package = os.path.realpath(fastworkflow.get_fastworkflow_package_path())
+    real = os.path.realpath(workflow_path)
+    return (
+        real == package
+        or is_internal_cme_folder(workflow_path)
+        or is_internal_consultation_folder(workflow_path)
+    )
+
+
+def _internal_workflow_trained(
+    fastworkflow_folderpath: str,
+    internal_name: str,
+) -> bool:
+    workflow_folderpath = os.path.join(
+        fastworkflow_folderpath,
+        "_workflows",
+        internal_name,
+    )
+    if not os.path.isdir(workflow_folderpath):
+        return False
     try:
         trained_contexts = set(
-            selective_training.contexts_for_training(cme_workflow_folderpath)
+            selective_training.contexts_for_training(workflow_folderpath)
         )
     except (AttributeError, KeyError, OSError, TypeError, ValueError) as exc:
         logger.warning(
-            "Could not discover trainable CME contexts for "
-            f"{cme_workflow_folderpath}: {exc}"
+            "Could not discover trainable contexts for "
+            f"{workflow_folderpath}: {exc}"
         )
         return False
 
-    required_artifact_paths = []
     for context_name in trained_contexts:
         context_folder = (
             GLOBAL_CONTEXT_FOLDER if context_name == "*" else context_name
         )
         context_artifact_dir = os.path.join(
-            cme_workflow_folderpath, "___command_info", context_folder
+            workflow_folderpath, "___command_info", context_folder
         )
         for artifact_name in selective_training.REQUIRED_CONTEXT_ARTIFACTS:
-            artifact_path = os.path.join(context_artifact_dir, artifact_name)
-            if not os.path.exists(artifact_path):
+            if not os.path.exists(os.path.join(context_artifact_dir, artifact_name)):
                 return False
-            required_artifact_paths.append(artifact_path)
 
-    if not required_artifact_paths:
+    if artifact_versioning.construction_record_problem(workflow_folderpath) is not None:
         return False
 
-    # Stale means a command's source or seed utterances changed since the
-    # recorded training, by content. Modification times are not evidence: a
-    # checkout or pull rewrites them and used to buy a paid CME retrain
-    # (fix-a7r7). Global inputs are deliberately not compared here; the CME
-    # trainer itself judges those once it is asked to run.
     signature = selective_training.load_training_signature(
-        cme_workflow_folderpath,
-        artifact_versioning.resolve_current_version(cme_workflow_folderpath),
+        workflow_folderpath,
+        artifact_versioning.resolve_current_version(workflow_folderpath),
     )
     if signature is None:
         return False
     return not selective_training.changed_commands(
         signature.command_fingerprints,
-        selective_training.compute_command_fingerprints(cme_workflow_folderpath),
+        selective_training.compute_command_fingerprints(workflow_folderpath),
+    )
+
+
+def is_fast_workflow_trained(fastworkflow_folderpath: str):
+    """True when shipped internal workflows have fresh, complete training artifacts."""
+    return (
+        _internal_workflow_trained(
+            fastworkflow_folderpath, "command_metadata_extraction"
+        )
+        and _internal_workflow_trained(fastworkflow_folderpath, "consultation")
     )
 
 
@@ -771,6 +849,16 @@ def train_main(args):
         print(
             f"{Fore.RED}Error: The specified workflow path '{workflow_path}' is not a valid directory.{Style.RESET_ALL}"
         )
+        exit(1)
+
+    # A command file that does not load would be missing from the model: stop before any training work.
+    from fastworkflow.command_preview import load_problems
+
+    if problems := load_problems(workflow_path):
+        print(f"{Fore.RED}Error: {len(problems)} command file(s) do not load; training stopped before it started:"
+              f"{Style.RESET_ALL}", file=sys.stderr)
+        for problem in problems:
+            print(f"  {problem}", file=sys.stderr)
         exit(1)
 
     env_vars = {
@@ -793,7 +881,7 @@ def train_main(args):
     # otherwise-unneeded CME retraining.
     fastworkflow_folderpath = fastworkflow.get_fastworkflow_package_path()
     if (
-        "fastworkflow" not in workflow_path and
+        not _trains_the_fastworkflow_package(workflow_path) and
         not is_fast_workflow_trained(fastworkflow_folderpath)
     ):
         train_workflow(

@@ -113,7 +113,7 @@ fastWorkflow was benchmarked on [Tau Bench](https://github.com/sierra-research/t
 - [Quick Start: run an example in 5 minutes](#quick-start-run-an-example-in-5-minutes)
 - [AI-enable your own app (without restructuring it)](#ai-enable-your-own-app-without-restructuring-it)
 - [How complex workflows scale: context hierarchies](#how-complex-workflows-scale-context-hierarchies)
-- [Skills: multi-command jobs in code (`_skills`)](#skills-multi-command-jobs-in-code-_skills)
+- [Planning commands: multi-command jobs in code](#planning-commands-multi-command-jobs-in-code)
 - [Chat with it and debug it: `run_chatbot`](#chat-with-it-and-debug-it-run_chatbot)
 - [Production deployment](#production-deployment)
 - [Developer FAQ](#developer-faq)
@@ -200,7 +200,6 @@ The agent introspects your code and generates `_commands/cancel_order.py`, `_com
 ```python
 # _commands/cancel_order.py  ← new file; wraps your existing code
 import fastworkflow
-from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from pydantic import BaseModel, Field
 
 from your_app.orders import OrderService
@@ -208,10 +207,9 @@ from your_app.orders import OrderService
 
 class Signature:
     class Input(BaseModel):
-        order_id: str = Field(
+        order_id: str = Field(                  # no default: required, so a missing ID is asked for
             description="The order ID to cancel",
             examples=["44821", "ORD-2024-001"],
-            default="NOT_FOUND",          # missing → fastWorkflow asks instead of guessing
         )
         refund_method: str = Field(
             description="How to refund the customer",
@@ -219,15 +217,13 @@ class Signature:
             default="original_payment",
         )
 
+    class Output(BaseModel):
+        status: str
+
     plain_utterances = [
         "Cancel order #44821 and give store credit",
         "cancel that blue jacket order, I want credit not a refund",
     ]
-
-    @staticmethod
-    def generate_utterances(workflow: fastworkflow.Workflow, command_name: str) -> list[str]:
-        return [command_name.split("/")[-1].lower().replace("_", " ")] + \
-            generate_diverse_utterances(Signature.plain_utterances, command_name)
 
 
 class ResponseGenerator:
@@ -235,15 +231,13 @@ class ResponseGenerator:
         self,
         workflow: fastworkflow.Workflow,
         command: str,
-        command_parameters: Signature.Input,
-    ) -> fastworkflow.CommandOutput:
+        input: Signature.Input,
+    ) -> Signature.Output:
         result = OrderService().cancel_order(
-            order_id=command_parameters.order_id,
-            refund_method=command_parameters.refund_method,
+            order_id=input.order_id,
+            refund_method=input.refund_method,
         )
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response=str(result))
-        )
+        return Signature.Output(status=str(result))  # returning the Output is enough
 ```
 
 Then `fastworkflow train` and `fastworkflow run` against your workflow directory. That's the entire integration pattern: a thin command layer over code you already have.
@@ -283,7 +277,7 @@ User                                ← always visible
         └── escalate_to_human()
 ```
 
-Context relationships live in **one file**, `context_inheritance_model.json` — not code. Each entry uses `base` (parent contexts whose commands are inherited) and optionally `/` (commands declared directly on the context):
+Inheritance lives in **one file**, `context_inheritance_model.json` — not code. Each entry's `base` names the contexts whose commands it inherits:
 
 ```json
 {
@@ -296,20 +290,24 @@ Context relationships live in **one file**, `context_inheritance_model.json` —
 }
 ```
 
+The enclosing object of each context comes from its `get_parent` method, read from the live object chain at run time; there is no separate hierarchy file.
+
+A request is matched along one lookup path: the current context and its bases, then each enclosing record and its bases, then the global commands. The nearest scope that recognises the request wins, and the command runs on that scope's object. For a natural-language request, a confident global command runs first. Exact command names take the nearest scope.
+
 This is what lets small models stay accurate as your app grows — and what keeps frontier models from drowning in tool definitions.
 
 ---
 
-## Skills: multi-command jobs in code (`_skills`)
+## Planning commands: multi-command jobs in code
 
-When a family of requests is answered by the same few commands in a known order (find a record, open it, read it, answer), write that job once as a **skill**: a Python file `_skills/<name>.py` next to `_commands/`. Its `Signature` describes the job and declares typed inputs; `steps(input)` builds the steps as text, or `plan(input)` splits them into phases that pass facts to each other in code. The planner fills the inputs from the request and the steps become the agent's plan; code runs the mechanical steps itself.
+When a family of requests is answered by the same few commands in a known order (find a record, open it, read it, answer), write that job once as a **planning command**: a Python file in `_commands/` (or `_commands/<Context>/`), beside the execution commands. Its `Signature` describes the job and declares typed inputs, and its `PlanGenerator` class holds the phases. Each phase is a method, run in the order `__phases__` gives, and the phases pass facts to each other in code. A planning command is a label of the classifiers whose scope holds it, so a request reaches it the way it reaches an execution command. With `JEV_API_KEY`, Jev picks the planning command for the request, one typed call fills its inputs, and the fields marked `classifier_confirms` are checked. Without it, the text planner plans the request with the planning commands in its list, and the classifier checks do not run. Code runs the mechanical steps itself. A command may carry `@user_approval_for_execution(UserApproval.REQUIRED_ALWAYS)` or `@user_approval_for_execution(UserApproval.REQUIRED_UNTIL_DELEGATED)`; the framework then asks the user before it runs, and the user replies `yes`, `no` or `always`. A planning command runs in agent mode; in assistant mode an exactly named one runs only when it is mechanical.
 
 ```sh
-fastworkflow skill preview <workflow_dir>           # one markdown preview per skill
-fastworkflow skill preview <workflow_dir> --check   # CI: fails on stale previews or a broken skill
+fastworkflow command preview <workflow_dir>           # one markdown preview per planning command
+fastworkflow command preview <workflow_dir> --check   # CI: fails on stale previews or a broken planning command
 ```
 
-Coding agents: use the wheel-shipped [author-workflow-skills](fastworkflow/skills_for_coding_fastworkflows/author-workflow-skills/SKILL.md) skill (file shape, input rules, phases, and the step wording the framework reads). Full reference: [`docs/skill_file_layout.md`](docs/skill_file_layout.md) and [`docs/skill_phases.md`](docs/skill_phases.md).
+Coding agents: use the wheel-shipped [author-planning-commands](fastworkflow/skills_for_coding_fastworkflows/author-planning-commands/SKILL.md) skill (file shape, input rules, phases, and the step wording the framework reads). Full reference: [`docs/planning_command_file_layout.md`](docs/planning_command_file_layout.md) and [`docs/planning_command_phases.md`](docs/planning_command_phases.md). Workflows that still keep planning commands in `_skills/` (a load error now) should follow [`docs/migrating_skills_to_commands.md`](docs/migrating_skills_to_commands.md).
 
 ---
 
@@ -353,7 +351,7 @@ fw.turn                        the whole logical turn (stable across ask_user su
                 ├── fw.nlu.intent            which matching layer decided, classifier
                 │                            confidence vs threshold, candidates on ambiguity
                 └── fw.nlu.param_extraction  extraction method, missing/invalid fields,
-                    │                        db_lookup outcomes, validation-hook verdict
+                    │                        validation-hook outcomes (changed and refused fields)
                     └── fw.llm.call          the LLM extraction call, when one ran
 fw.ask_user                    a clarifying question, and how long the user took
 
@@ -518,7 +516,7 @@ from fastworkflow.utils.dspy_utils import dspySignature
 import dspy
 
 dspy_sig = dspySignature(Signature.Input, Signature.Output)
-prediction = dspy.Predict(dspy_sig)(command_parameters)
+prediction = dspy.Predict(dspy_sig)(input)
 ```
 
 **Startup commands & headless mode** — initialize context or run non-interactively (batch/CI) by combining a startup command/action with `--keep_alive False`:
@@ -732,6 +730,8 @@ When a model uses the `litellm_proxy/` prefix, the per-role keys are ignored and
 > **`CRASH RUNNING FASTWORKFLOW`** — the persistent-state folder is corrupted. Delete `FASTWORKFLOW_STATE_ROOT/workflows/<workflow-id>/` (default `~/.local/state/fastworkflow/...`) and re-run.
 
 > **Slow first training run** — the first run downloads BERT/DistilBERT from HuggingFace and makes LLM calls for synthetic-utterance generation. Set `HF_HOME=/path/to/cache` to control model storage; later runs skip the download. A small workflow trains in ~5–8 minutes on CPU.
+
+> **"Retrain with `fastworkflow train`" when a workflow loads** — it was trained by an earlier release. The first retrain after an upgrade generates training utterances for each planning command, which calls the LLM.
 
 > **Commands not recognized** — a command module with an import/syntax error won't load and won't appear as an intent. Check your `_commands/*.py` files.
 

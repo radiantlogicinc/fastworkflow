@@ -173,6 +173,9 @@ def _raising_registry(monkeypatch, exc_factory):
         def get_command_names(self, context):
             return ["fail"]
 
+        def get_planning_command_names(self, context):
+            return []
+
     monkeypatch.setattr(
         fastworkflow.RoutingRegistry, "get_definition", lambda _: RaisingCRD()
     )
@@ -241,7 +244,7 @@ def test_annotate_exception_keeps_the_first_writer():
 
 def test_failed_command_carries_routed_identity_out_on_the_exception(monkeypatch):
     ctx, _sink, app_workflow = _failing_ctx(monkeypatch, lambda: RuntimeError("boom"))
-    expected_context = app_workflow.current_command_context_displayname
+    expected_context = app_workflow._current_command_context_displayname
     try:
         with pytest.raises(RuntimeError, match="boom") as excinfo:
             CommandExecutor.invoke_command(ctx, "fail")
@@ -259,7 +262,7 @@ def test_failed_command_carries_routed_identity_out_on_the_exception(monkeypatch
 def test_error_span_names_the_command_and_context(monkeypatch):
     """FW-3: the error end_span carried only error_type, unlike every sibling."""
     ctx, sink, app_workflow = _failing_ctx(monkeypatch, lambda: RuntimeError("boom"))
-    expected_context = app_workflow.current_command_context_displayname
+    expected_context = app_workflow._current_command_context_displayname
     try:
         with pytest.raises(RuntimeError):
             CommandExecutor.invoke_command(ctx, "fail")
@@ -294,7 +297,7 @@ def test_failure_output_names_the_command_and_joins_its_record(monkeypatch):
     assert failure_output.success is False
     assert failure_output.command_name == "fail"
     assert failure_output.workflow_name == app_workflow.folderpath.split("/")[-1]
-    assert failure_output.context == app_workflow.current_command_context_displayname
+    assert failure_output.context == app_workflow._current_command_context_displayname
 
     call_id = failure_output.command_call_id
     assert call_id
@@ -380,7 +383,7 @@ def _assert_identity(excinfo, workflow):
     exc = excinfo.value
     assert exc._fw_command_name == "fail"
     assert exc._fw_workflow_name == workflow.folderpath.split("/")[-1]
-    assert exc._fw_context == workflow.current_command_context_displayname
+    assert exc._fw_context == workflow._current_command_context_displayname
 
 
 def test_perform_action_carries_identity_out_when_the_command_takes_no_parameters(
@@ -458,6 +461,9 @@ def test_a_cme_hop_failure_reaches_the_failure_output_and_the_error_span(monkeyp
         def get_command_names(self, context):
             return ["anything"]
 
+        def get_planning_command_names(self, context):
+            return []
+
     monkeypatch.setattr(
         fastworkflow.RoutingRegistry, "get_definition", lambda _: CRD()
     )
@@ -481,7 +487,7 @@ def test_a_cme_hop_failure_reaches_the_failure_output_and_the_error_span(monkeyp
     failure_output = ctx._turn_outputs[-1]
     assert failure_output.success is False
     assert failure_output.command_name == "wildcard"
-    assert failure_output.context == ctx.cme_workflow.current_command_context_displayname
+    assert failure_output.context == ctx.cme_workflow._current_command_context_displayname
     assert failure_output.command_call_id
 
     span = sink.named(tracing.SPAN_COMMAND_EXECUTE)[-1]

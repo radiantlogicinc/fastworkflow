@@ -54,7 +54,7 @@ from jwt.exceptions import PyJWTError as JWTError
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow import state_paths
+from fastworkflow import approval_binding, state_paths
 from fastworkflow.experiment.readiness import runtime_readiness_snapshot
 from fastworkflow.utils.logging import logger
 
@@ -70,6 +70,7 @@ from .utils import (
     ChannelSessionManager,
     MAX_CONVERSATION_TURNS_IN_MEMORY,
     ensure_topic_and_summary,
+    persist_pending_after_turn,
     reserve_conversation_id,
     record_turn_feedback,
     assert_channel_owns_turn,
@@ -111,6 +112,7 @@ from .turns import (
     compute_idempotency_key,
 )
 from . import server_memory
+from . import jwt_manager
 from .parent_watch import start_parent_liveness_watch
 from .jwt_manager import (
     create_access_token,
@@ -131,6 +133,7 @@ from fastworkflow.conversation_labeling import (
     TOPIC_GENERATION_MAX_RETRIES,
     TOPIC_GENERATION_TIMEOUT_ENV_VAR,
 )
+from fastworkflow.mcp_server import command_schema_listing
 from fastworkflow.observability.store import ObservabilityStore
 from fastworkflow.observability.store import get_observability_sink, writer_incarnation_id
 from fastworkflow.experiment.runner import experiment_store_readiness
@@ -402,6 +405,12 @@ async def lifespan(_app: FastAPI):
             env_vars.update(dotenv_values(ARGS.passwords_file_path))
         fastworkflow.init(env_vars=env_vars)
 
+        # Command files that do not load are skipped by the server; log each one at startup.
+        from fastworkflow.command_preview import load_problems
+
+        for problem in load_problems(ARGS.workflow_path):
+            logger.error(f"command file does not load, so the server does not serve it: {problem}")
+
         # A FastAPI process serves exactly one workflow. Pin it on the manager
         # now, before any lazily-built store reads it, so conversation, session
         # and checkpoint trees are namespaced under this workflow's state dir.
@@ -623,7 +632,7 @@ def load_args():
     parser.add_argument("--passwords_file_path", required=False)
     parser.add_argument("--context", required=False)  # JSON string
     parser.add_argument("--startup_command", required=False)
-    parser.add_argument("--startup_action", required=False)  # JSON string
+    parser.add_argument("--startup_action", required=False)  # JSON file path, or an inline JSON object
     parser.add_argument("--project_folderpath", required=False)
     parser.add_argument("--port", type=int, default=8000, help="Port to run the server on (default: 8000)")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind the server to (default: 0.0.0.0)")
@@ -1347,6 +1356,52 @@ async def get_turn_trace(
     )
 
 
+@app.get(
+    "/command_schemas",
+    operation_id="get_command_schemas",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": (
+                "Every listed command of the channel's workflow, by qualified name: "
+                "{kind: 'execution' | 'planning', input: <JSON Schema or null>, "
+                "output: <JSON Schema or null>}. Framework and internal CME commands are "
+                "not listed."
+            )
+        },
+        401: {"description": "Invalid or expired JWT token"},
+        404: {"description": "Session not found, or no workflow bound to it"},
+    },
+)
+async def get_command_schemas(
+    session: SessionData = Depends(get_session_and_ensure_runtime),
+) -> dict[str, dict[str, Any]]:
+    """
+    The schemas a client needs to call each command and read its result (design 3.14).
+
+    `input` is the command's `Signature.Input` JSON Schema, and `output` its `Signature.Output`
+    JSON Schema when it declares one: a command's `command_response.output` in a turn is the
+    instance of that `output` schema. The listing is read from the channel's app workflow, so a
+    client sees the same commands the MCP tool listing and the agent see.
+    """
+    channel_id = session.channel_id
+    async with session_manager.leased_session(channel_id) as runtime:
+        if not runtime:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User session not found: {channel_id}",
+            )
+        workflow = runtime.execution_context.app_workflow
+        if workflow is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No workflow is bound to channel_id: {channel_id}",
+            )
+        folderpath = workflow.folderpath
+    # Reading signatures imports workflow modules: keep that off the event loop.
+    return await asyncio.get_running_loop().run_in_executor(None, command_schema_listing, folderpath)
+
+
 @app.post(
     "/initialize",
     operation_id="rest_initialize",
@@ -1430,9 +1485,7 @@ async def initialize(
         if request.startup_action:
             startup_action = fastworkflow.Action(**request.startup_action)
         elif ARGS.startup_action:
-            with open(ARGS.startup_action, 'r') as file:
-                startup_action_dict = json.load(file)
-            startup_action = fastworkflow.Action(**startup_action_dict)
+            startup_action = fastworkflow.load_startup_action(ARGS.startup_action)
 
         # Per-session workflow context [R24]: the request field overrides the
         # server-level --context CLI arg for this session; absent means the
@@ -1626,17 +1679,30 @@ async def invoke_agent(
 
             ctx = runtime.execution_context
             user_query = request.user_query.lstrip('/')
+            # Approval binding (ADR-EXP-025): an HTTP or MCP request is a host surface. Its identity
+            # is verified only when the JWT signature is checked (owner answer 2).
+            approval_surface = approval_binding.Surface(
+                kind="host", verified=bool(jwt_manager.EXPECT_ENCRYPTED_JWT), uid=user_id)
+            delivered: dict = {}
+
+            def _work():
+                output = ctx.process_turn(
+                    user_query, unattended=request.unattended,
+                    approval_surface=approval_surface, approval_token=request.approval_token)
+                delivered.update(approval_binding.take_host_delivery(ctx.app_workflow))
+                return output
+
             execn = await _submit_turn_endpoint(
                 runtime,
                 kind="invoke_agent",
-                work_fn=lambda: ctx.process_turn(
-                    user_query, unattended=request.unattended),
+                work_fn=_work,
                 # A retry differing only in `unattended` is a different turn.
                 idempotency_args=(user_query, *(("unattended",) if request.unattended else ())),
                 wait_seconds=request.timeout_seconds,
                 user_id=user_id,
                 http_bearer_token=session.http_bearer_token,
             )
+            execn.live_extras = delivered
             return _turn_json_response(execn, channel_id)
 
     except HTTPException:
@@ -2034,15 +2100,25 @@ async def perform_action(
                 ) from e
 
             ctx = runtime.execution_context
+            perform_surface = approval_binding.Surface(
+                kind="host", verified=bool(jwt_manager.EXPECT_ENCRYPTED_JWT), uid=user_id)
+            delivered: dict = {}
+
+            def _perform():
+                output = ctx.process_action_turn(action, approval_surface=perform_surface)
+                delivered.update(approval_binding.take_host_delivery(ctx.app_workflow))
+                return output
+
             execn = await _submit_turn_endpoint(
                 runtime,
                 kind="perform_action",
-                work_fn=lambda: ctx.process_action_turn(action),
+                work_fn=_perform,
                 idempotency_args=(request.action,),
                 wait_seconds=request.timeout_seconds,
                 user_id=user_id,
                 http_bearer_token=session.http_bearer_token,
             )
+            execn.live_extras = delivered
             return _turn_json_response(execn, channel_id)
 
     except HTTPException:
@@ -2085,6 +2161,18 @@ async def cancel_pending(
             session_manager.session_state_store.clear(channel_id)
 
         return {"status": "ok", "cleared": cleared}
+
+
+def _settle_pending_for_new_conversation(runtime, session_manager) -> None:
+    """New conversation settles the pending state at the moment the button is pressed (fix-newconv-pending).
+
+    Approvals are cancelled; a paused question or review is parked with the conversation it belongs to, and comes back
+    when that conversation is activated. The conversation's history is cleared as before, and the saved state is
+    rewritten so a restart sees the same thing.
+    """
+    runtime.execution_context.park_pending_for_new_conversation()
+    runtime.execution_context.clear_conversation_history()
+    persist_pending_after_turn(session_manager, runtime, None)
 
 
 @app.post(
@@ -2198,13 +2286,17 @@ async def new_conversation(
                     # Reserve next conversation ID for the next conversation
                     # (one minting chokepoint [R1]; binds the id onto the WEC)
                     runtime.active_conversation_id = reserve_conversation_id(runtime)
-                    runtime.execution_context.clear_conversation_history()
+                    _settle_pending_for_new_conversation(runtime, session_manager)
 
                     logger.info(f"Ready for new conversation {runtime.active_conversation_id} for session {channel_id}")
                     return {"status": "ok"}
                 else:
-                    # No turns to save, just clear history and start fresh
-                    runtime.execution_context.clear_conversation_history()
+                    # No turns to save, just clear history and start fresh. A paused question or review belongs to a
+                    # turn that has no completed record yet, so it still needs its conversation rotated away from.
+                    if runtime.execution_context.has_pending_state():
+                        if conv_id := reserve_conversation_id(runtime):
+                            runtime.active_conversation_id = conv_id
+                    _settle_pending_for_new_conversation(runtime, session_manager)
                     logger.info(f"No turns to save for session {channel_id}, cleared history")
                     return {"status": "ok", "message": "No turns to save"}
 
@@ -2544,6 +2636,8 @@ async def activate_conversation(
                         runtime.channel_id, request.conversation_id
                     )
                 )
+                # The pending state parked for this conversation (if any) is live again: save it as such.
+                persist_pending_after_turn(session_manager, runtime, None)
                 logger.info(f"Activated conversation {request.conversation_id} for session {channel_id}")
 
                 # After the activation, so the helper labels the conversation the

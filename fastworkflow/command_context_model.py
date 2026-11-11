@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -9,6 +10,13 @@ from pathlib import Path
 import fastworkflow
 from fastworkflow.command_directory import get_cached_command_directory
 from fastworkflow.utils import python_utils
+from fastworkflow.utils.logging import logger
+from fastworkflow.workflow_inheritance_model import WorkflowInheritanceModel
+
+#: Workflow folders already told that their ``context_hierarchy_model.json`` is ignored.
+#: ``CommandContextModel.load`` runs on every ``Workflow.get_parent`` call, so the warning is
+#: deduplicated per folder for the life of the process: one warning per workflow load.
+_HIERARCHY_FILE_WARNED: set[str] = set()
 
 """Utility for loading and traversing the single-file workflow command context model.
 
@@ -40,6 +48,37 @@ This loader performs:
 """
 
 
+#: The callback-class methods whose first parameter is the record (renamed from ``command_context_object``).
+_RECORD_PARAMETER_METHODS = ("get_parent", "get_displayname", "get_state", "get_locator")
+
+
+def context_class_problems(context_class: Any) -> list[str]:
+    """The load errors of a context callback class, empty when it loads.
+
+    Two removed spellings fail the load, each naming its replacement: a classmethod
+    ``instance_label`` (make the label a property on the record object and name it with
+    ``instance_label_attr``), and a parameter ``command_context_object`` on
+    ``get_parent``, ``get_displayname``, ``get_state`` or ``get_locator`` (name it ``record``).
+    """
+    problems = []
+    if hasattr(context_class, "instance_label"):
+        problems.append(
+            "instance_label is removed: make the label a property on the record object "
+            "and name it with instance_label_attr = \"<property name>\" (e.g. \"instance_label\")")
+    for method_name in _RECORD_PARAMETER_METHODS:
+        method = getattr(context_class, method_name, None)
+        if method is None:
+            continue
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            continue
+        if "command_context_object" in parameters:
+            problems.append(
+                f'{method_name}: parameter "command_context_object" is removed: name it "record"')
+    return problems
+
+
 class CommandContextModelError(Exception):
     """Base class for errors in this module."""
 
@@ -57,9 +96,6 @@ class CommandContextModel:
     _resolved_commands: dict[str, list[str]] = field(
         default_factory=dict, init=False
     )
-    _resolved_ancestors: dict[str, list[str]] = field(
-        default_factory=dict, init=False
-    )
 
     def __post_init__(self):
         # Inheritance is resolved lazily on first `commands()` call to
@@ -73,43 +109,12 @@ class CommandContextModel:
         workflow_path_obj = Path(workflow_path)
         
         # 1. Load command inheritance from JSON file (if it exists)
-        json_model_path = workflow_path_obj / "_commands/context_inheritance_model.json"
-        raw_contexts_from_json = {}
-        if json_model_path.is_file():
-            try:
-                with json_model_path.open("r") as f:
-                    raw_contexts_from_json = json.load(f)
-            except json.JSONDecodeError as e:
-                raise CommandContextModelValidationError(
-                    f"Invalid JSON in {json_model_path}: {e}"
-                ) from e
-            if not isinstance(raw_contexts_from_json, dict):
-                raise CommandContextModelValidationError(
-                    f"Context model root in {json_model_path} must be a dictionary, "
-                    f"but found {type(raw_contexts_from_json)}"
-                )
-            for context_name_in_json, context_def_in_json in raw_contexts_from_json.items():
-                if "/" in context_def_in_json:
-                    raise CommandContextModelValidationError(
-                        f"Context '{context_name_in_json}' in {json_model_path.name} "
-                        f"must not contain a '/' key. Only 'base' key is allowed."
-                    )
-                if "base" not in context_def_in_json:
-                    raise CommandContextModelValidationError(
-                        f"Context '{context_name_in_json}' in {json_model_path.name} "
-                        f"is missing the required 'base' key."
-                    )
-                if not isinstance(context_def_in_json["base"], list) or \
-                       not all(isinstance(b, str) for b in context_def_in_json["base"]):
-                    raise CommandContextModelValidationError(
-                        f"Key 'base' for context '{context_name_in_json}' in {json_model_path.name} "
-                        f"must be a list of context name strings."
-                    )
+        raw_contexts_from_json = cls._load_inheritance_json(workflow_path_obj)
         
         # 2. Use cached CommandDirectory to get filesystem-derived commands
         cmd_dir = get_cached_command_directory(str(workflow_path_obj))
         fs_derived_direct_commands = {}
-        for qualified_cmd_name in cmd_dir.map_command_2_metadata.keys():
+        for qualified_cmd_name in cmd_dir.get_execution_commands():
             if "/" in qualified_cmd_name:
                 context_part, _ = qualified_cmd_name.split("/", 1)
                 if context_part not in fs_derived_direct_commands:
@@ -142,89 +147,70 @@ class CommandContextModel:
         # Create the instance with the merged command contexts
         instance = cls(_workflow_path=str(workflow_path_obj), _command_contexts=merged_contexts)
 
-        # 4. Load and resolve the context hierarchy (for parent relationships)
-        hierarchy_data = instance._load_context_hierarchy()
-        instance._resolve_ancestry(hierarchy_data)
-        
+        # 4. The parent chain is not read from a file. The runtime climbs the live chain
+        #    (Workflow.get_parent -> the context class's get_parent). A leftover
+        #    context_hierarchy_model.json is ignored, and warned about once per workflow.
+        _warn_if_hierarchy_file_ignored(workflow_path_obj)
+
         return instance
 
-    def _load_context_hierarchy(self) -> dict:
-        """Loads and validates the context hierarchy model from the workflow path."""
-        hierarchy_model_path = Path(self._workflow_path) / "context_hierarchy_model.json"
-        if not hierarchy_model_path.is_file():
+    @classmethod
+    def _load_inheritance_json(cls, workflow_path: str | Path) -> dict[str, dict[str, list[str]]]:
+        """Load and validate ``_commands/context_inheritance_model.json`` without importing commands."""
+        workflow_path_obj = Path(workflow_path)
+        json_model_path = workflow_path_obj / "_commands/context_inheritance_model.json"
+        if not json_model_path.is_file():
             return {}
+        try:
+            with json_model_path.open("r") as f:
+                raw_contexts_from_json = json.load(f)
+        except json.JSONDecodeError as e:
+            raise CommandContextModelValidationError(
+                f"Invalid JSON in {json_model_path}: {e}"
+            ) from e
+        if not isinstance(raw_contexts_from_json, dict):
+            raise CommandContextModelValidationError(
+                f"Context model root in {json_model_path} must be a dictionary, "
+                f"but found {type(raw_contexts_from_json)}"
+            )
+        for context_name_in_json, context_def_in_json in raw_contexts_from_json.items():
+            if not isinstance(context_def_in_json, dict):
+                raise CommandContextModelValidationError(
+                    f"Definition for context '{context_name_in_json}' in {json_model_path.name} "
+                    f"must be a dictionary, but found {type(context_def_in_json)}"
+                )
+            if "/" in context_def_in_json:
+                raise CommandContextModelValidationError(
+                    f"Context '{context_name_in_json}' in {json_model_path.name} "
+                    f"must not contain a '/' key. Only 'base' key is allowed."
+                )
+            if "base" not in context_def_in_json:
+                raise CommandContextModelValidationError(
+                    f"Context '{context_name_in_json}' in {json_model_path.name} "
+                    f"is missing the required 'base' key."
+                )
+            if not isinstance(context_def_in_json["base"], list) or \
+                   not all(isinstance(b, str) for b in context_def_in_json["base"]):
+                raise CommandContextModelValidationError(
+                    f"Key 'base' for context '{context_name_in_json}' in {json_model_path.name} "
+                    f"must be a list of context name strings."
+                )
+        return raw_contexts_from_json
 
-        with hierarchy_model_path.open("r") as f:
-            hierarchy_data = json.load(f)
-
-        return hierarchy_data
-
-    def _resolve_ancestry(self, hierarchy: dict[str, dict[str, list[str]]]) -> None:
-        """Resolves the complete ancestry for each context and detects cycles."""
-        all_contexts = set(self._command_contexts.keys()) | set(hierarchy.keys())
-        for context_name in all_contexts:
-            if context_name not in self._resolved_ancestors:
-                self.get_ancestor_contexts(context_name, _hierarchy=hierarchy)
-
-    def get_ancestor_contexts(
-        self, 
-        context_name: str, 
+    @classmethod
+    def _validate_context_inheritance(
+        cls,
+        context_name: str,
+        contexts: dict[str, dict[str, list[str]]],
+        valid_contexts: set[str] | None = None,
         visiting: set[str] | None = None,
-        _hierarchy: dict[str, dict[str, list[str]]] | None = None
-    ) -> list[str]:
-        """
-        Returns the effective list of ancestor contexts for a given context.
-        This includes the full parent chain up to the root.
-        """
-        if context_name in self._resolved_ancestors:
-            return self._resolved_ancestors[context_name]
-
-        if _hierarchy is None:
-            _hierarchy = self._load_context_hierarchy()
-
-        if visiting is None:
-            visiting = set()
-
-        if context_name in visiting:
-            raise CommandContextModelValidationError(
-                f"Context hierarchy cycle detected: {' -> '.join(list(visiting) + [context_name])}"
-            )
-
-        visiting.add(context_name)
-
-        context_def = _hierarchy.get(context_name, {})
-        parent_contexts = context_def.get("parent", [])
-
-        if not isinstance(parent_contexts, list) or not all(isinstance(p, str) for p in parent_contexts):
-            raise CommandContextModelValidationError(
-                f"Key 'parent' for context '{context_name}' in context_hierarchy_model.json "
-                f"must be a list of context name strings."
-            )
-
-        all_ancestors = set()
-        for parent in parent_contexts:
-            all_ancestors.add(parent)
-            grandparents = self.get_ancestor_contexts(parent, visiting.copy(), _hierarchy)
-            all_ancestors.update(grandparents)
-
-        final_ancestors = sorted(list(all_ancestors))
-        self._resolved_ancestors[context_name] = final_ancestors
-
-        visiting.remove(context_name)
-
-        return final_ancestors
-
-    def _resolve_inheritance(self) -> None:
-        """Resolves command inheritance and detects cycles."""
-        for context_name in self._command_contexts:
-            self.commands(context_name)
-
-    def commands(self, context_name: str, visiting: set[str] | None = None) -> list[str]:
-        """Returns the effective list of commands for a given command context, including inherited ones."""
-        if context_name in self._resolved_commands:
-            return self._resolved_commands[context_name]
-
-        if context_name not in self._command_contexts:
+    ) -> None:
+        """Validate that *context_name* and its transitive ``base`` contexts exist in
+        *valid_contexts* (defaults to ``set(contexts)``) and contain no inheritance cycle."""
+        # "*" (the global context) is always a valid base: routing gives it a context even when no
+        # top-level command file exists (command_routing: resolved_contexts['*']), so it is never missing.
+        allowed = (set(contexts) | {"*"}) if valid_contexts is None else valid_contexts
+        if context_name not in allowed:
             # A context must be defined either by having command files
             # or by being part of a command inheritance structure. If it's not
             # in _command_contexts, it's an unknown/invalid context.
@@ -238,6 +224,95 @@ class CommandContextModel:
                 f"Inheritance cycle detected: {' -> '.join(list(visiting) + [context_name])}"
             )
 
+        next_visiting = visiting.copy()
+        next_visiting.add(context_name)
+        for base_context_name in contexts.get(context_name, {}).get("base") or []:
+            cls._validate_context_inheritance(
+                base_context_name, contexts, allowed, next_visiting
+            )
+
+    @staticmethod
+    def _ordered_bases_from_map(
+        context_name: str,
+        contexts: dict[str, dict[str, list[str]]],
+    ) -> list[str]:
+        """Depth-first declared base contexts for *context_name*, each once, from *contexts*."""
+        ordered: list[str] = []
+        seen: set[str] = {context_name}
+
+        def walk(name: str) -> None:
+            for base in contexts.get(name, {}).get("base") or []:
+                if base in seen:
+                    continue
+                seen.add(base)
+                ordered.append(base)
+                walk(base)
+
+        walk(context_name)
+        return ordered
+
+    @classmethod
+    def load_base_contexts(
+        cls,
+        workflow_path: str | Path,
+        known_contexts: set[str] | None = None,
+    ) -> dict[str, tuple[str, ...]]:
+        """Load and validate ``_commands/context_inheritance_model.json`` and return
+        ``{context: (base, ...)}`` in depth-first declared order without importing any command
+        or creating ``___command_info``.
+
+        Validates the JSON schema, verifies that every referenced base context exists
+        (either in the JSON or in *known_contexts*, discovered from ``_commands/`` folders
+        when *known_contexts* is not provided), and rejects inheritance cycles with
+        :class:`CommandContextModelValidationError`.
+        """
+        workflow_path_obj = Path(workflow_path)
+        raw_contexts = cls._load_inheritance_json(workflow_path_obj)
+        if not raw_contexts:
+            return {}
+
+        if known_contexts is None:
+            known: set[str] = set()
+            inh = WorkflowInheritanceModel.load(str(workflow_path_obj))
+            base_wf_paths = [Path(p) for p in inh.resolve_base_paths(str(workflow_path_obj))]
+            for wf_dir in (*base_wf_paths, workflow_path_obj):
+                cmds_dir = wf_dir / "_commands"
+                if cmds_dir.is_dir():
+                    for entry in cmds_dir.iterdir():
+                        if entry.is_dir() and not entry.name.startswith(("_", ".")):
+                            known.add(entry.name)
+        else:
+            known = set(known_contexts)
+
+        # The global context "*" always exists (command routing gives it a context even when no
+        # global command does), so a base of "*" names the global commands and is never missing.
+        valid_contexts = set(raw_contexts.keys()) | known | {"*"}
+        for ctx_name in raw_contexts:
+            cls._validate_context_inheritance(ctx_name, raw_contexts, valid_contexts)
+
+        all_contexts = (set(raw_contexts.keys()) | known) - {"*", ""}
+        return {
+            ctx: bases
+            for ctx in sorted(all_contexts)
+            if (bases := tuple(cls._ordered_bases_from_map(ctx, raw_contexts)))
+        }
+
+    def _resolve_inheritance(self) -> None:
+        """Resolves command inheritance and detects cycles."""
+        for context_name in self._command_contexts:
+            self._validate_context_inheritance(context_name, self._command_contexts)
+            self.commands(context_name)
+
+    def commands(self, context_name: str, visiting: set[str] | None = None) -> list[str]:
+        """Returns the effective list of commands for a given command context, including inherited ones."""
+        if context_name in self._resolved_commands:
+            return self._resolved_commands[context_name]
+
+        self._validate_context_inheritance(
+            context_name, self._command_contexts, visiting=visiting
+        )
+        if visiting is None:
+            visiting = set()
         visiting.add(context_name)
 
         context_def = self._command_contexts.get(context_name, {})
@@ -280,6 +355,17 @@ class CommandContextModel:
                 pending.extend(self._command_contexts.get(base, {}).get("base") or [])
         return bases
 
+    def ordered_base_contexts(self, context_name: str) -> list[str]:
+        """Every context whose commands *context_name* inherits, transitively,
+        depth-first in declared ``base`` order, each once.
+
+        Matches the order :meth:`commands` resolves inherited commands in.
+        Unknown contexts (including the global ``*``) inherit nothing and give
+        ``[]``. Cycles are rejected when the model loads, so the walk
+        terminates.
+        """
+        return self._ordered_bases_from_map(context_name, self._command_contexts)
+
     # ---------------------------------------------------------------------
     # Context callback class resolution
     # ---------------------------------------------------------------------
@@ -307,9 +393,35 @@ class CommandContextModel:
             context_metadata.context_module_path,
             context_metadata.workflow_folderpath or self._workflow_path,
         ):
-            return getattr(module, context_metadata.context_class, None)
+            context_class = getattr(module, context_metadata.context_class, None)
+            if context_class is not None:
+                problems = context_class_problems(context_class)
+                if problems:
+                    raise CommandContextModelError(
+                        f"context {context_name!r} does not load: " + "; ".join(problems))
+            return context_class
         else:
             return None
+
+
+def _warn_if_hierarchy_file_ignored(workflow_path: Path) -> None:
+    """Warn once per workflow that a leftover ``context_hierarchy_model.json`` is ignored.
+
+    The file used to declare each context's ``parent``. Parents now come only from the live
+    chain, so the file has no effect on routing or training and can be deleted.
+    """
+    hierarchy_path = workflow_path / "context_hierarchy_model.json"
+    if not hierarchy_path.is_file():
+        return
+    key = os.path.realpath(str(workflow_path))
+    if key in _HIERARCHY_FILE_WARNED:
+        return
+    _HIERARCHY_FILE_WARNED.add(key)
+    logger.warning(
+        f"Workflow '{workflow_path.name}' has a context_hierarchy_model.json, which is "
+        f"ignored: parents come from the live context chain and training no longer reads "
+        f"the file. It can be deleted ({hierarchy_path})."
+    )
 
 
 # ---------------------------------------------------------------------
@@ -324,16 +436,16 @@ def get_workflow_info(chat_session_or_path: fastworkflow.ChatSession | str) -> d
     {
       "workflow_name": str,
       "available_contexts": list[str],
-      "context_inheritance_model": dict,
-      "context_hierarchy_model": dict
+      "context_inheritance_model": dict
     }
 
     Notes:
     - available_contexts are derived from CommandContextModel.load(workflow_path)
       so they reflect filesystem + inheritance.
     - current context and purpose/description are intentionally omitted.
-    - Raw JSON for inheritance (from _commands/context_inheritance_model.json)
-      and hierarchy (from context_hierarchy_model.json) is returned verbatim when present.
+    - Raw JSON for inheritance (from _commands/context_inheritance_model.json) is
+      returned verbatim when present. The parent hierarchy is not described here:
+      it lives in the live chain, and context_hierarchy_model.json is ignored.
     """
     if isinstance(chat_session_or_path, str):
         workflow_path_str = chat_session_or_path
@@ -343,7 +455,6 @@ def get_workflow_info(chat_session_or_path: fastworkflow.ChatSession | str) -> d
 
     available_contexts: list[str]
     inheritance_json: dict[str, Any] = {}
-    hierarchy_json: dict[str, Any] = {}
 
     try:
         # Derive contexts via consolidated model
@@ -361,17 +472,8 @@ def get_workflow_info(chat_session_or_path: fastworkflow.ChatSession | str) -> d
     except Exception:
         inheritance_json = {}
 
-    # Load raw context hierarchy model (if present)
-    try:
-        hierarchy_path = Path(workflow_path_str) / "context_hierarchy_model.json"
-        if hierarchy_path.is_file():
-            hierarchy_json = json.loads(hierarchy_path.read_text())
-    except Exception:
-        hierarchy_json = {}
-
     return {
         "workflow_name": workflow_name,
         "available_contexts": available_contexts,
         "context_inheritance_model": inheritance_json,
-        "context_hierarchy_model": hierarchy_json,
     }

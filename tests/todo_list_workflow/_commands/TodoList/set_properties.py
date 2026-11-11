@@ -1,7 +1,6 @@
 from pydantic import ConfigDict
 
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
 from fastworkflow.workflow import Workflow
 from fastworkflow.utils.signatures import InputForParamExtraction
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
@@ -46,15 +45,11 @@ class Signature:
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
-    @staticmethod
-    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> tuple[bool, str]:
-        return (True, '')
-
 class ResponseGenerator:
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         """Sets one or more properties for an instance of TodoList."""
         # Access the application class instance:
-        todo_list = workflow.command_context_for_response_generation  # type: TodoList
+        todo_list = workflow.record  # type: TodoList
         if input.description is not None:
             todo_list.description = input.description
         if input.assign_to is not None:
@@ -63,12 +58,9 @@ class ResponseGenerator:
             todo_list.assign_to = status = TodoItem.COMPLETE if input.is_complete else TodoItem.INCOMPLETE
         return Signature.Output(success=True)
 
-    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandOutput:
-        output = self._process_command(workflow, command_parameters)
+    def __call__(self, workflow: Workflow, command: str, input: Signature.Input) -> fastworkflow.CommandResponse:
+        output = self._process_command(workflow, input)
         response = (
             f'Response: {output.model_dump_json()}'
         )
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=response)
-        )
+        return fastworkflow.CommandResponse(response=response, output=output)

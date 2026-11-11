@@ -1,8 +1,8 @@
 """Answer a capability question ("what can you do?") in code, in agent mode.
 
-When the app workflow has skills (``_skills/<name>.py``) and the whole user message asks
+When the app workflow has planning commands (``_commands/<name>.py``) and the whole user message asks
 what the assistant can do, the turn is answered here, before the split and the planner,
-with no model call: each skill in plain words with its shortest ``plain_utterance`` as the
+with no model call: each planning command in plain words with its shortest ``plain_utterance`` as the
 example, then the current context's commands, one line each, then one line for the commands
 that more than half of the other contexts add, then one line per other context with the
 commands only it (or a minority) adds. Each other-context line names commands in order while
@@ -21,7 +21,7 @@ from ever matching: it has more words than any utterance. The leading-window mat
 ``utils.fuzzy_match.find_best_matches`` does not fit here, because it scores a candidate
 on its first ``len(message)`` characters, so "what can" would match "what can you do?".
 
-Workflows without skills, the executor's ``what_can_i_do`` tool, the CME command itself
+Workflows without planning commands, the executor's ``what_can_i_do`` tool, the CME command itself
 and assistant mode ('/' commands) are untouched.
 """
 from __future__ import annotations
@@ -146,22 +146,22 @@ def _context_lines(other_contexts: dict[str, list[str]]) -> list[str]:
     return lines
 
 
-def render_capability_answer(skills: dict[str, tuple[str, ...]], commands: list[str],
+def render_capability_answer(planning_commands: dict[str, tuple[str, ...]], commands: list[str],
                              other_contexts: Optional[dict[str, list[str]]] = None) -> str:
-    """Markdown: each skill with its shortest example request, then one line per command,
+    """Markdown: each planning command with its shortest example request, then one line per command,
     then one line for the commands more than half of the other contexts add, then one line per
     other context with the rest of its commands (each of these lines cut to ``LINE_WIDTH``
     characters, the shared line to twice that, with the rest counted: "and 3 more", never
     "and 1 more").
 
-    *skills* maps a skill's name to its ``plain_utterances`` (written as users talk, unlike
+    *planning_commands* maps a planning command's name to its ``plain_utterances`` (written as users talk, unlike
     the ``Signature`` docstring, which is written for the matcher; the shortest by length is
     shown, the first of equals); *commands* are the names of the current context's commands;
     *other_contexts* maps each other context's name to the names of the commands it adds
     (``CommandMetadataAPI.get_other_context_commands``).
     """
     lines = ["Here is what I can do. Ask in your own words, for example:", ""]
-    for name, utterances in skills.items():
+    for name, utterances in planning_commands.items():
         examples = [u.strip() for u in utterances if u.strip()]
         example = f': "{min(examples, key=len)}"' if examples else ""
         lines.append(f"- **{_plain_name(name)}**{example}")
@@ -177,7 +177,8 @@ def context_commands(app_workflow, cme_workflow_folderpath: str) -> list[str]:
     meta = CommandMetadataAPI.get_enhanced_command_info(
         subject_workflow_path=app_workflow.folderpath,
         cme_workflow_path=cme_workflow_folderpath,
-        active_context_name=app_workflow.current_command_context_name,
+        active_context_name=app_workflow._current_command_context_name,
+        include_planning=False,
     )
     return [cmd["name"] for cmd in meta.get("commands", [])
             if not cmd["qualified_name"].startswith("IntentDetection/")]
@@ -188,17 +189,17 @@ def other_context_commands(app_workflow) -> dict[str, list[str]]:
     in every context, so the current one already lists (and skips) them. Empty on failure."""
     try:
         return CommandMetadataAPI.get_other_context_commands(
-            app_workflow.folderpath, app_workflow.current_command_context_name)
+            app_workflow.folderpath, app_workflow._current_command_context_name)
     except Exception:
         return {}
 
 
 def capability_answer(message: str, app_workflow, cme_workflow_folderpath: str) -> Optional[str]:
-    """The answer to *message* when it is a capability question and the workflow has skills, else None."""
-    from fastworkflow.workflow_agent import skill_utterances
+    """The answer to *message* when it is a capability question and the workflow has planning commands, else None."""
+    from fastworkflow.workflow_agent import planning_command_utterances
 
-    skills = skill_utterances(app_workflow.folderpath)
-    if not skills or not is_capability_question(message, capability_utterances(cme_workflow_folderpath)):
+    planning_commands = planning_command_utterances(app_workflow.folderpath)
+    if not planning_commands or not is_capability_question(message, capability_utterances(cme_workflow_folderpath)):
         return None
-    return render_capability_answer(skills, context_commands(app_workflow, cme_workflow_folderpath),
+    return render_capability_answer(planning_commands, context_commands(app_workflow, cme_workflow_folderpath),
                                     other_context_commands(app_workflow))

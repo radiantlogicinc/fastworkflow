@@ -37,16 +37,13 @@ class ResponseGenerator:
         workflow: fastworkflow.Workflow,
         command: str,
         command_parameters: Signature.Input,
-    ) -> fastworkflow.CommandOutput:
+    ) -> str:
         # Initialize the root context
-        workflow.root_command_context = User(command_parameters.name)
+        workflow.root = User(command_parameters.name)
 
         response = (
             f"Root context set to User('{command_parameters.name}')."
             f"Now you can call commands exposed in this context."
         )
 
-        return fastworkflow.CommandOutput(
-            command_response=
-                fastworkflow.CommandResponse(response=response)
-        )
+        return response

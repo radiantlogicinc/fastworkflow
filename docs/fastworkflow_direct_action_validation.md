@@ -57,7 +57,7 @@ So on the direct-action path that attribute stayed `None`, and
 The NLU path was fine because it constructs the extractor through the factory
 in `_workflows/command_metadata_extraction/parameter_extraction.py`.
 
-A related consequence of the same root cause: if a field declared `db_lookup`
+A related consequence of the same root cause: if a field declared `db_lookup` (since retired; the lookup now lives in the validation hook)
 and the direct action supplied a value for it, `validate_parameters` raised
 `ValueError("input_for_param_extraction_class is not set.")` before the hook
 would have run. So db-lookup commands failed closed on this path, while

@@ -62,11 +62,11 @@ def make_workflow(folderpath: Path) -> fastworkflow.Workflow:
 def run_command(workflow: fastworkflow.Workflow, command_name: str, command: str, **parameters):
     """Run one of the workflow's own commands, dispatching as perform_action does.
 
-    Not perform_action itself: its direct-action path constructs an
-    InputForParamExtraction without the command's Signature class, so a command
-    carrying a db_lookup field — messaging_app_4's set_current_user — raises
-    before its response generator ever runs. Parameters are supplied here
-    already valid, so parameter extraction is not what these tests exercise.
+    Not perform_action itself: parameters are supplied here already valid, so
+    parameter extraction (and the validation hook that runs in it, which
+    messaging_app_4's set_current_user uses for its fuzzy user lookup) is not
+    what these tests exercise. The response generator gets the three arguments
+    of its one signature: the filled Input, or None for a command with no Input.
     """
     routing = RoutingRegistry.get_definition(workflow.folderpath)
     generator = routing.get_command_class(
@@ -76,10 +76,15 @@ def run_command(workflow: fastworkflow.Workflow, command_name: str, command: str
         command_name, fastworkflow.ModuleType.COMMAND_PARAMETERS_CLASS
     )
 
-    workflow.command_context_for_response_generation = workflow.current_command_context
+    workflow._command_context_for_response_generation = workflow._current_command_context
     if parameters_class is None:
-        return generator(workflow, command)
-    return generator(workflow, command, parameters_class(**parameters))
+        return generator(workflow, command, None)
+    # Checked field by field, as a binding is (bound_fields: no model validators, so a validator's lookup does
+    # not rewrite a value the test set): the Input is what the response generator receives.
+    from fastworkflow.utils.input_validation import bound_fields
+
+    filled = parameters_class.model_construct(**bound_fields(parameters_class, parameters))
+    return generator(workflow, command, filled)
 
 
 def project(workflow: fastworkflow.Workflow):
@@ -130,8 +135,8 @@ def test_simple_workflow_template_round_trip(initialized_fastworkflow):
     run_command(workflow, "WorkItem/mark_as_complete", "done", is_complete=True)
     run_command(workflow, "WorkItem/go_to_workitem", "go to bug b1", path="/Bug[id=b1]")
 
-    live_root = workflow.root_command_context
-    assert workflow.current_command_context is not live_root
+    live_root = workflow.root
+    assert workflow._current_command_context is not live_root
 
     projection, record = project(workflow)
     assert projection.anchor_is_root
@@ -141,7 +146,7 @@ def test_simple_workflow_template_round_trip(initialized_fastworkflow):
     restored = make_workflow(folderpath)
     assert serialization_hooks.restore_command_contexts(restored, record)
 
-    root = restored.root_command_context
+    root = restored.root
     assert root is not live_root
     assert root.get_absolute_path() == "/"
     assert [child.type for child in root._children] == ["Story", "Bug"]
@@ -151,8 +156,8 @@ def test_simple_workflow_template_round_trip(initialized_fastworkflow):
     bug = root.get_workitem("/Bug[id=b1]")
 
     # Identity, not equality: the slots must be nodes of the restored tree.
-    assert restored.current_command_context is bug
-    assert restored.command_context_for_response_generation is task
+    assert restored._current_command_context is bug
+    assert restored.record is task
 
     # The links a JSON snapshot cannot carry.
     assert bug.parent is root
@@ -187,14 +192,14 @@ def test_simple_workflow_template_survives_data_and_new_children(initialized_fas
                 path="/Story[index=0]")
     run_command(workflow, "WorkItem/add_child_workitem", "add task t9",
                 workitem_type="Task", id="t9")
-    workflow.current_command_context["notes"] = "carried across the round trip"
+    workflow._current_command_context["notes"] = "carried across the round trip"
 
     _, record = project(workflow)
 
     restored = make_workflow(folderpath)
     assert serialization_hooks.restore_command_contexts(restored, record)
 
-    story = restored.root_command_context.get_workitem("/Story[index=0]")
+    story = restored.root.get_workitem("/Story[index=0]")
     assert [child.id for child in story._children] == [None, "t9"]
     assert story["notes"] == "carried across the round trip"
 
@@ -215,8 +220,8 @@ def test_todo_list_workflow_round_trip(initialized_fastworkflow, todo_list_json_
     run_command(workflow, "TodoList/add_child_todoitem", "add laundry",
                 description="laundry", assign_to="Sam", is_complete=False)
 
-    live_root = workflow.root_command_context
-    assert workflow.current_command_context is not live_root
+    live_root = workflow.root
+    assert workflow._current_command_context is not live_root
 
     projection, record = project(workflow)
     assert projection.anchor_is_root
@@ -226,7 +231,7 @@ def test_todo_list_workflow_round_trip(initialized_fastworkflow, todo_list_json_
     restored = make_workflow(folderpath)
     assert serialization_hooks.restore_command_contexts(restored, record)
 
-    manager = restored.root_command_context
+    manager = restored.root
     assert manager is not live_root
     assert {id_: lst.description for id_, lst in manager.lists.items()} == {
         1: "groceries",
@@ -238,8 +243,8 @@ def test_todo_list_workflow_round_trip(initialized_fastworkflow, todo_list_json_
     laundry = kitchen.get_child_by_id(1)
 
     # Identity, not equality: the slots must be nodes of the restored hierarchy.
-    assert restored.current_command_context is laundry
-    assert restored.command_context_for_response_generation is kitchen
+    assert restored._current_command_context is laundry
+    assert restored.record is kitchen
 
     assert laundry.parent is kitchen
     assert kitchen.parent is chores
@@ -267,7 +272,7 @@ def test_todo_list_workflow_restore_ignores_the_json_file(
     restored = make_workflow(folderpath)
     assert serialization_hooks.restore_command_contexts(restored, record)
 
-    chores = restored.root_command_context.get_todo_list(2)
+    chores = restored.root.get_todo_list(2)
     assert [child.description for child in chores.children] == ["laundry"]
 
 
@@ -279,6 +284,14 @@ def test_messaging_app_4_round_trip(initialized_fastworkflow):
     folderpath = EXAMPLES / "messaging_app_4"
     workflow = make_workflow(folderpath)
 
+    # set_current_user's fuzzy user lookup is its validation hook now, not a db_lookup key on the field (fix-3rsq.one-hook)
+    signature = RoutingRegistry.get_definition(workflow.folderpath).get_command_class(
+        "ChatRoom/set_current_user", fastworkflow.ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)
+    extra = signature.Input.model_fields["user_name"].json_schema_extra or {}
+    assert "db_lookup" not in extra
+    assert not hasattr(signature, "validate_extracted_parameters")
+    assert signature.Input.__pydantic_decorators__.model_validators   # the Input's validator (spec 3.1)
+
     run_command(workflow, "set_root_context", "start the chat room")
     run_command(workflow, "ChatRoom/add_user", "add Alice",
                 user_name="Alice", is_premium_user=False)
@@ -287,8 +300,8 @@ def test_messaging_app_4_round_trip(initialized_fastworkflow):
     run_command(workflow, "ChatRoom/set_current_user", "Bob Smith is the current user",
                 user_name="Bob Smith")
 
-    live_root = workflow.root_command_context
-    assert workflow.current_command_context is not live_root
+    live_root = workflow.root
+    assert workflow._current_command_context is not live_root
 
     projection, record = project(workflow)
     assert projection.anchor_is_root
@@ -298,17 +311,17 @@ def test_messaging_app_4_round_trip(initialized_fastworkflow):
     restored = make_workflow(folderpath)
     assert serialization_hooks.restore_command_contexts(restored, record)
 
-    chatroom = restored.root_command_context
+    chatroom = restored.root
     assert chatroom is not live_root
     assert chatroom.list_users() == ["Alice", "Bob Smith"]
 
-    bob = restored.current_command_context
+    bob = restored._current_command_context
     # Identity, not equality: current, the room's members and its current_user
     # all have to be the same object.
     assert bob is chatroom.users[1]
     assert chatroom.current_user is bob
     assert bob.chatroom is chatroom
-    assert restored.command_context_for_response_generation is chatroom
+    assert restored.record is chatroom
 
     # The subclass decides which commands the context exposes, so it must survive.
     assert type(bob).__name__ == "PremiumUser"
@@ -327,8 +340,8 @@ def test_messaging_app_2_round_trip(initialized_fastworkflow):
     run_command(workflow, "User/send_message", "message jane",
                 to="jane.doe@xyz.edu", message="hello there")
 
-    live_root = workflow.root_command_context
-    assert workflow.current_command_context is live_root
+    live_root = workflow.root
+    assert workflow._current_command_context is live_root
 
     projection, record = project(workflow)
     assert projection.anchor_is_root
@@ -338,11 +351,11 @@ def test_messaging_app_2_round_trip(initialized_fastworkflow):
     restored = make_workflow(folderpath)
     assert serialization_hooks.restore_command_contexts(restored, record)
 
-    user = restored.root_command_context
+    user = restored.root
     assert user is not live_root
     assert user.name == "Carol"
-    assert restored.current_command_context is user
-    assert restored.command_context_for_response_generation is user
+    assert restored._current_command_context is user
+    assert restored.record is user
 
 
 # ---------------------------------------------------------------------------
@@ -363,8 +376,8 @@ def test_messaging_app_3_round_trip(initialized_fastworkflow, is_premium_user, e
     run_command(workflow, "User/send_message", "message jane",
                 to="jane.doe@xyz.edu", message="hello there")
 
-    live_current = workflow.current_command_context
-    assert workflow.root_command_context is None
+    live_current = workflow._current_command_context
+    assert workflow.root is None
 
     projection, record = project(workflow)
     assert projection.anchor_is_root is False
@@ -374,12 +387,12 @@ def test_messaging_app_3_round_trip(initialized_fastworkflow, is_premium_user, e
     restored = make_workflow(folderpath)
     assert serialization_hooks.restore_command_contexts(restored, record)
 
-    user = restored.current_command_context
+    user = restored._current_command_context
     assert user is not live_current
     assert user.name == "Dave"
     assert type(user).__name__ == expected_context
     # A workflow that only ever set a current context must not acquire a root.
-    assert restored.root_command_context is None
+    assert restored.root is None
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +410,7 @@ class Gadget:
 NO_HOOK_CONTEXT = '''
 class Context:
     @classmethod
-    def get_parent(cls, command_context_object) -> None:
+    def get_parent(cls, record) -> None:
         return None
 '''
 
@@ -409,11 +422,11 @@ class Context:
     state_version = 1
 
     @classmethod
-    def get_parent(cls, command_context_object) -> None:
+    def get_parent(cls, record) -> None:
         return None
 
     @classmethod
-    def get_state(cls, command_context_object):
+    def get_state(cls, record):
         return fastworkflow.EPHEMERAL
 '''
 
@@ -422,10 +435,8 @@ import fastworkflow
 
 
 class ResponseGenerator:
-    def __call__(self, workflow, command) -> fastworkflow.CommandOutput:
-        return fastworkflow.CommandOutput(
-            command_response=fastworkflow.CommandResponse(response="poked")
-        )
+    def __call__(self, workflow, command, input) -> fastworkflow.CommandResponse:
+        return fastworkflow.CommandResponse(response="poked")
 '''
 
 
@@ -450,7 +461,7 @@ def write_scratch_workflow(tmp_path: Path) -> Path:
 
 def test_context_without_get_state_pins_and_warns_once(initialized_fastworkflow, tmp_path):
     workflow = make_workflow(write_scratch_workflow(tmp_path))
-    workflow.root_command_context = Widget()
+    workflow.root = Widget()
 
     projection = serialization_hooks.project_command_contexts(workflow)
     assert projection.outcome is ProjectionOutcome.HOOK_ABSENT
@@ -469,7 +480,7 @@ def test_context_without_get_state_pins_and_warns_once(initialized_fastworkflow,
 
 def test_context_declaring_ephemeral_pins_without_warning(initialized_fastworkflow, tmp_path):
     workflow = make_workflow(write_scratch_workflow(tmp_path))
-    workflow.root_command_context = Gadget()
+    workflow.root = Gadget()
 
     projection = serialization_hooks.project_command_contexts(workflow)
     assert projection.outcome is ProjectionOutcome.DECLARED_EPHEMERAL
@@ -484,4 +495,4 @@ def test_context_declaring_ephemeral_pins_without_warning(initialized_fastworkfl
     # Nothing was projected, so nothing is restored — silently, by design.
     restored = make_workflow(workflow.folderpath)
     assert serialization_hooks.restore_command_contexts(restored, projection.as_record()) is False
-    assert restored.root_command_context is None
+    assert restored.root is None

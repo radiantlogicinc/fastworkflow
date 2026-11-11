@@ -130,31 +130,14 @@ class ChatRoom:
 - `ChatRoom` tracks the current active user
 - We've used TYPE_CHECKING to avoid circular imports, a common pattern in complex object hierarchies
 
-### Step 2: Define the Context Hierarchy Model
+### Step 2: Define the Context Hierarchy
 
-In our previous example, we only had an inheritance model. Now, we need to define the parent-child relationships between contexts:
-
-```json
-# messaging_app_4/context_hierarchy_model.json
-{
-    "User": {
-      "parent": [
-        "ChatRoom"
-      ]
-    },
-    "PremiumUser": {
-      "parent": [
-        "ChatRoom"
-      ]
-    }
-}
-```
+In our previous example, we only had an inheritance model. Now, we need to say which object encloses each context. You do not write a separate hierarchy file for this: the parent of each context is what its `get_parent` method returns (Step 3), read from the live object chain as the workflow runs.
 
 **Key points:**
-- This JSON file defines the parent-child relationships between command contexts
-- `"User": { "parent": ["ChatRoom"] }` means that a `User` has a `ChatRoom` as its parent
-- `"PremiumUser": { "parent": ["ChatRoom"] }` means that a `PremiumUser` also has a `ChatRoom` as its parent
-- This tells `fastWorkflow` how to navigate up the context hierarchy
+- `User` and `PremiumUser` each have a `ChatRoom` as their parent, because `get_parent` returns the chat room
+- `fastWorkflow` walks up the live chain from the current object, one `get_parent` at a time, to find enclosing commands
+- A `context_hierarchy_model.json` left over from an earlier version of this example is ignored. It can be deleted
 
 ### Step 3: Implement the Context Navigation Classes
 
@@ -557,9 +540,7 @@ Our workflow supports navigation in both directions:
 - **Downward**: From `ChatRoom` to `User` or `PremiumUser` using `set_current_user`
 - **Upward**: From `User` or `PremiumUser` back to `ChatRoom` using `navigate_to_parent`
 
-This bidirectional navigation is defined through:
-- The `context_hierarchy_model.json` file
-- The `_<ClassName>.py` files with `get_parent` methods
+This bidirectional navigation is defined through the `_<ClassName>.py` files with `get_parent` methods
 
 ### 3. Structured Inputs and Outputs
 

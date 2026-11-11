@@ -1,5 +1,4 @@
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from pydantic import BaseModel
 
@@ -20,28 +19,25 @@ class Signature:
 
 
 class ResponseGenerator:
-    def __call__(self, workflow: fastworkflow.Workflow, command: str, cmd_parameters: Signature.Input) -> CommandOutput:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, cmd_parameters: Signature.Input) -> str:
         # This is a new command specific to the extended workflow
         report_data = {
             "report_type": cmd_parameters.report_type,
-            "current_context": str(type(workflow.root_command_context).__name__) if workflow.root_command_context else "None",
+            "current_context": str(type(workflow.root).__name__) if workflow.root else "None",
             "include_details": cmd_parameters.include_details,
             "generated_at": "2024-01-15 10:30:00",
-            "total_workitems": self._count_workitems(workflow.root_command_context) if workflow.root_command_context else 0
+            "total_workitems": self._count_workitems(workflow.root) if workflow.root else 0
         }
         
-        if cmd_parameters.include_details and workflow.root_command_context:
-            report_data["workitem_details"] = self._get_workitem_details(workflow.root_command_context)
+        if cmd_parameters.include_details and workflow.root:
+            report_data["workitem_details"] = self._get_workitem_details(workflow.root)
         
         response = {
             "message": f"Generated {cmd_parameters.report_type} report",
             "report": report_data
         }
         
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=str(response))
-        )
+        return str(response)
     
     def _count_workitems(self, workitem) -> int:
         """Count total number of workitems in the hierarchy"""

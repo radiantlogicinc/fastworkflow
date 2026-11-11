@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 import fastworkflow
 from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError
+from fastworkflow._workflows.command_metadata_extraction._commands.wildcard import Signature
 
 
 # ---------------------------------------------------------------------------
@@ -67,11 +68,9 @@ def test_invalid_action_parameters(monkeypatch, tmp_path):
     # Create a mock ResponseGenerator class
     class MockResponseGenerator:
         def __call__(self, *args, **kwargs):
-            return fastworkflow.CommandOutput(
-                command_response=
-                    fastworkflow.CommandResponse(response="mock response", success=True)
-            )
-    
+            # wildcard returns its routing result (the executor frames it into the turn's CommandOutput).
+            return Signature.Output(handled=True, routed=True, response="mock response")
+
     # Create a mock RoutingDefinition
     mock_routing_def = MagicMock()
     mock_routing_def.get_command_class.side_effect = lambda cmd_name, module_type: \

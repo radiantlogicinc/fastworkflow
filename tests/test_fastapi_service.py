@@ -71,6 +71,27 @@ def app_module(hello_world_workflow_path, env_files, tmp_path):
         restore_fastapi_env(previous_env)
 
 
+@pytest.fixture(autouse=True)
+def turn_model_seam(monkeypatch, request):
+    """Every turn in this file runs on the scripted model boundary (fix-3rsq.fastapi-live-test): the agent's steps,
+    the split, the refinement, the planner and the topic label are answered here, and a turn that ends without a
+    step ends with ``finish``. LiteLLM is refused as well, so a call that gets past the seam fails the test.
+    A test that needs a particular step asks for it through ``request.getfixturevalue("turn_model_seam")``.
+    """
+    import litellm
+    from tests.fastapi_turn_seam import install_turn_seam
+
+    def _refuse(*args, **kwargs):
+        raise AssertionError("a live model call was attempted from the FastAPI service tests")
+
+    monkeypatch.setattr(litellm, "completion", _refuse)
+    monkeypatch.setattr(litellm, "acompletion", _refuse)
+    if "app_module" not in request.fixturenames:
+        return None
+    return install_turn_seam(monkeypatch, finish_when_empty=True,
+                             app_module=request.getfixturevalue("app_module"))
+
+
 @pytest.fixture
 def admin_enabled(app_module):
     """Serve the admin routes for the duration of one test (fix-24f.2).
@@ -440,29 +461,17 @@ def test_perform_action_endpoint(app_module, unique_user_id):
 
 
 def test_session_not_found_errors(app_module):
-    """Test 404 errors when session not found (valid JWT for unknown user)"""
+    """An action naming a command this workflow does not have is refused, and the error says which command (a valid
+    JWT for a user with no initialized session: the runtime is created on demand, so no turn runs first)."""
     client = TestClient(app_module.app)
     token = app_module.create_access_token("nonexistent_user")
     headers = {"Authorization": f"Bearer {token}"}
-    # These two calls are setup, not the subject: they make real LLM calls, and
-    # /invoke_* is wait-or-defer, so 202 is as correct as 200 when the provider
-    # is slower than the wait window. Pinning them to 200 made this test fail on
-    # provider latency rather than on the behaviour it is named after.
-    response = client.post("/invoke_agent", headers=headers, json={
-        "user_query": "test query",
-        "timeout_seconds": 10,
-    })
-    assert response.status_code in (200, 202)
-    response = client.post("/invoke_assistant", headers=headers, json={
-        "user_query": "test query",
-        "timeout_seconds": 10,
-    })
-    assert response.status_code in (200, 202)
     response = client.post("/perform_action", headers=headers, json={
         "action": {"command_name": "test", "parameters": {}},
         "timeout_seconds": 10,
     })
     assert response.status_code == 500
+    assert "command name 'test'" in response.json()["detail"]
 
 
 def test_new_conversation_endpoint(app_module, unique_user_id):
@@ -476,7 +485,8 @@ def test_new_conversation_endpoint(app_module, unique_user_id):
         "timeout_seconds": 30,
     })
     response = client.post("/new_conversation", headers=headers, json={})
-    assert response.status_code in [200, 500]
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "ok"
 
 
 def test_conversations_list_endpoint(app_module, unique_user_id):
@@ -874,12 +884,13 @@ def test_session_data_extracts_user_id_from_token(app_module, unique_user_id):
         assert first_trace["user_id"] == "alice_123"
 
 
-def test_traces_include_raw_command(app_module, unique_user_id):
-    """Test that traces include the raw_command field"""
+def test_traces_include_raw_command(app_module, unique_user_id, turn_model_seam):
+    """Test that traces include the raw_command field: the agent's scripted step runs add_two_numbers"""
     client = TestClient(app_module.app)
     init = _initialize(client, unique_user_id)
     headers = _authorize(client, init["access_token"])
-    
+    turn_model_seam.steps[:] = [("execute_workflow_query", {"command": "add_two_numbers first_num=7 second_num=9"})]
+
     response = client.post("/invoke_agent", headers=headers, json={
         "user_query": "add 7 and 9",
         "timeout_seconds": 30,

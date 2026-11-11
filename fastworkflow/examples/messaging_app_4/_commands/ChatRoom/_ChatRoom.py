@@ -10,11 +10,11 @@ class Context:
     state_version = 1
 
     @classmethod
-    def get_parent(cls, command_context_object: ChatRoom) -> None:
+    def get_parent(cls, record: ChatRoom) -> None:
         return None
 
     @classmethod
-    def get_state(cls, command_context_object: ChatRoom) -> dict[str, Any]:
+    def get_state(cls, record: ChatRoom) -> dict[str, Any]:
         """Snapshot the chat room so a session holding it can be evicted.
 
         Without this hook the session is pinned from the moment
@@ -22,7 +22,7 @@ class Context:
         generic projection can reach. Return fastworkflow.EPHEMERAL instead to
         declare deliberately that this context is not worth persisting.
         """
-        return command_context_object.to_state_dict()
+        return record.to_state_dict()
 
     @classmethod
     def from_state(cls, state: dict[str, Any], workflow: fastworkflow.Workflow,
@@ -39,7 +39,7 @@ class Context:
         return ChatRoom.from_state_dict(state)
 
     @classmethod
-    def get_locator(cls, command_context_object: User) -> str:
+    def get_locator(cls, record: User) -> str:
         """Identify a user within the room by the name the room addresses them by.
 
         set_current_user points the current context at a user *inside* the
@@ -49,7 +49,7 @@ class Context:
         through, the framework's identity check pins the session rather than
         restoring the wrong user.
         """
-        return command_context_object.name
+        return record.name
 
     @classmethod
     def find_by_locator(cls, anchor: ChatRoom, locator: str) -> Optional[User]:

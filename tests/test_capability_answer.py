@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import fastworkflow
+from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from fastworkflow._workflows.command_metadata_extraction._commands.IntentDetection.what_can_i_do import (
     Signature as WhatCanIDo)
 from fastworkflow.capability_answer import is_capability_question, render_capability_answer
@@ -61,7 +62,7 @@ def test_a_message_that_adds_a_topic_or_asks_something_else_does_not_match(messa
     assert not is_capability_question(message, UTTERANCES)
 
 
-def test_the_answer_names_each_skill_with_its_shortest_example_then_each_command_then_other_contexts():
+def test_the_answer_names_each_planning_command_with_its_shortest_example_then_each_command_then_other_contexts():
     answer = render_capability_answer(
         {"close_out": ("close this record", "note what was done", "  ", "a third one"),
          "tag_record": ()},
@@ -188,9 +189,9 @@ def agent_ctx(monkeypatch):
     RoutingRegistry.clear_registry()
 
 
-def test_with_skills_the_turn_is_answered_in_code_without_the_planner_or_agent(agent_ctx, monkeypatch):
+def test_with_planning_commands_the_turn_is_answered_in_code_without_the_planner_or_agent(agent_ctx, monkeypatch):
     ctx, agent, planned = agent_ctx
-    monkeypatch.setattr("fastworkflow.workflow_agent.skill_utterances",
+    monkeypatch.setattr("fastworkflow.workflow_agent.planning_command_utterances",
                         lambda folder: {"close_out": ("close this record",)})
 
     turn = ctx.process_turn("Hey, what else can you do?")
@@ -204,7 +205,7 @@ def test_with_skills_the_turn_is_answered_in_code_without_the_planner_or_agent(a
     assert ctx.conversation_history.messages  # recorded as any finished turn
 
 
-def test_without_skills_the_turn_goes_the_normal_way(agent_ctx):
+def test_without_planning_commands_the_turn_goes_the_normal_way(agent_ctx):
     ctx, agent, planned = agent_ctx
 
     turn = ctx.process_turn("what can you do?")

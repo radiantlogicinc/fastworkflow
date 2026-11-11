@@ -4,7 +4,6 @@ from pydantic import BaseModel, Field
 
 import fastworkflow
 from fastworkflow.workflow import Workflow
-from fastworkflow import CommandOutput, CommandResponse
 
 # Import business-logic helper
 from ..retail_data import load_data
@@ -55,13 +54,11 @@ class ResponseGenerator:
         self,
         workflow: Workflow,
         command: str,
-        command_parameters: Signature.Input | None = None,
-    ) -> CommandOutput:
+        command_parameters: Signature.Input | None,
+    ) -> fastworkflow.CommandResponse:
         output = self._process_command(workflow)
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=f"list of product types: {output.status}"),
-        )
+        return fastworkflow.CommandResponse(
+            response=f"list of product types: {output.status}", output=output)
 
     def _process_command(self, workflow: Workflow) -> Signature.Output:
         """Run domain logic and wrap into `Signature.Output`."""

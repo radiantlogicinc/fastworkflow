@@ -222,7 +222,11 @@ def test_a_registered_experiment_run_elsewhere_lands_in_every_view_of_the_live_d
     # One live DB, and nothing beside it: no per-run store, no control file.
     assert _files(state_root, "*.sqlite3") == [Path(db_path)]
     assert _files(state_root, "*control*") == []
-    assert _files(folder, "*.sqlite3") == []
+    # The only SQLite file a run may leave in the workflow folder is the shared utterance/
+    # clarification cache (intent_detection.py, by design shared across sessions). Any other
+    # DB there would be a per-run observability store, which is what this test forbids.
+    shared_cache = folder / "___convo_info" / "cache.sqlite3"
+    assert set(_files(folder, "*.sqlite3")) <= {shared_cache}
 
 
 # ----------------------------------------------------------------------

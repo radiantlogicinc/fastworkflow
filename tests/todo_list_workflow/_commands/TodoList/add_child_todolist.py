@@ -2,7 +2,6 @@
 from pydantic import ConfigDict
 
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
 from fastworkflow.workflow import Workflow
 from fastworkflow.utils.signatures import InputForParamExtraction
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
@@ -52,31 +51,28 @@ class ResponseGenerator:
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         """Add a new TodoList as a child to this TodoList."""
         # Access the application class instance:
-        app_instance = workflow.command_context_for_response_generation  # type: TodoList
+        app_instance = workflow.record  # type: TodoList
         todo_list = app_instance.add_child_todolist(
             description=input.description, 
             assign_to=input.assign_to, 
             status=TodoItem.COMPLETE if input.is_complete else TodoItem.INCOMPLETE
         )
         
-        current_context = workflow.current_command_context_displayname
-        workflow.current_command_context = todo_list
-        new_context=workflow.current_command_context_displayname
+        current_context = workflow.record_displayname
+        workflow.record = todo_list
+        new_context=type(todo_list).__name__
 
         return Signature.Output(
             current_context=current_context,
             new_context=new_context
         )
 
-    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandOutput:
-        output = self._process_command(workflow, command_parameters)
+    def __call__(self, workflow: Workflow, command: str, input: Signature.Input) -> fastworkflow.CommandResponse:
+        output = self._process_command(workflow, input)
         response = (
             f'Context: {output.current_context}\n'
             f'Command: {command}\n'
-            f'Command parameters: {command_parameters}\n'
+            f'Command parameters: {input}\n'
             f'Response: {output.model_dump_json(include={"new_context"})}'
         )
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=response)
-        )
+        return fastworkflow.CommandResponse(response=response, output=output)

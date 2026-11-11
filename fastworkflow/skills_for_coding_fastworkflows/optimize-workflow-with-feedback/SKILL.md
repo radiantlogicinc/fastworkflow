@@ -74,8 +74,8 @@ command, extracted parameters, command response and final answer. Typical eviden
 | Evidence | Candidate change |
 |---|---|
 | Wrong command or repeated ambiguity | Context reachability, duplicate capabilities, seeds; use the routing companion skills |
-| Missing handle or unnecessary request for an ID | Producer hints (`available_from`) and lookup visibility |
-| Valid entity rejected or wrong fuzzy correction | `db_lookup` candidates and thresholds |
+| Missing handle or unnecessary request for an ID | Producer edges (`from_command_output`) and lookup visibility |
+| Valid entity rejected or wrong fuzzy correction | the validation hook's `fuzzy_match` candidates and thresholds (see `resolve-parameter-values`) |
 | Unusable values reach business logic | Validation hook and actionable correction messages |
 | Correct tools but missing/incorrect final information | Response content, presentation requirements, output limits |
 | Long latency/high cost | Identify costly LLM calls, repeated tools or waits before changing models or budgets |

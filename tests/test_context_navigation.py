@@ -143,9 +143,9 @@ def test_live_chain_stops_at_global_when_the_parent_is_none():
         pass
 
     class Workflow:
-        current_command_context_name = "ItemExplorer"
-        current_command_context = Explorer()
-        root_command_context = None
+        _current_command_context_name = "ItemExplorer"
+        _current_command_context = Explorer()
+        root = None
 
         def get_parent(self, obj):
             return None
@@ -171,6 +171,9 @@ class _App:
     def get_command_names(self, context):
         return self.contexts[context]
 
+    def get_planning_command_names(self, context):
+        return []
+
 
 class _Cme:
     def get_command_names(self, context):
@@ -179,9 +182,9 @@ class _Cme:
 
 class _Workflow:
     folderpath = "app"
-    current_command_context_name = "*"
-    current_command_context = None
-    root_command_context = None
+    _current_command_context_name = "*"
+    _current_command_context = None
+    root = None
 
     def get_parent(self, obj):
         return None
@@ -218,9 +221,10 @@ def test_go_up_at_the_top_level_names_the_commands_to_use_instead():
     app = fastworkflow.Workflow.create(workflow_folderpath=todo, workflow_id_str="go-up-top-level")
     wrapper = fastworkflow.Workflow.create(workflow_folderpath="/tmp", workflow_id_str="go-up-wrapper")
     wrapper.context = {"app_workflow": app}
-    assert app.is_current_command_context_root
+    assert app._is_current_command_context_root
 
-    text = ResponseGenerator()(wrapper, "IntentDetection/go_up").command_response.response
+    # Short form: the three-argument call (no Input for this command) returns the text itself.
+    text = ResponseGenerator()(wrapper, "IntentDetection/go_up", None)
 
     assert text.startswith("Already at the top-level 'global' context. From here, use one of: ")
     names = text.removeprefix("Already at the top-level 'global' context. From here, use one of: ")
@@ -296,9 +300,9 @@ def test_the_agent_message_passes_the_workflow_edges(monkeypatch):
 
     class Workflow:
         folderpath = "app"
-        current_command_context_name = "Shelf"
-        current_command_context = Shelf()
-        root_command_context = None
+        _current_command_context_name = "Shelf"
+        _current_command_context = Shelf()
+        root = None
 
         def get_parent(self, obj):
             return library if isinstance(obj, Shelf) else None

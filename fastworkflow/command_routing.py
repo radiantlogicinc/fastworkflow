@@ -14,6 +14,7 @@ It exposes two primary classes:
 from __future__ import annotations
 
 import contextlib
+import inspect
 import json
 import os
 from enum import Enum
@@ -23,8 +24,10 @@ from typing import Any, Dict, Optional, Set, Type, ClassVar
 from pydantic import BaseModel, ConfigDict
 
 from fastworkflow import ModuleType
+from fastworkflow.entry_declarations import check_retired_entry_declarations
 from fastworkflow.command_directory import (
     CommandDirectory,
+    is_visible_planning,
     UtteranceMetadata,
     compute_commands_source_fingerprint,
     get_cached_command_directory,
@@ -33,6 +36,32 @@ from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.utils import python_utils
 from fastworkflow.utils.logging import logger
 
+
+
+def check_response_call_arity(response_generation_class, where: str) -> None:
+    """A load error unless ``ResponseGenerator.__call__`` takes exactly three arguments (design 3.14):
+    ``(self, workflow, command, input)``, where ``input`` is None for a command with no ``Input``.
+    A two-argument ``__call__`` is refused, naming the form (fix-3rsq.12.3, decision C).
+    """
+    call = getattr(response_generation_class, "__call__", None)
+    if call is None or call is object.__call__:
+        return
+    try:
+        parameters = list(inspect.signature(call).parameters.values())
+    except (TypeError, ValueError):
+        return
+    if parameters and parameters[0].name in ("self", "cls"):
+        parameters = parameters[1:]
+    positional = [p for p in parameters
+                  if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+    varargs = any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in parameters)
+    if len(positional) == 3 and not varargs and all(p.default is inspect.Parameter.empty for p in positional):
+        return
+    raise ValueError(
+        f"{where}: ResponseGenerator.__call__ must take three arguments, (self, workflow, command, input), "
+        f"where input is None for a command with no Input; it takes {len(positional)} here. "
+        "Return the command's Output, a str or a CommandResponse, and refuse with raise fastworkflow.Refused(message)"
+    )
 
 class RoutingDefinition(BaseModel):
     """
@@ -58,8 +87,10 @@ class RoutingDefinition(BaseModel):
     # Maps command → contexts (set)
     routing_definition_map: Dict[str, Set[str]] = {}
 
-    # Single, process-wide cache of imported command classes
-    _GLOBAL_COMMAND_CLASS_CACHE: ClassVar[dict[str, Type[Any]]] = {}
+    # Single, process-wide cache of imported command classes, keyed by (workflow folder, command key).
+    # Keyed by name alone, a second workflow in the same process would get the first one's class for
+    # any command name they share (fix-3rsq.phase10-routing-class-cache).
+    _GLOBAL_COMMAND_CLASS_CACHE: ClassVar[dict[tuple[str, str], Type[Any]]] = {}
 
     # ------------------------------------------------------------------
     # Command Router functionality
@@ -86,23 +117,46 @@ class RoutingDefinition(BaseModel):
             commands = [cmd for cmd in commands if cmd != 'wildcard']
         return commands
 
+    def get_planning_command_names(self, context: str) -> list[str]:
+        """The planning commands runnable in *context*, inherited as its execution commands are:
+        its own, then each base's in ``context_model`` order, a simple name an earlier scope
+        already gives left out. A global planning command (no context folder) belongs to ``*``.
+
+        Kept apart from ``contexts``, which routing and training read for execution commands only.
+        """
+        planning = sorted(
+            name for name, metadata in self.command_directory.map_command_2_metadata.items()
+            if is_visible_planning(metadata)
+        )
+        if not planning:
+            return []
+        names: list[str] = []
+        taken: set[str] = set()
+        for scope in (context, *self.context_model.ordered_base_contexts(context)):
+            for name in planning:
+                owner, _, simple = name.rpartition("/")
+                if (owner or "*") == scope and simple not in taken:
+                    taken.add(simple)
+                    names.append(name)
+        return names
+
     def get_command_class(self, command_name: str, module_type: ModuleType) -> Optional[Type[Any]]:
         """
         Retrieves a command's implementation class from the cache or loads it.
         The context is no longer needed for lookup, as command names are unique.
         """
-        cache_key = f"{command_name}:{module_type.name}"
+        cache_key = (os.path.abspath(self.workflow_folderpath), f"{command_name}:{module_type.name}")
 
         cls = type(self)
 
-        # First check the **global** cache shared by every RoutingDefinition
+        # First check the **global** cache shared by every RoutingDefinition of this workflow folder
         if cache_key in cls._GLOBAL_COMMAND_CLASS_CACHE:
             return cls._GLOBAL_COMMAND_CLASS_CACHE[cache_key]
 
         # Not cached yet – load it now.
         result = self._load_command_class(command_name, module_type)
 
-        # Store in both caches so *all* future RoutingDefinition objects benefit.
+        # Store it so every future RoutingDefinition of this folder benefits.
         cls._GLOBAL_COMMAND_CLASS_CACHE[cache_key] = result
         return result
 
@@ -145,9 +199,78 @@ class RoutingDefinition(BaseModel):
             cls_obj = module
             for part in parts:
                 cls_obj = getattr(cls_obj, part, None)
-            return cls_obj
-        
-        return getattr(module, module_class_name, None)
+        else:
+            cls_obj = getattr(module, module_class_name, None)
+
+        if module_type == ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS:
+            # a load error for a check option on a field of a type it does not apply to (design 2.46)
+            from fastworkflow.planning_commands import option_params
+            input_model = getattr(cls_obj, "Input", None)
+            if isinstance(input_model, type) and issubclass(input_model, BaseModel):
+                option_params(input_model, f"{module_file_path}: {command_name}",
+                              planning=bool(command_metadata.is_planning))
+                self._check_paged_output(command_name, input_model, str(module_file_path))
+                if not command_metadata.is_planning:
+                    self._warn_default_not_found(command_name, input_model, str(module_file_path))
+            # the retired db_lookup is a load error naming the hook (fix-3rsq.one-hook); so is the removed
+            # Signature.validate_extracted_parameters (spec 3.1), which names the Input's validator
+            from fastworkflow.utils.signatures import reject_retired_db_lookup, removed_validate_hook_message
+            reject_retired_db_lookup(
+                cls_obj, input_model if isinstance(input_model, type) else None,
+                f"{module_file_path}: {command_name}")
+            if message := removed_validate_hook_message(cls_obj, f"{module_file_path}: {command_name}"):
+                raise ValueError(message)
+            # an Input validator that reads info.context says what it needs when built with no context
+            if isinstance(input_model, type) and issubclass(input_model, BaseModel):
+                from fastworkflow.planning import reserved_input_name_message
+                from fastworkflow.utils.input_validation import guard_input_validators
+                if message := reserved_input_name_message(input_model, f"{module_file_path}: {command_name}"):
+                    raise ValueError(message)
+                guard_input_validators(input_model, f"{module_file_path}: {command_name}")
+        elif module_type == ModuleType.RESPONSE_GENERATION_INFERENCE and not command_metadata.is_planning:
+            check_response_call_arity(cls_obj, f"{module_file_path}: {command_name}")
+        return cls_obj
+
+
+    @staticmethod
+    def _warn_default_not_found(command_name: str, input_model: type, where: str) -> None:
+        """One WARNING per field declared ``default="NOT_FOUND"`` (fix-3rsq.plain-required).
+
+        The marker is the framework's now: a required field is written as a plain field
+        (no default) and the framework supplies NOT_FOUND. The old spelling still works.
+        Planning commands never took NOT_FOUND as a required marker, so they are not checked.
+        """
+        for field_name, info in input_model.model_fields.items():
+            if info.default == "NOT_FOUND":
+                logger.warning(
+                    f"{where}: command {command_name!r} field {field_name!r} is declared with "
+                    f"default=\"NOT_FOUND\", which is deprecated and still works. Remove the default: "
+                    f"write a plain required field (no default), e.g. "
+                    f"`{field_name}: {getattr(info.annotation, '__name__', info.annotation)} = "
+                    f"Field(description=...)`, and the framework asks the user for a missing value.")
+
+    def _check_paged_output(self, command_name: str, input_model: type, where: str) -> None:
+        """A load error for a paged command (design 2.49, 3.14) whose ``Signature.Output`` does not
+        declare ``total: int``. A paged command is one whose Input has an int ``start``
+        (``facts.PAGING_PARAMETERS``); the message also says to rename the field when it is not a page."""
+        from fastworkflow.observation_offloading.facts import paging_parameters
+        from fastworkflow.planning_commands import PlanningCommandFormatError
+
+        paging = paging_parameters(input_model)
+        if not paging:
+            return
+        from fastworkflow.command_executor import _declared_output_model
+
+        output_model = _declared_output_model(
+            self.get_command_class(command_name, ModuleType.RESPONSE_GENERATION_INFERENCE))
+        total = getattr(output_model, "model_fields", {}).get("total")
+        if total is not None and total.annotation is int:
+            return
+        raise PlanningCommandFormatError(
+            f"{where}: Input.{paging[0]} makes {command_name} a paged command, but its Output declares "
+            f"no total; declare total: int, how many rows there are on every page, or rename "
+            f"{paging[0]} if it is not a page"
+        )
 
     # ------------------------------------------------------------------
     # Utterance Definition functionality
@@ -270,7 +393,7 @@ class RoutingDefinition(BaseModel):
         # contend for the importlib module lock at request time.  This
         # increases build() cost slightly but removes ~300 ms of latency
         # from the first real user message.
-        all_command_names: list[str] = command_directory.get_commands()
+        all_command_names: list[str] = command_directory.get_execution_commands()
 
         for cmd_name in all_command_names:
             # The vast majority of run-time look-ups are for the inference
@@ -339,6 +462,19 @@ class RoutingDefinition(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
+def _check_approval_annotations(workflow_folderpath: str, definition: "RoutingDefinition") -> None:
+    """Reject retired or hand-written command declarations, then validate and snapshot each command's
+    approval annotation and its ``writes`` declaration (imported lazily: approval_annotations imports this
+    module)."""
+    from fastworkflow.approval_annotations import check_approval_annotations
+    from fastworkflow.command_declarations import check_command_spellings
+    from fastworkflow.command_writes import check_write_declarations
+
+    check_command_spellings(workflow_folderpath, definition)
+    check_approval_annotations(workflow_folderpath, definition)
+    check_write_declarations(workflow_folderpath, definition)
+
+
 class RoutingRegistry:
     """
     A registry that holds a single, active RoutingDefinition per workflow.
@@ -374,12 +510,19 @@ class RoutingRegistry:
             if definition is None:
                 definition = RoutingDefinition.build(workflow_folderpath)
                 definition.save()
+            # Checked on every path, a persisted definition included: one saved before the
+            # retirement of enter_command would otherwise load without the load error (design 3.15).
+            check_retired_entry_declarations(workflow_folderpath, definition.context_model)
+            _check_approval_annotations(workflow_folderpath, definition)
             cls._definitions[workflow_folderpath] = definition
             return definition
-        
+
         # build fresh definition and persist via .save()
-        cls._definitions[workflow_folderpath] = RoutingDefinition.build(workflow_folderpath)
-        return cls._definitions[workflow_folderpath]
+        definition = RoutingDefinition.build(workflow_folderpath)
+        check_retired_entry_declarations(workflow_folderpath, definition.context_model)
+        _check_approval_annotations(workflow_folderpath, definition)
+        cls._definitions[workflow_folderpath] = definition
+        return definition
 
     @staticmethod
     def _persisted_definition_is_fresh(workflow_folderpath: str) -> bool:
@@ -422,4 +565,10 @@ class RoutingRegistry:
         # Clear the python_utils module import cache
         import fastworkflow.utils.python_utils
         if hasattr(fastworkflow.utils.python_utils.get_module, 'cache_clear'):
-            fastworkflow.utils.python_utils.get_module.cache_clear() 
+            fastworkflow.utils.python_utils.get_module.cache_clear()
+
+        # Clear the field-source resolution cache (and per-command Signature cache;
+        # inline import avoids circular import: planning_commands -> command_context_model -> command_directory)
+        import fastworkflow.planning_commands  # circular import: planning_commands -> command_context_model
+        if hasattr(fastworkflow.planning_commands.resolve_field_sources, 'cache_clear'):
+            fastworkflow.planning_commands.resolve_field_sources.cache_clear() 

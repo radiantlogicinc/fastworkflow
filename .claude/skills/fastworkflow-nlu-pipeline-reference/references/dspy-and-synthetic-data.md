@@ -6,17 +6,10 @@ c33b9a5). Paths repo-relative.
 ## A. Synthetic utterances (train-time, litellm direct)
 
 `fastworkflow/train/generate_synthetic.py::generate_diverse_utterances(seed_utterances,
-command_name, ...)`. Wired in by the build template: every generated command file gets
-
-```python
-@staticmethod
-def generate_utterances(workflow: Workflow, command_name: str) -> list[str]:
-    return [
-        command_name.split('/')[-1].lower().replace('_', ' ')
-    ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
-```
-
-(`fastworkflow/build/command_file_template.py:110-115`; same at :342 for the stub variant).
+command_name, ...)`. No command file needs to call it: a `Signature` without `generate_utterances` gets the framework
+default (`command_directory.default_generate_utterances`), which is exactly the command name in
+words plus `generate_diverse_utterances(plain_utterances)`. Define `generate_utterances` only to
+replace that body.
 
 Mechanics:
 
@@ -102,8 +95,8 @@ Pydantic Input model
 
 Validation is a separate pass — `validate_parameters` (:315-670): type coercion
 (str/bool/int/float/Enum/list with JSON/Python/CSV parsing), regex `pattern` fullmatch,
-`db_lookup` hooks (fuzzy DB matching), then the command's own
-`validate_extracted_parameters`. Missing/invalid fields produce the clarification error
+the command's own `Input` model validators, which may fuzzy-match
+against a DB and refuse with `fastworkflow.Refused`. Missing/invalid fields produce the clarification error
 message assembled from `MISSING_INFORMATION_ERRMSG` / `INVALID_INFORMATION_ERRMSG` —
 downstream code STRING-MATCHES on these messages (`parameter_extraction.py:147-157`), so
 never reword those env values casually.

@@ -117,7 +117,7 @@ def _span(**overrides) -> tracing.Span:
         "kind": tracing.KIND_INTERNAL,
         "channel_id": "chan-1",
         "command_name": "get_user_details",
-        # What `workflow.current_command_context_displayname` returns: a
+        # What `workflow._current_command_context_displayname` returns: a
         # workflow-supplied `get_displayname(instance)`, which the bundled
         # simple_workflow_template implements as the instance's absolute path.
         "context": f"Order: {TENANT}",

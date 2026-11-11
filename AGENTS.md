@@ -96,9 +96,35 @@ Two env files per workflow (see `fastworkflow/examples/fastworkflow.env` for a t
 - `fastworkflow.env` — model strings (`LLM_AGENT`, `LLM_PARAM_EXTRACTION`, etc.), logging, intent model IDs
 - `fastworkflow.passwords.env` — API keys (`LITELLM_API_KEY_AGENT`, etc.)
 
-Key models (all default to `mistral/mistral-small-latest`): `LLM_SYNDATA_GEN`, `LLM_PARAM_EXTRACTION`, `LLM_RESPONSE_GEN`, `LLM_PLANNER`, `LLM_AGENT`, `LLM_CONVERSATION_STORE`.
+Key models (all default to `mistral/mistral-small-latest`): `LLM_SYNDATA_GEN`, `LLM_PARAM_EXTRACTION`, `LLM_PLANNER`, `LLM_AGENT`, `LLM_CONVERSATION_STORE`.
 
 LiteLLM Proxy: prefix model names with `litellm_proxy/` and set `LITELLM_PROXY_API_BASE`.
+
+Optional settings for planning commands (`_commands/<name>.py` files; see
+[author-planning-commands](fastworkflow/skills_for_coding_fastworkflows/author-planning-commands/SKILL.md)):
+
+- `JEV_API_KEY` (optional). Without it, no planning command is matched and there is no typed planning
+  call: the text planner plans, and its command listing names the planning commands. With it, Jev
+  (`workflow_agent._jev_lm`) matches a sub-task to a planning command (`_planning_command_matcher`),
+  and the typed planning call fills that command's arguments and runs its classifier checks (`classifier_confirms`). Without the
+  key, a workflow that has planning commands logs one INFO line (`workflow_agent._warn_missing_jev_key`).
+- `FW_TURN_MAX_STEPS` (optional, default 400). The most model steps the nested planning-command calls of
+  one turn may take together; it resets each turn. A value that is not a positive integer logs a
+  warning and the default applies (`plan_frame.turn_max_steps`).
+
+Planning command previews: `fastworkflow command preview <workflow_folder>` writes one markdown preview
+per planning command to `<workflow_folder>/../docs/planning_command_previews/`. With `--check` it writes
+nothing and exits 1 when a preview is stale, missing or extra, or when a `from_command_output` edge does not resolve.
+`command preview` replaced `fastworkflow skill preview`.
+
+Running one call with no model: `fastworkflow command run-code <workflow_folder> <command> [--input '<json>']
+[--start-with '<step>' ...]` runs a planning command phase by phase (its steps as the runtime writes them, each
+step code can run, the facts, the answer), stopping at the first open step with exit 0, or an execution command
+and prints its `CommandOutput`. It runs the workflow's real commands, so use a development instance. Exit 1 when
+the command does not load, a step fails or a hook raises. `fastworkflow.planning.run_code` is the same run for
+integration tests (`tests/test_run_code.py`). Command files that do not load are reported by `fastworkflow run`
+(before its first prompt), `fastworkflow train` (before training) and the FastAPI server (at startup), all through
+`command_preview.load_problems`.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
 ## Beads Issue Tracker
@@ -186,3 +212,11 @@ that catches the second — one of those eight was the largest item on the board
 
 Verify by reading the file, not by trusting the command's output. Full detail in
 `.cursor/skills/beads-workflow/SKILL.md`.
+
+## Do not use grep for searching
+- **Go with mgrep if you are exploring an unfamiliar architecture or monorepo**. Its retrieval quality is much stronger at pulling together conceptual overviews, handling fuzzy documentation queries, and synthesizing disparate text assets (like a mix of YAML configs, Markdown files, and codebase PDFs).
+- **Go with ColGrep if you need absolute precision inside raw code lines**. Its capability to maintain token name exactness while performing semantic abstractions makes it the superior choice for tracking down bugs, handling heavy refactors, and pinpointing exact functional lines.
+
+## Repowise: semantic search via colgrep
+
+Repowise's own embedder is `mock` (semantic search off), so its `search_codebase` and the semantic half of `get_answer` only match keywords. For meaning-based code search, use colgrep (`colgrep`) instead of Repowise's search. Use Repowise's MCP tools (`get_overview`, `get_context`, `get_risk`, `get_why`) for architecture, ownership, and change-risk questions.

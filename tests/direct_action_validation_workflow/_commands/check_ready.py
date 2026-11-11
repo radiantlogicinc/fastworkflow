@@ -9,9 +9,8 @@ from __future__ import annotations
 from typing import Optional
 
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
 from fastworkflow.workflow import Workflow
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 HOOK_NOT_READY = "workflow is not ready. Set context['ready'] first."
 
@@ -24,6 +23,13 @@ class Signature:
             default=None,
             description="Optional unused field so Signature.Input exists",
         )
+
+        @model_validator(mode="after")
+        def refuse_until_ready(self, info):
+            workflow = info.context.get("workflow")
+            if not workflow.context.get("ready"):
+                raise fastworkflow.Refused(HOOK_NOT_READY)
+            return self
 
     class Output(BaseModel):
         status: str = Field(description="Ready status")
@@ -39,24 +45,7 @@ class Signature:
     def generate_utterances(workflow: Workflow, command_name: str) -> list[str]:
         return [command_name.split("/")[-1].lower().replace("_", " ")]
 
-    @staticmethod
-    def validate_extracted_parameters(
-        workflow: fastworkflow.Workflow,
-        command: str,
-        cmd_parameters: "Signature.Input",
-    ) -> tuple[bool, str]:
-        if not workflow.context.get("ready"):
-            return (False, HOOK_NOT_READY)
-        return (True, "")
-
-
 class ResponseGenerator:
-    def __call__(
-        self,
-        workflow: Workflow,
-        command: str,
-        command_parameters: Signature.Input,
-    ) -> CommandOutput:
-        return CommandOutput(
-            command_response=CommandResponse(response="ready=true")
-        )
+    def __call__(self, workflow: Workflow, command: str, input: Signature.Input) -> fastworkflow.CommandResponse:
+        return fastworkflow.CommandResponse(
+            response="ready=true", output=Signature.Output(status="ready=true"))

@@ -412,14 +412,15 @@ def test_the_scan_reaches_keys_written_far_from_the_emission_site():
     """The bags, specifically — the half a dict-literal scan cannot see.
 
     `escalation_outcome` is written into `nlu_trace` inside `_predict_impl`;
-    `db_lookup` is written into `diagnostics` from `utils/signatures.py`, a
+    `validation_hook` is written into `diagnostics` from `utils/signatures.py`, a
     different module entirely; `context_before` arrives through
     `**tracing.capture_attributes(...)`. If any of the three stopped being
     discovered, the corresponding declaration would silently become unchecked.
     """
     discovered = _emitted_attributes()
     assert "escalation_outcome" in discovered[tracing.SPAN_NLU_INTENT]
-    assert "db_lookup" in discovered[tracing.SPAN_NLU_PARAM_EXTRACTION]
+    assert "validation_hook" in discovered[tracing.SPAN_NLU_PARAM_EXTRACTION]
+    assert "db_lookup" not in discovered[tracing.SPAN_NLU_PARAM_EXTRACTION]
     assert tracing.ATTR_CONTEXT_BEFORE in discovered[tracing.SPAN_AGENT_TOOL_CALL]
 
 
@@ -494,8 +495,12 @@ def test_the_envelope_key_belongs_to_no_emitter():
     it is not part of the contract it describes — an emitter that declared it
     would be versioning its own version stamp."""
     assert tracing.ATTR_SPAN_CONTRACT_VERSION in tracing.ENVELOPE_ATTRIBUTES
+    # `frame_alias` is stamped by start_span from the host's frame on every span,
+    # so no emitter declares it.
+    assert tracing.ATTR_FRAME_ALIAS in tracing.ENVELOPE_ATTRIBUTES
     for name, contract in tracing.SPAN_CONTRACTS.items():
         assert tracing.ATTR_SPAN_CONTRACT_VERSION not in contract.attributes, name
+        assert tracing.ATTR_FRAME_ALIAS not in contract.attributes, name
 
 
 # ----------------------------------------------------------------------
@@ -638,7 +643,7 @@ def test_the_aggregate_number_moves_only_on_purpose():
     itself, so a bump -- or an accidental revert -- passes them all. Pinning the
     literal makes a change to the aggregate a deliberate edit to this test, next
     to the history comment in `tracing.py` that says what moved."""
-    assert tracing.SPAN_CONTRACT_VERSION == 23
+    assert tracing.SPAN_CONTRACT_VERSION == 41
 
 
 def test_a_provenance_record_written_before_the_map_still_validates():
@@ -710,7 +715,7 @@ def _make_ctx(todo_workflow_path: str, tmp_path, sink) -> WorkflowExecutionConte
     )
     context = WorkflowExecutionContext(run_as_agent=False, trace_sink=sink)
     context.bind_app_workflow(workflow)
-    workflow.root_command_context = TodoListManager(str(tmp_path / "todo_list.json"))
+    workflow.root = TodoListManager(str(tmp_path / "todo_list.json"))
     return context
 
 
@@ -762,6 +767,15 @@ def test_every_span_a_real_turn_emits_is_self_describing(ctx, sink):
         assert span.attributes[tracing.ATTR_SPAN_CONTRACT_VERSION] == (
             tracing.SPAN_CONTRACTS[span.name].version
         )
+
+
+def test_every_span_a_real_turn_emits_carries_the_turn_frame_alias(ctx, sink):
+    """No nested planning frame exists yet, so every span of a turn is on the turn
+    frame and carries an empty alias, including spans closed by a rebuild."""
+    ctx.process_action_turn(_action())
+
+    assert sink.spans
+    assert {span.attributes[tracing.ATTR_FRAME_ALIAS] for span in sink.spans} == {""}
 
 
 def test_a_real_turn_writes_no_attribute_outside_the_declared_contract(ctx, sink):

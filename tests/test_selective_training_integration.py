@@ -144,8 +144,8 @@ from ...application.user import PremiumUser
 
 class Context:
     @classmethod
-    def get_parent(cls, command_context_object: PremiumSession) -> PremiumUser:
-        return command_context_object.user
+    def get_parent(cls, record: PremiumSession) -> PremiumUser:
+        return record.user
 '''
 
 _PREMIUM_SESSION_COMMAND = '''\
@@ -169,12 +169,9 @@ class Signature:
 
 
 class ResponseGenerator:
-    def __call__(self, workflow: fastworkflow.Workflow, command: str) -> fastworkflow.CommandOutput:
-        session: PremiumSession = workflow.command_context_for_response_generation
-        return fastworkflow.CommandOutput(
-            command_response=
-                fastworkflow.CommandResponse(response=session.end_session())
-        )
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, input) -> fastworkflow.CommandResponse:
+        session: PremiumSession = workflow.record
+        return fastworkflow.CommandResponse(response=session.end_session())
 '''
 
 
@@ -189,12 +186,11 @@ def _add_premium_session_context(workflow_path: str) -> None:
         PremiumUser     base:   [User]          -> inherits User/send_message
         PremiumSession  parent: [PremiumUser]   -> wildcard class carries it
 
-    ``PremiumSession`` is not a descendant of ``User`` and does not inherit from it, yet
-    its wildcard class is assembled from ``PremiumUser``'s utterances, which include
-    ``User/send_message`` *because of* the ``base`` edge. Expanding over ``parent`` alone
-    misses it and expanding over ``base`` alone misses it; only the union catches it, and
-    only if the planner derives an ancestor's commands from the RESOLVED command list
-    rather than from the raw base graph -- which is the anti-decision AR2 names.
+    Phase 9 step 5: the ``parent`` link this fixture used to declare in
+    ``context_hierarchy_model.json`` is retired and was never read, so it is no longer written.
+    The fixture still adds the context and its ``base``-free command. Under design 2.50 a command
+    edit dirties its own heads; ``PremiumSession`` reads ``User/send_message`` only as one recorded
+    sample, so an edit reaches it only if that sample moved.
 
     Built into a copy rather than into the bundled example, because adding a context to
     the shipped workflow would invalidate its checked-in trained artifacts. bd fix-k0i.49.
@@ -209,10 +205,6 @@ def _add_premium_session_context(workflow_path: str) -> None:
     (commands_dir / "end_session.py").write_text(
         _PREMIUM_SESSION_COMMAND, encoding="utf-8")
 
-    hierarchy_path = Path(workflow_path) / "context_hierarchy_model.json"
-    hierarchy = json.loads(hierarchy_path.read_text())
-    hierarchy[PREMIUM_SESSION_CONTEXT] = {"parent": ["PremiumUser"]}
-    hierarchy_path.write_text(json.dumps(hierarchy, indent=2), encoding="utf-8")
 
 
 def _rebuild(workflow_path: str) -> None:
@@ -246,7 +238,7 @@ def _seed_utterance_cache(workflow_path: str) -> None:
         utterance_cache.CACHE_DIRNAME,
     )
     os.makedirs(cache_root, exist_ok=True)
-    context_commands, _ancestors, _ = st.build_context_maps(
+    context_commands, _ = st.build_context_maps(
         workflow_path, st.contexts_for_training(workflow_path))
     for commands in context_commands.values():
         for command_name in commands:
@@ -380,6 +372,11 @@ def _preseed_fixed_utterance_cache(
     commands = set(cmd_dir.get_utterance_keys()) | set(cmd_dir.core_command_names)
     for command_name in sorted(commands):
         if command_name.split("/")[-1] == "wildcard":
+            continue
+        # Framework machinery (fastworkflow/_framework_commands, e.g. review_plan) is not trained, so it
+        # has no provenance record (train.training_report: "not trained, reported or gated").
+        framework_meta = cmd_dir.map_command_2_metadata.get(command_name)
+        if framework_meta is not None and getattr(framework_meta, "framework", None):
             continue
         cmd_dir.ensure_command_hydrated(command_name)
         metadata = cmd_dir.get_utterance_metadata(command_name)
@@ -535,14 +532,13 @@ def test_base_axis_a_changed_base_command_retrains_every_deriving_context(baseli
     )
 
 
-def test_parent_axis_an_ancestor_command_change_retrains_its_descendants(baseline):
-    """``User`` and ``PremiumUser`` sit under ``ChatRoom`` in the context hierarchy.
+def test_a_command_change_under_chatroom_retrains_only_its_own_heads(baseline):
+    """Design 2.50 (was: Phase 9 step 5, any changed command dirties every head).
 
-    A ChatRoom command is not in either descendant's label space. It is in their
-    *wildcard* class, which is assembled from ancestor utterances -- so the edit
-    changes what those models must recognise as "belongs upstairs" without appearing
-    anywhere in their own label spaces. This is the axis that pure per-command
-    reasoning gets wrong.
+    A ChatRoom command is in neither descendant's label space. The descendants read it only as one
+    recorded sample, which is unchanged by an appended seed, so they carry forward.
+
+    Not run in this change (this file trains). Expectations were updated statically.
     """
     workflow_path, version_id = baseline
     _append_utterance(
@@ -553,15 +549,11 @@ def test_parent_axis_an_ancestor_command_change_retrains_its_descendants(baselin
 
     plan = _plan(workflow_path, version_id)
 
-    assert "ChatRoom" in plan.contexts_to_train
+    context_commands, _u = st.build_context_maps(workflow_path, st.contexts_for_training(workflow_path))
+    own = {ctx for ctx, commands in context_commands.items() if "ChatRoom/add_user" in commands}
+    assert "ChatRoom" in own and set(plan.contexts_to_train) == own
     for descendant in ("User", "PremiumUser"):
-        assert descendant in plan.contexts_to_train, (
-            f"{descendant} descends from ChatRoom; its wildcard class is now stale"
-        )
-        assert any(
-            "wildcard" in reason for reason in plan.reasons[descendant]
-        ), f"{descendant} was retrained but not for the wildcard reason"
-    assert plan.contexts_carried_forward == ["*"]
+        assert descendant in plan.contexts_carried_forward, descendant
 
 
 def test_a_context_inheritance_model_edit_alone_retrains_the_deriving_context(baseline):
@@ -632,21 +624,18 @@ def test_the_grandchild_fixture_really_has_both_axes(baseline_with_grandchild):
     # ...and PremiumSession does NOT inherit it -- it has no `base` entry at all.
     assert USER_MESSAGE_COMMAND not in crd.context_model.commands(
         PREMIUM_SESSION_CONTEXT)
-    # parent axis: PremiumUser is PremiumSession's ancestor, and User is not.
-    ancestors = crd.context_model.get_ancestor_contexts(PREMIUM_SESSION_CONTEXT)
-    assert "PremiumUser" in ancestors
-    assert "ChatRoom" in ancestors
-    assert "User" not in ancestors
 
 
-def test_a_base_inherited_command_edit_dirties_the_grandchild(baseline_with_grandchild):
-    """The composition, end to end through `compute_training_plan`.
+def test_a_base_inherited_command_edit_dirties_its_inheritors_and_not_the_grandchild(
+    baseline_with_grandchild,
+):
+    """Design 2.50 (was: the composition reached the grandchild through PremiumUser's utterances).
 
-    `User/send_message` is edited. `PremiumSession` neither owns it nor inherits it nor
-    descends from `User`, so neither axis alone reaches it -- it is dirty only because its
-    wildcard class is built from `PremiumUser`'s utterances and `PremiumUser` carries the
-    command through `base`. Leaving it on its old model desyncs what that model treats as
-    "belongs upstairs", with no error and no visible symptom.
+    `User/send_message` is edited. Its own heads (`User`, and `PremiumUser`, which inherits it through
+    `base`) retrain. `PremiumSession` neither owns nor inherits it, and reads it only as one recorded
+    sample, which the edit does not move, so it carries forward.
+
+    Not run in this change (this file trains). Expectations were updated statically.
     """
     workflow_path, version_id = baseline_with_grandchild
     _append_utterance(
@@ -658,24 +647,11 @@ def test_a_base_inherited_command_edit_dirties_the_grandchild(baseline_with_gran
     plan = _plan(workflow_path, version_id)
 
     assert plan.dirty_commands == [USER_MESSAGE_COMMAND]
-    assert PREMIUM_SESSION_CONTEXT in plan.contexts_to_train, (
-        "the grandchild's wildcard class is assembled from PremiumUser's utterances, "
-        "which include User/send_message through `base`; carrying it forward is silent "
-        "staleness"
-    )
-    reasons = plan.reasons[PREMIUM_SESSION_CONTEXT]
-    assert any("wildcard class is stale" in reason for reason in reasons), reasons
-    assert any("PremiumUser" in reason for reason in reasons), reasons
-    # The reason must name the ANCESTOR that carries it, not User: a developer reading
-    # this has to be able to follow the two hops.
-    assert all(
-        "label space contains" not in reason for reason in reasons
-    ), f"the grandchild does not own the command; got {reasons}"
-    # And the closure is still a closure. Without this, "dirty everything" would satisfy
-    # the assertion above and the compose claim would be indistinguishable from a planner
-    # that gave up: `ChatRoom` owns none of the edited command and has no ancestors, and
-    # `*` carries only core commands.
-    assert set(plan.contexts_carried_forward) == {"*", "ChatRoom"}
+    context_commands, _u = st.build_context_maps(workflow_path, st.contexts_for_training(workflow_path))
+    own = {ctx for ctx, commands in context_commands.items() if USER_MESSAGE_COMMAND in commands}
+    assert {"User", "PremiumUser"} <= own
+    assert set(plan.contexts_to_train) == own
+    assert PREMIUM_SESSION_CONTEXT in plan.contexts_carried_forward
 
 
 def test_an_unchanged_grandchild_workflow_carries_every_context_forward(
@@ -709,9 +685,11 @@ def test_a_leaf_edit_in_the_grandchild_stays_in_the_grandchild(
     plan = _plan(workflow_path, version_id)
 
     assert plan.dirty_commands == [PREMIUM_SESSION_COMMAND]
-    assert plan.contexts_to_train == [PREMIUM_SESSION_CONTEXT]
-    assert set(plan.contexts_carried_forward) == {
-        "*", "ChatRoom", "PremiumUser", "User"}
+    # Design 2.50: the edit dirties the heads that label the command, and no others.
+    context_commands, _u = st.build_context_maps(workflow_path, st.contexts_for_training(workflow_path))
+    own = {ctx for ctx, commands in context_commands.items() if PREMIUM_SESSION_COMMAND in commands}
+    assert set(plan.contexts_to_train) == own
+    assert PREMIUM_SESSION_CONTEXT in own
 
 
 # ---------------------------------------------------------------------

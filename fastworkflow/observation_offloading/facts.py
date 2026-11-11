@@ -1,45 +1,31 @@
 """Facts filled in code from the command runs a run archived.
 
-A *facts model* is a pydantic model whose fields each name where their value
-comes from::
+A *facts model* is a pydantic model whose fields are typed with the commands that
+produce them (design 3.12)::
 
     class Found(BaseModel):
-        item_uids: list[str] = Field(json_schema_extra={"from": "list_items.item_uids"})
-        total: int = Field(json_schema_extra={"from": "list_items.total"})
-        query: Optional[str] = Field(default=None, json_schema_extra={"from": "find_item.query"})
+        listing: ListItems.Output      # every field of that command's Output
+        query: Optional[FindItem.Input] = None
 
-``"<command>.<field>"`` names a field of that command's ``Signature.Output``
-(what it returned in ``CommandResponse.output``) or, when the Output has no
-such field, of its ``Signature.Input`` (the parameters it ran with). The
-command is spelled as the workflow names it: qualified (``Context/list_items``)
-or plain (``list_items``). A plain name that more than one context defines is
-resolved against the context of the record the runs were on (``context_name``,
-else the stored context of the runs ``context`` selects): ``list_items`` on a
-``Context`` record means ``Context/list_items``. One that still names more
-than one command is rejected as an ambiguous source, never guessed.
+A field typed with a command's ``Signature.Output`` gets that command's Output from its
+run in the phase; a field typed with its ``Signature.Input`` gets the arguments that run
+was called with. Properties, methods and validators compute any other value. A field
+typed with anything else is a load error. The copy edges of the earlier design
+(``fact_from``, a ``"from"`` on a facts field) are no longer read (design 2.33,
+Phase 15): such a field is a load error that says so.
+
+The typed fill is ``typed_phase_facts.fill_typed_phase_output``. It uses the paging and
+query rules below (``_page_key``, ``_join_list``, ``_scalar_of_pages``), so the
+rules apply to typed facts as they did to copies.
 
 Facts carry VALUES (ids, labels, counts), never observation aliases: ``O<n>``
 numbering restarts with each executor run.
 
-``facts_from_runs`` fills the model from runs as ``RuntimeHandleArchive.command_runs``
-returns them, by these rules and nothing else -- no model call, no parsing of
-response text:
+Only successful runs count, and, when a context is given, only runs that ran in that
+context (the ``"<Context> <label>"`` clause the archive stores).
 
-* Only successful runs count, and, when ``context`` is given, only runs that
-  ran in that context (the ``"<Context> <label>"`` clause the archive stores).
-* A scalar field takes its value from the LATEST such run of the BROADEST query
-  (see "Pages and queries" below) of the command whose stored Output (or Input)
-  holds the field.
-* A list field collects across such runs, in run order: a list value is
-  joined, any other value appended. Which runs count is decided on each run's
-  *normalised* Input (see "Pages and queries" below): a run with the same
-  normalised Input as an earlier one (the same page read again) replaces that
-  run's values in its place, so a re-read never duplicates rows; and list
-  values (pages) are joined only across the runs of ONE query.
-* A required field with no value fails with ``MissingFactError`` naming the
-  field and its source. It is never guessed. A field with a default keeps it.
-* A ``"from"`` that is malformed, or -- when ``signatures`` is given -- names a
-  command or field that does not exist, fails with ``FactSourceError``.
+A required field with no value fails with ``MissingFactError`` naming the field. It is
+never guessed. A field with a default keeps it.
 
 Pages and queries
 -----------------
@@ -56,10 +42,7 @@ GIVEN, and is left out of the key, when its value is:
   ``signatures`` is given, since that is where the defaults are known);
 * for a paging parameter, ``0``: the first row is where an omitted position starts.
 
-The paging parameters are the ones a facts field names in ``"page_by"`` (a name
-or a list of names: ``json_schema_extra={"from": "list_items.item_uids",
-"page_by": "cursor"}``), else the Input parameters named as a row position:
-``start``, ``offset`` or ``skip`` (``PAGING_PARAMETERS``). The other given
+The paging parameters are the Input parameters named as a row position: ``start`` (``PAGING_PARAMETERS``).
 parameters form the run's QUERY; the paging ones say which PAGE of it the run read.
 
 A list value is a page of its query's rows. The pages joined are those of the
@@ -98,21 +81,15 @@ import os
 import types
 import typing
 from dataclasses import dataclass, replace
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from pydantic import BaseModel, ValidationError
+
+from fastworkflow.plan_frame import runs_outside_ranges
 
 
 class FactsError(ValueError):
     """A facts model could not be filled."""
-
-
-class FactSourceError(FactsError):
-    """A field's ``"from"`` is malformed or names no known command field."""
-
-
-class AmbiguousFactSourceError(FactSourceError):
-    """A plain command name in a ``"from"`` names more than one command."""
 
 
 class MissingFactError(FactsError):
@@ -126,9 +103,48 @@ class MissingFactError(FactsError):
         self.source = source
 
 
-#: Input parameters taken as a row position (a page of the same query) when a
-#: facts field does not name its own with ``"page_by"``.
-PAGING_PARAMETERS = ("start", "offset", "skip")
+#: Input parameters taken as a row position (a page of the same query).
+PAGING_PARAMETERS = ("start",)
+
+
+def _is_int_annotation(annotation: Any) -> bool:
+    """Whether a field annotation is ``int`` or ``Optional[int]`` (not ``bool``, not ``datetime``)."""
+    if annotation is int:
+        return True
+    if typing.get_origin(annotation) in (typing.Union, types.UnionType):
+        args = [arg for arg in typing.get_args(annotation) if arg is not type(None)]
+        return len(args) == 1 and args[0] is int
+    return False
+
+
+def paging_parameters(input_model: Any) -> tuple[str, ...]:
+    """The paging parameters of a command's ``Input`` (design 2.49, 3.14): the fields named ``start``,
+    whose type is ``int`` or ``Optional[int]``, in ``PAGING_PARAMETERS`` order.
+
+    ``()`` for no ``Input`` or no such field: a ``start`` that is a ``datetime`` or a ``skip`` that is
+    a ``bool`` is an ordinary field. Every reader of ``PAGING_PARAMETERS`` for a command asks this.
+    """
+    fields = getattr(input_model, "model_fields", None)
+    if not isinstance(fields, Mapping):
+        return ()
+    return tuple(name for name in PAGING_PARAMETERS
+                 if name in fields and _is_int_annotation(fields[name].annotation))
+
+
+def output_page(output: Any) -> Optional[tuple[int, int]]:
+    """``(rows, total)`` of an ``Output`` (a model or its dict) that is a page (design 3.14): its
+    ``total`` is an int and its list fields share one length, the rows of one page. None otherwise."""
+    values = output.model_dump() if isinstance(output, BaseModel) else output
+    if not isinstance(values, Mapping):
+        return None
+    total = values.get("total")
+    if not isinstance(total, int) or isinstance(total, bool):
+        return None
+    lengths = {len(value) for name, value in values.items()
+               if name != "total" and isinstance(value, (list, tuple))}
+    if len(lengths) != 1:
+        return None
+    return lengths.pop(), total
 
 
 @dataclass(frozen=True)
@@ -140,123 +156,27 @@ class FactSource:
     source_field: str
     is_list: bool
     required: bool
-    page_by: tuple[str, ...] = PAGING_PARAMETERS
 
     @property
     def spelled(self) -> str:
         return f"{self.command}.{self.source_field}"
 
 
-def _is_list_annotation(annotation: Any) -> bool:
-    origin = typing.get_origin(annotation)
-    if origin in (list, tuple, set, frozenset):
-        return True
-    if origin in (typing.Union, types.UnionType):
-        return any(
-            _is_list_annotation(arg)
-            for arg in typing.get_args(annotation)
-            if arg is not type(None)
-        )
-    return annotation in (list, tuple, set, frozenset)
-
-
 def fact_sources(model: type[BaseModel]) -> list[FactSource]:
-    """Every field of *model* that declares a ``"from"``, parsed.
+    """The copy sources of *model*: always none (design 2.33, Phase 15).
 
-    Raises ``FactSourceError`` for a ``"from"`` that is not
-    ``"<command>.<field>"``. Fields without one are not listed.
+    A facts model's field is typed with the command it comes from (3.12), so no field copies
+    another command's value and nothing is parsed from a ``"from"``. A field that still
+    carries a ``"from"`` is a load error (``typed_phase_facts.check_typed_facts_model``).
+    Kept, returning ``[]``, for callers that take a source list.
     """
-    sources = []
-    for name, info in model.model_fields.items():
-        extra = info.json_schema_extra
-        spelled = extra.get("from") if isinstance(extra, Mapping) else None
-        if spelled is None:
-            continue
-        command, dot, source_field = str(spelled).strip().partition(".")
-        if (not isinstance(spelled, str) or not dot or not command or not source_field
-                or "." in source_field):
-            raise FactSourceError(
-                f"{model.__name__}.{name}: \"from\" must be \"<command>.<field>\", "
-                f"got {spelled!r}"
-            )
-        page_by = extra.get("page_by", PAGING_PARAMETERS)
-        if isinstance(page_by, str):
-            page_by = (page_by,)
-        if not all(isinstance(p, str) and p for p in page_by):
-            raise FactSourceError(
-                f"{model.__name__}.{name}: \"page_by\" must be a parameter name or a "
-                f"list of them, got {extra.get('page_by')!r}"
-            )
-        sources.append(FactSource(
-            field=name,
-            command=command,
-            source_field=source_field,
-            is_list=_is_list_annotation(info.annotation),
-            required=info.is_required(),
-            page_by=tuple(page_by),
-        ))
-    return sources
+    return []
 
 
 def _command_matches(declared: str, ran: str) -> bool:
     if declared == ran:
         return True
     return "/" not in declared and ran.split("/")[-1] == declared
-
-
-def _pick(model: type[BaseModel], source: FactSource, names: set[str],
-          context_name: Optional[str]) -> str:
-    """The one command *names* leaves for *source*, resolved by *context_name*."""
-    if len(names) == 1:
-        return next(iter(names))
-    if context_name and f"{context_name}/{source.command}" in names:
-        return f"{context_name}/{source.command}"
-    raise AmbiguousFactSourceError(
-        f"{model.__name__}.{source.field} (from {source.spelled!r}): ambiguous source: "
-        f"{source.command!r} names {len(names)} commands ({', '.join(sorted(names))})"
-        + (f" and none is in context {context_name!r}" if context_name else "")
-        + "; qualify it as <Context>/<command>"
-    )
-
-
-def _model_fields(cls: Any) -> set[str]:
-    fields = getattr(cls, "model_fields", None)
-    return set(fields) if isinstance(fields, Mapping) else set()
-
-
-def check_fact_sources(
-    model: type[BaseModel],
-    signatures: Mapping[str, Any],
-    *,
-    context_name: Optional[str] = None,
-) -> list[FactSource]:
-    """Check that every ``"from"`` of *model* names a known command and field.
-
-    *signatures* maps each command's name, as the workflow spells it
-    (``Context/command``, or plain for a root command), to its ``Signature``
-    class (anything with optional ``Input``/``Output`` pydantic models), as
-    ``workflow_signatures`` builds it. A plain name that several contexts
-    define resolves to ``<context_name>/<command>``; without one it is an
-    ``AmbiguousFactSourceError``. Returns the sources with ``command``
-    replaced by the resolved name; raises ``FactSourceError``.
-    """
-    resolved = []
-    for source in fact_sources(model):
-        where = f"{model.__name__}.{source.field} (from {source.spelled!r})"
-        matches = {name for name in signatures if _command_matches(source.command, name)}
-        if not matches:
-            raise FactSourceError(f"{where}: no command named {source.command!r}")
-        name = _pick(model, source, matches, context_name)
-        signature = signatures[name]
-        known = (_model_fields(getattr(signature, "Output", None))
-                 | _model_fields(getattr(signature, "Input", None)))
-        if source.source_field not in known:
-            raise FactSourceError(
-                f"{where}: {name} has no Output or Input field "
-                f"{source.source_field!r}"
-            )
-        resolved.append(replace(source, command=name))
-    return resolved
 
 
 def workflow_signatures(workflow_folderpath: str) -> dict[str, Any]:
@@ -281,30 +201,10 @@ def workflow_signatures(workflow_folderpath: str) -> dict[str, Any]:
     return signatures
 
 
-def _value_in(run: Mapping[str, Any], field: str) -> tuple[bool, Any]:
-    for part in ("output", "input"):
-        data = run.get(part)
-        if isinstance(data, Mapping) and field in data:
-            return True, data[field]
-    return False, None
-
-
 def _not_given_sentinels() -> tuple[Any, ...]:
-    import fastworkflow
-    from fastworkflow.utils.signatures import INVALID_FLOAT_VALUE, INVALID_INT_VALUE
+    from fastworkflow.utils.signatures import INVALID_FLOAT_VALUE, INVALID_INT_VALUE, NOT_FOUND
 
-    not_found = fastworkflow.get_env_var(
-        "NOT_FOUND", default=os.getenv("NOT_FOUND") or "NOT_FOUND")
-    return (not_found, INVALID_INT_VALUE, INVALID_FLOAT_VALUE)
-
-
-def _input_defaults(signature: Any) -> dict[str, Any]:
-    """The defaults of *signature*'s ``Input`` fields that have one."""
-    fields = getattr(getattr(signature, "Input", None), "model_fields", None)
-    if not isinstance(fields, Mapping):
-        return {}
-    return {name: info.default for name, info in fields.items()
-            if not info.is_required() and info.default_factory is None}
+    return (NOT_FOUND, INVALID_INT_VALUE, INVALID_FLOAT_VALUE)
 
 
 def _given(value: Any, sentinels: tuple[Any, ...]) -> bool:
@@ -420,89 +320,6 @@ def _scalar_of_pages(found: list[tuple[str, str, int, Any, Any]]) -> Any:
     return values[-1]
 
 
-def facts_from_runs(
-    model: type[BaseModel],
-    runs: Iterable[Mapping[str, Any]],
-    *,
-    context: Optional[str] = None,
-    context_name: Optional[str] = None,
-    signatures: Optional[Mapping[str, Any]] = None,
-) -> BaseModel:
-    """Fill *model* from *runs*, by the rules in this module's docstring.
-
-    *runs* are command runs in the order they ran, as
-    ``RuntimeHandleArchive.command_runs`` returns them (several scopes' runs may
-    be concatenated in order). *context*, when given, keeps only the runs on
-    that record (their ``context_clause``). *context_name* is the record's
-    context, which plain command names resolve against; by default the stored
-    context of the runs *context* selects. *signatures*, when given, is
-    checked first with ``check_fact_sources``.
-    """
-    eligible = [
-        run for run in runs
-        if run.get("success") and (context is None or run.get("context_clause") == context)
-    ]
-    if context_name is None and context is not None:
-        names = {str(run["context_name"]) for run in eligible if run.get("context_name")}
-        if len(names) == 1:
-            context_name = next(iter(names))
-        elif not names:
-            # Runs stored without a context name: the clause starts with it.
-            context_name = context.split(" ", 1)[0] or None
-    sources = (check_fact_sources(model, signatures, context_name=context_name)
-               if signatures is not None else fact_sources(model))
-    values: dict[str, Any] = {}
-    for source in sources:
-        matching = [run for run in eligible
-                    if _command_matches(source.command, str(run.get("command") or ""))]
-        ran = {str(run.get("command") or "") for run in matching}
-        if len(ran) > 1:
-            chosen = _pick(model, source, ran, context_name)
-            matching = [run for run in matching if run.get("command") == chosen]
-        found = []
-        for run in matching:
-            present, value = _value_in(run, source.source_field)
-            if present:
-                found.append((run.get("command"), run.get("input"), value, run.get("output")))
-        if not found:
-            if source.required:
-                raise MissingFactError(
-                    f"{model.__name__}.{source.field}: no successful run of "
-                    f"{source.command!r} holds {source.source_field!r} "
-                    f"(from {source.spelled!r})"
-                    + (f" in context {context!r}" if context is not None else ""),
-                    source=source,
-                )
-            continue
-        keyed = []
-        for command, run_input, value, output in found:
-            defaults = (_input_defaults(signatures.get(str(command or "")))
-                        if signatures is not None else None)
-            keyed.append((*_page_key(run_input, source.page_by, defaults), value, output))
-        values[source.field] = (_join_list(keyed) if source.is_list
-                                else _scalar_of_pages(keyed))
-    try:
-        return model.model_validate(values)
-    except ValidationError as error:
-        raise FactsError(f"{model.__name__}: the values found do not fit the model: {error}") from error
-
-
-def facts_from_archive(
-    model: type[BaseModel],
-    archive: Any,
-    scope: Any,
-    *,
-    context: Optional[str] = None,
-    context_name: Optional[str] = None,
-    signatures: Optional[Mapping[str, Any]] = None,
-) -> BaseModel:
-    """``facts_from_runs`` over the command runs *archive* holds for *scope*."""
-    return facts_from_runs(
-        model, archive.command_runs(scope), context=context,
-        context_name=context_name, signatures=signatures,
-    )
-
-
 def capped_items(items: Iterable[str], max_items: Optional[int], sep: str = ", ") -> str:
     """*items* joined with *sep*; past *max_items*, the first ones and
     ``"(and K more; M in all)"``. ``None`` (or 0) caps nothing."""
@@ -531,7 +348,7 @@ def _fact_value_text(value: Any, max_items: Optional[int] = None) -> str:
 
 def facts_text(facts: Any, *, fields: Optional[Iterable[str]] = None, sep: str = "; ",
                max_items: Optional[int] = None) -> str:
-    """*facts* (a filled facts model) as compact ``field: value`` text, for a skill's steps.
+    """*facts* (a filled facts model) as compact ``field: value`` text, for a planning command's steps.
 
     ``uid: b1; loan_uids: l1, l2; total: 3``. A list is joined with ``", "`` (``none`` when
     empty), ``None`` is ``none``, a bool ``true``/``false``, a nested model or mapping is
@@ -543,7 +360,7 @@ def facts_text(facts: Any, *, fields: Optional[Iterable[str]] = None, sep: str =
     answer to name a list must give it whole.
 
     The text is plain data: a phase that writes its answer from earlier facts (an
-    answer-only phase, see ``fastworkflow.skill_phases``) reads the values as given.
+    answer-only phase, see ``fastworkflow.planning_phases``) reads the values as given.
     """
     if isinstance(facts, (list, tuple)):
         return ", ".join(f"({facts_text(item, fields=fields, sep=sep, max_items=max_items)})"
@@ -559,17 +376,14 @@ def facts_text(facts: Any, *, fields: Optional[Iterable[str]] = None, sep: str =
 
 
 __all__ = [
-    "AmbiguousFactSourceError",
     "FactSource",
-    "FactSourceError",
     "FactsError",
     "MissingFactError",
     "PAGING_PARAMETERS",
     "capped_items",
-    "check_fact_sources",
     "fact_sources",
-    "facts_from_archive",
-    "facts_from_runs",
     "facts_text",
+    "output_page",
+    "paging_parameters",
     "workflow_signatures",
 ]

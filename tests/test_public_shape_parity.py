@@ -103,6 +103,11 @@ COMMAND_OUTPUT_FIELDS = (
     # names are unqualified, so a workflow defining a root command called
     # `ask_user` would have its failures collected as unanswered questions.
     "ask_user_entry",
+    # Appended by Phase 9 step 4 (design 3.9, "Filing the run"): both None when the command
+    # ran on the current record; set when an exact name ran it on an enclosing record or the
+    # global scope. Optional with a default, appended for the same reason as the field above.
+    "ran_in_context_name",
+    "ran_in_context_clause",
 )
 
 # `success` is a computed field: absent from `model_fields`, present in every
@@ -275,7 +280,7 @@ def test_a_real_turn_produces_exactly_the_pinned_public_shape(
     )
     ctx = WorkflowExecutionContext(run_as_agent=False)
     ctx.bind_app_workflow(workflow)
-    workflow.root_command_context = TodoListManager(str(tmp_path / "todo_list.json"))
+    workflow.root = TodoListManager(str(tmp_path / "todo_list.json"))
     try:
         turn_output = ctx.process_action_turn(
             fastworkflow.Action(command_name=LIST_COMMAND, command="list them")

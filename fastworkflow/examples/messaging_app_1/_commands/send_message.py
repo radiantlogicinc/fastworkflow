@@ -42,7 +42,7 @@ class ResponseGenerator:
     def __call__(self, workflow: 
                  fastworkflow.Workflow, 
                  command: str, 
-                 command_parameters: Signature.Input) -> fastworkflow.CommandOutput:
+                 command_parameters: Signature.Input) -> str:
         """The framework will call this function to process the command"""
         self._process_command(workflow, command_parameters)
         
@@ -50,7 +50,4 @@ class ResponseGenerator:
             f'Response: The message was printed to the screen'
         )
 
-        return fastworkflow.CommandOutput(
-            command_response=
-                fastworkflow.CommandResponse(response=response)
-        )
+        return response

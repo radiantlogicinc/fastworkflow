@@ -2,7 +2,6 @@
 from pydantic import ConfigDict
 
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
 from fastworkflow.workflow import Workflow
 from fastworkflow.utils.signatures import InputForParamExtraction
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
@@ -35,16 +34,13 @@ class ResponseGenerator:
     def _process_command(self, workflow: Workflow) -> Signature.Output:
         """List all todo lists."""
         # Access the application class instance:
-        app_instance = workflow.command_context_for_response_generation  # type: TodoListManager
+        app_instance = workflow.record  # type: TodoListManager
         todo_lists = app_instance.list_todo_lists()
         return Signature.Output(todolist_ids=[todolist.id for todolist in todo_lists])
 
-    def __call__(self, workflow: Workflow, command: str) -> CommandOutput:
+    def __call__(self, workflow: Workflow, command: str, input: None) -> fastworkflow.CommandResponse:
         output = self._process_command(workflow)
         response = (
             f'Response: {output.model_dump_json()}'
         )
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=response)
-        )
+        return fastworkflow.CommandResponse(response=response, output=output)

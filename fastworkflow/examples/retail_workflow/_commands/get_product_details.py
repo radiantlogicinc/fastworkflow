@@ -3,7 +3,6 @@ from typing import List
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.workflow import Workflow
-from fastworkflow import CommandOutput, CommandResponse
 
 from ..retail_data import load_data
 from ..tools.get_product_details import GetProductDetails
@@ -13,13 +12,10 @@ class Signature:
     """Get product details"""
     class Input(BaseModel):
         product_id: str = Field(
-            default="NOT_FOUND",
             description="The product ID (numeric string)",
-            pattern=r"^(\d{10}|NOT_FOUND)$",
+            json_schema_extra={"from_command_output": ["get_order_details", "list_all_product_types"]},
+            pattern=r"^(\d{10})$",
             examples=["6086499569"],
-            json_schema_extra={
-                "available_from": ["get_order_details", "list_all_product_types"]
-            }
         )
 
         model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
@@ -55,14 +51,9 @@ class Signature:
 
 
 class ResponseGenerator:
-    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandOutput:
+    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> Signature.Output:
         output = self._process_command(workflow, command_parameters)
-        response = (
-            f'Response: {output.product_details}'
-        )
-        return CommandOutput(
-            command_response=CommandResponse(response=response),
-        )
+        return output
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()

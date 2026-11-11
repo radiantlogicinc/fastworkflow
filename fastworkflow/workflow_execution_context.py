@@ -27,25 +27,48 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from queue import Queue
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 
 import fastworkflow
 import fastworkflow.turn
-from fastworkflow import active_workflow, metrics, tracing
+from fastworkflow import active_workflow, metrics, planning_commands, tracing
+from fastworkflow import approval_binding, turn_cache
+from fastworkflow.observation_offloading.state import current_execute_alias
 from fastworkflow.session_state_store import SCHEMA_VERSION, IncompatibleSessionState
 from fastworkflow.state_serialization import validate_state
+from fastworkflow.plan_frame import PlanFrame, runs_outside_ranges, turn_max_steps
 from fastworkflow.observability import store as observability_store
 from fastworkflow.observability.execution_recorder import ExecutionRecorder, record_execution
 from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_logger, dspy_utils
-from fastworkflow.utils.react import NoSuspendedAgentStateError
+from fastworkflow.utils.input_validation import stored_value
+from fastworkflow.utils.react import AskUserSuspend, NoSuspendedAgentStateError
 
 #: A sub-task that hits the ReAct step cap is continued by a fresh executor at most this many times.
 MAX_HANDOFFS = 2
+
+#: The refusal for a planning command called once the turn-wide step budget is spent.
+NESTED_BUDGET_SPENT_MESSAGE = (
+    "The step budget for nested commands is spent; continue with the remaining steps directly."
+)
+
+#: The refusal for a direct action run while a question waits for the user's answer.
+AWAITING_ANSWER_REFUSAL_MESSAGE = (
+    "A question is waiting for the user's answer; reply to it before running an action."
+)
+
+
+def _planning_args(params: Any) -> dict:
+    """The arguments of a planning call as a dict: an ``Input`` instance or a dict."""
+    if params is None:
+        return {}
+    if hasattr(params, "model_dump"):
+        return params.model_dump()
+    return dict(params)
 
 
 def _opened_part(trajectory: dict[str, Any]) -> str:
@@ -131,6 +154,60 @@ def _parse_isoformat(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _frame_property(field_name: str) -> property:
+    """A property over one field of the top PlanFrame, ``self._frames[-1]``."""
+
+    def fget(self):
+        return getattr(self._top_frame(), field_name)
+
+    def fset(self, value):
+        setattr(self._top_frame(), field_name, value)
+
+    return property(fget, fset)
+
+
+#: The turn's answer when the sub-task review is declined or expires: nothing runs (fix-3rsq.plan-review.2.6).
+SUBTASK_REVIEW_DECLINED = ("You declined the sub-task review, so nothing was run. "
+                           "Send the request again to review it again.")
+SUBTASK_REVIEW_EXPIRED = ("The sub-task review expired before you answered, so nothing was run, and your message "
+                          "was not taken as a reply to it. Send the request again to start a new review.")
+
+#: Owner of pending state saved before pending state was tagged with its conversation (fix-newconv-pending). Such
+#: state is parked, never applied to a conversation automatically.
+UNOWNED_PENDING = "unowned"
+#: "No owner set": the live pending state belongs to the conversation the context is bound to.
+_OWNER_UNSET = object()
+#: The serialized keys of a parked pending snapshot: the suspended turn and what it waits on, without the history,
+#: the approvals (cancelled, never parked) or the experiment labels (per context, not per conversation).
+_PARKED_PENDING_KEYS = (
+    "awaiting_user", "suspended_user_message", "pending_clarification_request", "skill_refusal_pending",
+    "skill_refusal_answered", "subtasks", "subtask_origins", "subtask_index", "subtask_answers",
+    "subtask_outputs", "subtask_exhausted", "subtask_review_open", "subtask_plan", "next_step",
+    "skill_phase_run", "react", "frames", "frame_react", "turn_child_step_ranges", "turn_steps_used", "nlu_stage",
+    "turn", "cme", "consultation_nlu_stage", "consultation_cme",
+)
+
+
+def _owner_key(owner) -> str:
+    """The key a parked snapshot is filed under: the conversation id, "none" or the unowned marker."""
+    return "none" if owner is None else str(owner)
+
+
+def _owner_encoded(owner):
+    """The owner as the serialized blob carries it: a conversation id, None, or the unowned marker."""
+    return owner if owner is None or owner == UNOWNED_PENDING else int(owner)
+
+
+def _owner_from_state(state: dict[str, Any]):
+    """The conversation a serialized pending state belongs to. A blob with no conversation_id key is unowned."""
+    if "conversation_id" not in state:
+        return UNOWNED_PENDING
+    value = state["conversation_id"]
+    if value is None or value == UNOWNED_PENDING:
+        return value
+    return int(value)
+
+
 class WorkflowExecutionContext:
     """
     Owns NLU (cme_workflow), the bound app workflow, and message execution.
@@ -186,30 +263,23 @@ class WorkflowExecutionContext:
         from fastworkflow.command_executor import CommandExecutor
         self._CommandExecutor = CommandExecutor
 
-        self._workflow_tool_agent = None
+        # One PlanFrame per planning-command call; the turn frame is at index 0. The per-call
+        # planning attributes (_subtasks, _phase_run, ...) are properties over the top frame.
+        self._frames: list[PlanFrame] = [PlanFrame.turn()]
         self._context_change_listener = None
 
         self._awaiting_user = False
         self._suspended_user_message: Optional[str] = None
         self._pending_clarification_request: Optional[str] = None
-        # Sub-task split of one turn (see _run_agent / _run_subtasks_from).
-        self._subtasks: list[str] = []
-        # Original sub-task number of each entry in _subtasks; a hand-off continuation shares its origin.
-        self._origins: list[int] = []
-        self._subtask_index = 0
-        self._subtask_answers: list[str] = []
-        # Set when a sub-task hit the step cap with no hand-off left: the turn is then exhausted.
-        self._subtask_exhausted = False
+        # A refused planning command call put to the user (the planner's PlanningCommandInputError, workflow_agent):
+        # the question the planner left for _call_agent_for_query, whether the suspension
+        # waiting on the reply is one of these, and whether this turn already put one.
+        self._planning_command_refusal: Optional[str] = None
+        self._planning_command_refusal_pending = False
+        self._planning_command_refusal_answered = False
         self._next_step = 0
-        # Finish check (fix-3xts): the first step each sub-task origin's outputs count from,
-        # and the run's initial plan as the planner wrote it.
-        self._evidence_floors: dict[int, int] = {}
-        self._initial_plan_text = ""
-        # A phased skill call in progress (skill_phases; see _run_skill_phases): JSON
-        # state that rides the suspension blob, and the live (command, phases) for it.
-        self._phase_run: Optional[dict[str, Any]] = None
-        self._phase_live: Optional[tuple[Any, list[Any]]] = None
-        self._phased_skill_call = None
+        # Model steps taken by nested planning-command frames this turn (design 3.5).
+        self._turn_steps_used = 0
 
         # Insights-distillation (teacher/student) state — CLI/Topology-A only.
         self._generate_insights = generate_insights
@@ -228,6 +298,10 @@ class WorkflowExecutionContext:
         self._metrics_sink: metrics.MetricsSink = metrics.NoOpMetricsSink()
         self._channel_id: Optional[str] = None
         self._conversation_id: Optional[int] = None
+        # fix-newconv-pending: the conversation the live pending state belongs to, when it is not the bound one (set
+        # by apply_serialized_state from the saved blob), and the pending state parked per conversation.
+        self._pending_owner_override = _OWNER_UNSET
+        self._parked_pending: dict[str, list[dict[str, Any]]] = {}
         self._embedder_owns_conversations: bool = False
         # The experiment container's labels, bound beside channel/conversation
         # identity and stamped onto every TurnResult this context produces
@@ -262,6 +336,13 @@ class WorkflowExecutionContext:
         # Unattended turn: nobody is there to answer, so the agent has no
         # ask_user for the whole logical turn. Set when the turn begins.
         self._turn_unattended: bool = False
+        # The sub-task review gate's state for the turn (fix-3rsq.plan-review.2.2/.2.6/.2.8): the marker the turn span
+        # carries, and the plan the gate built (the accepted one after a review; the draft when no one could answer).
+        self._turn_subtask_review: str = "not_applicable"
+        self._turn_subtask_plan = None
+        # fix-48np.1: one shown == run record per bound sub-task the turn ran with drafting on (review_proposals.
+        # binding_record); the turn span carries them as ``subtask_bindings``.
+        self._turn_subtask_bindings: list = []
         self._turn_agent_result: Any = None
         self._turn_history_baseline: int = 0
         # turn_key of the newest turn that both completed and contributed a
@@ -277,6 +358,14 @@ class WorkflowExecutionContext:
         # i.e. whether it grew the durable memory the label schedule counts.
         self._last_turn_added_memory: bool = False
 
+        # Phase 9 step 4: the CME's heads serve every session, so an old CME is refused here, for
+        # every runtime path (chat, MCP, FastAPI). Training does not construct this class.
+        from fastworkflow.train.artifact_versioning import require_construction_record
+        require_construction_record(
+            fastworkflow.get_internal_workflow_path("command_metadata_extraction"))
+        require_construction_record(
+            fastworkflow.get_internal_workflow_path("consultation"))
+
         cme_id = (
             f"cme_{session_key}"
             if session_key
@@ -290,7 +379,91 @@ class WorkflowExecutionContext:
             },
         )
 
+        consultation_id = (
+            f"consultation_{session_key}"
+            if session_key
+            else f"consultation_{uuid.uuid4().hex}"
+        )
+        consultation_path = fastworkflow.get_internal_workflow_path("consultation")
+        self._consultation_workflow = fastworkflow.Workflow.create(
+            consultation_path,
+            workflow_id_str=consultation_id,
+        )
+        from fastworkflow.utils import python_utils
+
+        proposal_review_cb = python_utils.get_module(
+            os.path.join(
+                consultation_path,
+                "_commands",
+                "ProposalReview",
+                "_ProposalReview.py",
+            ),
+            consultation_path,
+        )
+        self._consultation_workflow.record = (
+            proposal_review_cb.ProposalReview()
+        )
+
+        consultation_cme_id = (
+            f"consultation_cme_{session_key}"
+            if session_key
+            else f"consultation_cme_{uuid.uuid4().hex}"
+        )
+        self._consultation_cme = fastworkflow.Workflow.create(
+            fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
+            workflow_id_str=consultation_cme_id,
+            workflow_context={
+                "NLU_Pipeline_Stage": fastworkflow.NLUPipelineStage.INTENT_DETECTION,
+                "app_workflow": self._consultation_workflow,
+            },
+        )
+
         self.clear_conversation_history()
+
+    def _frame_stack(self) -> list[PlanFrame]:
+        frames = getattr(self, "_frames", None)
+        if not frames:
+            # A context built with __new__ (no __init__) starts with the turn frame.
+            frames = self._frames = [PlanFrame.turn()]
+        return frames
+
+    def _top_frame(self) -> PlanFrame:
+        return self._frame_stack()[-1]
+
+    def _turn_frame(self) -> PlanFrame:
+        return self._frame_stack()[0]
+
+    # Sub-task split of one turn (see _run_agent / _run_subtasks_from).
+    _subtasks = _frame_property("subtasks")
+    # Original sub-task number of each entry in _subtasks; a hand-off continuation shares its origin.
+    _origins = _frame_property("origins")
+    _subtask_index = _frame_property("subtask_index")
+    _subtask_answers = _frame_property("subtask_answers")
+    _subtask_outputs = _frame_property("subtask_outputs")
+    # Set when a sub-task hit the step cap with no hand-off left: the turn is then exhausted.
+    _subtask_exhausted = _frame_property("subtask_exhausted")
+    # Finish check (fix-3xts): the first step each sub-task origin's outputs count from,
+    # and the run's initial plan as the planner wrote it.
+    _evidence_floors = _frame_property("evidence_floors")
+    _initial_plan_text = _frame_property("initial_plan_text")
+    # A phased planning command call in progress (planning_phases; see _run_planning_command_phases): JSON
+    # state that rides the suspension blob, and the live (command, phases) for it.
+    _phase_run = _frame_property("phase_run")
+    _phase_live = _frame_property("phase_live")
+    _phased_planning_command_call = _frame_property("phased_planning_command_call")
+    _phase_call = _frame_property("phase_call")
+    # The ReAct agent of the call in progress: the top frame's agent (the turn frame's, for now).
+    _workflow_tool_agent = _frame_property("agent")
+
+    @property
+    def _turn_subtask_plan(self):
+        """The turn's sub-task plan (review_proposals.SubTaskProposal): the accepted proposal, or the draft when the
+        turn was not reviewed. It is on the turn frame, so a suspended turn keeps it (fix-3rsq.plan-review.2.9)."""
+        return self._turn_frame().subtask_plan
+
+    @_turn_subtask_plan.setter
+    def _turn_subtask_plan(self, plan) -> None:
+        self._turn_frame().subtask_plan = plan
 
     @property
     def session_key(self) -> Optional[str]:
@@ -388,8 +561,12 @@ class WorkflowExecutionContext:
             self._bind_experiment_labels(experiment_id, task_id, attempt)
         if channel_id is not None:
             self._channel_id = channel_id
-        if conversation_id is not None:
+        if conversation_id is not None and conversation_id != self._conversation_id:
+            # fix-newconv-pending: the live pending state settles before the conversation changes, and the new
+            # conversation's parked pending state (if any) comes back.
+            self._settle_pending_for_conversation(conversation_id)
             self._conversation_id = conversation_id
+            self._restore_parked_pending(conversation_id)
         if embedder_owns_conversations is not None:
             self._embedder_owns_conversations = embedder_owns_conversations
 
@@ -547,6 +724,12 @@ class WorkflowExecutionContext:
         return self._turn_key
 
     @property
+    def current_frame_alias(self) -> str:
+        """The alias of the planning frame on top, "" for the turn frame (design 3.5).
+        Tracing reads it when a span opens, so the span records the frame it ran under."""
+        return self._top_frame().alias
+
+    @property
     def trace_span_stack(self) -> list[tracing.Span]:
         """Open-span stack for parenting nested spans (single-turn: I5)."""
         return self._trace_span_stack
@@ -575,16 +758,28 @@ class WorkflowExecutionContext:
         """
         self.assert_experiment_claim_current()
         self._ensure_observability_conversation()
+        # Drops nested frames only. The turn frame's own state (its sub-tasks and its agent)
+        # is left as it was: _clear_subtask_state clears the sub-task state when a run starts,
+        # and a message that resumes a suspended turn still finds its sub-tasks.
+        del self._frame_stack()[1:]
+        self._turn_steps_used = 0
         self._turn_outputs = []
         self._turn_key = mint_turn_key()
         self._turn_started_at = datetime.now(timezone.utc)
         self._turn_user_message = user_message
         self._turn_unattended = bool(unattended)
+        self._turn_subtask_review = "not_applicable"
+        self._turn_subtask_plan = None
+        self._turn_subtask_bindings = []
+        turn_cache.begin_turn()
+        self._planning_command_refusal_pending = False
+        self._planning_command_refusal_answered = False
         self._turn_refined_message = None
         self._turn_suspended_ms = 0
         self._suspend_began_at = None
         self._turn_agent_result = None
         self._turn_history_baseline = len(self.conversation_history.messages)
+        approval_binding.on_new_turn(self, self._app_workflow, unattended=self._turn_unattended)
 
         self._turn_entry_workflow_name = ""
         self._turn_entry_context = ""
@@ -594,7 +789,7 @@ class WorkflowExecutionContext:
                     self._app_workflow.folderpath.split("/")[-1]
                 )
                 self._turn_entry_context = (
-                    self._app_workflow.current_command_context_name or ""
+                    self._app_workflow._current_command_context_name or ""
                 )
 
         # Context-mutation baseline (D3 as amended): a shallow snapshot of the
@@ -912,7 +1107,9 @@ class WorkflowExecutionContext:
             "agent_result": agent_result,
         }
 
-    def _serialize_cme_continuation(self) -> Optional[dict[str, Any]]:
+    def _serialize_cme_continuation(
+        self, cme_workflow: Optional[fastworkflow.Workflow] = None,
+    ) -> Optional[dict[str, Any]]:
         """Project the in-flight CME command, or None when none is in flight.
 
         Restoring nlu_stage alone is not enough and is actively unsafe: at
@@ -922,21 +1119,23 @@ class WorkflowExecutionContext:
         either raises KeyError or silently discards every parameter collected
         so far and re-extracts from the answer text alone.
         """
-        if self._cme_workflow is None:
+        if cme_workflow is None:
+            cme_workflow = self._cme_workflow
+        if cme_workflow is None:
             # close() treats this as reachable, and has_open_command() runs
             # after every turn rather than only suspensions, so a missing CME
             # workflow must read as "nothing in flight" instead of raising in
             # the post-turn persist path.
             return None
 
-        ctx = self._cme_workflow.context
+        ctx = cme_workflow.context
         stored = ctx.get("stored_parameters")
 
         # command_name is deliberately NOT part of this test. Unlike command and
         # stored_parameters, end_command_processing() leaves it behind, so a
         # session that merely ran a command once would look mid-extraction
         # forever and its state would be written on every completed turn.
-        if stored is None and not self._is_extracting_parameters():
+        if stored is None and not self._is_extracting_parameters(cme_workflow):
             return None
 
         command_name = ctx.get("command_name")
@@ -948,21 +1147,29 @@ class WorkflowExecutionContext:
             # NOT_FOUND sentinels), so dump without validating on the way out.
             stored_dump = stored.model_dump(mode="json")
 
-        return {
+        payload: dict[str, Any] = {
             "command": command,
             "command_name": command_name,
             "stored_parameters": stored_dump,
         }
+        missing_value_question = ctx.get("missing_value_question")
+        if missing_value_question is not None:
+            payload["missing_value_question"] = missing_value_question
+        return payload
 
-    def _is_extracting_parameters(self) -> bool:
+    def _is_extracting_parameters(
+        self, cme_workflow: Optional[fastworkflow.Workflow] = None,
+    ) -> bool:
         """True when the NLU pipeline is parked at parameter extraction.
 
         The stage survives serialization as a raw value, so compare on value
         rather than on enum identity.
         """
-        if self._cme_workflow is None:
+        if cme_workflow is None:
+            cme_workflow = self._cme_workflow
+        if cme_workflow is None:
             return False
-        stage = self._cme_workflow.context.get("NLU_Pipeline_Stage")
+        stage = cme_workflow.context.get("NLU_Pipeline_Stage")
         target = fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION
         return stage == target or getattr(stage, "value", stage) == target.value
 
@@ -974,15 +1181,201 @@ class WorkflowExecutionContext:
         """
         return self._serialize_cme_continuation() is not None
 
+    # ------------------------------------------------------------------
+    # Pending state and conversations (fix-newconv-pending)
+    # ------------------------------------------------------------------
+    #
+    # Live pending state belongs to the conversation that created it: a paused ask_user question, a planning
+    # refusal question, an open review, a CME continuation (parked) and a pending approval (cancelled). When the
+    # context moves to another conversation, the live state is settled before anything else runs: approvals are
+    # cancelled (they would run side effects on a bare "yes"), the rest is parked under its owner and comes back
+    # when that conversation is bound again. stop_asking's tool removal is scoped the same way.
+
+    def _live_pending_owner(self):
+        """The conversation the live pending state belongs to (see _OWNER_UNSET)."""
+        if self._pending_owner_override is not _OWNER_UNSET:
+            return self._pending_owner_override
+        return self._conversation_id
+
+    def _has_parkable_pending(self) -> bool:
+        """Live pending state that is parked on a conversation change: a question, a refusal, a review or a CME run."""
+        if self._awaiting_user or self._planning_command_refusal_pending or self.has_open_command():
+            return True
+        if getattr(self._turn_frame(), "subtask_review_open", False):
+            return True
+        return bool(approval_binding.active_reviews(self._app_workflow))
+
+    def _has_live_pending(self) -> bool:
+        """True when anything pending is live: a parkable question or review, or a pending approval."""
+        return self._has_parkable_pending() or bool(approval_binding.active_approvals(self._app_workflow))
+
+    def has_pending_state(self) -> bool:
+        """Public form of _has_live_pending, for the embedder's New conversation."""
+        return self._has_live_pending()
+
+    def has_parked_pending(self) -> bool:
+        """True when some conversation's pending state is parked (it must be saved with the rest of the state)."""
+        return bool(self._parked_pending)
+
+    def _cancel_live_approvals(self, reason: str) -> int:
+        """Cancel the pending approvals (an approval runs its side effect on a bare reply, so it never outlives its
+        conversation). A suspended approval also abandons the agent's suspended call."""
+        if self._app_workflow is None:
+            return 0
+        awaiting = approval_binding.active_record(self._app_workflow)
+        cancelled = approval_binding.cancel_conversation_approvals(self, self._app_workflow, reason=reason)
+        if (cancelled and awaiting is not None and awaiting.suspended_agent
+                and awaiting.kind == approval_binding.KIND_ACTION and self._awaiting_user):
+            self._reset_agent_suspension()
+        return cancelled
+
+    def _clear_cme_continuation(
+        self, cme_workflow: Optional[fastworkflow.Workflow] = None,
+    ) -> None:
+        """Drop the CME command in flight, as end_command_processing does (its command_name is kept there, not here)."""
+        if cme_workflow is None:
+            cme_workflow = self._cme_workflow
+        if cme_workflow is None:
+            return
+        context = cme_workflow.context
+        context.pop("command", None)
+        context.pop("command_name", None)
+        context.pop("stored_parameters", None)
+        context.pop("missing_value_question", None)
+        context["NLU_Pipeline_Stage"] = fastworkflow.NLUPipelineStage.INTENT_DETECTION
+
+    def _clear_live_pending(self) -> None:
+        """Clear the live pending state (the suspended turn, its review, its CME run) without touching history."""
+        self._reset_agent_suspension()
+        turn = self._turn_frame()
+        turn.subtask_review_open = False
+        turn.framework_entry = False
+        turn.subtask_plan = None
+        self._planning_command_refusal_answered = False
+        self._suspend_began_at = None
+        self._turn_suspended_ms = 0
+        if self.has_open_command():
+            self._clear_cme_continuation()
+        consultation_cme = getattr(self, "_consultation_cme", None)
+        if consultation_cme is not None:
+            self._clear_cme_continuation(consultation_cme)
+
+    def _pending_snapshot(self, owner) -> dict[str, Any]:
+        """The live pending state as a parked snapshot, tagged with its owner."""
+        payload = self.serialize_state(channel_id=str(self._channel_id or ""))
+        snapshot: dict[str, Any] = {key: payload.get(key) for key in _PARKED_PENDING_KEYS}
+        snapshot["conversation_id"] = owner
+        snapshot["schema_version"] = SCHEMA_VERSION
+        return snapshot
+
+    def _park_and_clear_live_pending(self, owner) -> None:
+        """Park the questions and reviews under their owner (never cancelled), then clear them from the live context.
+
+        A snapshot that cannot be encoded is dropped with an error rather than applied to another conversation.
+        """
+        if self._has_parkable_pending():
+            try:
+                snapshot = self._pending_snapshot(owner)
+            except Exception:  # noqa: BLE001 - losing one parked question must not route it to another conversation
+                logger.error("pending state of conversation %s could not be parked; it is dropped", owner,
+                             exc_info=True)
+                snapshot = None
+            if snapshot is not None:
+                snapshot["reviews"] = approval_binding.park_reviews(self._app_workflow)
+                self._parked_pending.setdefault(_owner_key(owner), []).append(snapshot)
+                logger.info("parked pending state of conversation %s", owner)
+        self._clear_live_pending()
+
+    def _settle_pending_for_conversation(self, new_conversation_id) -> None:
+        """Settle the live pending state for a context that is moving to *new_conversation_id*.
+
+        Nothing happens when the state already belongs to that conversation. Otherwise approvals are cancelled,
+        questions and reviews are parked under their owner, and stop_asking's tool removal ends with its conversation.
+        """
+        owner = self._live_pending_owner()
+        # Unowned state is parked whatever the conversation is. Any other state is adopted, not parked, by a context
+        # that has no conversation bound yet: a bare embedder's turn mints its id after this check, as it did before
+        # pending state was tagged.
+        if owner != UNOWNED_PENDING and (owner == new_conversation_id or new_conversation_id is None):
+            self._pending_owner_override = _OWNER_UNSET
+            return
+        self._pending_owner_override = _OWNER_UNSET
+        if self._app_workflow is not None:
+            self._cancel_live_approvals(reason="conversation changed")
+        if self._has_parkable_pending():
+            self._park_and_clear_live_pending(owner)
+        self._enable_all_tools()
+
+    def park_pending_for_new_conversation(self) -> None:
+        """New conversation (the button): settle the live pending state at once, not at the next message.
+
+        Approvals are cancelled and questions and reviews are parked under the current conversation. The conversation
+        id itself is changed by the embedder (reserve_conversation_id), which parks the state through bind.
+        """
+        owner = self._live_pending_owner()
+        self._pending_owner_override = _OWNER_UNSET
+        if self._app_workflow is not None:
+            self._cancel_live_approvals(reason="new conversation")
+        self._park_and_clear_live_pending(owner)
+        self._enable_all_tools()
+
+    def _restore_parked_pending(self, conversation_id) -> None:
+        """Bring back the pending state parked for *conversation_id*, the oldest one first.
+
+        Unowned state is never restored here. A snapshot that cannot be applied stays parked.
+        """
+        key = _owner_key(conversation_id)
+        items = self._parked_pending.get(key)
+        if not items:
+            return
+        snapshot = items.pop(0)
+        if not items:
+            del self._parked_pending[key]
+        if snapshot.get("schema_version") != SCHEMA_VERSION:
+            self._parked_pending.setdefault(key, []).insert(0, snapshot)
+            logger.error("parked pending state of conversation %s is from another schema; it stays parked", key)
+            return
+        approval_binding.unpark_reviews(self._app_workflow, snapshot.get("reviews") or [])
+        state = {
+            **snapshot,
+            "approval": None,
+            "conversation_history_turns": [],
+            "action_log": list(self._action_log),
+            "last_completed_turn_key": self._last_completed_turn_key,
+        }
+        self.apply_serialized_state(state)
+        self._pending_owner_override = _OWNER_UNSET
+        logger.info("restored parked pending state of conversation %s", key)
+
+    def bound_conversation_id(self):
+        """The conversation the context is bound to (None when it has none)."""
+        return self._conversation_id
+
+    def parked_conversation_ids(self) -> list[int]:
+        """The conversation ids that have parked state. "none" and the unowned marker are not conversation ids."""
+        return [int(key) for key in self._parked_pending if key.isdigit()]
+
+    def drop_parked_pending(self, conversation_id) -> int:
+        """Forget the pending state parked for *conversation_id* (fix-ayez): the conversation was deleted or archived.
+
+        Only the parked entries under that id go. The live state is left alone, because it belongs to whichever
+        conversation the context is bound to. Returns the number of snapshots dropped.
+        """
+        items = self._parked_pending.pop(_owner_key(conversation_id), None) or []
+        if items:
+            logger.info("dropped %d parked pending state(s) of conversation %s", len(items), conversation_id)
+        return len(items)
+
     def serialize_state(self, *, channel_id: str) -> dict[str, Any]:
         """
         Export durable Topology-B state for cross-process resume.
 
         Requires session_key and bound app_workflow when persisting.
         """
+        turn = self._turn_frame()
         react_blob = None
-        if self._workflow_tool_agent is not None:
-            react_blob = self._workflow_tool_agent.export_suspended()
+        if turn.agent is not None:
+            react_blob = turn.agent.export_suspended()
 
         nlu_stage = self._cme_workflow.context.get("NLU_Pipeline_Stage")
         if hasattr(nlu_stage, "value"):
@@ -990,12 +1383,22 @@ class WorkflowExecutionContext:
         elif nlu_stage is not None:
             nlu_stage = str(nlu_stage)
 
+        consultation_nlu_stage = None
+        consultation_cme = getattr(self, "_consultation_cme", None)
+        if consultation_cme is not None:
+            consultation_nlu_stage = consultation_cme.context.get("NLU_Pipeline_Stage")
+            if hasattr(consultation_nlu_stage, "value"):
+                consultation_nlu_stage = consultation_nlu_stage.value
+            elif consultation_nlu_stage is not None:
+                consultation_nlu_stage = str(consultation_nlu_stage)
+
         current_context_name = None
-        if self._app_workflow and self._app_workflow.current_command_context is not None:
-            current_context_name = self._app_workflow.current_command_context_name
+        if self._app_workflow and self._app_workflow._current_command_context is not None:
+            current_context_name = self._app_workflow._current_command_context_name
 
         from fastworkflow.conversation_history_io import extract_turns_from_history
 
+        nested = self._frame_stack()[1:]
         payload = {
             "schema_version": SCHEMA_VERSION,
             "channel_id": channel_id,
@@ -1008,19 +1411,41 @@ class WorkflowExecutionContext:
                 self._app_workflow.folderpath if self._app_workflow else None
             ),
             "awaiting_user": self._awaiting_user,
+            # Additive (ADR-EXP-025 section 7): the session's approval records and turn clock.
+            "approval": self._approval_state_payload(),
             "suspended_user_message": self._suspended_user_message,
             "pending_clarification_request": self._pending_clarification_request,
-            "subtasks": list(self._subtasks),
-            "subtask_origins": list(self._origins),
-            "subtask_index": self._subtask_index,
-            "subtask_answers": list(self._subtask_answers),
-            "subtask_exhausted": self._subtask_exhausted,
+            "skill_refusal_pending": self._planning_command_refusal_pending,
+            "skill_refusal_answered": self._planning_command_refusal_answered,
+            "subtasks": list(turn.subtasks),
+            "subtask_origins": list(turn.origins),
+            "subtask_index": turn.subtask_index,
+            "subtask_answers": list(turn.subtask_answers),
+            "subtask_outputs": list(turn.subtask_outputs),
+            "subtask_exhausted": turn.subtask_exhausted,
+            # Additive (fix-3rsq.plan-review.2.7/.2.9): the open sub-task review and the turn's sub-task plan, so an
+            # accept after a restart resumes the review and runs the accepted goals.
+            "subtask_review_open": bool(turn.subtask_review_open),
+            "subtask_plan": None if turn.subtask_plan is None else turn.subtask_plan.model_dump(mode="json"),
             "next_step": self._next_step,
-            "skill_phase_run": self._phase_run,
+            "skill_phase_run": turn.phase_run,
             "react": react_blob,
+            "frames": [frame.to_state() for frame in nested],
+            "frame_react": [
+                None if frame.agent is None else frame.agent.export_suspended()
+                for frame in nested
+            ],
+            "turn_child_step_ranges": [list(step_range) for step_range in turn.child_step_ranges],
+            "turn_steps_used": self._turn_steps_used,
             "nlu_stage": nlu_stage,
             "turn": self._serialize_turn_accumulator(),
             "cme": self._serialize_cme_continuation(),
+            "consultation_nlu_stage": consultation_nlu_stage,
+            "consultation_cme": (
+                self._serialize_cme_continuation(consultation_cme)
+                if consultation_cme is not None
+                else None
+            ),
             "current_command_context_name": current_context_name,
             "action_log": list(self._action_log),
             "conversation_history_turns": extract_turns_from_history(
@@ -1038,7 +1463,18 @@ class WorkflowExecutionContext:
             "attempt": self._attempt,
             "claim_epoch": self._claim_epoch,
             "server_incarnation": self._server_incarnation,
+            # Additive (fix-newconv-pending): the conversation the live pending state belongs to, and the pending
+            # state parked for the other conversations. Absent from older blobs (read as unowned, see apply).
+            "conversation_id": _owner_encoded(self._live_pending_owner()),
+            "parked_pending": {key: list(items) for key, items in self._parked_pending.items()},
         }
+        # The policy verifier's memory of the conversation, only when a policy is
+        # enabled: a session resumed in another process keeps what was read and
+        # asked. Absent otherwise, so a state written without a policy is unchanged.
+        from fastworkflow.policy_runtime import policy_of
+
+        if policy := policy_of(self._workflow_tool_agent):
+            payload["policy_state"] = policy.export_state()
         # No default=str round-trip. This is the first serializer, so coercing
         # here is what made every downstream strictness check vacuous: an
         # unsupported value would already be a string by the time anything
@@ -1067,21 +1503,64 @@ class WorkflowExecutionContext:
                 raise IncompatibleSessionState(found)
 
         self._awaiting_user = bool(state.get("awaiting_user"))
+        # Additive (fix-newconv-pending): what was parked, kept whole until its conversation is bound again.
+        if "parked_pending" in state:
+            self._parked_pending = {
+                str(key): [dict(item) for item in items or []]
+                for key, items in (state.get("parked_pending") or {}).items()
+            }
+        # Absent from blobs written before approval binding: no records.
+        if state.get("approval") and self._app_workflow is not None:
+            approval_binding.store_for(self._app_workflow).load_state(state["approval"])
         self._suspended_user_message = state.get("suspended_user_message")
         self._pending_clarification_request = state.get(
             "pending_clarification_request"
         )
+        # Absent from blobs written before a refused planning command call could suspend a turn.
+        self._planning_command_refusal_pending = bool(state.get("skill_refusal_pending"))
+        self._planning_command_refusal_answered = bool(state.get("skill_refusal_answered"))
         # Absent from blobs written before sub-task splitting; the defaults mean "not split".
-        self._subtasks = list(state.get("subtasks") or [])
+        turn = self._turn_frame()
+        turn.subtasks = list(state.get("subtasks") or [])
         # Absent before hand-off continuations: each entry is then its own origin.
-        self._origins = list(state.get("subtask_origins") or range(len(self._subtasks)))
-        self._subtask_index = int(state.get("subtask_index") or 0)
-        self._subtask_answers = list(state.get("subtask_answers") or [])
-        self._subtask_exhausted = bool(state.get("subtask_exhausted"))
+        turn.origins = list(state.get("subtask_origins") or range(len(turn.subtasks)))
+        turn.subtask_index = int(state.get("subtask_index") or 0)
+        turn.subtask_answers = list(state.get("subtask_answers") or [])
+        turn.subtask_outputs = list(state.get("subtask_outputs") or [])
+        turn.subtask_exhausted = bool(state.get("subtask_exhausted"))
+        # Absent from blobs written before the sub-task review gate: no review open, no plan.
+        turn.subtask_review_open = bool(state.get("subtask_review_open"))
+        # The review's frame flag rides with its open flag: the review is the framework call the turn resumes into.
+        turn.framework_entry = turn.subtask_review_open
+        plan = state.get("subtask_plan")
+        if plan:
+            from fastworkflow.review_proposals import SubTaskProposal
+
+            turn.subtask_plan = SubTaskProposal.model_validate(plan)
+        else:
+            turn.subtask_plan = None
+        from fastworkflow.review_engine import KIND_SUB_TASKS
+
+        active = (
+            approval_binding.active_record(self._app_workflow)
+            if self._app_workflow is not None
+            else None
+        )
+        subtask_review_active = bool(turn.subtask_review_open) or (
+            active is not None and active.kind == KIND_SUB_TASKS
+        )
+        if subtask_review_active:
+            # The restored review keeps its free-text reader (set by the gate of the turn that opened it).
+            self._give_review_reader()
         self._next_step = int(state.get("next_step") or 0)
-        # Absent before skill phases: no phased skill call in progress.
-        self._phase_run = state.get("skill_phase_run") or None
-        self._phase_live = None
+        # Absent before planning command phases: no phased planning command call in progress.
+        turn.phase_run = state.get("skill_phase_run") or None
+        turn.phase_live = None
+        # Absent from blobs written before nested frames: no child ranges, zero steps used.
+        turn.child_step_ranges = [
+            list(step_range) for step_range in state.get("turn_child_step_ranges") or []
+        ]
+        self._turn_steps_used = int(state.get("turn_steps_used") or 0)
 
         self._action_log = list(state.get("action_log") or [])
         # Absent from blobs written before ruling I3 landed; a missing key just
@@ -1106,6 +1585,12 @@ class WorkflowExecutionContext:
 
             self._conversation_history = restore_history_from_turns(turns)
 
+        # The live pending state belongs to the conversation the blob names (unowned when it names none). The binding
+        # that follows settles it against the conversation the context is bound to (fix-newconv-pending).
+        self._pending_owner_override = (
+            _owner_from_state(state) if self._has_live_pending() else _OWNER_UNSET
+        )
+
         nlu_stage = state.get("nlu_stage")
         if nlu_stage is not None:
             try:
@@ -1116,25 +1601,59 @@ class WorkflowExecutionContext:
                 self._cme_workflow.context["NLU_Pipeline_Stage"] = nlu_stage
 
         self._apply_cme_continuation(state.get("cme"))
+        consultation_cme = getattr(self, "_consultation_cme", None)
+        if consultation_cme is not None:
+            self._clear_cme_continuation(consultation_cme)
+            if subtask_review_active:
+                consultation_nlu_stage = state.get("consultation_nlu_stage")
+                if consultation_nlu_stage is not None:
+                    try:
+                        consultation_cme.context["NLU_Pipeline_Stage"] = (
+                            fastworkflow.NLUPipelineStage(consultation_nlu_stage)
+                        )
+                    except (ValueError, TypeError):
+                        consultation_cme.context["NLU_Pipeline_Stage"] = consultation_nlu_stage
+                self._apply_cme_continuation(
+                    state.get("consultation_cme"),
+                    cme_workflow=consultation_cme,
+                    subject_workflow=self._consultation_workflow,
+                )
         self._apply_turn_accumulator(state.get("turn"))
 
+        # Restore the turn agent with the turn frame on top: _workflow_tool_agent reads the top frame.
+        del self._frame_stack()[1:]
+        if state.get("policy_state") is not None:
+            from fastworkflow.policy_runtime import policy_of
+
+            self._ensure_agent_initialized()
+            if policy := policy_of(self._workflow_tool_agent):
+                policy.import_state(state["policy_state"])
         react_blob = state.get("react")
         if react_blob and self._awaiting_user:
             self._ensure_agent_initialized()
             if self._workflow_tool_agent is not None:
                 self._workflow_tool_agent.import_suspended(react_blob)
 
+        # Absent from blobs written before nested frames: no nested frames.
+        nested = [PlanFrame.from_state(frame_state) for frame_state in state.get("frames") or []]
+        frame_react = state.get("frame_react") or [None] * len(nested)
+        for frame, blob in zip(nested, frame_react):
+            if blob and self._awaiting_user:
+                self._attach_nested_agent(frame)
+                frame.agent.import_suspended(blob)
+        self._frames.extend(nested)
+
         saved_context_name = state.get("current_command_context_name")
         if (
             saved_context_name
             and self._app_workflow
-            and self._app_workflow.current_command_context is not None
-            and self._app_workflow.current_command_context_name != saved_context_name
+            and self._app_workflow._current_command_context is not None
+            and self._app_workflow._current_command_context_name != saved_context_name
         ):
             logger.debug(
                 "Command context name after rehydrate (%s) differs from saved (%s); "
                 "navigation depth may not match until workflow-specific restore is added",
-                self._app_workflow.current_command_context_name,
+                self._app_workflow._current_command_context_name,
                 saved_context_name,
             )
 
@@ -1177,7 +1696,13 @@ class WorkflowExecutionContext:
                 exhausted=bool(agent_result.get("exhausted"))
             )
 
-    def _apply_cme_continuation(self, cme: Optional[dict[str, Any]]) -> None:
+    def _apply_cme_continuation(
+        self,
+        cme: Optional[dict[str, Any]],
+        *,
+        cme_workflow: Optional[fastworkflow.Workflow] = None,
+        subject_workflow: Optional[fastworkflow.Workflow] = None,
+    ) -> None:
         """Restore the in-flight CME command so the next message continues it.
 
         stored_parameters is rebuilt through model_construct rather than
@@ -1188,19 +1713,28 @@ class WorkflowExecutionContext:
         if not cme:
             return
 
-        context = self._cme_workflow.context
+        if cme_workflow is None:
+            cme_workflow = self._cme_workflow
+        if cme_workflow is None:
+            return
+
+        context = cme_workflow.context
         command_name = cme.get("command_name")
 
         if cme.get("command") is not None:
             context["command"] = cme["command"]
         if command_name is not None:
             context["command_name"] = command_name
+        if cme.get("missing_value_question") is not None:
+            context["missing_value_question"] = cme["missing_value_question"]
 
         stored = cme.get("stored_parameters")
         if stored is None or command_name is None:
             return
 
-        params_class = self._command_parameters_class(command_name)
+        params_class = self._command_parameters_class(
+            command_name, subject_workflow=subject_workflow,
+        )
         if params_class is None:
             # Losing the partial parameters is bad, but resuming into a command
             # whose parameter class no longer exists is worse. Reset to intent
@@ -1217,17 +1751,33 @@ class WorkflowExecutionContext:
 
         context["stored_parameters"] = params_class.model_construct(**stored)
 
-    def _command_parameters_class(self, command_name: str):
+    def _command_parameters_class(
+        self,
+        command_name: str,
+        *,
+        subject_workflow: Optional[fastworkflow.Workflow] = None,
+    ):
         """The Input class for a command name, or None if it cannot be resolved."""
-        if self._app_workflow is None:
+        if subject_workflow is None:
+            subject_workflow = self._app_workflow
+        if subject_workflow is None:
             return None
         try:
             routing = fastworkflow.RoutingRegistry.get_definition(
-                self._app_workflow.folderpath
+                subject_workflow.folderpath
             )
-            return routing.get_command_class(
+            params_class = routing.get_command_class(
                 command_name, fastworkflow.ModuleType.COMMAND_PARAMETERS_CLASS
             )
+            if params_class is None:
+                sig_cls = routing.get_command_class(
+                    command_name,
+                    fastworkflow.ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS,
+                )
+                slot_input = getattr(sig_cls, "SlotInput", None) if sig_cls else None
+                if slot_input is not None:
+                    params_class = slot_input
+            return params_class
         except Exception:
             return None
 
@@ -1242,8 +1792,9 @@ class WorkflowExecutionContext:
 
         Returns True if a pending clarification was cleared, False otherwise.
         """
+        cancelled_approvals = self.cancel_pending_approvals()
         if not self._awaiting_user:
-            return False
+            return cancelled_approvals > 0
         self._reset_agent_suspension()
         self._suspend_began_at = None
         self._turn_suspended_ms = 0
@@ -1329,15 +1880,46 @@ class WorkflowExecutionContext:
         """
         self._app_workflow = workflow
         self._cme_workflow.context["app_workflow"] = workflow
+        consultation_cme = getattr(self, "_consultation_cme", None)
+        if consultation_cme is not None and workflow is not None:
+            consultation_cme.context["convo_path"] = os.path.join(
+                workflow.folderpath, "___convo_info"
+            )
         # getattr: a context built through ``__new__`` without ``__init__`` has
         # no flag, and is treated as having chosen its sink.
         if not getattr(self, "_trace_sink_supplied", True):
             self._open_auto_sink(workflow)
 
     def _on_app_context_change(self) -> None:
-        """Context-change observer: refresh the ReAct agent's available_commands."""
+        """Context-change observer: refresh the ReAct agent's available_commands.
+
+        A plain goal bound to its command keeps its narrowed listing through a context switch (fix-3rsq.plan-review.2.9):
+        the listing is the bound command's, re-read from the workflow now. Only the turn's own agent (the turn frame).
+        """
         from fastworkflow.workflow_agent import _refresh_agent_available_commands
+
+        bound = getattr(self, "_narrow_to", None)
+        if bound is not None and self._app_workflow is not None and len(self._frame_stack()) == 1:
+            from fastworkflow import run_listing
+
+            inputs = getattr(self._workflow_tool_agent, "inputs", None)
+            if isinstance(inputs, dict) and "available_commands" in inputs:
+                inputs["available_commands"] = run_listing.bound_command_listing(self._app_workflow, bound)
+                return
         _refresh_agent_available_commands(self)
+
+    def _close_workflow_safely(self, workflow: Optional[fastworkflow.Workflow]) -> bool:
+        if workflow is None:
+            return True
+        try:
+            return workflow.close()
+        except ValueError:
+            # Child workflows should not occur; ignore if mis-invoked.
+            logger.debug(
+                "WorkflowExecutionContext.close: workflow %s is not a root session",
+                getattr(workflow, "id", workflow),
+            )
+            return False
 
     def close(self) -> bool:
         """
@@ -1351,14 +1933,15 @@ class WorkflowExecutionContext:
             self._app_workflow.remove_context_change_listener(listener)
             self._context_change_listener = None
 
-        if self._cme_workflow is None:
-            return True
-        try:
-            return self._cme_workflow.close()
-        except ValueError:
-            # Child cme workflows should not occur; ignore if mis-invoked.
-            logger.debug("WorkflowExecutionContext.close: cme_workflow is not a root session")
-            return False
+        ok = True
+        ok = self._close_workflow_safely(self._cme_workflow) and ok
+        ok = self._close_workflow_safely(
+            getattr(self, "_consultation_cme", None),
+        ) and ok
+        ok = self._close_workflow_safely(
+            getattr(self, "_consultation_workflow", None),
+        ) and ok
+        return ok
 
     # ------------------------------------------------------------------
     # Active workflow stack (contextvar)
@@ -1381,7 +1964,9 @@ class WorkflowExecutionContext:
     # ------------------------------------------------------------------
 
     def process_turn(
-        self, message: str, *, unattended: bool = False
+        self, message: str, *, unattended: bool = False,
+        approval_surface: "approval_binding.Surface | None" = None,
+        approval_token: Optional[str] = None,
     ) -> "fastworkflow.TurnOutput":
         """
         Execute one user message synchronously and return the public TurnOutput.
@@ -1396,9 +1981,11 @@ class WorkflowExecutionContext:
         full internal TurnResult is built and projected onto the slim public
         TurnOutput (see docs/turn_result_design_final.md section 1a).
         """
+        self._note_approval_inbound(approval_surface, approval_token, unattended)
         try:
             command_output = self._execute_message(message, unattended=unattended)
         except Exception as exc:
+            approval_binding.clear_inbound(self._app_workflow)
             # A turn that raised is still a turn: record it as failed, with its
             # spans closed under it, before the error propagates. Without this
             # the turn had no record at all and read as lost.
@@ -1409,6 +1996,7 @@ class WorkflowExecutionContext:
             except Exception:  # noqa: BLE001 - never mask the turn's own error
                 logger.warning("could not record the failed turn", exc_info=True)
             raise
+        approval_binding.clear_inbound(self._app_workflow)
         turn_result = self._build_turn_result(command_output)
         return turn_result.turn_output
 
@@ -1423,12 +2011,24 @@ class WorkflowExecutionContext:
                 "No app workflow bound; call bind_app_workflow() before executing a message"
             )
 
+        # fix-newconv-pending: a message never answers pending state that belongs to another conversation. The live
+        # state is parked (or its approvals cancelled) first, so this message begins a new turn.
+        self._settle_pending_for_conversation(self._conversation_id)
+
         if not self._awaiting_user:
             # A message during suspension is the resume answer — never a reset.
             self._begin_turn(message, unattended=unattended)
 
         self.push_active_workflow(self._app_workflow)
         try:
+            awaiting = approval_binding.active_record(self._app_workflow)
+            if awaiting is None or not awaiting.suspended_agent:
+                managed = approval_binding.management_reply(self, self._app_workflow, message)
+                if managed is not None:
+                    return self._approval_text_output(managed)
+            if awaiting is not None and (not awaiting.suspended_agent
+                                         or message.strip() == approval_binding.CANCEL_COMMAND):
+                return self._resume_approval_direct(message)
             self._prepare_message_routing(message)
             if self._should_run_agent_for_message(message):
                 if self._awaiting_user:
@@ -1481,6 +2081,8 @@ class WorkflowExecutionContext:
                 # not by status/failure_reason.
                 answer = self._turn_outputs[-1].command_response.response
 
+        # The approval token is never in an output: it reaches the host through
+        # approval_binding.take_delivery, once, on the live response (ADR section 6.4).
         turn_output = fastworkflow.TurnOutput(
             turn_key=self._turn_key or mint_turn_key(),
             status=status,
@@ -1636,6 +2238,9 @@ class WorkflowExecutionContext:
                     "channel_id": self._channel_id,
                     "conversation_id": self._conversation_id,
                     "user_message": tracing.cap_attr_value(self._turn_user_message),
+                    # The root span belongs to the turn frame, whose alias is "" (design 3.5).
+                    # frame_alias is an envelope attribute: tracing.end_span stamps it from the
+                    # frame on top, which is the turn frame here, so no emitter writes it.
                 },
                 experiment_id=self._experiment_id,
                 task_id=self._task_id,
@@ -1657,6 +2262,8 @@ class WorkflowExecutionContext:
                 "failure_reason": turn_output.failure_reason,
                 "suspended_ms": turn_result.suspended_ms,
                 "context_mutations": self._compute_context_mutations(),
+                "subtask_review": self._turn_subtask_review,
+                "subtask_bindings": list(getattr(self, "_turn_subtask_bindings", None) or []) or None,
             },
         )
         if not awaiting:
@@ -1718,6 +2325,14 @@ class WorkflowExecutionContext:
             raise RuntimeError(
                 "No app workflow bound; call bind_app_workflow() before process_action()"
             )
+        if self._awaiting_user:
+            # The suspended turn is still waiting for its answer: it is neither ended nor
+            # begun over, and its frames stay as they are.
+            return fastworkflow.CommandOutput(
+                command_response=fastworkflow.CommandResponse(
+                    response=AWAITING_ANSWER_REFUSAL_MESSAGE, success=False),
+                command_name=action.command_name or "",
+            )
 
         # Each direct action is its own logical turn [A30].
         self._begin_turn(action.command_name or "")
@@ -1731,7 +2346,8 @@ class WorkflowExecutionContext:
                 self._app_workflow.flush()
 
     def process_action_turn(
-        self, action: fastworkflow.Action
+        self, action: fastworkflow.Action, *,
+        approval_surface: "approval_binding.Surface | None" = None,
     ) -> "fastworkflow.TurnOutput":
         """
         Execute one direct action synchronously and return the public TurnOutput.
@@ -1743,7 +2359,20 @@ class WorkflowExecutionContext:
         turn registry) store exactly one result type across both the message and
         action paths.
         """
-        command_output = self.process_action(action)
+        self._note_approval_inbound(approval_surface, None, False)
+        try:
+            command_output = self.process_action(action)
+        finally:
+            approval_binding.clear_inbound(self._app_workflow)
+        if self._awaiting_user:
+            # The refusal: the suspended turn's record was emitted when it suspended and
+            # stands; building the result again would emit it once more with the refusal.
+            return fastworkflow.TurnOutput(
+                turn_key=self._turn_key or mint_turn_key(),
+                status=TurnStatus.AWAITING_USER,
+                answer=command_output.command_response.response,
+                command_outputs=list(self._turn_outputs),
+            )
         turn_result = self._build_turn_result(command_output)
         return turn_result.turn_output
 
@@ -1799,13 +2428,19 @@ class WorkflowExecutionContext:
     # Agent mode
     # ------------------------------------------------------------------
 
+    def _build_react_agent(self):
+        """A workflow-tool ReAct agent for one run; its steps number from this context's next step."""
+        from fastworkflow.workflow_agent import initialize_workflow_tool_agent
+        agent = initialize_workflow_tool_agent(self)
+        agent.step_floor = lambda: self._next_step
+        return agent
+
     def _initialize_agent_functionality(self) -> None:
         self._cme_workflow.context["run_as_agent"] = True
         if self._app_workflow:
             self._app_workflow.context["run_as_agent"] = True
 
-        from fastworkflow.workflow_agent import initialize_workflow_tool_agent
-        self._workflow_tool_agent = initialize_workflow_tool_agent(self)
+        self._workflow_tool_agent = self._build_react_agent()
 
         # Re-scope the active ReAct agent's available_commands whenever the context changes,
         # driven by the workflow's context-change observer (the single switch chokepoint)
@@ -1825,22 +2460,29 @@ class WorkflowExecutionContext:
         self._awaiting_user = False
         self._suspended_user_message = None
         self._pending_clarification_request = None
+        self._planning_command_refusal_pending = False
+        # A suspended nested frame (run_planning_command) is dropped with the suspension;
+        # what is cleared below belongs to the turn frame, the only frame left.
+        del self._frame_stack()[1:]
         self._clear_subtask_state()
-        if self._workflow_tool_agent is not None and hasattr(
-            self._workflow_tool_agent, "clear_suspension"
-        ):
-            self._workflow_tool_agent.clear_suspension()
+        turn_agent = self._turn_frame().agent
+        if turn_agent is not None and hasattr(turn_agent, "clear_suspension"):
+            turn_agent.clear_suspension()
 
     def _clear_subtask_state(self) -> None:
-        self._subtasks = []
-        self._origins = []
-        self._subtask_index = 0
-        self._subtask_answers = []
-        self._subtask_exhausted = False
+        turn = self._turn_frame()
+        turn.subtasks = []
+        turn.origins = []
+        turn.subtask_index = 0
+        turn.subtask_answers = []
+        turn.subtask_outputs = []
+        turn.subtask_exhausted = False
         self._next_step = 0
-        self._evidence_floors = {}
-        self._phase_run = None
-        self._phase_live = None
+        turn.evidence_floors = {}
+        turn.phase_run = None
+        turn.phase_live = None
+        # Step numbers restart at 0 with _next_step, so ranges from an earlier run no longer apply.
+        turn.child_step_ranges = []
         self._enable_all_tools()
 
     def _enable_all_tools(self) -> None:
@@ -1934,12 +2576,16 @@ class WorkflowExecutionContext:
 
         if self._app_workflow:
             self._app_workflow.context["raw_user_message"] = message
+        from fastworkflow.policy_runtime import policy_of
+
+        if policy := policy_of(self._workflow_tool_agent):
+            policy.observe_turn(message)
 
         refined_user_query = self._refine_user_query(message, self.conversation_history)
         self._turn_refined_message = refined_user_query
         self._clear_subtask_state()
 
-        # A workflow with skills answers a plain "what can you do?" in code, with no model call.
+        # A workflow with planning commands answers a plain "what can you do?" in code, with no model call.
         from fastworkflow.capability_answer import capability_answer
 
         if self._app_workflow and (answer := capability_answer(
@@ -1948,12 +2594,35 @@ class WorkflowExecutionContext:
 
         from fastworkflow.workflow_agent import split_into_subtasks
 
+        # The split's request is the user's new message; the earlier turns go in as the splitter's separate
+        # conversation input, never prepended to the request: the merge returns the request itself as the one job,
+        # so a prepended summary became the sub-task's goal, and its names changed how the request merged
+        # (fix-bydz). An unsplit request still runs on refined_user_query (_run_turn_subtasks).
         subtasks = split_into_subtasks(
-            refined_user_query,
+            message,
+            conversation=self._conversation_context(self.conversation_history),
             planner_lm=getattr(self, "_current_planner_lm", None),
             workflow_folderpath=self._app_workflow.folderpath if self._app_workflow else None,
         )
-        if len(subtasks) > 1:
+        if self._app_workflow is not None:
+            # The review gate (fix-3rsq.plan-review.2.6): None when the sub-tasks run now, or the suspended review.
+            asked = self._subtask_gate(subtasks)
+            if asked is not None:
+                return asked
+        return self._run_turn_subtasks(subtasks, refined_user_query, message)
+
+    def _run_turn_subtasks(self, subtasks: list[str], refined_user_query: str, message: str):
+        """Run the turn's sub-tasks: several, one after another; or one, with the step-cap hand-off. A turn with a
+        sub-task plan (accepted, or the draft) runs through _run_subtasks_from, which binds each goal to its means."""
+        plan = self._turn_subtask_plan
+        planned = plan is not None and len(plan.items) == len(subtasks)
+        if planned and any(item.parts for item in plan.items):
+            # A joined item (a split over the cap) that the review left as drafted runs its parts as jobs of their own.
+            from fastworkflow import review_proposals
+            subtasks, plan = review_proposals.expand_joined_parts(
+                self._app_workflow, subtasks, plan, planner_lm=getattr(self, "_current_planner_lm", None))
+            self._turn_subtask_plan = plan
+        if len(subtasks) > 1 or planned:
             self._subtasks = subtasks
             self._origins = list(range(len(subtasks)))
             return self._run_subtasks_from(0)
@@ -1969,28 +2638,145 @@ class WorkflowExecutionContext:
         self._hand_off(0)
         return self._run_subtasks_from(1)
 
+    # ------------------------------------------------------------------
+    # The sub-task review gate (fix-3rsq.plan-review.2.2, .2.3, .2.6, .2.8)
+    # ------------------------------------------------------------------
+
+    def _subtask_no_answerer(self) -> bool:
+        """True when nobody can answer a review this turn: an unattended turn (ask_user is off for it), or a host
+        surface (REST, MCP). Owner decision 2. An agent-to-agent turn reaches the framework as an unattended turn."""
+        store = approval_binding.store_for(self._app_workflow)
+        host = store is not None and store.surface.kind == "host"
+        return bool(self._turn_unattended) or host
+
+    def _subtask_gate(self, subtasks: list[str]):
+        """Decide how the turn's sub-tasks run, after split and merge, before any of them runs.
+
+        Fast path (one sub-task, confident head or exact name): no review, today's run. A turn with no one to answer:
+        the draft runs as proposed, recorded as not reviewed. Otherwise the review_subtasks framework command opens with
+        the draft and suspends the turn; returns the suspended prediction (its replies come through
+        _resume_agent_message). Returns None when the sub-tasks run now.
+        """
+        from fastworkflow import review_proposals
+
+        workflow = self._app_workflow
+        if review_proposals.fast_path_for(workflow, subtasks) is not None:
+            # plan-review.6 hook: review_proposals.planning_intent_confirmation is where the one-line confirmation of a
+            # fast-path planning command goes. Round 1 asks nothing here.
+            self._turn_subtask_review = "fast_path"
+            return None
+        draft = review_proposals.draft_round1_proposal(
+            workflow, subtasks, planner_lm=getattr(self, "_current_planner_lm", None))
+        self._turn_subtask_plan = draft
+        if self._subtask_no_answerer():
+            # Owner decision 2: no one can answer, so the draft is recorded as not reviewed and the turn carries on.
+            # The draft runs as proposed: its goals and bound means drive the run (_run_subtasks_from).
+            self._turn_subtask_review = "not_reviewed"
+            logger.info("sub-task review not opened (no one to answer): %d sub-task(s) run as drafted, not reviewed",
+                        len(draft.items))
+            return None
+        self._turn_subtask_review = "open"
+        turn = self._turn_frame()
+        turn.subtask_review_open = True
+        self._give_review_reader()
+        try:
+            with review_proposals.draft_scope(draft):
+                asked = self.run_framework_planning_command(
+                    "review_subtasks", {"subtasks": review_proposals.DRAFT_ITEMS}, "review the sub-tasks",
+                    within_turn=True)
+        except BaseException:
+            turn.subtask_review_open = False
+            raise
+        if getattr(asked, "suspended", None) is not True:
+            turn.subtask_review_open = False
+            raise AssertionError("review_subtasks must suspend the turn on its review")
+        return asked
+
+    def _give_review_reader(self) -> None:
+        """The free-text reader of this turn's sub-task review (fix-3rsq.plan-review.2.7): one model call on the
+        planner's role, with the planner's LM when the turn has one. Set on the session's review store."""
+        from fastworkflow import planning_commands, review_engine, review_proposals
+
+        store = review_engine.store_for(self._app_workflow)
+        if store is None:
+            return
+        names = tuple(sorted(planning_commands.resolve_field_sources(self._app_workflow.folderpath).planning_commands))
+        # The planner's LM is read when a reply comes, not when the review opens: the turn's planner LM is the one in place then.
+        store.edit_reader = review_proposals.model_edit_reader(
+            planner_lm=lambda: getattr(self, "_current_planner_lm", None), planning_names=names)
+        store.consultation_cme = getattr(self, "_consultation_cme", None)
+        store.consultation_workflow = getattr(self, "_consultation_workflow", None)
+
+    def _accept_subtask_review(self, agent_result):
+        """The gate's review was accepted: its frame finishes with the accepted proposal, which is stored for the
+        hand-off (fix-3rsq.plan-review.2.9 reads ``_turn_subtask_plan``), and the turn runs the accepted goals as today.
+        Its inputs and means are not used until 2.9."""
+        from fastworkflow import review_proposals
+
+        turn = self._turn_frame()
+        turn.subtask_review_open = False
+        turn.framework_entry = False
+        consultation_cme = getattr(self, "_consultation_cme", None)
+        if consultation_cme is not None:
+            self._clear_cme_continuation(consultation_cme)
+        self._finish_framework_call(agent_result)
+        accepted = review_proposals.accepted_subtask_proposal(self._app_workflow)
+        if accepted is None:
+            raise RuntimeError("the accepted sub-task review is not on the session")
+        self._turn_subtask_plan = accepted
+        self._turn_subtask_review = "reviewed"
+        subtasks = [item.goal for item in accepted.items]
+        return self._run_turn_subtasks(subtasks, subtasks[0] if len(subtasks) == 1 else self._turn_refined_message,
+                                       self._turn_user_message)
+
+    def _end_subtask_review_unrun(self, state: str):
+        """The gate's review was declined or expired: its frame is dropped, nothing runs, and the turn says so."""
+        from fastworkflow import review_engine
+
+        turn = self._turn_frame()
+        turn.subtask_review_open = False
+        turn.framework_entry = False
+        consultation_cme = getattr(self, "_consultation_cme", None)
+        if consultation_cme is not None:
+            self._clear_cme_continuation(consultation_cme)
+        self._pop_frame(self._top_frame())
+        declined = state == review_engine.DECLINED
+        self._turn_subtask_review = "declined" if declined else "expired"
+        self._turn_subtask_plan = None
+        text = SUBTASK_REVIEW_DECLINED if declined else SUBTASK_REVIEW_EXPIRED
+        return self._settle_agent_result(self._turn_user_message, dspy.Prediction(final_answer=text, exhausted=False))
+
     def _call_agent_for_query(self, query: str, planner_user_query: str, *,
                               first_step: int | None = None,
                               template_text: str | None = None,
-                              evidence_floor: int | None = None):
+                              evidence_floor: int | None = None,
+                              bound_command: str | None = None):
         """Plan one query with the planner, then run the ReAct agent on it.
 
-        ``template_text`` picks the skill template; it defaults to the query itself.
+        ``template_text`` picks the planning command template; it defaults to the query itself.
         ``evidence_floor`` is the first step index whose archived outputs count as
         this run's for the finish check (a hand-off continuation counts the runs
         of its sub-task before it); it defaults to ``first_step``.
         """
-        from fastworkflow.workflow_agent import (
-            build_query_with_next_steps, _what_can_i_do, planner_skill_for)
+        from fastworkflow import review_proposals
+        from fastworkflow.workflow_agent import build_query_with_next_steps, sub_task_commands_text
 
-        # One skill match gives both the template and, for a skill with params or phases, its parsed
-        # form; a hand-off continuation (query differs from its original text) plans from
-        # the template only, since the skill call would plan the whole job again.
-        plan_template, skill_command = (
-            planner_skill_for(template_text or query, self._app_workflow.folderpath)
-            if self._app_workflow is not None else ("", None))
+        # One planning command match gives both the template and its parsed form; a hand-off continuation
+        # (query differs from its original text) plans from the template only, since the planning command
+        # call would plan the whole job again.
+        # The match's option distribution (empty without JEV_API_KEY) feeds the listings' gathering (run_listing).
+        # The match is memoised for the turn (review_proposals.planning_match): the gate's draft asked it already.
+        planning_distribution: dict[str, float] = {}
+        plan_template, planning_command = "", None
+        if self._app_workflow is not None:
+            plan_template, planning_command, planning_distribution = review_proposals.planning_match(
+                self._app_workflow, template_text or query)
         if template_text is not None and template_text != query:
-            skill_command = None
+            planning_command = None
+        if bound_command is not None:
+            # The bound means of a plain goal: the plan names its command, so the finish check holds the goal to it.
+            plan_template = f"This sub-task is done with the command {bound_command}."
+            planning_command = None
         # Initial turn planning uses every prior turn summary, not the previous
         # turn's full agent trajectory (mid-turn replans still use trajectory).
         command_info_and_refined_message_with_todolist = build_query_with_next_steps(
@@ -2000,16 +2786,29 @@ class WorkflowExecutionContext:
             planner_lm=getattr(self, "_current_planner_lm", None),
             planner_user_query=planner_user_query,
             plan_template=plan_template or None,
-            skill_command=skill_command,
+            planning_command=planning_command,
+            planning_probabilities=planning_distribution or None,
         )
-        phased, self._phased_skill_call = getattr(self, "_phased_skill_call", None), None
+        refusal, self._planning_command_refusal = self._planning_command_refusal, None
+        if refusal is not None:
+            # A refused planning command call the user is asked about: the turn suspends on the question as
+            # an ask_user does (no plan, no run); the reply re-runs it (_rerun_after_planning_command_refusal).
+            self._planning_command_refusal_pending = True
+            return dspy.Prediction(suspended=True, clarification=refusal, exhausted=False)
+        phased, self._phased_planning_command_call = getattr(self, "_phased_planning_command_call", None), None
         if phased is not None:
-            # A phased skill call: its phases run as sub-plans, with no hand-off.
-            return self._start_skill_phases(query, *phased, first_step=first_step or 0)
-        available_commands = _what_can_i_do(self)
+            # A planning command call: its phases run as sub-plans, with no hand-off.
+            return self._start_planning_command_phases(query, *phased, first_step=first_step or 0)
+        if bound_command is not None:
+            from fastworkflow import run_listing
+
+            available_commands = run_listing.bound_command_listing(self._app_workflow, bound_command)
+        else:
+            available_commands = sub_task_commands_text(self, query, planning_probabilities=planning_distribution or None)
         step_kwargs = {} if first_step is None else {"first_step": first_step}
         self._attach_finish_check(
-            evidence_floor if evidence_floor is not None else (first_step or 0))
+            evidence_floor if evidence_floor is not None else (first_step or 0),
+            final=self._last_subtask_running())
 
         return self._call_agent_with_retry(
             lambda: self._workflow_tool_agent(
@@ -2020,22 +2819,32 @@ class WorkflowExecutionContext:
             trace_input=command_info_and_refined_message_with_todolist,
         )
 
+    def _last_subtask_running(self) -> bool:
+        """Whether the sub-task running now is the turn's last (always, for an unsplit turn)."""
+        subtasks = getattr(self, "_subtasks", None) or []
+        return getattr(self, "_subtask_index", 0) >= len(subtasks) - 1
+
     def _attach_finish_check(self, floor: int, *, values: bool = False,
-                             item_binding: Optional[tuple[Any, list, list]] = None) -> None:
+                             item_binding: Optional[tuple[Any, list, list]] = None,
+                             final: bool = True) -> None:
         """Give the agent this run's finish check, or none when the run has no plan.
 
         The plan is the one ``build_query_with_next_steps`` just made for this
         run. Set before every run, so a check never outlives the run it was made for.
-        *values*: a step's concrete argument values must match (a skill phase's run).
+        *values*: a step's concrete argument values must match (a planning command phase's run).
         *item_binding* ``(item, other items, the phase's planned command names)``: the
         run is one item of a fan-out phase,
         bound to its record; the check also flags a run on another item's record and
-        an item never opened (``skill_phases.item_record_issues``).
+        an item never opened (``planning_phases.item_record_issues``).
         """
         agent = self._workflow_tool_agent
         if agent is None:
             return
         agent.finish_reviewer = None
+        # *final*: this run ends the turn (the last sub-task, the last phase). The
+        # policy's finish check reads the answer against the whole request, so it
+        # only runs there (fastworkflow.policy_runtime).
+        agent.policy_final_run = final
         from fastworkflow.observation_offloading import finish_check
 
         plan_text = str(getattr(self, "_initial_plan_text", "") or "")
@@ -2046,24 +2855,23 @@ class WorkflowExecutionContext:
         def review(trajectory, iters_left: int):
             from fastworkflow.workflow_agent import core_command_names
 
-            routing = fastworkflow.RoutingRegistry.get_definition(folderpath)
             # The archive keeps the command text as sent; the action log says
             # which command each text resolved to (an alias, a misspelling).
             note = finish_check.review_finish(
                 plan_text=plan_text, floor=floor, iters_left=iters_left,
-                commands=list(routing.routing_definition_map),
+                commands=self._workflow_command_names(),
                 core_commands=core_command_names(),
                 resolved=finish_check.resolved_command_names(
                     getattr(self, "_action_log", None) or ()),
                 values=values)
             if item_binding is None or iters_left < finish_check.MIN_ITERS_LEFT:
                 return note
-            from fastworkflow import skill_phases
+            from fastworkflow import planning_phases
 
             try:
                 runs = self._archived_command_runs(from_step=int(floor or 0))
                 item, others, planned = item_binding
-                binding = skill_phases.item_record_note(item, skill_phases.item_record_issues(
+                binding = planning_phases.item_record_note(item, planning_phases.item_record_issues(
                     runs, item, others, self._current_record()[0], planned))
             except Exception as error:  # noqa: BLE001 - the check never fails a turn
                 logger.warning("item record check skipped: %s: %s", type(error).__name__, error)
@@ -2073,39 +2881,43 @@ class WorkflowExecutionContext:
         agent.finish_reviewer = review
 
     # ------------------------------------------------------------------
-    # Phased skill calls (fastworkflow.skill_phases)
+    # Phased planning command calls (fastworkflow.planning_phases)
     # ------------------------------------------------------------------
 
-    def _start_skill_phases(self, query: str, command, call, *, first_step: int):
-        """Run a phased skill call's phases, in order; the sub-task's result.
+    def _start_planning_command_phases(self, query: str, command, call, *, first_step: int,
+                                       reextracted: bool = False):
+        """Run a phased planning command call's phases, in order; the sub-task's result.
 
-        ``call`` is the skill call (``skill_commands.SkillCallPlan``) whose ``phases``
-        run. See ``fastworkflow.skill_phases`` for what the runner does and decides.
-        Extra command steps after the skill's own that would land in an answer-only last
-        phase run in a phase of their own just before it (``skill_phases.extra_steps_phase``).
-        The extra steps before the skill's own run first, in a phase of their own
-        (``skill_phases.steps_before_phase``).
+        ``call`` is the planning command call (``planning_commands.PlanningCommandCallPlan``) whose ``phases``
+        run. ``reextracted``: this call is the restart after a failed first phase (``_restart_after_empty_first_phase``),
+        which a call restarts at most once. See ``fastworkflow.planning_phases`` for what the runner does and decides.
+        Extra command steps after the planning command's own that would land in an answer-only last
+        phase run in a phase of their own just before it (``planning_phases.extra_steps_phase``).
+        The extra steps before the planning command's own run first, in a phase of their own
+        (``planning_phases.steps_before_phase``).
         """
-        from fastworkflow import skill_phases
+        from fastworkflow import planning_phases
         from fastworkflow.observation_offloading.facts import fact_sources
 
         names = self._phase_command_names()
         names["commands"] = names["commands"] + [
             source.command for phase in call.phases if phase.output is not None
             for source in fact_sources(phase.output)]
-        extra, steps_after = skill_phases.extra_steps_phase(call.phases, call.steps_after, **names)
-        phases = skill_phases.with_phase_before(call.phases, extra)
-        before = skill_phases.steps_before_phase(phases, call.steps_before)
-        phases = skill_phases.with_phase_before(phases, before, 0)
+        extra, steps_after = planning_phases.extra_steps_phase(call.phases, call.steps_after, **names)
+        phases = planning_phases.with_phase_before(call.phases, extra)
+        before = planning_phases.steps_before_phase(phases, call.steps_before)
+        phases = planning_phases.with_phase_before(phases, before, 0)
         self._phase_live = (command, phases)
+        self._phase_call = (command, call)
         self._phase_run = {
             "skill": command.name,
+            # Set when a phase's lookup found nothing (the run's MissingFactError), read by the restart rule.
+            "missing_fact": False,
+            # True for the call planned again after a failed first phase: it is not planned again a second time.
+            "reextracted": bool(reextracted),
             "args": json.loads(json.dumps(call.args, default=str)),
             "query": query,
             "phases": [phase.name for phase in phases],
-            # A flat skill call (call_phases: one phase named after the skill, no output): its
-            # run gets the executor's own step cap, not FW_SKILL_PHASE_MAX_STEPS.
-            "flat": [(p.name, p.output) for p in call.phases] == [(command.name, None)],
             "steps_before": list(call.steps_before),
             "steps_after": steps_after,
             # The phase the extra command steps run in (None when there is none), its steps
@@ -2113,7 +2925,7 @@ class WorkflowExecutionContext:
             "extra_phase": extra.name if extra is not None else None,
             "extra_steps": extra.steps_fn() if extra is not None else [],
             "extra_answer": "",
-            # The phase the extra steps before the skill's own run in (None when there
+            # The phase the extra steps before the planning command's own run in (None when there
             # are none; its steps are steps_before) and its answer (added to the job's).
             "before_phase": before.name if before is not None else None,
             "before_answer": "",
@@ -2129,37 +2941,45 @@ class WorkflowExecutionContext:
             # A fan-out phase's `until` condition was met: its remaining items do not run.
             "until_met": False,
             "notes": [],
+            "call_first_step": first_step,
             "first_step": first_step,
             "plan": "",
+            "uses_result": bool(getattr(command, "uses_result", False)),
+            # A flat call: one phase named after the planning command (call_phases).
+            "flat": len(call.phases) == 1 and call.phases[0].name == command.name,
         }
-        return self._run_skill_phases(first_step)
+        return self._run_planning_command_phases(first_step)
 
-    def _live_skill_phases(self):
-        """``(command, phases)`` of the call in progress; rebuilt from the skill after a restore."""
+    def _live_planning_command_phases(self):
+        """``(command, phases)`` of the call in progress; rebuilt from the planning command after a restore."""
         if self._phase_live is not None:
             return self._phase_live
-        from fastworkflow.skill_commands import call_phases
-        from fastworkflow.skill_phases import PhaseError
-        from fastworkflow.workflow_agent import load_skill_commands
+        from fastworkflow.planning_commands import call_phases
+        from fastworkflow.planning_phases import PhaseError
+        from fastworkflow.workflow_agent import load_planning_command_map
 
         state = self._phase_run
-        command = load_skill_commands(self._app_workflow.folderpath).get(state["skill"])
+        folderpath = self._app_workflow.folderpath
+        command = load_planning_command_map(folderpath).get(state["skill"])
         if command is None:
-            raise PhaseError(f"skill {state['skill']!r} is no longer defined")
+            # A planning command's call (run_planning_command) is not a planning command file.
+            command = planning_commands.planning_command(folderpath, state["skill"])
+        if command is None:
+            raise PhaseError(f"planning command {state['skill']!r} is no longer defined")
         # A flat call (no plan(), or no phases for these arguments) is one phase.
         phases = call_phases(command, state["args"])
         if state.get("extra_phase"):
-            from fastworkflow.skill_phases import Phase, with_phase_before
+            from fastworkflow.planning_phases import Phase, with_phase_before
 
             moved = list(state.get("extra_steps") or [])
             phases = with_phase_before(phases, Phase(state["extra_phase"], lambda: list(moved)))
         if state.get("before_phase"):
-            from fastworkflow.skill_phases import Phase, with_phase_before
+            from fastworkflow.planning_phases import Phase, with_phase_before
 
             first = list(state.get("steps_before") or [])
             phases = with_phase_before(phases, Phase(state["before_phase"], lambda: list(first)), 0)
         if [phase.name for phase in phases] != state["phases"]:
-            raise PhaseError(f"skill {state['skill']!r} now plans other phases")
+            raise PhaseError(f"planning command {state['skill']!r} now plans other phases")
         self._phase_live = (command, phases)
         return self._phase_live
 
@@ -2172,29 +2992,38 @@ class WorkflowExecutionContext:
             if p.output is None or p.name not in state["outputs"]:
                 continue
             value = state["outputs"][p.name]
-            outputs[p.name] = ([p.output.model_validate(v) for v in value] if p.fans_out
-                               else p.output.model_validate(value))
+            outputs[p.name] = ([stored_value(p.output, v) for v in value] if p.fans_out
+                               else stored_value(p.output, value))
         return outputs
 
-    def _run_skill_phases(self, first_step: Optional[int] = None, *,
-                          resume_observation: Optional[str] = None):
+    def _run_planning_command_phases(self, first_step: Optional[int] = None, *,
+                          resume_observation: Optional[str] = None,
+                          resume_completes_step: bool = False):
         """Run the phases from the current one; a suspension, or the sub-task's result.
 
         With ``resume_observation`` the current phase's executor run, suspended on
-        ask_user, is resumed first. The result never reports ``exhausted``: a phased
-        skill is not handed off. A fan-out phase runs one sub-plan per item, until its
+        ask_user (or on a nested command, ``resume_completes_step``), is resumed first. The
+        result never reports ``exhausted``: a phased
+        planning command is not handed off. A fan-out phase runs one sub-plan per item, until its
         items are done or its ``until`` condition is met. A phase with a callable
-        ``when`` is decided when it is reached (``skill_phases.runs_now``); a skipped one
+        ``when`` is decided when it is reached (``planning_phases.runs_now``); a skipped one
         runs nothing and keeps the answers of the phase before it.
         """
-        from fastworkflow import skill_phases
+        from fastworkflow import planning_phases
 
         state = self._phase_run
         try:
-            command, phases = self._live_skill_phases()
+            command, phases = self._live_planning_command_phases()
         except Exception as error:  # noqa: BLE001 - the call stops, saying why
-            return self._skill_phases_failed(state["phases"][state["index"]], f"{error}")
+            return self._planning_command_phases_failed(state["phases"][state["index"]], f"{error}")
+        phase_names = frozenset(state["phases"])
         while state["index"] < len(phases):
+            if resume_observation is None and self._nested_budget_spent():
+                # A nested call's later phases do not start once the turn-wide budget is
+                # spent (run_planning_command); the call ends here, as exhausted. A
+                # resumed phase is not stopped here: it is already running.
+                state["exhausted"] = True
+                break
             phase = phases[state["index"]]
             starting = resume_observation is None and (
                 not phase.fans_out or state.get("items") is None)
@@ -2205,14 +3034,17 @@ class WorkflowExecutionContext:
                                         "notes": len(state.get("notes") or [])}
             if starting and phase.has_condition:
                 try:
-                    runs, why = skill_phases.runs_now(
-                        phase, self._phase_outputs(phases, state["index"])), None
-                except skill_phases.PhaseError as error:
+                    runs, why = planning_phases.runs_now(
+                        phase, self._phase_outputs(phases, state["index"]),
+                        phase_names=phase_names), None
+                except planning_phases.PhaseError as error:
                     runs, why = False, str(error)
                 if not runs:
                     # Skipped: counts as not run (no output, later parameters keep their
                     # defaults). The phase's span says so; no executor runs.
-                    outcome, value = self._run_skill_phase(command, phases, first_step,
+                    # Phase 3 step 1a: phase-named parameters bind None when skipped, not
+                    # those defaults (``planning_phases.bound_arguments`` with ``phase_names``).
+                    outcome, value = self._run_planning_command_phase(command, phases, first_step,
                                                            skip=True, skip_error=why)
                     if outcome == "failed":
                         failed = self._phase_failure(phase, value)
@@ -2225,9 +3057,9 @@ class WorkflowExecutionContext:
                 state["phase_answers"] = []
             if phase.fans_out and state.get("items") is None:
                 try:
-                    items, total = skill_phases.fan_out_items(
+                    items, total = planning_phases.fan_out_items(
                         phase, self._phase_outputs(phases, state["index"]))
-                except skill_phases.PhaseError as error:
+                except planning_phases.PhaseError as error:
                     failed = self._phase_failure(phase, str(error))
                     if failed is not None:
                         return failed
@@ -2236,21 +3068,27 @@ class WorkflowExecutionContext:
                              items_total=total, item_index=0, until_met=False)
                 state["outputs"][phase.name] = []
                 if total > len(items) and phase.until is None:
-                    note = skill_phases.cap_note(phase.name, len(items), total, phase.noun)
+                    note = planning_phases.cap_note(phase.name, len(items), total, phase.noun)
                     # Two fan-outs over the same items with one noun say it once.
                     if note not in state["notes"]:
                         state["notes"].append(note)
             if not phase.fans_out or (state["item_index"] < len(state["items"])
                                       and not state.get("until_met")):
-                outcome, value = self._run_skill_phase(
+                outcome, value = self._run_planning_command_phase(
                     command, phases,
                     state["first_step"] if resume_observation is not None else first_step,
-                    resume_observation=resume_observation)
+                    resume_observation=resume_observation,
+                    resume_completes_step=resume_completes_step)
                 resume_observation = None
+                resume_completes_step = False
                 if outcome == "suspended":
                     return value
                 if outcome == "failed":
                     first_step = self._next_step
+                    # Disabled after benchmark pass 4 (fix-zezw never restarted a call in 840 runs):
+                    # restarted = self._restart_after_empty_first_phase(phase, value)
+                    # if restarted is not None:
+                    #     return restarted
                     failed = self._phase_failure(phase, value)
                     if failed is not None:
                         return failed
@@ -2261,37 +3099,195 @@ class WorkflowExecutionContext:
                     continue
             if phase.fans_out and phase.until is not None:
                 # Said at the end: stopped on its condition, or capped.
-                note = skill_phases.fan_out_note(phase.name, state["item_index"],
+                note = planning_phases.fan_out_note(phase.name, state["item_index"],
                                                  state["items_total"], bool(state.get("until_met")),
                                                  phase.noun)
                 if note and note not in state["notes"]:
                     state["notes"].append(note)
             state.update(items=None, items_total=0, item_index=0, until_met=False)
             state["index"] += 1
-        answers = state["answers"]
-        # The last phase writes the answer, from the facts its steps carry (a fan-out
-        # last phase: its items' answers, in item order).
-        last = [a for a in state.get("phase_answers") or [] if a]
-        answer = "\n\n".join(last) if last else "\n\n".join(a for a in answers if a)
-        if state.get("extra_answer") and last:
-            # The extra command steps' own report (their phase is not the last).
-            answer = f"{answer}\n\n{state['extra_answer']}"
-        if state.get("before_answer") and last:
-            # The report of the extra steps before the skill's own (their phase is first).
-            answer = f"{state['before_answer']}\n\n{answer}"
-        notes = list(state.get("notes") or [])
-        if notes:
-            answer = "\n\n".join(part for part in (answer, " ".join(notes)) if part)
+        uses_result = state.get("uses_result")
+        command_output = None
+        response = None
+        if uses_result and command.plan_cls is not None:
+            from fastworkflow.planning_commands import _phase_names_for_command, input_instance
+
+            typed = planning_phases.typed_phase_outputs(state["outputs"], phases)
+            input_obj = input_instance(command, state["args"])
+            # __result__ may name any phase of the command: one this call left out is None (3.16).
+            response, _fallback = planning_phases.run_call_result(
+                command.plan_cls, input_obj, typed,
+                phase_names=phase_names | frozenset(_phase_names_for_command(command)),
+                output_model=command.output_model,
+                command_name=command.name,
+                request=state["query"],
+            )
+        if response is not None:
+            answer = response.response or ""
+            notes = list(state.get("notes") or [])
+            if notes:
+                answer = "\n\n".join(part for part in (answer, " ".join(notes)) if part)
+            command_output = fastworkflow.CommandOutput(
+                command_response=response,
+                command_name=command.name,
+                command_parameters=input_obj,
+            )
+            if self._app_workflow:
+                command_output.workflow_name = self._app_workflow.folderpath.split("/")[-1]
+            fastworkflow.turn.warn_on_missing_declared_output(
+                command_output,
+                output_model=command.output_model,
+            )
+            if len(self._frame_stack()) == 1:
+                # The turn's own call appends its output here. A nested call's output is
+                # returned instead: run_planning_command hands it to the step that ran it,
+                # which appends it (workflow_agent._execute_workflow_query).
+                self.append_turn_output(command_output)
+        else:
+            # No __result__, or it returned None (no code-written answer, 3.16): the answer is the
+            # one the phases give, as with no __result__. A deferred answer is written now.
+            settled: dict = {}
+            answers = [self._settled_phase_answer(a, phases, settled) for a in state["answers"]]
+            phase_answers = [self._settled_phase_answer(a, phases, settled)
+                             for a in state.get("phase_answers") or []]
+            # The last phase writes the answer, from the facts its steps carry (a fan-out
+            # last phase: its items' answers, in item order).
+            last = [a for a in phase_answers if a]
+            answer = "\n\n".join(last) if last else "\n\n".join(a for a in answers if a)
+            extra = self._settled_phase_answer(state.get("extra_answer"), phases, settled)
+            if extra and last:
+                # The extra command steps' own report (their phase is not the last).
+                answer = f"{answer}\n\n{extra}"
+            before = self._settled_phase_answer(state.get("before_answer"), phases, settled)
+            if before and last:
+                # The report of the extra steps before the planning command's own (their phase is first).
+                answer = f"{before}\n\n{answer}"
+            notes = list(state.get("notes") or [])
+            if notes:
+                answer = "\n\n".join(part for part in (answer, " ".join(notes)) if part)
         self._phase_run = self._phase_live = None
-        return dspy.Prediction(final_answer=answer, exhausted=False)
+        # exhausted stays False: a phased planning command is not handed off. phase_exhausted says a
+        # phase ran out of steps, and command_output is the call's own output when its
+        # __result__ built one (uses_result), which a nested call returns to its step.
+        return dspy.Prediction(final_answer=answer, exhausted=False,
+                               phase_exhausted=bool(state.get("exhausted")),
+                               command_output=command_output)
+
+    def _defer_phase_answer(self, index: int, query: str, plan: str) -> dict:
+        """Hold an answer-only phase's model call until the answer is settled (3.16): it runs
+        only when ``__result__`` returned None. Returns the marker the phase records."""
+        deferred = self._phase_run.setdefault("deferred", {})
+        key = str(len(deferred))
+        deferred[key] = {"index": index, "query": query, "plan": plan}
+        return {"deferred": key}
+
+    def _settled_phase_answer(self, value, phases, settled: dict) -> str:
+        """A recorded phase answer as text. A deferred one (a ``{"deferred": key}`` marker) is
+        written now, once, by the model from the facts its phase had (``answer_only_answer``)."""
+        if not (isinstance(value, dict) and "deferred" in value):
+            return value or ""
+        key = value["deferred"]
+        if key not in settled:
+            import dspy
+            from fastworkflow import planning_phases
+
+            deferred = self._phase_run["deferred"][key]
+            phase = phases[deferred["index"]]
+            # The facts of the phase itself and of the phases before it (a judgement phase's own
+            # output included), given to the model with the request.
+            outputs = self._phase_outputs(phases, deferred["index"] + 1)
+            facts = "\n\n".join(planning_phases.found_facts(outputs))
+            query = f"{deferred['query']}\n\n{facts}" if facts else deferred["query"]
+            span = tracing.start_span(self, tracing.SPAN_PLANNING_COMMAND_ANSWER, attributes={
+                "skill": self._phase_run["skill"], "phase": phase.name,
+                "phase_index": deferred["index"], "phase_count": len(phases)})
+            try:
+                result = self._call_agent_with_retry(
+                    lambda: dspy.Prediction(
+                        final_answer=planning_phases.answer_only_answer(
+                            query, deferred["plan"], outputs),
+                        suspended=False, exhausted=False),
+                    trace_input=query,
+                )
+            except BaseException as exc:
+                tracing.end_span(self, span, status=tracing.status_for_dispatch_exception(exc),
+                                 attributes={"error_type": type(exc).__name__})
+                raise
+            settled[key] = planning_phases.clean_answer(getattr(result, "final_answer", "") or "")
+            tracing.end_span(self, span)
+        return settled[key]
+
+    def _record_phase_answer(self, phase, answer) -> None:
+        """Record a phase's answer (text, or a deferred marker) for the call's answer."""
+        state = self._phase_run
+        if phase.name == state.get("extra_phase"):
+            state["extra_answer"] = answer
+        if phase.name == state.get("before_phase"):
+            state["before_answer"] = answer
+        state["answers"].append(answer)
+        state.setdefault("phase_answers", []).append(answer)
+
+    def _restart_after_empty_first_phase(self, phase, observation: str):
+        """The call planned again once, when its first phase's lookup found nothing (fix-variance).
+
+        Applies when the first phase (its first item, if it fans out) fails on a required fact no run holds
+        (``MissingFactError``), the phase is not optional, and the call was not restarted before. No earlier
+        phase exists to have run a command. The failed phase's own steps may have run before its facts failed,
+        so the call is not restarted when those steps name a command that writes (``command_writes``): a restart
+        would write twice. The arguments are extracted once more with the phase's observation after the request
+        (``planning_commands.reextracted_arguments``), and the call runs its phases again from the start. None
+        when it does not apply, or the arguments come out the same or are refused: the failure then stops the
+        job as before.
+        """
+        state = self._phase_run
+        if (state is None or state.get("index") != 0 or state.get("item_index") or state.get("reextracted")
+                or not state.get("missing_fact") or getattr(phase, "optional", False)
+                or self._phase_call is None):
+            return None
+        from fastworkflow import command_writes, planning_commands
+
+        # Read before _phase_run is cleared: the steps of the phase that failed, as its runs were planned.
+        planned = command_writes.phase_planned_commands(self)
+        if planned is None:
+            logger.info("planning command %s: phase %s found nothing, and its planned commands are unknown; "
+                        "the call is not planned again", state["skill"], phase.name)
+            return None
+        writes = {command_writes._plain(name) for name in
+                  command_writes.write_commands(self._app_workflow.folderpath)}
+        writing = sorted(planned & writes)
+        if writing:
+            logger.info("planning command %s: phase %s found nothing, but its steps name a command that writes "
+                        "(%s); the call is not planned again, so nothing is written twice",
+                        state["skill"], phase.name, ", ".join(writing))
+            return None
+
+        command, call = self._phase_call
+        query = state["query"]
+        try:
+            args = planning_commands.reextracted_arguments(
+                command, query, observation, call.args, workflow=self._app_workflow, verdicts=call.verdicts)
+        except Exception as error:  # noqa: BLE001 - the job stops as it would have
+            logger.warning("planning command %s: arguments not extracted again after phase %s found nothing: %s: %s",
+                           state["skill"], phase.name, type(error).__name__, error)
+            return None
+        if args is None:
+            logger.info("planning command %s: phase %s found nothing; the arguments extracted again are the same "
+                        "or refused, so the call is not planned again", state["skill"], phase.name)
+            return None
+        logger.info("planning command %s: phase %s found nothing; planning the call again with arguments %s",
+                    state["skill"], phase.name, args)
+        new_call = planning_commands.replanned_call(command, call, args, notes=list(call.notes or []))
+        self._phase_run = self._phase_live = None
+        return self._start_planning_command_phases(query, command, new_call, first_step=self._next_step or 0,
+                                                   reextracted=True)
 
     def _phase_failure(self, phase, error: str):
-        """Phase *phase* failed: the sub-task's result (``_skill_phases_failed``), or None
+        """Phase *phase* failed: the sub-task's result (``_planning_command_phases_failed``), or None
         when the phase is ``optional``. An optional phase then counts as not run: its
         output, the answers its runs wrote and the notes it added are dropped, and the
         runner goes on with the next phase."""
         if not getattr(phase, "optional", False):
-            return self._skill_phases_failed(phase.name, error)
+            return self._planning_command_phases_failed(phase.name, error)
         state = self._phase_run
         start = state.get("phase_start") or {}
         del state["answers"][start.get("answers", len(state["answers"])):]
@@ -2300,51 +3296,321 @@ class WorkflowExecutionContext:
         state["outputs"].pop(phase.name, None)
         state.update(items=None, items_total=0, item_index=0, until_met=False)
         state["index"] += 1
-        logger.info("skill %s: optional phase %s failed and is left out: %s",
+        logger.info("planning command %s: optional phase %s failed and is left out: %s",
                     state["skill"], phase.name, error)
         return None
 
-    def _skill_phases_failed(self, name: str, error: str):
+    def _planning_command_phases_failed(self, name: str, error: str):
         """The sub-task's result when phase ``name`` failed: the facts found, and what failed.
 
-        Only facts filled in code are shown (``skill_phases.found_facts``), never text a
+        Only facts filled in code are shown (``planning_phases.found_facts``), never text a
         phase's run wrote: the failed phase's own answer may report what it never read."""
-        from fastworkflow.skill_phases import failure_text, found_facts
+        from fastworkflow.planning_phases import failure_text, found_facts
 
         state = self._phase_run
         names = state["phases"]
         not_run = names[names.index(name) + 1:] if name in names else []
-        logger.info("skill %s: phase %s failed: %s", state["skill"], name, error)
+        logger.info("planning command %s: phase %s failed: %s", state["skill"], name, error)
         self._phase_run = self._phase_live = None
         return dspy.Prediction(
             final_answer=failure_text(found_facts(state.get("outputs") or {}), name, error,
                                       not_run, notes=state.get("notes") or ()),
             exhausted=False, phase_failed=name)
 
+    # ------------------------------------------------------------------
+    # Planning commands as nested frames (design 3.5)
+    # ------------------------------------------------------------------
+
+    def _nested_budget_spent(self) -> bool:
+        """True inside a nested frame once the turn-wide step budget is spent.
+
+        Only nested frames stop on it: the turn frame is bounded by its own caps (design 3.5).
+        """
+        return len(self._frame_stack()) > 1 and self._turn_steps_used >= turn_max_steps()
+
+    def run_framework_planning_command(self, qualified_name: str, params: Any, step_text: str, *,
+                                       unattended: bool = False, within_turn: bool = False):
+        """The framework's own entry point for a framework planning command (fix-3rsq.plan-review.1).
+
+        Runs *qualified_name* (review_subtasks, review_plan) as one turn, through the same nested frame
+        and executor a planning step uses, without the agent's explicit-name resolution (which refuses
+        framework commands). Returns the command's output, or the awaiting output when the review asks the
+        user (its replies come as ordinary messages on this session).
+
+        ``within_turn``: the call runs inside a turn already begun (the sub-task gate): that turn's state, its
+        unattended flag and its approval surface are kept, and a suspension returns the suspended prediction for the
+        caller to settle, not the awaiting output (fix-3rsq.plan-review.2.8). Without it the call begins a turn of its
+        own, with *unattended* (attended by default, as the review always was).
+        """
+        from fastworkflow.utils.react import AskUserSuspend
+
+        from fastworkflow.workflow_agent import framework_call_scope
+
+        self._ensure_agent_initialized()
+        if not within_turn:
+            self._begin_turn(step_text, unattended=unattended)
+            self._note_approval_inbound(None, None, False)
+        # The turn frame has no agent step of its own: when the call finishes, its output is the turn's answer.
+        self._turn_frame().framework_entry = True
+        self.push_active_workflow(self._app_workflow)
+        try:
+            with framework_call_scope():
+                output = self.run_planning_command(qualified_name, params, step_text)
+        except AskUserSuspend as asked:
+            self._awaiting_user = True
+            if within_turn:
+                return dspy.Prediction(suspended=True, clarification=asked.clarification_request)
+            return self._awaiting_user_output(asked.clarification_request)
+        finally:
+            self.pop_active_workflow()
+        self.append_turn_output(output)
+        return output
+
+    def run_planning_command(self, qualified_name: str, params: Any,
+                             step_text: str) -> fastworkflow.CommandOutput:
+        """Run planning command *qualified_name* as a nested frame, for the step *step_text*.
+
+        *params* are the arguments the executor extracted and checked: an ``Input``
+        instance or a dict. Returns the command's output, which the step that called it
+        holds as its run. A call that asks the user raises AskUserSuspend and keeps its
+        frame on the stack for the resume (sibling task; design 3.5, Ask_user inside a child).
+        """
+        frames = self._frame_stack()
+        if any(frame.command_name == qualified_name for frame in frames):
+            return self._nested_refusal(
+                qualified_name,
+                f"{qualified_name} is already running; call its steps directly.")
+        limit = turn_max_steps()
+        if self._turn_steps_used >= limit:
+            return self._nested_refusal(qualified_name, NESTED_BUDGET_SPENT_MESSAGE)
+        folderpath = self._app_workflow.folderpath if self._app_workflow is not None else ""
+        command = planning_commands.planning_command(folderpath, qualified_name) if folderpath else None
+        if command is None:
+            return self._nested_refusal(
+                qualified_name, f"{qualified_name} is a planning command that could not be loaded.")
+        args = _planning_args(params)
+        try:
+            phases = planning_commands.call_phases(command, args)
+        except planning_commands.PlanningCommandCallError as error:
+            return self._nested_refusal(qualified_name, f"{qualified_name} could not run: {error}")
+
+        # The step in flight is the parent's execute step k; the child's steps number after
+        # it and after every step already run (step numbers stay unique across frames).
+        parent = self._top_frame()
+        alias = current_execute_alias(parent.agent) if parent.agent is not None else None
+        invoking_step = int(alias[1:]) if alias else None
+        first_step = self._next_step
+        if invoking_step is not None:
+            first_step = max(first_step, invoking_step + 1)
+        stem = qualified_name.split("/")[-1]
+        count = parent.child_counts.get(stem, 0) + 1
+        parent.child_counts[stem] = count
+        ran_in_clause, ran_in_context_name = self._current_record()
+        run_state = getattr(parent.agent, "run_state", None)
+        execute_call = run_state.get("execute_call", {}) if isinstance(run_state, dict) else {}
+        frame = PlanFrame(
+            kind="planning",
+            command_name=qualified_name,
+            depth=parent.depth + 1,
+            alias=f"{parent.alias}/{stem}#{count}",
+            subtasks=[step_text],
+            origins=[0],
+            subtask_index=0,
+            invoking_step=invoking_step,
+            first_step=first_step,
+            ran_in_clause=ran_in_clause,
+            ran_in_context_name=ran_in_context_name,
+            call_args=json.loads(json.dumps(args, default=str)),
+            command_text=execute_call.get("command", ""),
+            folded_note=execute_call.get("folded_note", ""),
+        )
+        frames.append(frame)
+        self._attach_nested_agent(frame)
+        # The call's plan is its phases, which carry their own steps: nothing is planned
+        # with a model here (the phases of call_phases).
+        call = planning_commands.PlanningCommandCallPlan(plan="", args=args, notes=[], prediction=None,
+                                            phases=phases)
+        try:
+            result = self._start_planning_command_phases(step_text, command, call, first_step=first_step)
+        except AskUserSuspend:
+            raise  # the frame stays for the resume
+        except BaseException:
+            self._pop_frame(frame)
+            raise
+        if getattr(result, "suspended", None) is True:
+            # The frame stays on the stack; the parent's step is suspended with it.
+            raise AskUserSuspend(str(getattr(result, "clarification", "") or ""))
+
+        command_parameters = params if hasattr(params, "model_dump") else (
+            planning_commands.input_instance(command, args))
+        return self._close_planning_call(frame, result, command_parameters)
+
+    def _attach_nested_agent(self, frame: PlanFrame) -> None:
+        """Give a nested frame its agent: each of its model steps counts against the turn-wide
+        budget, and ask_user is off for an unattended turn. Also set on a restored frame, which
+        is built the same way before its suspended state is imported."""
+        frame.agent = self._build_react_agent()
+        # One policy verifier per conversation (fastworkflow.policy_runtime): a nested planning-command
+        # frame shares the turn agent's, so what was read and asked is remembered across frames.
+        turn_policy = getattr(self._turn_frame().agent, "policy", None)
+        if turn_policy is not None:
+            frame.agent.policy = turn_policy
+        frame.agent.disabled_tools = (
+            frozenset({"ask_user"}) if getattr(self, "_turn_unattended", False) else frozenset())
+        limit = turn_max_steps()
+
+        def count_step() -> bool:
+            # Each model step of a nested frame counts against the turn-wide budget.
+            self._turn_steps_used += 1
+            return self._turn_steps_used < limit
+
+        frame.agent.on_iteration = count_step
+
+    def _close_planning_call(self, frame: PlanFrame, result,
+                             command_parameters) -> fastworkflow.CommandOutput:
+        """Pop *frame*, a nested call that finished with *result*, and build the output its
+        parent's step holds: the call's step range is recorded on the parent."""
+        limit = turn_max_steps()
+        ran = self._next_step > frame.first_step
+        self._pop_frame(frame)
+        if ran:
+            self._top_frame().child_step_ranges.append([frame.first_step, self._next_step - 1])
+
+        output = getattr(result, "command_output", None)
+        if output is None:
+            output = fastworkflow.CommandOutput(
+                command_response=fastworkflow.CommandResponse(
+                    response=str(getattr(result, "final_answer", "") or "")),
+            )
+        if getattr(result, "phase_exhausted", False) and self._turn_steps_used >= limit:
+            # The turn-wide budget stopped this call's steps (design 3.5): its response says so.
+            # A call that finished, or a phase that ran out of its own cap, keeps its answer.
+            output = fastworkflow.CommandOutput(
+                command_response=fastworkflow.CommandResponse(
+                    response=NESTED_BUDGET_SPENT_MESSAGE, success=False),
+            )
+        if getattr(result, "phase_failed", None) or getattr(result, "phase_exhausted", False):
+            # Out of steps or failed: the step's observation says so, and the run is not a success.
+            output.command_response.success = False
+        output.command_name = frame.command_name
+        output.command_parameters = command_parameters
+        # The context the call ended on: the one its parent's later steps start from.
+        active = self.get_active_workflow()
+        if active is not None:
+            output.workflow_name = active.folderpath.split("/")[-1]
+            output.context = active._current_command_context_displayname
+        return output
+
+    def _finish_framework_call(self, result) -> fastworkflow.CommandOutput:
+        """The framework's own call (run_framework_planning_command) finished after a suspension: its planning
+        command's typed output is the turn's answer, and its frame is closed."""
+        frame = self._top_frame()
+        command = planning_commands.planning_command(self._app_workflow.folderpath, frame.command_name)
+        output = self._close_planning_call(frame, result, planning_commands.input_instance(command, frame.call_args))
+        self._pop_frame(frame)
+        self._awaiting_user = False
+        self.append_turn_output(output)
+        return output
+
+    def _finish_nested_frame(self, result) -> str:
+        """Close the nested call on top, which finished after a suspension, and return the
+        observation of the step it was called from.
+
+        That step is still in flight, so the call's run is held under it, and its turn output
+        and action-log record are written, as a call that finishes at once writes them
+        (_execute_workflow_query). The observation reads the run as the step's own would have,
+        with its handle line. The step's alias, command and folded note are the frame's: a
+        restored frame has them, where the step's agent may not have its trajectory yet.
+        """
+        # inline import avoids circular import: workflow_agent imports this module at load (CommandCancelledError)
+        from fastworkflow.workflow_agent import (
+            _append_action_record, _append_turn_output, _hold_command_run, action_record,
+            command_run_response, run_observation)
+
+        frame = self._top_frame()
+        command = planning_commands.planning_command(
+            self._app_workflow.folderpath, frame.command_name)
+        output = self._close_planning_call(
+            frame, result, planning_commands.input_instance(command, frame.call_args))
+        _append_turn_output(self, output)
+        alias = f"O{frame.invoking_step}" if frame.invoking_step is not None else None
+        # The child's last step left the workflow where it ended: the run is held on that record.
+        now_clause, now_name = self._current_record()
+        if alias is not None:
+            _hold_command_run(self, output, now_clause, now_name, alias=alias)
+        response = command_run_response(output)
+        _append_action_record(self, action_record(frame.command_text, output, response))
+        run_state = getattr(self._workflow_tool_agent, "run_state", None)
+        if isinstance(run_state, dict):
+            # A folded call that suspended never reached the step that reads this.
+            run_state.pop("folded_command", None)
+        return run_observation(
+            alias, frame.ran_in_clause, response, folded_note=frame.folded_note,
+            context_changed=now_clause != frame.ran_in_clause, now_clause=now_clause)
+
+    def _nested_refusal(self, qualified_name: str, message: str) -> fastworkflow.CommandOutput:
+        """A planning-command call that did not run: a failed output and no frame."""
+        return fastworkflow.CommandOutput(
+            command_response=fastworkflow.CommandResponse(response=message, success=False),
+            command_name=qualified_name,
+        )
+
+    def _pop_frame(self, frame: PlanFrame) -> None:
+        """Remove *frame* from the stack when it is on top, which releases its agent and phases."""
+        frames = self._frame_stack()
+        if frames and frames[-1] is frame:
+            frames.pop()
+
     def _archived_command_runs(self, *, from_step: Optional[int] = None,
                                to_step: Optional[int] = None) -> list[dict[str, Any]]:
         """The command runs archived for this turn, in run order (``offload_command_runs``);
-        only steps ``from_step``..``to_step`` (inclusive) when given, filtered in SQL."""
+        only steps ``from_step``..``to_step`` (inclusive) when given, filtered in SQL. Runs
+        inside the top frame's child step ranges are left out (design 3.5)."""
         from fastworkflow.observation_offloading.state import (
             archive_for_path, observability_db_path, scope_for_host)
 
-        return archive_for_path(observability_db_path(self)).command_runs(
+        runs = archive_for_path(observability_db_path(self)).command_runs(
             scope_for_host(self), from_step=from_step, to_step=to_step)
+        return runs_outside_ranges(runs, self._top_frame().child_step_ranges)
 
     def _phase_command_names(self) -> dict[str, list[str]]:
         """``commands`` / ``core_commands`` a phase's steps are read with, as the finish check
         reads them. Without the routing definition only the runs' and the facts' commands
-        are known (``skill_phases.fill_output`` adds those)."""
+        are known (``planning_phases.fill_output`` adds those)."""
         from fastworkflow.workflow_agent import core_command_names
 
-        commands: list[str] = []
+        return {"commands": self._workflow_command_names(),
+                "core_commands": list(core_command_names())}
+
+    def _workflow_command_names(self) -> list[str]:
+        """The app workflow's command names a step may name: the routed commands and the
+        planning commands (which routing does not hold, and which a step may call, 3.5).
+        Empty when the names cannot be read: the steps are then read with what is known."""
+        if self._app_workflow is None:
+            return []
+        folderpath = self._app_workflow.folderpath
+        names: list[str] = []
         try:
-            if self._app_workflow is not None:
-                routing = fastworkflow.RoutingRegistry.get_definition(self._app_workflow.folderpath)
-                commands = list(routing.routing_definition_map)
+            routing = fastworkflow.RoutingRegistry.get_definition(folderpath)
+            names += list(routing.routing_definition_map)
+            # Framework execution commands (review_proposal) are not agent-visible, but a plan step may
+            # call them by exact name: the framework's own review steps.
+            names += [name for name, meta in routing.command_directory.map_command_2_metadata.items()
+                      if meta.framework and not meta.is_planning]
         except Exception:  # noqa: BLE001 - read the steps with what is known
-            commands = []
-        return {"commands": commands, "core_commands": list(core_command_names())}
+            pass
+        names += list(self._planning_commands())
+        return names
+
+    def _planning_commands(self) -> Mapping[str, Any]:
+        """The app workflow's loaded planning commands (qualified name -> ``PlanningCommandCommand``),
+        or {} when they cannot be read: a step then reads as before, with the routed commands."""
+        if self._app_workflow is None:
+            return {}
+        try:
+            return planning_commands.resolve_field_sources(self._app_workflow.folderpath).planning_commands
+        except Exception:  # noqa: BLE001 - read the steps with what is known
+            return {}
 
     def _current_record(self) -> tuple[str, str]:
         """``(clause, context name)`` of the record the workflow is on now (``""`` at the root)."""
@@ -2355,8 +3621,9 @@ class WorkflowExecutionContext:
             return "", ""
         return context_clause_for(active), context_identity(active)[0]
 
-    def _run_skill_phase(self, command, phases, first_step: int, *,
+    def _run_planning_command_phase(self, command, phases, first_step: int, *,
                          resume_observation: Optional[str] = None,
+                         resume_completes_step: bool = False,
                          skip: bool = False, skip_error: Optional[str] = None):
         """Run the current phase (of a fan-out phase: its current item) as one sub-plan
         and fill its output.
@@ -2366,20 +3633,26 @@ class WorkflowExecutionContext:
         not be decided): only its span is written (``skipped``), nothing runs, and the
         result is ``("done", None)`` (``("failed", skip_error)``).
         One ``fw.skill.phase`` span per run (a resumed run opens a new one). An
-        answer-only phase (``skill_phases.is_answer_only``) is not an executor run: one
-        model call with no tools writes its answer (``skill_phases.write_answer``).
+        answer-only phase (``planning_phases.is_answer_only``) is not an executor run: one
+        model call with no tools writes its answer (``planning_phases.write_answer``).
         """
-        from fastworkflow import skill_phases
-        from fastworkflow.skill_commands import number
-        from fastworkflow.observation_offloading.facts import FactsError, fact_sources
+        from fastworkflow import planning_phases
+        from fastworkflow.planning_commands import number
+        from fastworkflow.observation_offloading.facts import FactsError, MissingFactError, fact_sources
         from fastworkflow.workflow_agent import _what_can_i_do
 
         state = self._phase_run
+        state["missing_fact"] = False
         index = state["index"]
         phase = phases[index]
         last = index == len(phases) - 1
+        uses_result = state.get("uses_result")
+        phase_names = frozenset(state["phases"])
+        # A call that runs one phase (call_phases: one phase, whatever its output): its
+        # run gets the executor's own step cap, not PHASE_MAX_STEPS.
+        # A call that runs one phase has the agent's own cap; a call of several gives each phase the phase cap.
         budget = (getattr(self._workflow_tool_agent, "max_iters", None)
-                  if state.get("flat") else None) or skill_phases.phase_step_budget()
+                  if len(phases) == 1 else None) or planning_phases.phase_step_budget()
         resumed = resume_observation is not None
         attributes = {
             "skill": state["skill"],
@@ -2389,6 +3662,7 @@ class WorkflowExecutionContext:
             "step_budget": budget,
             "first_step": first_step,
             "resumed": resumed,
+            "reextracted": True if state.get("reextracted") else None,
         }
         item = None
         others: list[Any] = []
@@ -2401,7 +3675,7 @@ class WorkflowExecutionContext:
             last_item = k == len(items) - 1
         else:
             last_item = True
-        span = tracing.start_span(self, tracing.SPAN_SKILL_PHASE, attributes=attributes)
+        span = tracing.start_span(self, tracing.SPAN_PLANNING_COMMAND_PHASE, attributes=attributes)
         if skip:
             if skip_error is not None:
                 tracing.end_span(self, span, status=tracing.STATUS_ERROR,
@@ -2416,9 +3690,10 @@ class WorkflowExecutionContext:
         if not resumed:
             outputs = self._phase_outputs(phases, index)
             try:
-                steps = (skill_phases.phase_steps(phase, outputs, item) if phase.fans_out
-                         else skill_phases.phase_steps(phase, outputs))
-            except skill_phases.PhaseError as error:
+                steps = (planning_phases.phase_steps(phase, outputs, item, phase_names=phase_names)
+                         if phase.fans_out
+                         else planning_phases.phase_steps(phase, outputs, phase_names=phase_names))
+            except planning_phases.PhaseError as error:
                 tracing.end_span(self, span, status=tracing.STATUS_ERROR,
                                  attributes={"steps": "", "facts_error": str(error)})
                 return "failed", str(error)
@@ -2429,24 +3704,45 @@ class WorkflowExecutionContext:
             state["first_step"] = first_step
             state["plan"] = number(steps)
         plan_text = state["plan"]
-        answer_only = not resumed and skill_phases.is_answer_only(plan_text, **names)
-        planned = sorted(skill_phases.planned_steps(plan_text, **names))
+        answer_only = not resumed and planning_phases.is_answer_only(plan_text, **names)
+        if answer_only and last and planning_phases.answer_by_code(plan_text):
+            # 3.16 (b): a last phase of 'say that' lines the load check could not read (its template
+            # did not build). Refused as the load check refuses it, as this phase's failure.
+            message = planning_phases.say_that_last_message(command.path, phase.name)
+            tracing.end_span(self, span, status=tracing.STATUS_ERROR,
+                             attributes={"steps": plan_text, "answer_only": True,
+                                         "facts_error": message})
+            return "failed", message
+        planned = sorted(planning_phases.planned_steps(plan_text, **names))
         item_frame = (state["item_index"], len(state["items"]), item) if phase.fans_out else None
         try:
             if answer_only:
                 # Steps that name no command: one model call, with no tools, writes the
                 # answer from the facts the steps carry (none when every step is verbatim
-                # or a guard: code writes it, skill_phases.answer_by_code). Nothing can run a command.
+                # or a guard: code writes it, planning_phases.answer_by_code). Nothing can run a command.
                 # A long list the steps do not tell the answer to name is cut short in the
-                # prompt (skill_phases.capped_steps); a list to name is given whole.
+                # prompt (planning_phases.capped_steps); a list to name is given whole.
                 earlier_outputs = self._phase_outputs(phases, index)
-                prompt_steps = skill_phases.capped_steps(plan_text, earlier_outputs)
-                user_query = skill_phases.phase_query(
+                prompt_steps = planning_phases.capped_steps(plan_text, earlier_outputs)
+                user_query = planning_phases.phase_query(
                     state["query"], prompt_steps, index=index, count=len(phases),
                     name=phase.name, answer_only=True, item=item_frame)
+                if not last and planning_phases.answer_by_code(prompt_steps):
+                    # 3.16 (a): a phase before the last made only of 'say that' lines writes no
+                    # answer; its text reaches the answer only through __result__.
+                    tracing.end_span(self, span, attributes={"skipped": True, "answer_only": True})
+                    return "done", None
+                if uses_result and not planning_phases.answer_by_code(prompt_steps):
+                    # __result__ may return None, and then the model writes this answer: it is
+                    # asked then, not now (WorkflowExecutionContext._settled_phase_answer).
+                    marker = self._defer_phase_answer(index, user_query, prompt_steps)
+                    tracing.end_span(self, span, attributes={"skipped": True, "answer_only": True,
+                                                             "uses_result": True})
+                    self._record_phase_answer(phase, marker)
+                    return "done", None
                 result = self._call_agent_with_retry(
                     lambda: dspy.Prediction(
-                        final_answer=skill_phases.answer_only_answer(
+                        final_answer=planning_phases.answer_only_answer(
                             user_query, prompt_steps, earlier_outputs),
                         suspended=False, exhausted=False),
                     trace_input=user_query,
@@ -2457,24 +3753,40 @@ class WorkflowExecutionContext:
                 self._attach_finish_check(
                     state["first_step"], values=True,
                     item_binding=(item, others, planned) if phase.fans_out and phase.bind
-                    else None)
+                    else None,
+                    final=bool(last and last_item) and self._last_subtask_running())
                 if resumed:
-                    result = self._call_agent_resume(resume_observation)
+                    result = self._call_agent_resume(
+                        resume_observation, completes_step=resume_completes_step)
+                    # The code that ran the phase's leading steps before the suspension is
+                    # still the run's: its count and where it stopped are the phase's.
+                    code = getattr(self._workflow_tool_agent, "last_code", None)
                 else:
-                    # Code runs the leading mechanical steps first (skill_phases.CodeSteps).
+                    # A phased command with __result__ gets its answer from __result__ (or, when that
+                    # returns None, from the deferred model call): its last phase's agent only runs steps.
+                    result_driven = bool(uses_result and last and not state.get("flat"))
+                    # Code runs the leading mechanical steps first (planning_phases.CodeSteps).
+                    # A framework command's result-driven last phase takes no model step after code's steps.
                     code = self._phase_code_steps(
                         plan_text, own_steps, names,
-                        answers=last or phase.name == state.get("extra_phase"))
+                        answers=(last or phase.name == state.get("extra_phase"))
+                        and not (result_driven and planning_commands.is_framework_planning_command(command)))
                     # A phase other than the last sees only its own steps, never the request.
-                    user_query = skill_phases.phase_query(
+                    user_query = planning_phases.phase_query(
                         state["query"], plan_text, index=index, count=len(phases),
                         name=phase.name, item=item_frame,
-                        code_steps=code is not None and code.runs_any)
+                        code_steps=code is not None and code.runs_any,
+                        result_driven=result_driven)
+                    if uses_result and last and last_item:
+                        notes = list(state.get("notes") or [])
+                        if notes:
+                            user_query = f"{user_query}\n\n{' '.join(notes)}"
                     if code is not None and last:
                         # Code may run every step: the agent then answers from their outputs.
-                        code.done_inputs = {"user_query": skill_phases.phase_query(
+                        code.done_inputs = {"user_query": planning_phases.phase_query(
                             state["query"], plan_text, index=index, count=len(phases),
-                            name=phase.name, item=item_frame, code_ran_all=True)}
+                            name=phase.name, item=item_frame, code_ran_all=True,
+                            result_driven=result_driven)}
                     available_commands = _what_can_i_do(self)
 
                     def run_phase():
@@ -2493,13 +3805,13 @@ class WorkflowExecutionContext:
                                          "error_type": type(exc).__name__})
             raise
         by_code = {}
-        if not answer_only and not resumed:
+        if not answer_only and (not resumed or code is not None):
             by_code = {"steps_by_code": code.count if code is not None else 0,
                        "code_stop": (code.stop if code is not None else None) or "off"}
         if answer_only:
             steps_used = 0
             # Whether code wrote the answer from the steps, with no model call (fix-hia1.30).
-            by_code = {"answer_by_code": skill_phases.answer_by_code(prompt_steps)}
+            by_code = {"answer_by_code": planning_phases.answer_by_code(prompt_steps)}
         else:
             trajectory = getattr(self._workflow_tool_agent, "trajectory", None) or {}
             indices = [int(key.rsplit("_", 1)[1]) for key in trajectory
@@ -2513,15 +3825,21 @@ class WorkflowExecutionContext:
                                              **by_code})
                 return "suspended", result
             if indices:
-                self._next_step = max(indices) + 1
-        answer = skill_phases.clean_answer(getattr(result, "final_answer", "") or "")
-        if phase.name == state.get("extra_phase"):
-            state["extra_answer"] = answer
-        if phase.name == state.get("before_phase"):
-            state["before_answer"] = answer
-        state["answers"].append(answer)
-        state.setdefault("phase_answers", []).append(answer)
+                # Never backwards: a nested frame this phase ran (run_planning_command) may be past it.
+                self._next_step = max(self._next_step, max(indices) + 1)
+        if uses_result and last and not state.get("flat") and not answer_only:
+            # 3.16: the agent wrote no answer; the answer is __result__'s, or the deferred model call's.
+            answer_query = planning_phases.phase_query(
+                state["query"], plan_text, index=index, count=len(phases), name=phase.name,
+                answer_only=True, item=item_frame)
+            answer = self._defer_phase_answer(index, answer_query, plan_text)
+        else:
+            answer = planning_phases.clean_answer(getattr(result, "final_answer", "") or "")
+        self._record_phase_answer(phase, answer)
         exhausted = getattr(result, "exhausted", None) is True
+        if exhausted:
+            # The call (run_planning_command) reports it as the frame's failure.
+            state["exhausted"] = True
         closing = {"steps": plan_text, "steps_used": steps_used, "exhausted": exhausted,
                    "suspended": False, "answer_only": answer_only, **by_code}
         record = None
@@ -2537,14 +3855,14 @@ class WorkflowExecutionContext:
                        if phase.output is not None else [])
             if phase.fans_out and phase.bind:
                 # The item is bound to the record that names it, wherever the run ended.
-                issues = skill_phases.item_record_issues(runs, item, others, ended_on, planned)
-                record = skill_phases.item_record(runs, item, ended_on)
+                issues = planning_phases.item_record_issues(runs, item, others, ended_on, planned)
+                record = planning_phases.item_record(runs, item, ended_on, planned=planned)
                 if record != ended_on:
                     record_context = None
             elif phase.output is not None and not phase.fans_out:
                 # The phase did its steps on one record, then moved off it: fill on
                 # that record (fix-hia1.10), not on the clause the run ended on.
-                rebound = skill_phases.planned_record(
+                rebound = planning_phases.planned_record(
                     runs, plan_text, ended_on=ended_on, **names)
                 if rebound is not None:
                     record, record_context = rebound, None
@@ -2554,13 +3872,16 @@ class WorkflowExecutionContext:
                                      "record that names it")
                 # Only runs that do one of the phase's own steps count; an opening step
                 # the workflow was already on is done by the run that entered the record.
-                filled = skill_phases.fill_output(
+                filled = planning_phases.fill_output(
                     phase.output, runs, record=record, record_context=record_context,
                     plan_text=plan_text, earlier_runs=earlier, ended_on=ended_on, **names)
                 facts = filled.model_dump(mode="json")
         except Exception as error:  # noqa: BLE001 - the phase fails, saying why
-            message = (str(error) if isinstance(error, FactsError) else
+            from pydantic import ValidationError
+
+            message = (str(error) if isinstance(error, (FactsError, ValidationError)) else
                        f"its command runs could not be read ({type(error).__name__}: {error})")
+            state["missing_fact"] = isinstance(error, MissingFactError)
             if phase.fans_out:
                 message = f"item {item}: {message}"
             tracing.end_span(self, span, status=tracing.STATUS_ERROR, attributes={
@@ -2573,12 +3894,16 @@ class WorkflowExecutionContext:
                 state["outputs"][phase.name] = facts
         if phase.fans_out and phase.until is not None:
             # The stop condition reads the items' outputs so far (typed) and earlier outputs.
-            so_far = ([phase.output.model_validate(v) for v in state["outputs"][phase.name]]
+            from fastworkflow.typed_phase_facts import validate_phase_output_value
+
+            so_far = ([validate_phase_output_value(phase.output, v)
+                       for v in state["outputs"][phase.name]]
                       if phase.output is not None else [])
             try:
-                state["until_met"] = skill_phases.stops_after(
-                    phase, so_far, self._phase_outputs(phases, index))
-            except skill_phases.PhaseError as error:
+                state["until_met"] = planning_phases.stops_after(
+                    phase, so_far, self._phase_outputs(phases, index),
+                    phase_names=phase_names)
+            except planning_phases.PhaseError as error:
                 message = f"item {item}: {error}"
                 tracing.end_span(self, span, status=tracing.STATUS_ERROR, attributes={
                     **closing, "record": record, "record_issues": issues, "facts": facts,
@@ -2591,19 +3916,23 @@ class WorkflowExecutionContext:
 
     def _phase_code_steps(self, plan_text: str, own_steps: int, names: dict, *,
                           answers: bool):
-        """The steps code runs at the start of this phase run (``skill_phases.CodeSteps``),
+        """The steps code runs at the start of this phase run (``planning_phases.CodeSteps``),
         or None: the run has no steps of its own (planner-written steps only), or nothing
         could be read (never a reason to fail the phase; the agent then runs every step)."""
-        from fastworkflow import skill_phases
+        from fastworkflow import planning_phases
 
         if not own_steps or self._app_workflow is None:
             return None
         try:
-            return skill_phases.CodeSteps(
+            state = getattr(self, "_phase_run", None) or {}
+            call_first = state.get("call_first_step", state.get("first_step", 0))
+            return planning_phases.CodeSteps(
                 plan_text, workflow=lambda: self.get_active_workflow() or self._app_workflow,
                 runs=lambda index: self._archived_command_runs(from_step=index,
                                                                 to_step=index),
-                own_steps=own_steps, answers=answers, **names)
+                call_runs=lambda: self._archived_command_runs(from_step=call_first),
+                own_steps=own_steps, answers=answers, planning=self._planning_commands(),
+                **names)
         except Exception as error:  # noqa: BLE001 - the agent runs the steps instead
             logger.warning("code-run steps skipped: %s: %s", type(error).__name__, error)
             return None
@@ -2628,20 +3957,199 @@ class WorkflowExecutionContext:
             if not isinstance(floors, dict):
                 floors = self._evidence_floors = {}
             floors.setdefault(origin, self._next_step)
-            result = self._call_agent_for_query(
-                query, query, first_step=self._next_step,
-                template_text=self._original_text(origin),
-                evidence_floor=floors[origin],
-            )
+            first = k == 0 or self._origins[k - 1] != origin
+            outputs_before = len(self._turn_outputs)
+            result = self._run_entry(k, origin, query, first=first, floor=floors[origin])
             if getattr(result, "suspended", None) is True:
                 return result
-            self._record_subtask_answer(result)
+            self._record_subtask_answer(result, self._typed_output_since(outputs_before))
             if getattr(result, "exhausted", None) is True:
                 self._hand_off(k)
             k += 1
 
         return dspy.Prediction(final_answer=self._combined_answer(),
                                exhausted=self._subtask_exhausted)
+
+    def _bound_item(self, origin: int):
+        """The reviewed sub-task (SubTask: goal, inputs, outcome, means) that origin *origin* runs, or None when the turn
+        has no plan for it (a turn that was not split under a plan, or a fast-path turn)."""
+        plan = self._turn_subtask_plan
+        if plan is None or not 0 <= origin < len(plan.items):
+            return None
+        return plan.items[origin]
+
+    def _answers_by_number(self) -> dict[int, str]:
+        """Each sub-task that has run, by its 1-based number, with the answer its run gave (the last of its runs).
+
+        The hand-off's 'from sub-task N' inputs take these: the run's typed Output (JSON) when it produced one, else the
+        text its run returned (the command's answer for a planning command, the agent's final answer otherwise)."""
+        answers: dict[int, str] = {}
+        typed = list(self._subtask_outputs)
+        typed += [""] * (len(self._subtask_answers) - len(typed))
+        for origin, answer, output in zip(self._origins, self._subtask_answers, typed):
+            answers[origin + 1] = output or answer
+        return answers
+
+    def _typed_output_since(self, start: int) -> str:
+        """The typed Output of the last successful command run since turn output *start*, as JSON; "" when none."""
+        for command_output in reversed(self._turn_outputs[start:]):
+            response = command_output.command_response
+            if response.success and response.output is not None:
+                dump = getattr(response.output, "model_dump_json", None)
+                return dump() if callable(dump) else json.dumps(response.output, default=str)
+        return ""
+
+    def _run_entry(self, k: int, origin: int, query: str, *, first: bool, floor: int):
+        """Run entry *k* of the turn: the bound means of its goal when the turn has a plan, else the agent as today.
+
+        A planning means runs its phases with its inputs (through the phase runner), its first entry only. A plain
+        means and a from-scratch goal run the agent with the goal's text (its inputs and desired outcome in it); a plain
+        means narrows the executor's listing to its command, and the plan of the run names that command, so the
+        finish check holds the goal to it. Nothing here marks a goal complete: the finish check does (arch 19.0 inv. 3).
+        """
+        from fastworkflow import review_proposals
+
+        item = self._bound_item(origin)
+        if item is None:
+            return self._call_agent_for_query(query, query, first_step=self._next_step,
+                                              template_text=self._original_text(origin), evidence_floor=floor)
+        resolved = review_proposals.resolve_inputs(item, self._answers_by_number())
+        if resolved.missing:
+            numbers = ", ".join(str(number) for number in resolved.missing)
+            return dspy.Prediction(final_answer=f"This sub-task needs the output of sub-task {numbers}, which has not run.",
+                                   exhausted=False)
+        if first:
+            query = review_proposals.run_text(item, resolved)
+        else:
+            query = self._continued_text(query, item, resolved)
+        if first and item.means.kind == review_proposals.MEANS_PLANNING:
+            return self._run_planning_means(item, query, origin, floor=floor)
+        if first and item.means.kind == review_proposals.MEANS_PLAIN and review_proposals.drafting_on():
+            return self._run_plain_means(item, query, origin, floor=floor)
+        bound = item.means.name if item.means.kind == review_proposals.MEANS_PLAIN else None
+        self._narrow_to = bound
+        try:
+            return self._call_agent_for_query(
+                query, query, first_step=self._next_step, template_text=self._original_text(origin),
+                evidence_floor=floor, bound_command=bound)
+        finally:
+            self._narrow_to = None
+
+    @staticmethod
+    def _continued_text(text: str, item, resolved) -> str:
+        """A hand-off continuation's text with the sub-task's inputs and outcome in its first line."""
+        from fastworkflow import review_proposals
+
+        head, separator, tail = text.partition("\n")
+        full = review_proposals.run_text(item, resolved)
+        suffix = full[len(item.goal):]
+        return f"{head}{suffix}{separator}{tail}" if suffix else text
+
+    def _run_planning_means(self, item, query: str, origin: int, *, floor: int):
+        """A sub-task bound to a planning command: its phases run with its inputs (the phase runner, as a planned call's
+        phases do; no model plans them). Its arguments are checked as a planned command's are (check_planned_arguments);
+        a refusal, or no command, falls back to the agent with the refusal as a note and the bound command's listing.
+        With drafting on (fix-48np.1) the reviewed inputs are the arguments (review_proposals.reviewed_arguments), and
+        the run records whether they ran as shown; a refusal still falls back to the agent, recorded as a deviation."""
+        from fastworkflow import planning_commands, review_proposals, run_listing
+
+        folder = self._app_workflow.folderpath
+        name = item.means.name
+        command = planning_commands.planning_command(folder, name)
+        presets = review_proposals.drafting_on()
+        refusal = None
+        reviewed = None
+        if command is None:
+            refusal = f"{name} could not be loaded"
+        else:
+            resolved = review_proposals.resolve_inputs(item, self._answers_by_number())
+            if presets:
+                reviewed, checked = review_proposals.reviewed_arguments(
+                    self._app_workflow, command, item, resolved, query,
+                    earlier=list(self._turn_subtask_plan.items[:origin]), answers=self._answers_by_number(),
+                    earlier_outputs=tuple(self._subtask_answers),
+                    planner_lm=getattr(self, "_current_planner_lm", None))
+            else:
+                checked = run_listing.check_planned_arguments(command, dict(resolved.named), query,
+                                                              earlier_outputs=list(self._subtask_answers))
+            refusal = checked.refusal
+            if refusal is None:
+                try:
+                    phases = planning_commands.call_phases(command, checked.args)
+                except planning_commands.PlanningCommandCallError as error:
+                    refusal = str(error)
+        if presets:
+            self._turn_subtask_bindings.append(review_proposals.binding_record(
+                origin + 1, item, reviewed, None if refusal is not None else checked.args,
+                f"refused, the agent ran it instead: {refusal}" if refusal is not None else None))
+        if refusal is not None:
+            return self._call_agent_for_query(
+                f"{query}\n\nThe planning command {name} cannot run as planned: {refusal}.",
+                query, first_step=self._next_step, template_text=self._original_text(origin),
+                evidence_floor=floor, bound_command=name)
+        call = planning_commands.PlanningCommandCallPlan(
+            plan="", args=checked.args, notes=list(checked.notes), prediction=None, phases=phases)
+        return self._start_planning_command_phases(query, command, call, first_step=self._next_step)
+
+    def _run_plain_means(self, item, query: str, origin: int, *, floor: int):
+        """F1 (fix-48np.1, drafting on): a sub-task bound to an execution command runs that command with its reviewed
+        inputs. Code runs it as the plan's one step (``planning_phases.CodeSteps``: the agent's own command tool, so the
+        CME parameter path and its validation, as a planning command's code steps run), going to the command's context
+        first when code finds a path; the agent then answers from its output. The agent writes no command text for it.
+
+        When a required input is unbound (review_proposals.reviewed_values), the agent handles the sub-task as before
+        (F2). When the CME refuses the values, or code cannot run the step, the agent takes over with the refusal in its
+        trajectory (F2). Either is recorded as a deviation (review_proposals.binding_record)."""
+        from fastworkflow import ModuleType, review_proposals, run_listing
+        from fastworkflow.planning import run as run_step
+
+        name = item.means.name
+        params_class = fastworkflow.RoutingRegistry.get_definition(self._app_workflow.folderpath).get_command_class(
+            name, ModuleType.COMMAND_PARAMETERS_CLASS)
+        required = [field for field, info in (params_class.model_fields.items() if params_class else ())
+                    if info.is_required()]
+        resolved = review_proposals.resolve_inputs(item, self._answers_by_number())
+        reviewed = review_proposals.reviewed_values(
+            self._app_workflow, item, resolved, required, earlier=list(self._turn_subtask_plan.items[:origin]),
+            answers=self._answers_by_number(), planner_lm=getattr(self, "_current_planner_lm", None))
+        self._narrow_to = name
+        try:
+            if reviewed.unbound:
+                self._turn_subtask_bindings.append(review_proposals.binding_record(
+                    origin + 1, item, reviewed, None,
+                    f"unbound {', '.join(reviewed.unbound)}, the agent ran it instead"))
+                return self._call_agent_for_query(
+                    query, query, first_step=self._next_step, template_text=self._original_text(origin),
+                    evidence_floor=floor, bound_command=name)
+            plan_text = f"1. {run_step(name.rsplit('/', 1)[-1], **reviewed.values)}"
+            outputs_before = len(self._turn_outputs)
+            self._initial_plan_text = plan_text
+            self._attach_finish_check(floor, values=True)
+            code = self._phase_code_steps(plan_text, 1, self._phase_command_names(), answers=True)
+            if code is not None:
+                code.done_inputs = {"user_query": (
+                    f"{query}\n\nThis step has run, with the reviewed inputs; answer from its output:\n{plan_text}")}
+            agent = self._workflow_tool_agent
+            listing = run_listing.bound_command_listing(self._app_workflow, name)
+
+            def run_bound():
+                agent.code_steps = code
+                return agent(user_query=f"{query}\n\nExecute these next steps:\n{plan_text}",
+                             available_commands=listing, first_step=self._next_step)
+
+            result = self._call_agent_with_retry(run_bound, trace_input=plan_text)
+            ran = None
+            for output in self._turn_outputs[outputs_before:]:
+                if output.command_name == name and output.command_response.success:
+                    ran = _planning_args(output.command_parameters)
+                    break
+            stop = getattr(code, "stop", None) if code is not None else "no code steps"
+            deviation = None if ran is not None else f"code did not run it ({stop}), the agent ran it instead"
+            self._turn_subtask_bindings.append(review_proposals.binding_record(
+                origin + 1, item, reviewed, ran, deviation))
+            return result
+        finally:
+            self._narrow_to = None
 
     def _original_text(self, origin: int) -> str:
         """The sub-task text an origin was split out as (its first entry, before any hand-off)."""
@@ -2653,23 +4161,24 @@ class WorkflowExecutionContext:
         The progress check reads the agent's current trajectory, so it runs before
         the next run replaces that trajectory. At most MAX_HANDOFFS continuations per sub-task.
         """
-        origin = self._origins[k]
-        if self._origins.count(origin) > MAX_HANDOFFS:
+        turn = self._turn_frame()
+        origin = turn.origins[k]
+        if turn.origins.count(origin) > MAX_HANDOFFS:
             # No continuation left: the capped answer stands as partial and the turn is exhausted.
-            self._subtask_exhausted = True
+            turn.subtask_exhausted = True
             return
         from fastworkflow.workflow_agent import run_progress_check
 
         done = run_progress_check(self, "step_limit", done_only=True).strip()
-        opened = _opened_part(getattr(self._workflow_tool_agent, "trajectory", None) or {})
+        opened = _opened_part(getattr(turn.agent, "trajectory", None) or {})
         logger.info("sub-task %d hit the step limit; handing off to a fresh executor (hand-off %d)",
-                    origin + 1, self._origins.count(origin))
-        self._subtasks.insert(k + 1, (
+                    origin + 1, turn.origins.count(origin))
+        turn.subtasks.insert(k + 1, (
             f"{self._original_text(origin)}\n\n"
             "Already done in this sub-task (do not repeat it; observation ids such as O12 can be looked up):\n"
             f"{done}"
             + (f"\n\n{opened}" if opened else "")))
-        self._origins.insert(k + 1, origin)
+        turn.origins.insert(k + 1, origin)
         # This capped run's answer is kept: _combined_answer joins it with the continuation's.
 
     def _combined_answer(self) -> str:
@@ -2689,20 +4198,38 @@ class WorkflowExecutionContext:
             for origin, text in joined.items()
         )
 
-    def _record_subtask_answer(self, result) -> None:
+    def _record_subtask_answer(self, result, typed: str = "") -> None:
+        outputs = self._subtask_outputs
+        # Padded first: a blob written before the typed outputs were kept has answers and no outputs.
+        outputs.extend([""] * (len(self._subtask_answers) - len(outputs)))
         self._subtask_answers.append(result.final_answer)
+        outputs.append(typed)
         trajectory = getattr(self._workflow_tool_agent, "trajectory", None) or {}
         steps = [int(key.rsplit("_", 1)[1]) for key in trajectory
                  if key.rsplit("_", 1)[-1].isdigit()]
         if steps:
-            self._next_step = max(steps) + 1
+            # Never backwards: a nested frame's steps (run_planning_command) may be past it.
+            self._next_step = max(self._next_step, max(steps) + 1)
 
-    def _call_agent_resume(self, observation: str):
-        return self._call_agent_with_retry(
-            lambda: self._workflow_tool_agent.resume(observation),
-            trace_input=observation,
-            resumed=True,
-        )
+    def _call_agent_resume(self, observation: str, *, completes_step: bool = False):
+        def resume():
+            # A plain answer is resumed as it always was; the flag is passed only for a nested run.
+            if completes_step:
+                return self._workflow_tool_agent.resume(observation, completes_step=True)
+            return self._workflow_tool_agent.resume(observation)
+
+        return self._call_agent_with_retry(resume, trace_input=observation, resumed=True)
+
+    def _resume_top_frame(self, observation: str, *, completes_step: bool = False):
+        """Resume the top frame's suspended run with *observation*: its phase run, or its agent.
+
+        *completes_step*: the observation is the run of a nested command the step waited on,
+        not a user's answer (``fastWorkflowReAct.resume``)."""
+        if self._phase_run is not None:
+            # A phase of a phased planning command call was suspended: resume it, then run the rest.
+            return self._run_planning_command_phases(resume_observation=observation,
+                                          resume_completes_step=completes_step)
+        return self._call_agent_resume(observation, completes_step=completes_step)
 
     def _awaiting_user_output(self, clarification: str) -> fastworkflow.CommandOutput:
         command_response = fastworkflow.CommandResponse(response=clarification)
@@ -2726,7 +4253,7 @@ class WorkflowExecutionContext:
         )
         if "[[" in result_text:
             # A DSPy field marker ("[[ ## completed ## ]]") a reply carried into its text.
-            from fastworkflow.skill_phases import clean_answer
+            from fastworkflow.planning_phases import clean_answer
             result_text = clean_answer(result_text)
 
         command_response = fastworkflow.CommandResponse(response=result_text)
@@ -2777,6 +4304,10 @@ class WorkflowExecutionContext:
             return result.command_output
 
         agent_result = self._run_agent(message)
+        return self._settle_agent_result(message, agent_result)
+
+    def _settle_agent_result(self, message: str, agent_result) -> fastworkflow.CommandOutput:
+        """The turn's output for one agent run: its suspension (the turn awaits the user), or its answer."""
         self._turn_agent_result = agent_result
         if getattr(agent_result, "suspended", None) is True:
             self._awaiting_user = True
@@ -2787,8 +4318,102 @@ class WorkflowExecutionContext:
         self._reset_agent_suspension()
         return self._finalize_agent_output(message, agent_result)
 
+    def _rerun_after_planning_command_refusal(self, reply: str) -> fastworkflow.CommandOutput:
+        """The reply to a refused planning command call's question: the turn runs once more from its request,
+        with the reply after it, so the planner's typed call sees the value the user gave (its
+        guards read the request). The question's exchange is completed here. Nothing ran before
+        the question (``_planning_command_refusal_may_ask``), so nothing is run twice."""
+        message = f"{self._suspended_user_message}\n{reply}"
+        self._note_agent_resume()
+        self.complete_ask_user_entry(reply)
+        self._planning_command_refusal_pending = False
+        self._planning_command_refusal_answered = True
+        self._reset_agent_suspension()
+        return self._settle_agent_result(message, self._run_agent(message))
+
+    def _approval_state_payload(self) -> Optional[dict]:
+        store = approval_binding.store_for(self._app_workflow)
+        if store is None or not store.records and not store.turn_seq:
+            return None
+        return store.to_state()
+
+    def _note_approval_inbound(self, surface, token: Optional[str], unattended: bool) -> None:
+        """Record the surface, token and turn kind the approval gate reads for this message."""
+        store = approval_binding.store_for(self._app_workflow)
+        if store is None:
+            return
+        store.surface = surface or approval_binding.CHANNEL_SURFACE
+        store.inbound_token = token
+        store.channel = str(self._channel_id or "")
+        store.task = str(self._session_key or self._channel_id or "")
+
+    def _resume_approval_direct(self, message: str) -> fastworkflow.CommandOutput:
+        """The reply to an approval raised outside the agent's loop (an MCP tool call), or a
+        /cancel_pending for a suspended one: the record resolves here, and its outcome is this
+        turn's output."""
+        awaiting = approval_binding.active_record(self._app_workflow)
+        was_suspended = awaiting is not None and awaiting.suspended_agent
+        resolution = approval_binding.resolve_reply(self, self._app_workflow, message)
+        if not resolution.done:
+            self._awaiting_user = True
+            return self._awaiting_user_output(resolution.text)
+        self._awaiting_user = False
+        if was_suspended:
+            self._reset_agent_suspension()
+        output = resolution.output
+        if output is None:
+            output = fastworkflow.CommandOutput(
+                command_response=fastworkflow.CommandResponse(response=resolution.text))
+        self.append_turn_output(output)
+        return output
+
+    def _approval_text_output(self, text: str) -> fastworkflow.CommandOutput:
+        """A plain text output for the user's approval management messages (never agent-visible)."""
+        output = fastworkflow.CommandOutput(command_response=fastworkflow.CommandResponse(response=text))
+        if self._app_workflow is not None:
+            output.workflow_name = self._app_workflow.folderpath.split("/")[-1]
+        self.append_turn_output(output)
+        return output
+
+    def cancel_pending_approvals(self) -> int:
+        """Invalidate every awaiting approval on this session (session end, eviction, /cancel_pending).
+
+        A suspended approval also abandons the agent's suspended tool call, so a later message is
+        never taken as its answer. Returns how many records were cancelled.
+        """
+        if self._app_workflow is None:
+            return 0
+        awaiting = approval_binding.active_record(self._app_workflow)
+        cancelled = approval_binding.cancel_all(self, self._app_workflow, reason="cancelled")
+        if awaiting is not None and awaiting.suspended_agent and self._awaiting_user:
+            self._reset_agent_suspension()
+        return cancelled
+
+    def _hold_resumed_approval_run(self, output: fastworkflow.CommandOutput) -> None:
+        """Hold the run an approval reply executed under the step it suspended (fix-3rsq.approval-finish-check).
+
+        The approved call runs through approval_binding._execute_stored (perform_action), not the
+        agent's execute path, so nothing holds its run for the step's archive row. Without that row
+        the finish check reads the step as not run and sends the agent back to run it again. The
+        step is the suspended agent's in-flight execute step: the nested frame's agent when the
+        suspension is inside a planning command, else the turn's agent. Never raises.
+        """
+        from fastworkflow.workflow_agent import _held_context, _hold_command_run
+
+        try:
+            agent = self._top_frame().agent or self._workflow_tool_agent
+            alias = current_execute_alias(agent)
+            if alias is None:
+                return
+            clause, name = _held_context(self, output, *self._current_record())
+            _hold_command_run(self, output, clause, name, alias=alias)
+        except Exception:  # noqa: BLE001 - holding a record must not fail the approved command
+            logger.debug("could not hold the approved run for its archive row", exc_info=True)
+
     def _resume_agent_message(self, user_answer: str) -> fastworkflow.CommandOutput:
         self._ensure_agent_initialized()
+        if self._planning_command_refusal_pending:
+            return self._rerun_after_planning_command_refusal(user_answer)
         # Catch awaiting_user/_suspended desync before any LLM work: resume()
         # consumes _suspended at entry, so a second request (or a restore that
         # lost the react blob) must not become a bare 500.
@@ -2797,21 +4422,48 @@ class WorkflowExecutionContext:
             raise NoSuspendedAgentStateError(
                 "No suspended ReAct state to resume"
             )
-        self._note_agent_resume()
-
-        from fastworkflow.workflow_agent import _post_ask_user_response
-
-        self._workflow_tool_agent.iteration_counter = -1
-        observation = _post_ask_user_response(
-            self._pending_clarification_request,
-            user_answer,
-            self,
-        )
-        if self._phase_run is not None:
-            # A phase of a phased skill call was suspended: resume it, then run the rest.
-            agent_result = self._run_skill_phases(resume_observation=observation)
+        awaiting = approval_binding.active_record(self._app_workflow)
+        approval_resumed = awaiting is not None and awaiting.suspended_agent
+        if approval_resumed:
+            # The suspended tool call is an approval (ADR-EXP-025): the reply resolves it, and
+            # the resolution is the observation. Nothing else reads the reply.
+            resolution = approval_binding.resolve_reply(self, self._app_workflow, user_answer)
+            if not resolution.done:
+                return self._awaiting_user_output(resolution.text)
+            self._note_agent_resume()
+            self.complete_ask_user_entry(user_answer)
+            if resolution.output is None and getattr(self._turn_frame(), "subtask_review_open", False):
+                # Declined or expired: the gate's review ends, and nothing runs (fix-3rsq.plan-review.2.6).
+                return self._end_subtask_review_unrun(awaiting.state)
+            if resolution.output is not None:
+                self.append_turn_output(resolution.output)
+                self._hold_resumed_approval_run(resolution.output)
+            self._workflow_tool_agent.iteration_counter = -1
+            observation = resolution.text
         else:
-            agent_result = self._call_agent_resume(observation)
+            self._note_agent_resume()
+
+            from fastworkflow.workflow_agent import _post_ask_user_response
+
+            self._workflow_tool_agent.iteration_counter = -1
+            observation = _post_ask_user_response(
+                self._pending_clarification_request,
+                user_answer,
+                self,
+            )
+        # An approval's observation is the approved command's own run: the step completes as one
+        # that returned normally, so its completion hook archives the run held above.
+        agent_result = self._resume_top_frame(observation, completes_step=approval_resumed)
+        # The suspension may be nested: each call that finishes hands its run to the step it
+        # was called from, which resumes next, until the turn frame is on top again.
+        while len(self._frame_stack()) > 1 and getattr(agent_result, "suspended", None) is not True:
+            if getattr(self._turn_frame(), "framework_entry", False) and len(self._frame_stack()) == 2:
+                if getattr(self._turn_frame(), "subtask_review_open", False):
+                    # The gate's review was accepted: the turn runs its sub-tasks (fix-3rsq.plan-review.2.6).
+                    return self._settle_agent_result(self._turn_user_message, self._accept_subtask_review(agent_result))
+                return self._finish_framework_call(agent_result)
+            observation = self._finish_nested_frame(agent_result)
+            agent_result = self._resume_top_frame(observation, completes_step=True)
         if self._subtasks and getattr(agent_result, "suspended", None) is not True:
             self._record_subtask_answer(agent_result)
             if getattr(agent_result, "exhausted", None) is True:
@@ -3129,11 +4781,9 @@ class WorkflowExecutionContext:
 
         return command_output
 
-    def _refine_user_query(
-        self, user_query: str, conversation_history: dspy.History
-    ) -> str:
-        if not conversation_history.messages:
-            return user_query
+    @staticmethod
+    def _conversation_context(conversation_history: dspy.History) -> str:
+        """The last five turns' summaries, one ``key: value`` line each; "" with no earlier turn."""
         messages = []
         for conv_dict in conversation_history.messages[-5:]:
             messages.extend(
@@ -3141,8 +4791,15 @@ class WorkflowExecutionContext:
                 for k, v in conv_dict.items()
                 if k != "conversation_traces"
             )
-        messages.append(f"new_user_query: {user_query}")
         return "\n".join(messages)
+
+    def _refine_user_query(
+        self, user_query: str, conversation_history: dspy.History
+    ) -> str:
+        if not conversation_history.messages:
+            return user_query
+        context = self._conversation_context(conversation_history)
+        return f"{context}\nnew_user_query: {user_query}" if context else f"new_user_query: {user_query}"
 
     def _extract_conversation_summary(
         self,

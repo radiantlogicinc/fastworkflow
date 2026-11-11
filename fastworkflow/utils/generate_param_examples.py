@@ -6,6 +6,7 @@ import random
 import sys
 import re
 import json
+from fastworkflow.utils.python_utils import legacy_module_names
 from enum import Enum
 from types import UnionType
 from typing import (
@@ -581,7 +582,7 @@ def render_field_examples(
         try:
             rendered.append(repr(run_stable_form(example)))
         except TypeError:
-            type_name = f"{type(example).__module__}.{type(example).__qualname__}"
+            type_name = legacy_module_names(f"{type(example).__module__}.{type(example).__qualname__}")
             logger.warning(
                 f"Field '{field_name}' of command '{command_name}' declares an example "
                 f"of type {type_name}, which has no run-stable representation. The "
@@ -1162,9 +1163,9 @@ def missing_value_example(command_name: str, field_annotations: Dict[str, Any]) 
     answers with the same "missing" markers `create_signature_from_pydantic_model`
     tells the extractor to use. None when the command has no required field.
     """
-    from fastworkflow.utils.signatures import INVALID_INT_VALUE
+    from fastworkflow.utils.signatures import INVALID_INT_VALUE, NOT_FOUND
 
-    missing_markers = {str: fastworkflow.get_env_var("NOT_FOUND"),
+    missing_markers = {str: NOT_FOUND,
                        int: INVALID_INT_VALUE,
                        float: -sys.float_info.max}
     fields = {"command": command_name.split("/")[-1]}

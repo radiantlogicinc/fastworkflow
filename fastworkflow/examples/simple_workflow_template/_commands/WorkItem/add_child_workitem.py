@@ -1,8 +1,8 @@
 from typing import Optional
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
+from fastworkflow.utils.signatures import NOT_FOUND
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from ...application.workitem import WorkItem
 
@@ -20,6 +20,12 @@ class Signature:
             description="Optional unique identifier for the work item among its siblings"
         )
 
+        @model_validator(mode="after")
+        def clear_placeholder_id(self, info):
+            if self.id == NOT_FOUND:
+                self.id = None
+            return self
+
     class Output(BaseModel):
         success: bool = Field(description="Whether add child was successful")
         error_msg: str = Field(default='', description="Error message if unsuccessful")
@@ -36,20 +42,13 @@ class Signature:
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
-    @staticmethod
-    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> tuple[bool, str]:
-        if cmd_parameters.id == fastworkflow.get_env_var('NOT_FOUND'):
-            cmd_parameters.id = None
-        return (True, '')
-
-
 class ResponseGenerator:
     """Handle command execution and craft the textual response."""
 
     def _process_command(self, 
                          workflow: fastworkflow.Workflow, 
                          input: Signature.Input) -> Signature.Output:
-        parent_workitem: WorkItem = workflow.command_context_for_response_generation
+        parent_workitem: WorkItem = workflow.record
         
         # Create a new child work item with the specified type        
         try:
@@ -63,20 +62,11 @@ class ResponseGenerator:
                 new_child_path = child_workitem.get_absolute_path()
             )
         except ValueError as e:
-            return Signature.Output(
-                success = False,
-                error_msg = str(e)
-            )
+            raise fastworkflow.Refused(str(e))
 
     def __call__(self, workflow: fastworkflow.Workflow, command: str, 
-                 command_parameters: Signature.Input) -> CommandOutput:
+                 command_parameters: Signature.Input) -> Signature.Output:
         output = self._process_command(workflow, command_parameters)
         
-        response = (
-            f'Response: {output.model_dump_json()}'
-        )
         
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=response)
-        )
+        return output

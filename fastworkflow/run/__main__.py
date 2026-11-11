@@ -135,6 +135,12 @@ def run_main(args):
         "[bold green]Tips:[/bold green] Type '//exit' to quit the application. Type '//new' to start a new conversation. " 
         "[bold green]Tips:[/bold green] Prefix natural language commands with a single '/' to execute them in deterministic (non-agentic) mode")
 
+    # Command files that do not load are skipped; say so before the first prompt (not only in the log).
+    from fastworkflow.command_preview import load_problems
+
+    for problem in load_problems(args.workflow_path):
+        console.print(f"[bold red]Load problem:[/bold red] {problem}")
+
     # ------------------------------------------------------------------
     # Startup progress bar ------------------------------------------------
     # ------------------------------------------------------------------
@@ -167,11 +173,20 @@ def run_main(args):
         )
         exit(1)
 
+    # Phase 9 step 4: artifacts built before the sparse "not here" construction are refused,
+    # for the app and for the internal CME workflow.
+    from fastworkflow.train.artifact_versioning import construction_record_problem
+    cme_path = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
+    problem = (construction_record_problem(args.workflow_path)
+               or construction_record_problem(cme_path))
+    if problem:
+        StartupProgress.end()
+        console.print(f"[bold red]Error:[/bold red] {problem}")
+        exit(1)
+
     startup_action: Optional[fastworkflow.Action] = None
     if args.startup_action:
-        with open(args.startup_action, 'r') as file:
-            startup_action_dict = json.load(file)
-        startup_action = fastworkflow.Action(**startup_action_dict)
+        startup_action = fastworkflow.load_startup_action(args.startup_action)
 
     context_dict = None
     if args.context_file_path:
@@ -323,7 +338,7 @@ if __name__ == "__main__":
         "--startup_command", help="Optional startup command", default=""
     )
     parser.add_argument(
-        "--startup_action", help="Optional startup action", default=""
+        "--startup_action", help="Optional startup action: a path to a JSON file, or an inline JSON object starting with '{'", default=""
     )
     parser.add_argument(
         "--keep_alive", help="Optional keep_alive", default=True

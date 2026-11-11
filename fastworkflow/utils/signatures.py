@@ -1,40 +1,120 @@
 import sys
+import contextvars
 import ast
+import html
 import inspect
 import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
+from dspy.experimental import Choice
 import os
 from contextlib import suppress
 from dataclasses import dataclass, field as dataclass_field
-from typing import Optional, Tuple, Union, Dict, Any, Type, List, get_args, get_origin
+from types import UnionType
+from typing import Literal, NamedTuple, Optional, Tuple, Union, Dict, Any, Type, List, get_args, get_origin
 from enum import Enum
 from datetime import date
 import re
-from difflib import get_close_matches
+from difflib import SequenceMatcher, get_close_matches
+from concurrent.futures import ThreadPoolExecutor
 import json
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pydantic_core import PydanticUndefined
 
 import fastworkflow
 from fastworkflow import ModuleType
 from fastworkflow.utils.logging import logger
 from fastworkflow.model_pipeline_training import get_route_layer_filepath_model
-from fastworkflow.utils.fuzzy_match import find_best_matches
+from fastworkflow.utils.fuzzy_match import (
+    best_window_distance, find_best_matches, normalize_text, normalized_levenshtein_distance,
+)
 from fastworkflow.utils import dspy_utils
+from fastworkflow.utils.extraction_attempts import FirstAttemptGreedy
+from fastworkflow.utils.input_validation import bound_fields, is_pydantic_model, set_field_unvalidated
 from fastworkflow.utils.dspy_logger import DSPyForward
 from fastworkflow.command_directory import CommandDirectory
+from fastworkflow import planning_commands
+from fastworkflow.utils.workflow_vocabulary import (
+    KIND_WORD_WHY, WorkflowVocabulary, is_kind_word, is_pronoun_phrase, load_workflow_vocabulary)
 
-MISSING_INFORMATION_ERRMSG = None
-INVALID_INFORMATION_ERRMSG = None
-PARAMETER_EXTRACTION_ERROR_MSG = None
-NOT_FOUND = None
+# Framework sentinels, fixed in code (not env settings). ``NOT_FOUND`` is what the
+# extractor answers for a value it could not find, and what a required field holds
+# until the user supplies it. ``INVALID`` is the marker for a value that failed a check.
+NOT_FOUND = "NOT_FOUND"
+INVALID = "INVALID"
+MISSING_INFORMATION_ERRMSG = "Missing parameter values: "
+INVALID_INFORMATION_ERRMSG = "Invalid parameter values: "
+PARAMETER_EXTRACTION_ERROR_MSG = "Error in parameter extraction: {error}"
 
 LLM_PARAM_EXTRACTION = None
 LITELLM_API_KEY_PARAM_EXTRACTION = None
 
 INVALID_INT_VALUE = -sys.maxsize
 INVALID_FLOAT_VALUE = -sys.float_info.max
+
+
+def not_given_value(field_info: Any) -> Any:
+    """What a field of a parameters model holds when nothing gives it a value.
+
+    A declared default wins (a factory is called). Otherwise a required field holds the
+    framework's marker for its type, which is what the user is then asked for: ``NOT_FOUND``
+    for a str, ``INVALID_INT_VALUE`` / ``INVALID_FLOAT_VALUE`` for a number, ``[]`` for a list.
+    The developer writes none of this: a plain required field (no default) gets it here.
+    An Optional field, or any other type, holds None.
+    """
+    if field_info.default is not PydanticUndefined:
+        return field_info.default
+    if field_info.default_factory is not None:
+        return field_info.default_factory()
+    annotation = field_info.annotation
+    if get_origin(annotation) in (Union, UnionType):
+        return None
+    origin = get_origin(annotation)
+    if origin is list or annotation is list:
+        return []
+    if annotation is str:
+        return NOT_FOUND
+    if annotation is int:
+        return INVALID_INT_VALUE
+    if annotation is float:
+        return INVALID_FLOAT_VALUE
+    return None
+
+
+def is_required_argument(field_info: Any) -> bool:
+    """Whether a caller must give the field: no declared default, and not Optional."""
+    if not field_info.is_required():
+        return False
+    return get_origin(field_info.annotation) not in (Union, UnionType)
+
+
+def parameters_with_unfilled(model_class: Type[BaseModel], values: Dict[str, Any]) -> BaseModel:
+    """The parameters model for *values*, with each required field *values* leaves out set to
+    its ``not_given_value``, so validation reports it as missing (and the user is asked for it)
+    instead of pydantic raising on the construction.
+
+    The given values are checked field by field (``bound_fields``: type, constraints and the field's
+    own validators), with no model validators: an ``Input``'s validators need the validation context, and ``validate_parameters``
+    runs them with it, once. A value that does not check raises ValidationError when every field was
+    given, as the constructor did; with a field unfilled, the model is built unvalidated, and
+    ``validate_parameters`` is the one check that runs, as on the NLU path.
+    """
+    unfilled = {
+        name: not_given_value(info)
+        for name, info in getattr(model_class, "model_fields", {}).items()
+        if name not in values and info.is_required()
+    }
+    if not is_pydantic_model(model_class):
+        # Not a pydantic model: nothing to check or mark, so it is built from the values as given.
+        return model_class(**values)
+    data = {**values, **unfilled}
+    try:
+        checked = bound_fields(model_class, data)
+    except ValidationError:
+        if not unfilled:
+            raise
+        return model_class.model_construct(**data)
+    return model_class.model_construct(**checked)
 
 
 # --- Angle-bracketed parameter values ------------------------------------------
@@ -49,6 +129,23 @@ INVALID_FLOAT_VALUE = -sys.float_info.max
 # The whole value is one bracketed token, possibly doubled (``<<x>>``). A value
 # with brackets inside it, or text outside them, is left alone.
 _BRACKETED_VALUE = re.compile(r"^\s*<+\s*([^<>]*?)\s*>+\s*$")
+
+# How many rounds of HTML entity decoding a value gets before it is matched. A model that answers
+# through a forced tool call sometimes writes the brackets escaped (``&lt;UNKNOWN&gt;``), and once
+# more for a doubly escaped reply (``&amp;lt;UNKNOWN&amp;gt;``) (fix-3koe).
+_ENTITY_DECODE_ROUNDS = 3
+
+
+def decode_entities(text: str) -> str:
+    """*text* with HTML entities decoded, repeated until it no longer changes (at most
+    ``_ENTITY_DECODE_ROUNDS`` rounds). Used only to match the bracket shapes below: a value with
+    no bracketed shape keeps its own text (``AT&amp;T`` is not rewritten)."""
+    for _ in range(_ENTITY_DECODE_ROUNDS):
+        decoded = html.unescape(text)
+        if decoded == text:
+            break
+        text = decoded
+    return text
 
 # Lowercase words joined by ``_`` or ``-``, no digits: the shape of a variable
 # name, which is what a usage-text placeholder is.
@@ -73,7 +170,8 @@ def _is_placeholder_text(inner: str, field_name: str) -> bool:
     ``9a1b2c3d...``, ``Ann Lee``, ``PayHub``.
     """
     core = re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9]+$", "", inner)
-    if not core:
+    if not core or core.lower() == "unknown":
+        # ``<UNKNOWN>`` is the extractor's not-given marker (fix-1pfu), never a value.
         return True
     if not (core.islower() or core.isupper()):
         return False
@@ -107,7 +205,8 @@ def classify_bracketed_value(value: Any, field_name: str) -> Tuple[str, Any]:
         return ("unwrapped", items) if changed else ("unchanged", value)
     if not isinstance(value, str) or isinstance(value, Enum):
         return "unchanged", value
-    match = _BRACKETED_VALUE.match(value)
+    # Escaped brackets (``&lt;item_uid&gt;``) are brackets: matched on the decoded text (fix-3koe).
+    match = _BRACKETED_VALUE.match(decode_entities(value))
     if not match:
         return "unchanged", value
     inner = match[1]
@@ -214,6 +313,21 @@ _PLACEHOLDER_QUALIFIERS = frozenset({
 })
 
 
+def _is_declared_choice(annotation: Any, value: Any) -> bool:
+    """Whether str *value* is one of the choices *annotation* declares: a member of a ``Literal``,
+    or the value of an ``Enum``, alone or inside an ``Optional``. A declared choice is a value
+    whatever word it is: ``code`` for ``Literal["code", "name"]`` is never a placeholder."""
+    if not isinstance(value, str):
+        return False
+    options = get_args(annotation) if get_origin(annotation) is Union else (annotation,)
+    for option in options:
+        if get_origin(option) is Literal and value in get_args(option):
+            return True
+        if isinstance(option, type) and issubclass(option, Enum) and value in {m.value for m in option}:
+            return True
+    return False
+
+
 def is_ungrounded_placeholder(value: Any, field_name: str,
                               request_text: Optional[str]) -> bool:
     """Whether str *value* is placeholder-shaped and *request_text* never writes it.
@@ -240,6 +354,142 @@ def is_ungrounded_placeholder(value: Any, field_name: str,
     if len(words) >= 2 and words[0] in _PLACEHOLDER_QUALIFIERS:
         return bool(set(words[1:]) & known)
     return set(words) <= known
+
+
+# --- A command's name written as a value -----------------------------------------------
+#
+# An extractor sometimes copies a command's name into a parameter: a planning command's own name as
+# its ``application``, or another command's name as the ``query`` of a lookup, because it
+# has just been reading that name. No real value is a command name, so such a value is
+# treated as not given. Only the identifier form counts (``orphan_login_review``,
+# ``Directory/find_group``, in any case); a name written with spaces is a value, so an
+# entity called "Tag Record" is never refused. A declared Literal or enum choice is never
+# refused, whatever word it is.
+
+def command_name_index(app_workflow, subject_command_name: str) -> Dict[str, str]:
+    """Identifier form (lowercase) of each command name of *app_workflow* -> the name as written.
+
+    Names come from the workflow's command directory: each qualified key (``Directory/find_group``)
+    and its bare name (``find_group``). Empty when the workflow has no folder path.
+    """
+    names = set()
+    folderpath = getattr(app_workflow, "folderpath", None)
+    if folderpath:
+        directory = fastworkflow.RoutingRegistry.get_definition(folderpath).command_directory
+        for key in directory.map_command_2_metadata:
+            names.add(key)
+            if "/" in key:
+                names.add(key.split("/", 1)[1])
+    index: Dict[str, str] = {}
+    for name in sorted(names):
+        index.setdefault(name.lower(), name)
+    return index
+
+
+def _is_declared_choice_of(annotation: Any, value: Any) -> bool:
+    """``_is_declared_choice`` for a field, and for the items of a list field."""
+    if _is_declared_choice(annotation, value):
+        return True
+    options = get_args(annotation) if get_origin(annotation) is Union else (annotation,)
+    return any(
+        get_origin(option) in (list, List) and get_args(option)
+        and _is_declared_choice(get_args(option)[0], value)
+        for option in options
+    )
+
+
+def command_name_refusals(cmd_parameters: BaseModel, subject_command_name: str,
+                          index: Dict[str, str], skip: Any) -> Dict[str, Tuple[Any, str]]:
+    """Fields whose str value (or one str item of a list) is a command name.
+
+    Returns ``{field: (value, wording)}``. The name is the called command's own (its
+    qualified or bare name) or any other command's name in *index*. Fields in *skip* were
+    already refused by ``screen_parameter_values`` and are left alone.
+    """
+    own_forms = {name.strip().lower() for name in
+                 (subject_command_name or "", (subject_command_name or "").split("/")[-1]) if name}
+    refused: Dict[str, Tuple[Any, str]] = {}
+    for field_name, field_info in type(cmd_parameters).model_fields.items():
+        if field_name in skip:
+            continue
+        value = getattr(cmd_parameters, field_name, None)
+        for item in (value if isinstance(value, list) else [value]):
+            if not isinstance(item, str) or isinstance(item, Enum):
+                continue
+            if _is_declared_choice_of(field_info.annotation, item):
+                continue
+            form = item.strip().lower()
+            if form in own_forms:
+                wording = (f"{field_name} {item!r} is the name of this command, not a value: "
+                           f"pass the real {field_name} the request names.")
+            elif form in index:
+                wording = (f"{field_name} {item!r} is the name of the command {index[form]!r}, "
+                           f"not a value: pass the real {field_name} the request names.")
+            else:
+                continue
+            refused[field_name] = (item, wording)
+            break
+    return refused
+
+
+# --- A free-text value that is only a word of the workflow ---------------------------
+#
+# A planner that fills a free-text (``str``) input can write a word that names the kind of
+# record or a field name rather than a record (``query='right_name'``, ``query='department'``),
+# or a pronoun (``query='Her'``). The workflow's own vocabulary
+# (``fastworkflow.utils.workflow_vocabulary``) and the closed pronoun list decide. Only a value
+# that is exactly such a word is refused; a value that merely contains one passes. A declared
+# choice (a Literal or an Enum field) is never screened, whatever word it is. A kind-selector
+# field (its description or labeled examples name the kinds it takes, ``kind_options``) is exempt
+# from the kind-word refusal for the values it lists; the pronoun refusal still applies to it.
+# The text ``None`` is the missing-value marker and is never a kind word (``default_unfilled_optional_strs``).
+
+PRONOUN_WHY = "is a pronoun, not a value"
+
+
+def _workflow_vocabulary(app_workflow) -> Optional[WorkflowVocabulary]:
+    """The workflow's vocabulary (the stored file when fresh, else derived in memory); None when
+    the workflow has no folder path or the derivation fails. The pronoun screen still runs then."""
+    folderpath = getattr(app_workflow, "folderpath", None)
+    if not folderpath:
+        return None
+    try:
+        return load_workflow_vocabulary(folderpath)
+    except Exception:  # noqa: BLE001 - the workflow's own code: the screens are skipped, not the call
+        logger.warning(f"could not derive the vocabulary of {folderpath}", exc_info=True)
+        return None
+
+
+def word_screen_refusals(cmd_parameters: BaseModel, vocabulary: Optional[WorkflowVocabulary],
+                         skip: Any, command_name: Optional[str]) -> Dict[str, Tuple[Any, str]]:
+    """Free-text ``str`` fields whose value is only a pronoun or only a kind word or field name.
+
+    Returns ``{field: (value, wording)}``. A ``str`` or ``Optional[str]`` field only; the
+    fields in *skip* were already refused by an earlier screen and are left alone. A kind-selector
+    field (``WorkflowVocabulary.kind_options``) is exempt from the kind-word refusal only: a value
+    it lists is a kind it takes. The pronoun refusal still applies.
+    """
+    refused: Dict[str, Tuple[Any, str]] = {}
+    for field_name, field_info in type(cmd_parameters).model_fields.items():
+        if field_name in skip:
+            continue
+        if field_info.annotation is not str and not is_optional_str_field(field_info):
+            continue
+        value = getattr(cmd_parameters, field_name, None)
+        if not isinstance(value, str) or isinstance(value, Enum):
+            continue
+        text = value.strip()
+        if not text:
+            continue
+        options = vocabulary.kind_options(command_name, field_name) if vocabulary is not None else frozenset()
+        if is_pronoun_phrase(text):
+            why = PRONOUN_WHY
+        elif is_kind_word(text, field_name, vocabulary, options):
+            why = KIND_WORD_WHY
+        else:
+            continue
+        refused[field_name] = (value, f"{field_name} {value!r} {why}: pass the real {field_name} the request names.")
+    return refused
 
 
 # --- Numbers out of any sane range ---------------------------------------------------
@@ -356,11 +606,14 @@ def is_optional_str_field(field_info: Any) -> bool:
 
 
 def default_unfilled_optional_strs(cmd_parameters: BaseModel, not_found: Optional[str]) -> List[str]:
-    """Give each ``Optional[str]`` field holding ``not_found`` or ``"None"`` its default.
+    """Give each ``Optional[str]`` field, and each ``str`` field that declares a default, holding
+    ``not_found`` or ``"None"`` its default.
 
     Returns the names of the fields changed. The default is the field's declared one
-    (a factory is called), or None when it declares none. Required fields are left
-    alone, so a missing one is still reported and asked for.
+    (a factory is called), or None when it declares none. A required ``str`` field holding
+    ``"None"`` is set to None, the missing value: the literal text ``None`` is the extractor's
+    "not given" marker, not a value, so the missing check reports the field as missing. A
+    required field holding ``not_found`` is left alone (that check already counts it missing).
     """
     markers = {"None"} | ({not_found} if not_found else set())
     changed: List[str] = []
@@ -368,15 +621,23 @@ def default_unfilled_optional_strs(cmd_parameters: BaseModel, not_found: Optiona
         value = getattr(cmd_parameters, field_name, None)
         if not isinstance(value, str) or isinstance(value, Enum) or value.strip() not in markers:
             continue
-        if not is_optional_str_field(field_info):
+        if is_optional_str_field(field_info):
+            default = field_info.get_default(call_default_factory=True)
+            set_field_unvalidated(cmd_parameters, field_name, None if default is PydanticUndefined else default)
+        elif not field_info.is_required():
+            # A plain ``str`` field that declares a default (``reason: str = "ordered by mistake"``) is
+            # optional too: not given, it takes that default instead of reaching the missing check,
+            # which counts only ``Optional[...]`` fields as optional and would ask the user for it.
+            set_field_unvalidated(cmd_parameters, field_name, field_info.get_default(call_default_factory=True))
+        elif value.strip() == "None":
+            set_field_unvalidated(cmd_parameters, field_name, None)
+        else:
             continue
-        default = field_info.get_default(call_default_factory=True)
-        setattr(cmd_parameters, field_name, None if default is PydanticUndefined else default)
         changed.append(field_name)
     return changed
 
 
-# --- One pass over a call's values, shared by commands and skill calls -----------------
+# --- One pass over a call's values, shared by commands and planning command calls -----------------
 
 
 @dataclass
@@ -418,8 +679,8 @@ def screen_parameter_values(cmd_parameters: BaseModel, quote_texts: Optional[str
     "not given" marker is left as it is, for the caller to report as missing.
 
     *field_names*, when given, limits the pass to those fields. ``validate_parameters``
-    runs this before any other check of a command's parameters; a skill call runs it on its
-    ``str`` and ``int`` arguments (``fastworkflow.skill_commands.check_arguments``).
+    runs this before any other check of a command's parameters; a planning command call runs it on its
+    ``str`` and ``int`` arguments (``fastworkflow.planning_commands.check_arguments``).
     """
     screen = ParameterScreen()
     placeholder_fields = screen.placeholder_fields
@@ -438,16 +699,33 @@ def screen_parameter_values(cmd_parameters: BaseModel, quote_texts: Optional[str
         quoted, field_value = unwrap_quoted_value(field_value, quote_texts)
         kind, new_value = classify_bracketed_value(field_value, field_name)
         if kind == "unwrapped":
-            unwrapped_fields[field_name] = original_value
             inner_quoted, new_value = unwrap_quoted_value(new_value, quote_texts)
             quoted = quoted or inner_quoted
             field_value = new_value
+        # HEAD wrote a screened value with a plain assignment, which validated it only on an Input with
+        # validate_assignment=True (there it raised, uncaught). On such an Input the value is checked
+        # against its own field (type, constraints, field validators; no model validator): a value that
+        # passes is stored as validated (coerced), one that does not is refused like the other invalid
+        # values (reported, not written; the field keeps the value as given). Any other Input gets the
+        # unwrapped value stored unvalidated, as HEAD did.
+        if field_value is not original_value and type(cmd_parameters).model_config.get("validate_assignment"):
+            try:
+                field_value = bound_fields(type(cmd_parameters), {field_name: field_value})[field_name]
+            except ValidationError:
+                invalid_fields.append(f"{field_name} '{field_value}'")
+                continue
+        if kind == "unwrapped":
+            unwrapped_fields[field_name] = original_value
         if quoted:
             quoted_fields[field_name] = original_value
         if field_value is not original_value:
-            setattr(cmd_parameters, field_name, field_value)
+            set_field_unvalidated(cmd_parameters, field_name, field_value)
+        # A declared Literal or Enum choice is never ungrounded: it is the field's own vocabulary,
+        # and a choice that looks like a placeholder word (``code``) is not one. A bracketed
+        # placeholder (``<code>``) is still refused: it is not the choice itself.
         if kind == "placeholder" or (
             kind == "unchanged"
+            and not _is_declared_choice(field_info.annotation, field_value)
             and is_ungrounded_placeholder(field_value, field_name, grounding_text)
         ):
             placeholder_fields[field_name] = field_value
@@ -464,7 +742,7 @@ def screen_parameter_values(cmd_parameters: BaseModel, quote_texts: Optional[str
             if default is PydanticUndefined and is_optional_field:
                 default = None
             if default is not PydanticUndefined:
-                setattr(cmd_parameters, field_name, default)
+                set_field_unvalidated(cmd_parameters, field_name, default)
                 # The framework's own "not given" marker is routine; only a
                 # number the model made up is worth recording.
                 if number not in (INVALID_INT_VALUE, INVALID_FLOAT_VALUE):
@@ -514,13 +792,56 @@ def get_trainset(subject_command_name,workflow_folderpath) -> List[Dict[str, Any
         return trainset
 
 
+# Jev's pick among the candidates of an undecided fuzzy match (DatabaseValidator.fuzzy_match_with_request).
+# Measured: with value descriptions, 97 confident picks and 1 wrong; without them (value names alone)
+# 6 wrong picks in 26, so the helper never calls Jev without descriptions. 0.9 is the conservative bar.
+VALUE_PICK_THRESHOLD = 0.9
+VALUE_PICK_ENV_VAR = "FW_JEV_VALUE_PICK"
+_VALUE_PICK_OFF = ("off", "0", "false")
+_VALUE_PICK_FALLBACK_CANDIDATES = 5
+
+
+#: A unique fuzzy match is applied only when no other candidate scores within this margin of it (edits /
+#: length, the scale of auto_apply_threshold). Within the margin the value is ambiguous: 'Sarah Coen' is one
+#: edit from both 'Sarah Chen' (1/9) and 'Sarah Cohen' (1/10), and the longer name wins on ratio alone
+#: (fix-jd9o.10). 0.08 was picked on the fix-jd9o.10 dev sets, which scored window distance only; the score
+#: here is the smaller of window and whole-string distance, so re-measure before quoting a rate.
+NEAR_TIE_MARGIN = 0.08
+_NEAR_TIE_EPSILON = 1e-9   # float slack so a runner-up exactly at the margin still counts as within it
+
+
+def _near_tied_candidates(value: str, key_values: list[str], cutoff: float, margin: float) -> list[tuple[float, str]]:
+    """Each distinct candidate within ``cutoff`` with its score, nearest first, when it is within ``margin``
+    of the nearest candidate's score. A candidate's score is the smaller of its best-window distance (the
+    find_best_matches scale, which lets a containing name score 0.0) and its whole-string distance over the
+    longer of the two, so 'Sarah Cohen' (1/10 for 'Sarah Coen') is not penalised for its extra letter."""
+    normalized_value = normalize_text(value)
+    scored: dict[str, float] = {}
+    for candidate in key_values:
+        if candidate in scored:
+            continue
+        normalized_candidate = normalize_text(candidate)
+        window = best_window_distance(normalized_value, normalized_candidate, max_normalized=cutoff)
+        whole = normalized_levenshtein_distance(normalized_value, normalized_candidate, max_normalized=cutoff)
+        score = min(window, whole)
+        if score <= cutoff:
+            scored[candidate] = score
+    if not scored:
+        return []
+    nearest = min(scored.values())
+    ranked = sorted(scored.items(), key=lambda item: item[1])   # stable: ties keep list order
+    return [(score, candidate) for candidate, score in ranked
+            if score - nearest <= margin + _NEAR_TIE_EPSILON]
+
+
 class DatabaseValidator:
     """Generic validator for database lookups with fuzzy matching"""
-    
+
     @staticmethod
     def fuzzy_match(value: str, key_values: list[str], threshold: float = 0.6,
                     suggest_threshold: float = 0.7,
-                    auto_apply_threshold: float = 0.2) -> Tuple[bool, Optional[str], List[str]]:
+                    auto_apply_threshold: float = 0.2,
+                    near_tie_margin: float = NEAR_TIE_MARGIN) -> Tuple[bool, Optional[str], List[str]]:
         """Find the closest matching value in the specified database.
 
         Three stages run in order, and each one short-circuits: a
@@ -549,11 +870,14 @@ class DatabaseValidator:
             characters exceeds this and is offered as a suggestion instead.
             Raise it per command if an extra clarification turn costs more than
             a wrong substitution.
+        near_tie_margin
+            A candidate's score is the smaller of its best-window distance and its whole-string distance
+            (edits / the longer length), so an extra letter does not hide a near tie. A match is applied only
+            when the window-best candidate is the only one within this margin of the best score. Otherwise
+            nothing is applied: the result is ``(False, None, suggestions)``, the window-best matches and every
+            candidate within the margin, nearest first, so the caller asks the user to choose. A tie is always
+            ambiguous; 0.0 asks only on exact ties (and when the two scores disagree on the best candidate).
         """
-        global NOT_FOUND
-        if not NOT_FOUND:
-            NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
-
         if not value or value in [None, NOT_FOUND]:
             return False, None, []
 
@@ -567,10 +891,15 @@ class DatabaseValidator:
         best_matches, best_distance = find_best_matches(
             value, key_values, threshold = suggest_threshold, best_window = True)
         if best_matches:
-            if len(best_matches) == 1 and best_distance <= auto_apply_threshold:
+            near = [candidate for _, candidate in _near_tied_candidates(
+                value, key_values, suggest_threshold, near_tie_margin)]
+            # The window-best matches always stay in the suggestions (every tie at the best distance).
+            near = list(dict.fromkeys(near + best_matches))
+            if near == [best_matches[0]] and len(best_matches) == 1 and best_distance <= auto_apply_threshold:
                 return True, best_matches[0], []
-            # Ambiguous, or close enough to offer but too far to apply unannounced.
-            return False, None, best_matches
+            # Ambiguous (a tie, or a runner-up within the margin), or close enough to offer but too far
+            # to apply unannounced.
+            return False, None, near
 
         lowercase_matches = get_close_matches(
             value.lower(), 
@@ -591,6 +920,312 @@ class DatabaseValidator:
 
         return False, None, []
 
+    @staticmethod
+    def fuzzy_match_with_request(value: str, key_values: list[str], request: str,
+                                 descriptions: Optional[Dict[str, str]],
+                                 threshold: float = 0.6, suggest_threshold: float = 0.7,
+                                 auto_apply_threshold: float = 0.2,
+                                 argument_name: str = "") -> Tuple[bool, Optional[str], List[str]]:
+        """``fuzzy_match``, and when that is not decisive, Jev reads the request to pick the intended value.
+
+        Same return contract as ``fuzzy_match``. A unique fuzzy match stands and Jev is not called. When
+        fuzzy matching leaves several candidates (its suggestions, or the five closest keys by ``difflib``
+        when it has none), one Jev call sees the *request* and each candidate with its description. The
+        pick is returned as a match only when Jev is at least ``VALUE_PICK_THRESHOLD`` sure of it and it is
+        one of the candidates; "ask" or a less sure answer returns ``fuzzy_match``'s result, so the hook
+        still asks the user to choose.
+
+        Descriptions are required. ``descriptions`` maps each key value to a short description of what it
+        is. Without them Jev picks from bare names and makes wrong picks (measured: 6 wrong in 26), so with
+        no descriptions (None or {}) Jev is not called. An empty *request* also makes no call.
+
+        A hook gets the request text through its ``command_text`` parameter: ``validate_parameters`` passes
+        the command's request (its statement) to a hook that declares ``command_text`` and to no other hook.
+        Pass that text as *request*.
+
+        Jev is not called when the value is empty or NOT_FOUND, *key_values* is empty, no Jev LM is
+        configured (no JEV_API_KEY), or the switch ``FW_JEV_VALUE_PICK`` is off (``off``, ``0`` or ``false``,
+        case-insensitive; default on). The call never raises: a failure logs a warning and returns
+        ``fuzzy_match``'s result.
+        """
+        fuzzy = DatabaseValidator.fuzzy_match(value, key_values, threshold, suggest_threshold,
+                                              auto_apply_threshold)
+        if fuzzy[0]:
+            return fuzzy
+        if not request or not descriptions or not value or value == NOT_FOUND or not key_values:
+            return fuzzy
+        switch = str(fastworkflow.get_env_var(VALUE_PICK_ENV_VAR, default="on")).strip().lower()
+        if switch in _VALUE_PICK_OFF:
+            return fuzzy
+        try:
+            from fastworkflow.workflow_agent import _jev_lm   # read at call time (workflow_agent imports this module)
+            lm = _jev_lm()
+            if lm is None:
+                return fuzzy
+            candidates = list(dict.fromkeys(fuzzy[2]))
+            if not candidates:
+                candidates = sorted(
+                    key_values,
+                    key=lambda k: SequenceMatcher(None, value.lower(), k.lower()).ratio(),
+                    reverse=True,
+                )[:_VALUE_PICK_FALLBACK_CANDIDATES]
+                candidates = list(dict.fromkeys(candidates))
+            if "ask" in candidates:
+                return fuzzy
+            options = tuple(
+                (v, f"{v} ({descriptions.get(v, 'no other details')})") for v in candidates
+            ) + (("ask", "The request does not say which one; the user must choose."),)
+            signature = dspy.make_signature({
+                "request": (str, dspy.InputField(desc="the user's request")),
+                "argument": (str, dspy.InputField(
+                    desc="the argument being filled and the value written for it")),
+                "value": (Choice[options], dspy.OutputField(
+                    desc="Which of these does the request mean? 'ask' if it does not say.")),
+            }, "Decide which candidate value the user's request means for the argument.")
+            where = f"{argument_name}; " if argument_name else ""
+            with dspy.context(lm=lm):
+                choice = dspy.Predict(signature)(
+                    request=request,
+                    argument=f"{where}value written for it: '{value}'",
+                ).value
+            picked = str(choice.value)
+            probability = float((choice.probabilities or {}).get(picked, choice.confidence))
+            logger.info(f"value pick for '{value}': {picked} (probability {probability:.2f})")
+            if picked != "ask" and picked in candidates and probability >= VALUE_PICK_THRESHOLD:
+                return True, picked, []
+            return fuzzy
+        except Exception:  # noqa: BLE001 - the pick is an extra; fuzzy_match's result stands
+            logger.warning(f"could not pick the value for '{value}' from the request", exc_info=True)
+            return fuzzy
+
+
+def _planning_command_of(app_workflow, subject_command_name: str):
+    """The loaded planning command *subject_command_name* of *app_workflow*, or None."""
+    folderpath = getattr(app_workflow, "folderpath", None)
+    if not folderpath:
+        return None
+    directory = fastworkflow.RoutingRegistry.get_definition(folderpath).command_directory
+    metadata = directory.map_command_2_metadata.get(subject_command_name)
+    if metadata is None or not metadata.is_planning:
+        return None
+    return planning_commands.planning_command(folderpath, subject_command_name)
+
+
+def _unfilled_required(planning, cmd_parameters: BaseModel) -> List[str]:
+    """The required arguments of a planning command that hold no value (missing)."""
+    unfilled = []
+    for param in planning.params:
+        value = getattr(cmd_parameters, param.name, None)
+        if param.required and (value is None or value == NOT_FOUND
+                               or (isinstance(value, str) and not value.strip())
+                               or (isinstance(value, list) and not value)):
+            unfilled.append(param.name)
+    return unfilled
+
+
+_REMOVED_VALIDATE_HOOK = (
+    'validate_extracted_parameters is removed: write @model_validator(mode="after") on Input '
+    '(read info.context["command_text"], ["workflow"], ["command"])'
+)
+
+
+def removed_validate_hook_message(signature_class, where: str) -> Optional[str]:
+    """The load error for a Signature that still defines ``validate_extracted_parameters`` (spec 3.1), or None."""
+    if signature_class is not None and "validate_extracted_parameters" in vars(signature_class):
+        return f"{where}: {_REMOVED_VALIDATE_HOOK}"
+    return None
+
+
+class _InputRules(NamedTuple):
+    """The outcome of the Input's validators (``_check_input_rules``)."""
+    ran: bool                 # the Input declares a validator
+    message: Optional[str]    # the refusal's or the call error's text; None when accepted
+    fields: tuple             # the fields a fastworkflow.Refused named
+    raised: Optional[str]     # the exception type of a validator that raised (not a refusal)
+    changed: tuple            # the fields the validators wrote back
+
+
+def _declares_input_validators(model) -> bool:
+    """Whether an Input declares a model or field validator (spec 3.1)."""
+    decorators = getattr(model, "__pydantic_decorators__", None)
+    return bool(decorators and (decorators.model_validators or decorators.field_validators))
+
+
+_RETIRED_DB_LOOKUP = (
+    "db_lookup is retired: do the lookup in a model validator on Input, write the corrected value "
+    "to self, or raise fastworkflow.Refused('... Did you mean ...?', field='<name>')"
+)
+
+
+def reject_retired_db_lookup(signature_class, input_model, where: str) -> None:
+    """A load error for the retired ``db_lookup``: the field key or the Signature method (fix-3rsq.one-hook)."""
+    if signature_class is not None and "db_lookup" in vars(signature_class):
+        raise ValueError(f"{where}: Signature.db_lookup: {_RETIRED_DB_LOOKUP}")
+    if input_model is None:
+        return
+    for name, info in input_model.model_fields.items():
+        extra = getattr(info, "json_schema_extra", None)
+        if isinstance(extra, dict) and "db_lookup" in extra:
+            raise ValueError(f"{where}: field {name!r} has json_schema_extra 'db_lookup': {_RETIRED_DB_LOOKUP}")
+
+
+# Jev's check of the fields an LLM extraction filled (fields_not_given). A filled field is reset
+# to its not-given value when Jev is at least FIELD_GIVEN_THRESHOLD sure the statement does not
+# give it a value. Measured: 775/778 agreement with a reference model, and at probability >= 0.7
+# it never blanked a correct value; 0.9 is the conservative bar.
+FIELD_GIVEN_THRESHOLD = 0.9
+FIELD_GIVEN_ENV_VAR = "FW_JEV_FIELD_GIVEN"
+_FIELD_GIVEN_OFF = ("off", "0", "false")
+_FIELD_GIVEN_OPTIONS = (
+    ("given", "The statement states a value for this argument, in any form."),
+    ("not_given", "The statement does not state a value for this argument; it would have to be guessed."),
+)
+
+
+def _field_given_enabled() -> bool:
+    value = str(fastworkflow.get_env_var(FIELD_GIVEN_ENV_VAR, default="on")).strip().lower()
+    return value not in _FIELD_GIVEN_OFF
+
+
+def _declared_default(field_info: Any) -> Any:
+    """The field's declared default (a factory is called), or PydanticUndefined when it has none."""
+    if field_info.default is not PydanticUndefined:
+        return field_info.default
+    if field_info.default_factory is not None:
+        return field_info.default_factory()
+    return PydanticUndefined
+
+
+def _is_filled(field_info: Any, value: Any) -> bool:
+    """True when an extracted value is a real value: not None, NOT_FOUND, empty, the not-given value
+    or the declared default. Only a filled value is checked against the statement."""
+    if value is None or value == NOT_FOUND:
+        return False
+    if isinstance(value, (str, list)) and len(value) == 0:
+        return False
+    # The extraction prompt asks for a marker number when an int/float is not mentioned (an Optional
+    # field's not_given_value is None, so the comparison below would miss it): a marker is not a value.
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and is_sentinel_number(value):
+        return False
+    if value == not_given_value(field_info):
+        return False
+    default = _declared_default(field_info)
+    if default is not PydanticUndefined and value == default:
+        return False
+    return True
+
+
+def _check_field_given(lm, statement: str, name: str, field_info: Any) -> tuple[str, float]:
+    """``(verdict, probability)`` of one Jev check: does *statement* give a value for this field?"""
+    argument = f"{name}: {field_info.description or ''}"
+    signature = dspy.make_signature({
+        "statement": (str, dspy.InputField(desc="the command statement sent to the workflow")),
+        "argument": (str, dspy.InputField(desc="the argument's name and description")),
+        "verdict": (Choice[_FIELD_GIVEN_OPTIONS],
+                    dspy.OutputField(desc="Does the statement give a value for this argument?")),
+    }, "Decide whether a command statement gives a value for one argument.")
+    with dspy.context(lm=lm):
+        choice = dspy.Predict(signature)(statement=statement, argument=argument).verdict
+    value = str(choice.value)
+    probability = float((choice.probabilities or {}).get(value, choice.confidence))
+    return value, probability
+
+
+def fields_not_given(statement: str, model_class: Type[BaseModel], values: dict) -> dict[str, float]:
+    """``{field_name: probability}`` for the filled fields of *values* that Jev is at least
+    FIELD_GIVEN_THRESHOLD sure the *statement* does not give a value for. One Jev call per filled
+    field, in parallel. Empty without a Jev LM or when FW_JEV_FIELD_GIVEN is off. A failed check
+    leaves the extracted value standing; never raises."""
+    try:
+        if not _field_given_enabled():
+            return {}
+        from fastworkflow.workflow_agent import _jev_lm   # read at call time (workflow_agent imports this module)
+        lm = _jev_lm()
+        if lm is None:
+            return {}
+        checks = [(name, info) for name, info in model_class.model_fields.items()
+                  if _is_filled(info, values.get(name))]
+        if not checks:
+            return {}
+
+        def one(item):
+            name, info = item
+            try:
+                verdict, probability = _check_field_given(lm, statement, name, info)
+                return name, verdict, probability
+            except Exception:  # noqa: BLE001 - a check is an extra; the extracted value stands
+                logger.warning(f"could not check whether the statement gives {name}", exc_info=True)
+                return None
+
+        with ThreadPoolExecutor(len(checks)) as pool:
+            # Each check runs under a copy of this thread's context, so its model call is traced under the turn.
+            futures = [pool.submit(contextvars.copy_context().run, one, check) for check in checks]
+            results = [r for r in (f.result() for f in futures) if r is not None]
+        return {name: probability for name, verdict, probability in results
+                if verdict == "not_given" and probability >= FIELD_GIVEN_THRESHOLD}
+    except Exception:  # noqa: BLE001
+        logger.warning("could not check which fields the statement gives", exc_info=True)
+        return {}
+
+
+def reset_to_not_given(model_class: Type[BaseModel], values: dict, fields) -> None:
+    """Set each of *fields* in *values* to its not-given value (``not_given_value``)."""
+    for name in fields:
+        values[name] = not_given_value(model_class.model_fields[name])
+
+
+# The not-given marker some models write in angle brackets for an argument the request does not give
+# (``<UNKNOWN>``, or HTML-escaped ``&lt;UNKNOWN&gt;`` through a forced tool call). It is never a value:
+# at the extraction boundary it becomes the field's not-given value.
+_UNKNOWN_MARKER = re.compile(r"^\s*<+\s*unknown\s*>+\s*$", re.IGNORECASE)
+
+
+def is_unknown_marker(value: Any) -> bool:
+    """Whether *value* is the bracketed ``<UNKNOWN>`` marker (a string, not a value), also written
+    with its brackets HTML-escaped once or more (``&lt;UNKNOWN&gt;``, ``&amp;lt;UNKNOWN&amp;gt;``:
+    fix-3koe)."""
+    return isinstance(value, str) and _UNKNOWN_MARKER.match(decode_entities(value)) is not None
+
+
+def drop_unknown_markers(value: Any, not_given: Any) -> Any:
+    """*value* with the ``<UNKNOWN>`` marker removed: a marker string gives *not_given*, and a list
+    loses its marker items."""
+    if is_unknown_marker(value):
+        return not_given
+    if isinstance(value, list):
+        return [item for item in value if not is_unknown_marker(item)]
+    return value
+
+
+def planning_verbatim_sentences(model_class: Type[BaseModel], command_name: Optional[str],
+                                workflow_folderpath: Optional[str],
+                                sentences: Dict[str, Tuple[str, ...]]) -> Dict[str, Tuple[str, ...]]:
+    """*sentences*, with the copy-it-exactly sentence added to each ``str`` field of a planning command's ``Input``
+    that does not already carry one (fix-48np).
+
+    The typed planning call told its model that every ``str`` argument is "Copied verbatim from the request"
+    (``planning_commands._field_desc``); the extractor told it only for an ``in_request`` field, and paraphrased a
+    free-text argument (a note) that no check reads. A planning command's ``str`` fields now get
+    ``planning_commands.IN_REQUEST_STR_SENTENCE`` here. An execution command's fields are unchanged: *model_class*
+    is a planning command's ``Input`` only when *command_name* names a planning command of the workflow at
+    *workflow_folderpath* with the same fields.
+    """
+    if not command_name or not workflow_folderpath:
+        return sentences
+    try:
+        command = planning_commands.planning_command(workflow_folderpath, command_name)
+    except Exception:  # noqa: BLE001 - no planning command, no sentence: the extraction is as before
+        return sentences
+    if command is None or {p.name for p in command.params} != set(model_class.model_fields):
+        return sentences
+    out = dict(sentences)
+    for param in command.params:
+        if param.type == "str" and param.name in model_class.model_fields:
+            have = out.get(param.name, ())
+            if planning_commands.IN_REQUEST_STR_SENTENCE not in have and planning_commands.SUBJECT_SENTENCE not in have:
+                out[param.name] = (*have, planning_commands.IN_REQUEST_STR_SENTENCE)
+    return out
+
 
 class InputForParamExtraction(BaseModel):
     """Extract parameters from a user query using step-by-step reasoning.
@@ -599,6 +1234,8 @@ Today's date is {today}.
     command: str
     input_for_param_extraction_class: Optional[Type[Any]] = None
     input_for_param_extraction: Optional[Any] = None
+    # Set by extract_parameters: the fields Jev judged not given, {name: probability} (fields_not_given).
+    fields_reset_not_given: Dict[str, float] = Field(default_factory=dict, exclude=True)
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
     @classmethod
@@ -637,14 +1274,20 @@ Today's date is {today}.
     
     @staticmethod
     def create_signature_from_pydantic_model(
-        pydantic_model: Type[BaseModel]
+        pydantic_model: Type[BaseModel],
+        sentences: Optional[Dict[str, Tuple[str, ...]]] = None,
+        skip: frozenset = frozenset(),
     ) -> Type[dspy.Signature]:
         """
         Create a DSPy Signature class from a Pydantic model with type annotations.
-        
+
         Args:
             pydantic_model: The Pydantic model class to convert
-            
+            sentences: ``{field: rule sentences}`` appended after that field's description
+                (``planning_commands.extraction_sentences_for``); nothing else reads them
+            skip: fields the extractor is not asked for (``verify: "alone"``, which the classifier
+                decides: ``planning_commands.classifier_alone_fields``)
+
         Returns:
             A DSPy Signature class
         """
@@ -656,6 +1299,8 @@ Today's date is {today}.
         field_num = 1
 
         for attribute_name, attribute_metadata in pydantic_model.model_fields.items():
+            if attribute_name in skip:
+                continue
             is_optional = False
             attribute_type = attribute_metadata.annotation
 
@@ -665,7 +1310,6 @@ Today's date is {today}.
                     is_optional = True
                     attribute_type = next((elem for elem in union_elements if elem is not type(None)), str)
 
-            NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
             if attribute_type is str:            
                 default_value = NOT_FOUND
             elif attribute_type is int:
@@ -683,6 +1327,10 @@ Today's date is {today}.
                 default_value = attribute_metadata.default
 
             info_text = attribute_metadata.description or f"The {attribute_name}"
+            if rule_sentences := (sentences or {}).get(attribute_name):
+                # the rule sentences of the field's options (3.4, Descriptions), after its description;
+                # the ". This field is ..." below ends the last one
+                info_text = f"{info_text.rstrip('. ')}. {' '.join(s.rstrip('.') for s in rule_sentences)}"
 
             if attribute_name != "query": 
                 steps.append(f"Step {field_num}: Identify the {attribute_name} ({info_text}).")
@@ -691,6 +1339,11 @@ Today's date is {today}.
             if isinstance(attribute_type, type) and issubclass(attribute_type, Enum):
                 possible_values = [f"'{option.value}'" for option in attribute_type]
                 info_text += f". Valid values: {', '.join(possible_values)}"
+            elif isinstance(extra := attribute_metadata.json_schema_extra, dict) and \
+                    isinstance(declared := extra.get("enum"), (list, tuple)) and declared:
+                # allowed values declared outside the type (JSON Schema ``enum``): the model is told
+                # them, and argument_checks refuses any other value (fix-1pfu.enum-in-extra, fix-qjf4)
+                info_text += f". Valid values: {', '.join(repr(str(v)) for v in declared)}"
 
             if attribute_metadata.examples:
                 sample_values = ", ".join([f"'{sample}'" for sample in attribute_metadata.examples])
@@ -727,11 +1380,9 @@ Today's date is {today}.
         Returns:
             The extracted parameters
         """
-        global PARAMETER_EXTRACTION_ERROR_MSG, LLM_PARAM_EXTRACTION, LITELLM_API_KEY_PARAM_EXTRACTION
+        global LLM_PARAM_EXTRACTION, LITELLM_API_KEY_PARAM_EXTRACTION
 
-        if not PARAMETER_EXTRACTION_ERROR_MSG:
-            PARAMETER_EXTRACTION_ERROR_MSG = fastworkflow.get_env_var("PARAMETER_EXTRACTION_ERROR_MSG")
-
+        self.fields_reset_not_given = {}
         if not LLM_PARAM_EXTRACTION:
             LLM_PARAM_EXTRACTION = fastworkflow.get_env_var("LLM_PARAM_EXTRACTION")
             LITELLM_API_KEY_PARAM_EXTRACTION = fastworkflow.get_env_var("LITELLM_API_KEY_PARAM_EXTRACTION")
@@ -742,7 +1393,11 @@ Today's date is {today}.
         if model_class is None:
             raise ValueError("No model class provided")
         
-        params_signature = self.create_signature_from_pydantic_model(model_class)
+        params_signature = self.create_signature_from_pydantic_model(
+            model_class,
+            planning_verbatim_sentences(model_class, subject_command_name, workflow_folderpath,
+                                        planning_commands.option_sentences(model_class)),
+            planning_commands.classifier_alone_fields(model_class))
         
         class ParamExtractor(dspy.Module):
             def __init__(self, signature):
@@ -770,14 +1425,15 @@ Today's date is {today}.
             def basic_checks(args, pred):
                 for field_name in field_names:
                     # return 0 if it extracts an example value instead of correct value | None
-                    extracted_param_value = getattr(pred, field_name)
+                    extracted_param_value = getattr(pred, field_name, None)   # None: not asked for
                     examples = model_class.model_fields[field_name].examples
                     if examples and extracted_param_value in examples:
                         return 0.0
                 return 1.0
 
-            # Create a refined module that tries up to 3 times
-            best_of_3 = dspy.BestOfN(
+            # Up to 3 attempts: the first at temperature 0, the retries (reward 0)
+            # at temperature 1.0 with distinct rollout ids.
+            best_of_3 = FirstAttemptGreedy(
                 module=compiled_model, 
                 N=3, 
                 reward_fn=basic_checks, 
@@ -786,10 +1442,16 @@ Today's date is {today}.
             try:
                 dspy_result = best_of_3(command=self.command)
                 for field_name in field_names:
-                    default = model_class.model_fields[field_name].default
-                    param_dict[field_name] = getattr(dspy_result, field_name, default)
+                    default = not_given_value(model_class.model_fields[field_name])
+                    value = getattr(dspy_result, field_name, default)
+                    param_dict[field_name] = drop_unknown_markers(value, default)
             except Exception as exc:
                 logger.warning(PARAMETER_EXTRACTION_ERROR_MSG.format(error=exc))
+
+        # A filled field the statement does not give (Jev, fields_not_given) is not a value: reset it
+        # to its not-given value, so an optional field takes its default and a required one is asked for.
+        self.fields_reset_not_given = fields_not_given(self.command, model_class, param_dict)
+        reset_to_not_given(model_class, param_dict, self.fields_reset_not_given)
 
         # IMPORTANT: Do *not* instantiate the original model via the regular
         # constructor – that would invoke full validation including regex
@@ -797,6 +1459,70 @@ Today's date is {today}.
         # object in-place without any validation.
         return model_class.model_construct(**param_dict)  # type: ignore[arg-type]
     
+    def _option_command(self, app_workflow, subject_command_name: str, cmd_parameters: BaseModel):
+        """The checks of the command's ``Input`` options as a ``PlanningCommandCommand`` (2.46): its fields
+        that carry an option, for an execution command; a planning command's own description otherwise."""
+        from fastworkflow.workflow_agent import identifier_patterns
+
+        folderpath = getattr(app_workflow, "folderpath", None)
+        identifiers = identifier_patterns(folderpath) if folderpath else ()
+        return planning_commands.option_command(type(cmd_parameters), subject_command_name, identifiers)
+
+    def _check_option_arguments(self, command, cmd_parameters: BaseModel,
+                                diagnostics: Optional[Dict[str, Any]]) -> Optional[str]:
+        """The arguments of the command *command*'s check options, checked against the request (self.command),
+        for a command of either kind (2.46, 3.4).
+
+        ``check_verdicts`` (one classifier call per ``verify`` field, when a Jev LM is set) and then
+        ``check_arguments``' guards; the guarded values are written back onto *cmd_parameters*.
+        Returns the refusal's text, or None when every guard passes.
+        """
+        # workflow_agent imports this module (through command_executor), so it is read at call time.
+        from fastworkflow.workflow_agent import _jev_lm
+
+        raw = {param.name: getattr(cmd_parameters, param.name, None) for param in command.params}
+        try:
+            verdicts = planning_commands.check_verdicts(_jev_lm(), command, self.command)
+            args, notes = planning_commands.check_arguments(command, raw, self.command, verdicts)
+        except planning_commands.PlanningCommandCallError as refusal:
+            if diagnostics is not None:
+                diagnostics["argument_refusal"] = str(refusal)
+            return str(refusal)
+        if diagnostics is not None and notes:
+            diagnostics["argument_notes"] = list(notes)
+        for name, value in args.items():
+            set_field_unvalidated(cmd_parameters, name, value)
+        return None
+
+    def _check_input_rules(self, command, cmd_parameters: BaseModel, app_workflow) -> "_InputRules":
+        """The outcome of the ``Input``'s own model validators, for a command of either kind (spec 3.1-3.4).
+
+        The validators read the command text (self.command), the workflow and the command's name from the
+        validation context (``planning_commands.check_input``). A value a validator changes is written back
+        onto the command's parameters. ``message`` is None when they accept.
+        """
+        ran = _declares_input_validators(type(cmd_parameters))
+        args = {name: getattr(cmd_parameters, name, None) for name in type(cmd_parameters).model_fields}
+        try:
+            written = planning_commands.check_input(command, args, self.command, app_workflow)
+        except planning_commands.PlanningCommandCallError as failure:
+            # The hook's wording on this path (HEAD's signature hook): a validator's refusal is its bare
+            # message, a validator that raised is "Exception in X's validate_extracted_parameters function: e".
+            # The writes it made before it stopped are kept on the parameters, as the hook kept them.
+            changed = tuple(getattr(failure, "written", {}))
+            for name, value in getattr(failure, "written", {}).items():
+                set_field_unvalidated(cmd_parameters, name, value)
+            if getattr(failure, "refusal", None) is not None:
+                return _InputRules(ran, failure.refusal, tuple(failure.fields), None, changed)
+            raised = getattr(failure, "raised", None)
+            if raised:
+                message = f"Exception in {command.name}'s validate_extracted_parameters function: {failure.detail}"
+                return _InputRules(ran, message, (), raised, changed)
+            return _InputRules(ran, str(failure), tuple(getattr(failure, "fields", ())), None, changed)
+        for name, value in written.items():
+            set_field_unvalidated(cmd_parameters, name, value)
+        return _InputRules(ran, None, (), None, tuple(written))
+
     def validate_parameters(self,
                             app_workflow: fastworkflow.Workflow,
                             subject_command_name: str,
@@ -814,18 +1540,11 @@ Today's date is {today}.
         fw.nlu.param_extraction span so debugging agents read fields instead
         of parsing the prose error message. Passing None changes nothing.
         """
-        global MISSING_INFORMATION_ERRMSG, INVALID_INFORMATION_ERRMSG, NOT_FOUND
-        if not MISSING_INFORMATION_ERRMSG:
-            MISSING_INFORMATION_ERRMSG = fastworkflow.get_env_var("MISSING_INFORMATION_ERRMSG")
-        if not INVALID_INFORMATION_ERRMSG:
-            INVALID_INFORMATION_ERRMSG = fastworkflow.get_env_var("INVALID_INFORMATION_ERRMSG")
-        if not NOT_FOUND:
-            NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
-
         is_valid = True
         missing_fields = []
         invalid_fields = []
         all_suggestions = {}
+        refusal_messages: List[str] = []
 
         # Wrappers and placeholders first, before type coercion, patterns,
         # db_lookup and the workflow's hook see the value: every extraction
@@ -856,6 +1575,20 @@ Today's date is {today}.
             is_valid = False
 
         refused_fields = screen.refused_fields
+        # A command's name written as a value is treated as not given: the field is cleared
+        # (to its default when it has one), so the missing check reports a required one.
+        command_name_fields = command_name_refusals(
+            cmd_parameters, subject_command_name, command_name_index(app_workflow, subject_command_name),
+            refused_fields)
+        # A free-text value that is only a pronoun, or only a word of the workflow's vocabulary, is
+        # treated the same way (see word_screen_refusals).
+        word_fields = word_screen_refusals(
+            cmd_parameters, _workflow_vocabulary(app_workflow), {**refused_fields, **command_name_fields},
+            subject_command_name)
+        for field_name in {**command_name_fields, **word_fields}:
+            field_info = type(cmd_parameters).model_fields[field_name]
+            default = field_info.get_default(call_default_factory=True)
+            set_field_unvalidated(cmd_parameters, field_name, None if default is PydanticUndefined else default)
         if diagnostics is not None:
             def _as_text(fields: Dict[str, Any]) -> Dict[str, str]:
                 return {name: str(value) for name, value in fields.items()}
@@ -869,6 +1602,12 @@ Today's date is {today}.
                 diagnostics["defaulted_sentinel_values"] = _as_text(defaulted_fields)
             if out_of_range_fields:
                 diagnostics["out_of_range_values"] = _as_text(out_of_range_fields)
+            if command_name_fields:
+                diagnostics["command_name_values"] = {
+                    name: str(value) for name, (value, _) in command_name_fields.items()}
+            if word_fields:
+                diagnostics["word_screen_values"] = {
+                    name: str(value) for name, (value, _) in word_fields.items()}
 
         for field_name, field_info in type(cmd_parameters).model_fields.items():
                 if field_name in refused_fields:
@@ -890,10 +1629,11 @@ Today's date is {today}.
                         def build_type_suggestion() -> List[str]:
                             examples = getattr(field_info, "examples", []) or []
                             example = examples[0] if examples else None
-                            # Enum suggestions list valid values
+                            # Enum and Literal suggestions list valid values
                             enum_types = [t for t in candidate_types if isinstance(t, type) and issubclass(t, Enum)]
-                            if enum_types:
-                                opts = [f"'{opt.value}'" for t in enum_types for opt in t]
+                            literal_values = [v for t in candidate_types if get_origin(t) is Literal for v in get_args(t)]
+                            if enum_types or literal_values:
+                                opts = [f"'{opt.value}'" for t in enum_types for opt in t] + [f"'{v}'" for v in literal_values]
                                 return [f"Please provide a value matching the expected type/format. Valid values: {', '.join(opts)}"]
                             # List suggestions
                             def _is_list_type(tt):
@@ -1010,6 +1750,11 @@ Today's date is {today}.
                                         with suppress(Exception):
                                             return True, expected_type(**val)
                                     return False, None
+                                # list[T] inner types like dict[str, Any] (not valid for isinstance)
+                                if get_origin(expected_type) is dict:
+                                    if isinstance(val, dict):
+                                        return True, val
+                                    return False, None
                                 # Unknown: accept if already instance
                                 return (True, val) if isinstance(val, expected_type) else (False, None)
 
@@ -1040,6 +1785,17 @@ Today's date is {today}.
                                         return True, member
                             return False, None
 
+                        def _try_coerce_literal(literal_type: Any, val: Any) -> Tuple[bool, Optional[str]]:
+                            # A member as written, else the one member it matches in any case (as an enum's name)
+                            members = get_args(literal_type)
+                            if val in members:
+                                return True, val
+                            if isinstance(val, str):
+                                folded = [m for m in members if isinstance(m, str) and m.lower() == val.lower()]
+                                if len(folded) == 1:
+                                    return True, folded[0]
+                            return False, None
+
                         for t in candidate_types:
                             # list[...] and typing.List[...] support
                             if _is_list_type(t):
@@ -1061,6 +1817,13 @@ Today's date is {today}.
                                     corrected_value = enum_val
                                     valid_by_type = True
                                     break
+                            # Literal (a planning command's choice of text values): a member, as an enum's value
+                            if get_origin(t) is Literal:
+                                ok, literal_val = _try_coerce_literal(t, field_value)
+                                if ok:
+                                    corrected_value = literal_val
+                                    valid_by_type = True
+                                    break
 
                         if valid_by_type:
                             if corrected_value is not None:
@@ -1071,19 +1834,6 @@ Today's date is {today}.
                                     None,
                                 )
                                 if pattern and field_value is not None and field_value != NOT_FOUND:
-                                    invalid_value = None
-                                    if hasattr(field_info, "json_schema_extra") and field_info.json_schema_extra:
-                                        invalid_value = field_info.json_schema_extra.get("invalid_value")
-
-                                    # if invalid_value and field_value == invalid_value:
-                                    #     invalid_fields.append(f"{field_name} '{field_value}'")
-                                    #     pattern_str = str(pattern)
-                                    #     examples = getattr(field_info, "examples", [])
-                                    #     example = examples[0] if examples else ""
-                                    #     all_suggestions[field_name] = [f"Please use the format matching pattern {pattern_str} (e.g., {example})"]
-                                    #     is_valid = False
-
-                                    # else:
                                     pattern_regex = re.compile(pattern)
                                     if not pattern_regex.fullmatch(str(field_value)):
                                         invalid_fields.append(f"{field_name} '{field_value}'")
@@ -1096,13 +1846,13 @@ Today's date is {today}.
                                         is_valid = False
                                     else:
                                         try:
-                                            setattr(cmd_parameters, field_name, corrected_value)
+                                            set_field_unvalidated(cmd_parameters, field_name, corrected_value)
                                         except Exception as e:
                                             logger.critical(f"Failed to set attribute {field_name} with value {corrected_value}")
                                             raise e
                                 else:
                                     try:
-                                        setattr(cmd_parameters, field_name, corrected_value)
+                                        set_field_unvalidated(cmd_parameters, field_name, corrected_value)
                                     except Exception as e:
                                         logger.critical(f"Failed to set attribute {field_name} with value {corrected_value}")
                                         raise e
@@ -1152,99 +1902,61 @@ Today's date is {today}.
                         missing_fields.append(field_name)
                         is_valid = False
 
-        for field_name, field_info in type(cmd_parameters).model_fields.items():
-            field_value = getattr(cmd_parameters, field_name, None)
-
-            if field_value in [NOT_FOUND, None] or field_name in refused_fields:
-                continue
-
-            is_db_lookup = None
-            if hasattr(field_info, "json_schema_extra") and field_info.json_schema_extra:
-                is_db_lookup = field_info.json_schema_extra.get("db_lookup")
-
-            if is_db_lookup:
-                if not self.input_for_param_extraction_class:
-                    raise ValueError("input_for_param_extraction_class is not set.")
-                matched, corrected_value, field_suggestions = (
-                    self.input_for_param_extraction_class.db_lookup(
-                        app_workflow, field_name, field_value)
-                )
-                # matched, corrected_value, field_suggestions = DatabaseValidator.fuzzy_match(field_value, key_values)
-
-                if diagnostics is not None:
-                    # The three-state contract, recorded structurally:
-                    # applied (value possibly rewritten), rejected (suggestions
-                    # offered), declined (no opinion — value left alone).
-                    diagnostics.setdefault("db_lookup", []).append({
-                        "field": field_name,
-                        "input_value": str(field_value),
-                        "outcome": (
-                            "applied" if matched
-                            else "rejected" if field_suggestions
-                            else "declined"
-                        ),
-                        "corrected_value": (
-                            str(corrected_value) if matched else None
-                        ),
-                        "corrected": bool(matched) and corrected_value != field_value,
-                        "suggestions": [str(s) for s in (field_suggestions or [])],
-                    })
-
-                if matched:
-                    if corrected_value != field_value:
-                        logger.debug(
-                            f"db_lookup substituted {subject_command_name}.{field_name}: "
-                            f"'{field_value}' -> '{corrected_value}'"
-                        )
-                    setattr(cmd_parameters, field_name, corrected_value)
-                elif field_suggestions:
-                    invalid_fields.append(f"{field_name} '{field_value}'")
-                    all_suggestions[field_name] = field_suggestions
-                    is_valid = False
+        planning = _planning_command_of(app_workflow, subject_command_name)
+        if is_valid and planning is not None:
+            unfilled = _unfilled_required(planning, cmd_parameters)
+            if unfilled:
+                missing_fields.extend(unfilled)
+                is_valid = False
+        # One validation step for every command (3.4, The argument path): the options' checks, then the
+        # roles, then the Input's validators (the former hook). A command's checks are its option fields (2.46).
+        command = planning if planning is not None else self._option_command(
+            app_workflow, subject_command_name, cmd_parameters)
+        if is_valid and command.params:
+            guard_refusal = self._check_option_arguments(command, cmd_parameters, diagnostics)
+            if guard_refusal is not None:
+                return (False, guard_refusal, {}, [])
+        # The roles of two required str inputs given one value (3.4), as the typed planning call checks them.
+        # HEAD's order on this path: the option checks, the roles, then the hook (now the Input's validators).
+        if is_valid and planning is not None:
+            values = {param.name: getattr(cmd_parameters, param.name, None) for param in planning.params}
+            try:
+                planning_commands._check_roles(planning, values, self.command)
+            except planning_commands.PlanningCommandInputError as refusal:
+                return (False, str(refusal), {}, [])
+        # The Input's validators (the former hook: after the option checks and the roles). A refusal with a
+        # field asks for that field again with its message; one without, or a call error, answers the call.
+        if is_valid:
+            rules = self._check_input_rules(command, cmd_parameters, app_workflow)
+            if diagnostics is not None:
+                # `ran` says whether the Input declares a validator (False is the honest fact for a command with none).
+                # `changed_fields`: the fields the validators wrote back (the slot-binding record reads it as the
+                # `validation_hook` binding, fix-3rsq.one-hook); `refused_fields`: the fields a Refused named.
+                diagnostics["validation_hook"] = {
+                    "ran": rules.ran,
+                    "is_valid": rules.message is None,
+                    "message": rules.message,
+                    "changed_fields": list(rules.changed),
+                    "refused_fields": list(rules.fields),
+                }
+                if rules.raised:
+                    diagnostics["validation_hook"]["raised"] = rules.raised
+            if rules.message is not None:
+                if rules.raised:
+                    logger.critical(rules.message)
+                if not rules.fields or rules.raised:
+                    return (False, rules.message, {}, [])
+                is_valid = False
+                for name in rules.fields:
+                    if name not in type(cmd_parameters).model_fields:
+                        raise ValueError(
+                            f"{subject_command_name}: fastworkflow.Refused names {name!r}, which is not a field "
+                            f"of its Input (fields: {', '.join(type(cmd_parameters).model_fields)})")
+                    invalid_fields.append(f"{name} '{getattr(cmd_parameters, name, None)}'")
+                refusal_messages.append(rules.message)
 
         if is_valid:
-            if not (
-                self.input_for_param_extraction_class and \
-                            hasattr(self.input_for_param_extraction_class, 'validate_extracted_parameters')
-            ):
-                return (True, "All required parameters are valid.", {}, [])
-
-            try:
-                hook = self.input_for_param_extraction_class.validate_extracted_parameters
-                # The command text goes only to a hook that declares `command_text`,
-                # so every existing (workflow, command, cmd_parameters) hook is
-                # called exactly as before.
-                hook_kwargs = (
-                    {"command_text": self.command}
-                    if "command_text" in inspect.signature(hook).parameters
-                    else {}
-                )
-                try:
-                    is_valid, message = hook(app_workflow, subject_command_name, cmd_parameters,
-                                             **hook_kwargs)
-                except fastworkflow.Refused as refusal:
-                    is_valid, message = False, str(refusal)
-                if diagnostics is not None:
-                    diagnostics["validation_hook"] = {
-                        "ran": True,
-                        "is_valid": bool(is_valid),
-                        "message": None if is_valid else str(message),
-                    }
-            except Exception as e:
-                message = f"Exception in {subject_command_name}'s validate_extracted_parameters function: {str(e)}"
-                logger.critical(message)
-                if diagnostics is not None:
-                    diagnostics["validation_hook"] = {
-                        "ran": True,
-                        "is_valid": False,
-                        "message": message,
-                        "raised": type(e).__name__,
-                    }
-                return (False, message, {}, [])
-
-            if is_valid:
-                return (True, "All required parameters are valid.", {}, [])
-            return (False, message, {}, [])
+            return (True, "All required parameters are valid.", {}, [])
 
         if diagnostics is not None:
             diagnostics["missing_fields"] = list(missing_fields)
@@ -1264,13 +1976,26 @@ Today's date is {today}.
                     msg_prefix = "abort and "
                     if "run_as_agent" in app_workflow.context:
                         msg_prefix = ""
-                    message += f"{msg_prefix}use the {' or '.join(is_available_from)} command(s) to get {missing_field} information. OR...\n"
+                    bare_commands = [
+                        str(entry).split("/")[-1].split(".", 1)[0]
+                        for entry in is_available_from
+                    ]
+                    message += f"{msg_prefix}use the {' or '.join(bare_commands)} command(s) to get {missing_field} information. OR...\n"
 
         if invalid_fields:
             message += f"{INVALID_INFORMATION_ERRMSG}" + ", ".join(invalid_fields) + "\n"
 
         for field, value in placeholder_fields.items():
             message += placeholder_value_message(field, value) + "\n"
+
+        for _, wording in command_name_fields.values():
+            message += wording + "\n"
+
+        for _, wording in word_fields.values():
+            message += wording + "\n"
+
+        for refusal_message in refusal_messages:
+            message += refusal_message + "\n"
 
         for field, value in out_of_range_fields.items():
             message += out_of_range_value_message(field, value, out_of_range_problems[field]) + "\n"

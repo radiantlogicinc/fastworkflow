@@ -19,6 +19,7 @@ from fastworkflow.session_state_store import (
     IncompatibleSessionState,
 )
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - shared fixture (autouse in this module)
 
 
 @pytest.fixture
@@ -71,7 +72,11 @@ def test_serialize_restore_resume_across_contexts(
     initialized_fastworkflow,
     todo_workflow_path,
     monkeypatch,
+    no_review_gate,
 ):
+    # no_review_gate: this test is an ask_user suspension resumed in a new context. Without it the first turn's
+    # request is one sub-task that the round-1 gate reviews, so the turn suspends on the review, not the clarification
+    # (the restored review is covered by tests/test_round1_handoff.py).
     channel_id = f"ch-{uuid.uuid4().hex}"
     store_dir = initialized_fastworkflow / "session_state"
     store = DiskSessionStateStore(str(store_dir))

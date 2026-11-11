@@ -55,6 +55,7 @@ PUBLIC = (
     ("TurnResult", "ModelMetaclass", "fastworkflow.turn"),
     ("TurnStatus", "EnumType", "fastworkflow.turn"),
     ("Union", "_SpecialForm", "typing"),
+    ("UserApproval", "EnumType", "fastworkflow.command_declarations"),
     ("UnsupportedStateVersion", "type", "fastworkflow"),
     ("Workflow", "type", "fastworkflow.workflow"),
     ("WorkflowExecutionContext", "type", "fastworkflow.workflow_execution_context"),
@@ -65,6 +66,11 @@ PUBLIC = (
     ("contextlib", "module", "contextlib"),
     ("dataclass", "function", "dataclasses"),
     ("datetime", "type", "datetime"),
+    ("ConfirmsOptions", "_TypedDictMeta", "fastworkflow.field_options"),
+    ("CopiedOptions", "_TypedDictMeta", "fastworkflow.field_options"),
+    ("FieldOptions", "_TypedDictMeta", "fastworkflow.field_options"),
+    ("RecordNamedOptions", "_TypedDictMeta", "fastworkflow.field_options"),
+    ("descends_to", "function", "fastworkflow.command_declarations"),
     ("get_active_workflow", "function", "fastworkflow.active_workflow"),
     ("get_env_var", "function", "fastworkflow"),
     ("get_fastworkflow_package_path", "function", "fastworkflow"),
@@ -72,6 +78,7 @@ PUBLIC = (
     ("get_workflow_id", "function", "fastworkflow"),
     ("init", "function", "fastworkflow"),
     ("kvstore", "module", "fastworkflow.kvstore"),
+    ("load_startup_action", "function", "fastworkflow"),
     ("metrics", "module", "fastworkflow.metrics"),
     ("mint_turn_key", "function", "fastworkflow.turn"),
     ("mmh3", "module", "mmh3"),
@@ -87,9 +94,11 @@ PUBLIC = (
     ("time", "module", "time"),
     ("tracing", "module", "fastworkflow.tracing"),
     ("turn", "module", "fastworkflow.turn"),
+    ("user_approval_for_execution", "function", "fastworkflow.command_declarations"),
     ("utils", "module", "fastworkflow.utils"),
     ("workflow", "module", "fastworkflow.workflow"),
     ("workflow_execution_context", "module", "fastworkflow.workflow_execution_context"),
+    ("writes", "function", "fastworkflow.command_declarations"),
 )
 
 
@@ -128,8 +137,17 @@ def test_public_names_still_resolve():
 
     script = textwrap.dedent(
         f"""
+        import types
         import fastworkflow
-        names = [name for name in dir(fastworkflow) if not name.startswith("_")]
+        # Submodules imported as a side effect bind as package attributes (import machinery,
+        # not API). Phase 9 made command_directory and workflow_execution_context load on a
+        # bare import; a module is excluded unless the PUBLIC list declares it.
+        declared = set({sorted(name for name, _, _ in PUBLIC)!r})
+        names = [
+            name for name in dir(fastworkflow)
+            if not name.startswith("_")
+            and (name in declared or not isinstance(getattr(fastworkflow, name), types.ModuleType))
+        ]
         print("\\n".join(names))
         print("--")
         for name in {sorted(INIT_ASSIGNED)!r}:

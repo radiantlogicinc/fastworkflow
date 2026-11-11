@@ -1,5 +1,4 @@
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
 from fastworkflow.workflow import Workflow
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from pydantic import BaseModel, ConfigDict, Field
@@ -40,7 +39,7 @@ class ResponseGenerator:
 
         fully_qualified_command_names = (
             set(cme_command_names) | 
-            set(subject_crd.get_command_names(app_workflow.current_command_context_name))
+            set(subject_crd.get_command_names(app_workflow._current_command_context_name))
         )
 
         valid_command_names = [
@@ -50,7 +49,7 @@ class ResponseGenerator:
 
         return Signature.Output(valid_command_names=sorted(valid_command_names))
 
-    def __call__(self, workflow: Workflow, command: str) -> CommandOutput:
+    def __call__(self, workflow: Workflow, command: str, input: None) -> Signature.Output:
         output = self._process_command(workflow)
 
         response = (
@@ -66,10 +65,8 @@ class ResponseGenerator:
             "Otherwise, type 'abort' to cancel, then rephrase your request."
         )
 
-        return CommandOutput(
-            command_response=
-                CommandResponse(
-                    response=response,
-                    artifacts=output.model_dump(),
-                ),
+        return fastworkflow.CommandResponse(
+            response=response,
+            artifacts=output.model_dump(),
+            output=output,
         ) 

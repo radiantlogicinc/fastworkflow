@@ -58,7 +58,7 @@ class ResponseGenerator:
     def _process_command(self, workflow):
         return Signature.Output(success=True)
     
-    def __call__(self, workflow, command):
+    def __call__(self, workflow, command, input):
         output = self._process_command(workflow)
         return output
 """

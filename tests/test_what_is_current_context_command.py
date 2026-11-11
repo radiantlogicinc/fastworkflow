@@ -38,10 +38,10 @@ def test_global_context():
     
     # Call the __call__ method which is the current implementation
     gen = ResponseGenerator()
-    response = gen(mock_workflow, "what context am I in")
+    response = gen(mock_workflow, "what context am I in", None)
     
     # Check that the response indicates the global context
-    assert "global" in response.command_response.response.lower() or "*" in response.command_response.response
+    assert "global" in response.lower() or "*" in response
 
 
 def test_context_no_properties():
@@ -59,7 +59,7 @@ def test_context_no_properties():
     )
     
     # Use TodoListManager as context
-    app_workflow.current_command_context = TodoListManager()
+    app_workflow.record = TodoListManager()
     
     # Create a command metadata extraction workflow
     workflow_type = "command_metadata_extraction"
@@ -73,10 +73,10 @@ def test_context_no_properties():
     )
     
     # Call the __call__ method which is the current implementation
-    response = ResponseGenerator()(mock_workflow, "what context am I in")
+    response = ResponseGenerator()(mock_workflow, "what context am I in", None)
     
     # Check that the response contains the context name
-    assert "TodoListManager" in response.command_response.response
+    assert "TodoListManager" in response
 
 
 def test_context_with_properties():
@@ -95,7 +95,7 @@ def test_context_with_properties():
     
     # Create a TodoList with some properties
     todo_list = TodoList(id=1, description="Test List")
-    app_workflow.current_command_context = todo_list
+    app_workflow.record = todo_list
     
     # Create a command metadata extraction workflow
     workflow_type = "command_metadata_extraction"
@@ -109,7 +109,7 @@ def test_context_with_properties():
     )
     
     # Call the __call__ method which is the current implementation
-    response = ResponseGenerator()(mock_workflow, "what context am I in")
+    response = ResponseGenerator()(mock_workflow, "what context am I in", None)
     
     # Check that the response contains the context name
-    assert "TodoList" in response.command_response.response 
+    assert "TodoList" in response 

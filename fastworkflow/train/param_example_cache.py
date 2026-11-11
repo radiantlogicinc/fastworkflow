@@ -111,6 +111,7 @@ from fastworkflow.train.utterance_cache import (
     slugify,
 )
 from fastworkflow.utils.logging import logger
+from fastworkflow.utils.python_utils import legacy_module_names
 
 # Bumped by hand when the on-disk shape changes in a way older readers cannot
 # interpret. A file with a different value is ignored (a miss), never migrated.
@@ -279,6 +280,9 @@ def _canonical_digest(payload: Any) -> str:
         separators=(",", ":"),
         default=_canonicalize_unserialisable,
     )
+    # A workflow's types name their module under the folder's namespace (library__3fa2b1c4.x);
+    # the bare name is what keys written before that namespace used, so they still match.
+    canonical = legacy_module_names(canonical)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 

@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import fastworkflow
+from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from fastworkflow.utils.react import NoSuspendedAgentStateError
 from fastworkflow.workflow_agent import _ask_user_tool
 from fastworkflow.workflow_execution_context import (

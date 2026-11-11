@@ -1,22 +1,18 @@
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
 from ..application.todo_manager import TodoListManager
 
 class ResponseGenerator:
-    def __call__(self, workflow: fastworkflow.Workflow, command: str) -> CommandOutput:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, input: None) -> str:
         filepath = (
             f'{workflow.folderpath}/'
             'application/'
             'todo_list.json'
         )
-        workflow.root_command_context = TodoListManager(filepath)
+        workflow.root = TodoListManager(filepath)
         
         response = {
             "message": "Application initialized.",
-            "context": workflow.current_command_context_name
+            "context": type(workflow.root).__name__
         }
 
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=str(response))
-        )
+        return str(response)

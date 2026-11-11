@@ -1,5 +1,4 @@
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from pydantic import BaseModel, Field
 
@@ -31,19 +30,16 @@ class ResponseGenerator:
     """Handle command execution and craft the textual response."""
 
     def _process_command(self, workflow: fastworkflow.Workflow, input: Signature.Input) -> None:
-        workitem: WorkItem = workflow.command_context_for_response_generation
+        workitem: WorkItem = workflow.record
         workitem.is_complete = input.is_complete
 
     def __call__(self, workflow: fastworkflow.Workflow, command: str, 
-                 command_parameters: Signature.Input) -> CommandOutput:
+                 command_parameters: Signature.Input) -> str:
         self._process_command(workflow, command_parameters)
         
-        workitem: WorkItem = workflow.command_context_for_response_generation
+        workitem: WorkItem = workflow.record
         status = "complete" if workitem.is_complete else "incomplete"
         
         response = f"Work item '{workitem.get_absolute_path()}' has been marked as {status}."
         
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=response)
-        )
+        return response

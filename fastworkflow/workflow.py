@@ -74,6 +74,19 @@ def enablecache(func):
 
     return wrapper
 
+# Attribute names removed from Workflow, each mapped to its replacement. Reading or
+# assigning one raises AttributeError naming the replacement (Workflow.__getattr__ / __setattr__).
+_RETIRED_CONTEXT_ATTRIBUTES = {
+    "command_context_for_response_generation": "is removed: use workflow.record",
+    "current_command_context": "is removed: use workflow.record (assigning it moves the workflow)",
+    "root_command_context": "is removed: use workflow.root",
+    "is_command_context_for_response_generation_root": "is removed: use workflow.is_record_root",
+    "current_command_context_name": "is internal: read the record with workflow.record and its context class's get_displayname",
+    "current_command_context_displayname": "is internal: read the record with workflow.record and its context class's get_displayname",
+    "is_current_command_context_root": "is internal: read the record with workflow.record and compare it with workflow.root",
+}
+
+
 class Workflow:
     """Workflow class"""
     @classmethod
@@ -167,7 +180,7 @@ class Workflow:
         self._current_command_context = None
         self._command_context_for_response_generation = None
 
-        # Observers invoked when current_command_context changes. Kept on
+        # Observers invoked when the current position changes (workflow.record = x). Kept on
         # the workflow because the setter is the single chokepoint every context switch
         # (set_current_*, go_up, reset_context) passes through.
         self._context_change_listeners: list = []
@@ -187,36 +200,33 @@ class Workflow:
         self._dirty = False
 
     @property
-    def current_command_context(self) -> object:
-        return self._current_command_context
-
-    @property
-    def current_command_context_name(self) -> str:
+    def _current_command_context_name(self) -> str:
         return Workflow.get_command_context_name(self._current_command_context)
 
     @property
-    def current_command_context_displayname(self) -> str:
+    def _current_command_context_displayname(self) -> str:
+        return self._displayname_of(self._current_command_context)
+
+    @property
+    def record_displayname(self) -> str:
+        """The display name of ``workflow.record``, as a command prints it."""
+        return self._displayname_of(self._command_context_for_response_generation)
+
+    def _displayname_of(self, record: Optional[object]) -> str:
         crd = fastworkflow.CommandContextModel.load(self._folderpath)
         context_class = crd.get_context_class(
-                Workflow.get_command_context_name(self._current_command_context),
+                Workflow.get_command_context_name(record),
                 fastworkflow.ModuleType.CONTEXT_CLASS
         )
         if context_class and hasattr(context_class, 'get_displayname'):
-            return context_class.get_displayname(self._current_command_context)
+            return context_class.get_displayname(record)
 
-        return Workflow.get_command_context_name(self._current_command_context, for_display=True)
+        return Workflow.get_command_context_name(record, for_display=True)
 
 
     @property
-    def is_current_command_context_root(self) -> bool:
+    def _is_current_command_context_root(self) -> bool:
         return self._current_command_context == self._root_command_context
-
-    @current_command_context.setter
-    def current_command_context(self, value: Optional[object]) -> None:
-        changed = value is not self._current_command_context
-        self._current_command_context = value
-        if changed:
-            self._notify_context_change()
 
     def add_context_change_listener(self, listener) -> None:
         """Register a zero-arg callable invoked whenever the current context changes.
@@ -269,51 +279,82 @@ class Workflow:
         self._context_change_listeners = alive
 
     @property
-    def root_command_context(self) -> object:
+    def record(self) -> object:
+        """The record the running command acts on: the one it was invoked on.
+
+        It differs from the current position when the command was found on an
+        enclosing record through ``get_parent``. It keeps returning the invoked
+        record until the command returns, so a command that moves the workflow
+        reads the record once into a local, then assigns ``workflow.record = child``
+        to move. Assigning it sets the current position, which is what listings
+        and navigation read.
+        """
+        return self._command_context_for_response_generation
+
+    @record.setter
+    def record(self, value: Optional[object]) -> None:
+        changed = value is not self._current_command_context
+        self._current_command_context = value
+        if changed:
+            self._notify_context_change()
+
+    @property
+    def root(self) -> object:
+        """The root record of this workflow, set once in the startup command."""
         return self._root_command_context
 
-    @root_command_context.setter
-    def root_command_context(self, value: Optional[object]) -> None:
+    @root.setter
+    def root(self, value: Optional[object]) -> None:
         if self._root_command_context:
-            raise ValueError("Root command context can only be set once per Workflow")
+            raise ValueError("workflow.root can only be set once per Workflow")
 
         self._root_command_context = value
         self._current_command_context = value
 
-    def get_parent(self, command_context_object: Optional[object] = None) -> Optional[object]:
-        if command_context_object == self._root_command_context or command_context_object is None:
+    def get_parent(self, record: Optional[object] = None) -> Optional[object]:
+        if record == self._root_command_context or record is None:
             return self._root_command_context
 
         crd = fastworkflow.CommandContextModel.load(
             self._folderpath)
         context_class = crd.get_context_class(
-                Workflow.get_command_context_name(command_context_object),
+                Workflow.get_command_context_name(record),
                 fastworkflow.ModuleType.CONTEXT_CLASS
         )
         if context_class:
-            command_context_object = context_class.get_parent(command_context_object)
+            record = context_class.get_parent(record)
         else:
-            command_context_object = None
+            record = None
 
-        return command_context_object
-
-    @property
-    def command_context_for_response_generation(self) -> object:
-        return self._command_context_for_response_generation
-
-    @command_context_for_response_generation.setter
-    def command_context_for_response_generation(self, value: Optional[object]) -> None:
-        self._command_context_for_response_generation = value
+        return record
 
     @property
-    def is_command_context_for_response_generation_root(self) -> bool:
+    def is_record_root(self) -> bool:
+        """Whether ``workflow.record`` is the root record (see ``workflow.root``)."""
         return self._command_context_for_response_generation == self._root_command_context
 
     @staticmethod
-    def get_command_context_name(command_context_object: Optional[object], for_display = False) -> str:
-        if command_context_object:
-            return command_context_object.__class__.__name__
+    def get_command_context_name(record: Optional[object], for_display = False) -> str:
+        if record:
+            return record.__class__.__name__
         return 'global' if for_display else '*'
+
+    def __getattr__(self, name: str):
+        # Only reached when normal lookup fails, so it catches exactly the retired
+        # spellings. A getattr(workflow, name, default) call would otherwise hide the
+        # removal, which is why the message names the replacement.
+        replacement = _RETIRED_CONTEXT_ATTRIBUTES.get(name)
+        if replacement is not None:
+            raise AttributeError(f"Workflow.{name} {replacement}")
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    def __setattr__(self, name: str, value) -> None:
+        # Without this, ``workflow.current_command_context = x`` would silently create
+        # a plain attribute and leave the workflow where it was.
+        replacement = _RETIRED_CONTEXT_ATTRIBUTES.get(name)
+        if replacement is not None:
+            raise AttributeError(f"Workflow.{name} {replacement}")
+        object.__setattr__(self, name, value)
 
     @property
     def id(self) -> int:

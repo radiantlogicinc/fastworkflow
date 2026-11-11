@@ -17,7 +17,18 @@ from fastworkflow.command_directory import CommandDirectory
 from fastworkflow.entry_declarations import declared_occupiable
 from fastworkflow.utils import python_utils
 
+
+def _approval_marker(subject_workflow_path: str, qualified_name: str) -> str:
+    """The short listing marker of an approval-annotated command, "" for an unannotated one.
+
+    Imported here: approval_annotations reads the routing definition, which this module sits above."""
+    from fastworkflow.approval_annotations import approval_marker
+
+    return approval_marker(subject_workflow_path, qualified_name)
+
+
 logger = logging.getLogger(__name__)
+
 
 def _is_pydantic_undefined(value: Any) -> bool:
     """Return True if value appears to be Pydantic's 'undefined' sentinel.
@@ -58,6 +69,7 @@ class CommandMetadataAPI:
         subject_workflow_path: str,
         cme_workflow_path: str,
         active_context_name: str,
+        include_planning: bool = True,
     ) -> Dict[str, Any]:
         """
         Get enhanced command information for a given workflow and context.
@@ -66,6 +78,8 @@ class CommandMetadataAPI:
             subject_workflow_path: Path to the subject workflow
             cme_workflow_path: Path to the Command Metadata Extraction workflow
             active_context_name: Name of the active command context
+            include_planning: Whether the context's planning commands are listed too
+                (MCP and the capability answer leave them out)
 
         Returns:
             Structured dictionary with context and command details
@@ -75,8 +89,10 @@ class CommandMetadataAPI:
 
         cme_command_names = cme_crd.get_command_names('IntentDetection')
         subject_command_names = subject_crd.get_command_names(active_context_name)
+        planning_names = (set(subject_crd.get_planning_command_names(active_context_name))
+                          if include_planning else set())
 
-        candidate_commands = set(cme_command_names) | set(subject_command_names)
+        candidate_commands = set(cme_command_names) | set(subject_command_names) | planning_names
 
         commands = []
         for fq_cmd in candidate_commands:
@@ -88,7 +104,7 @@ class CommandMetadataAPI:
                 cme_crd.command_directory.get_utterance_metadata(fq_cmd)
             )
 
-            if not utterance_meta:
+            if not utterance_meta and fq_cmd not in planning_names:
                 continue
 
             cmd_name = fq_cmd.split("/")[-1]
@@ -238,6 +254,20 @@ class CommandMetadataAPI:
         if type_str.startswith("<class '") and type_str.endswith("'>"):
             return type_str[len("<class '"):-2]
         return type_str
+
+    @staticmethod
+    def _planning_template(subject_workflow_path: str, qualified_name: str) -> tuple[str, ...]:
+        """The template steps of a planning command (``planning_commands.planning_command``), the
+        ones a call of it runs; empty for an execution command."""
+        # inline import avoids circular import: planning_commands -> observation_offloading -> command_metadata_api
+        from fastworkflow import planning_commands
+        command = planning_commands.planning_command(subject_workflow_path, qualified_name)
+        return command.template if command is not None else ()
+
+    @staticmethod
+    def _context_command_names(crd: RoutingDefinition, context_name: str) -> list[str]:
+        """The execution commands of *context_name* (``crd.contexts``) and its planning commands."""
+        return [*crd.contexts.get(context_name, ()), *crd.get_planning_command_names(context_name)]
 
     @staticmethod
     def _prune_empty(value: Any, remove_keys: set[str] | None = None) -> Any:
@@ -511,8 +541,7 @@ class CommandMetadataAPI:
                 {
                     "workflow_name": str,
                     "available_contexts": list[str],
-                    "context_inheritance_model": dict,
-                    "context_hierarchy_model": dict
+                    "context_inheritance_model": dict
                 }
         
         Returns:
@@ -541,16 +570,6 @@ class CommandMetadataAPI:
                         parent_list = ", ".join(["global" if p == "*" else p for p in parents])
                         lines.append(f"    {display_ctx}: [{parent_list}]")
         
-        # Context hierarchy (if present and non-empty)
-        if hierarchy := workflow_info.get("context_hierarchy_model"):
-            if hierarchy:  # Only show if not empty dict
-                lines.append("  context_hierarchy:")
-                for parent, children in sorted(hierarchy.items()):
-                    if children:  # Only show if has children
-                        display_parent = "global" if parent == "*" else parent
-                        children_list = ", ".join(["global" if c == "*" else c for c in children])
-                        lines.append(f"    {display_parent}: [{children_list}]")
-        
         return "\n".join(lines)
 
     @staticmethod
@@ -560,6 +579,7 @@ class CommandMetadataAPI:
         active_context_name: str,
         for_agents: bool = False,
         exclude: frozenset[str] = frozenset(),
+        with_templates: bool = False,
     ) -> str:
         """
         Return a YAML-like display text for commands in the given context.
@@ -567,6 +587,7 @@ class CommandMetadataAPI:
         - Calls get_enhanced_command_info to retrieve raw command metadata
         - Removes empty fields/lists and the 'default' field
         - Includes input 'pattern' only when for_agents=True
+        - Adds a planning command's template steps only when with_templates=True
         """
         meta = CommandMetadataAPI.get_enhanced_command_info(
             subject_workflow_path=subject_workflow_path,
@@ -618,6 +639,7 @@ class CommandMetadataAPI:
                 active_context_name=active_context_name,
                 qualified_command_name=fq,
                 for_agents=for_agents,
+                with_template=with_templates,
             ):
                 parts.append(part)
 
@@ -660,21 +682,58 @@ class CommandMetadataAPI:
             cme_workflow_path=cme_workflow_path,
             active_context_name=active_context_name,
             for_agents=for_agents,
+            with_templates=True,
         )
 
         try:
             crd = fastworkflow.RoutingRegistry.get_definition(subject_workflow_path)
-            already_listed = set(crd.contexts.get(active_context_name, ()))
+            already_listed = set(CommandMetadataAPI._context_command_names(crd, active_context_name))
 
             # Order sections shallowest-first so the command
             # that ENTERS a context is introduced before the context that requires it.
+            # Depth is the breadth-first distance over the declared descend edges
+            # (context_navigation.collect_descend_edges), not a count of ancestors.
+            depths = CommandMetadataAPI._descend_depths(subject_workflow_path, crd)
+
             def _depth(context_name: str) -> int:
-                try:
-                    return len(crd.context_model.get_ancestor_contexts(context_name))
-                except Exception:
-                    return 0
+                return depths.get(context_name, 0)
 
             sections: List[str] = [base_text]
+            # 3.9, Catalogs: the scopes of the exact-name path other than the active one (the enclosing
+            # records' contexts with their bases, then the global scope) are callable here by name, with
+            # the scope each comes from. The live chain is read now, from the live object.
+            if navigation_workflow is not None:
+                from fastworkflow.context_navigation import exact_name_scopes
+
+                for scope in exact_name_scopes(navigation_workflow):
+                    if scope.context_name == active_context_name:
+                        continue
+                    here_names = [
+                        qualified_name
+                        for qualified_name in sorted(CommandMetadataAPI._context_command_names(crd, scope.context_name))
+                        if qualified_name not in already_listed
+                        and qualified_name.split("/")[-1] != "wildcard"
+                    ]
+                    if not here_names:
+                        continue
+                    where = ("the global scope" if scope.context_name == "*"
+                             else f"the {scope.context_name} context")
+                    parts = [
+                        f"Commands available here from {where} "
+                        f"(on your lookup path; run by name, no navigation):"
+                    ]
+                    for qualified_name in here_names:
+                        if part := CommandMetadataAPI.format_callable_here_command(
+                            subject_workflow_path=subject_workflow_path,
+                            cme_workflow_path=cme_workflow_path,
+                            owning_context_name=scope.context_name,
+                            qualified_command_name=qualified_name,
+                            active_context_name=active_context_name,
+                        ):
+                            parts.append(part)
+                    already_listed.update(here_names)
+                    sections.append("\n".join(parts))
+
             occupiable = CommandMetadataAPI._occupiable_context_names(
                 subject_workflow_path
             )
@@ -688,7 +747,7 @@ class CommandMetadataAPI:
                     continue
                 new_commands = [
                     qualified_name
-                    for qualified_name in sorted(crd.contexts.get(context_name, ()))
+                    for qualified_name in sorted(CommandMetadataAPI._context_command_names(crd, context_name))
                     if qualified_name not in already_listed
                     and qualified_name.split("/")[-1] != "wildcard"
                 ]
@@ -720,6 +779,36 @@ class CommandMetadataAPI:
                 exc_info=True,
             )
             return base_text
+
+    @staticmethod
+    def _descend_depths(subject_workflow_path: str, crd) -> Dict[str, int]:
+        """Breadth-first depth of each context from the roots of the descend graph.
+
+        A root is a context no descend edge enters (the global scope is one when it has no
+        edge into it). Contexts no edge reaches keep depth 0, as they did when nothing was
+        declared. Built from the commands the workflow declares, never from a hierarchy file.
+        """
+        from fastworkflow.context_navigation import collect_descend_edges
+
+        edges = collect_descend_edges(subject_workflow_path)
+        targets = {edge.target for edge in edges}
+        sources = {edge.source for edge in edges}
+        children: Dict[str, List[str]] = {}
+        for edge in edges:
+            children.setdefault(edge.source, []).append(edge.target)
+        depths: Dict[str, int] = {}
+        frontier = sorted(name for name in sources | set(crd.contexts) if name not in targets)
+        for name in frontier:
+            depths[name] = 0
+        while frontier:
+            next_frontier: List[str] = []
+            for name in frontier:
+                for target in sorted(set(children.get(name, []))):
+                    if target not in depths:
+                        depths[target] = depths[name] + 1
+                        next_frontier.append(target)
+            frontier = next_frontier
+        return depths
 
     @staticmethod
     def get_other_context_commands(
@@ -759,15 +848,26 @@ class CommandMetadataAPI:
         adds. Empty when the routing definition cannot be read.
         """
         from fastworkflow.context_identity import context_class_for
-        from fastworkflow.context_navigation import navigation_steps_to_context
+        from fastworkflow.context_navigation import exact_name_scopes, navigation_steps_to_context
 
         try:
             lines: List[str] = []
+            # 3.9, Catalogs: a context on the exact-name path (an enclosing record's, or a base of
+            # one) has its commands callable here, so it is not one to enter to run them.
+            on_path = ({scope.context_name for scope in exact_name_scopes(navigation_workflow)}
+                       if navigation_workflow is not None else set())
             for context_name, added in CommandMetadataAPI.get_other_context_commands(
                     subject_workflow_path, active_context_name, exclude).items():
                 context_class = (context_class_for(navigation_workflow, context_name)
                                  if navigation_workflow is not None else None)
                 description = (inspect.getdoc(context_class) or "").strip().split("\n")[0]
+                if context_name in on_path:
+                    if not description:
+                        description = "its commands are on your lookup path"
+                    lines.append(
+                        f"- {context_name}: {description.rstrip('.')}. Its commands are callable "
+                        f"here by name (listed above); you do not enter it to run them.")
+                    continue
                 if not description:
                     description = "commands: " + ", ".join(added) if added else ""
                 steps = None
@@ -779,11 +879,50 @@ class CommandMetadataAPI:
                 lines.append(f"- {context_name}: {description.rstrip('.')}. To enter: {route}")
             if not lines:
                 return ""
-            return ("Other contexts (enter one to see and run its commands):\n"
+            return ("Other contexts (enter one to see and run its commands; a context whose commands are "
+                    "callable here needs no entering):\n"
                     + "\n".join(lines))
         except Exception:  # callers must never break on metadata assembly
             logger.warning("Failed to list the other contexts.", exc_info=True)
             return ""
+
+    @staticmethod
+    def format_callable_here_command(
+        subject_workflow_path: str,
+        cme_workflow_path: str,
+        owning_context_name: str,
+        qualified_command_name: str,
+        active_context_name: str,
+    ) -> str:
+        """One command of a scope on the exact-name path, callable from here by its name (3.9).
+
+        Example::
+
+            - get_all_children
+              Get the children of the list.
+        """
+        meta = CommandMetadataAPI.get_enhanced_command_info(
+            subject_workflow_path=subject_workflow_path,
+            cme_workflow_path=cme_workflow_path,
+            active_context_name=owning_context_name,
+        )
+        commands = meta.get("commands", [])
+        leaf = qualified_command_name.split("/")[-1]
+        target_cmd = (next((cmd for cmd in commands if cmd.get("qualified_name") == qualified_command_name), None)
+                      or next((cmd for cmd in commands if cmd.get("name") == leaf), None))
+        if target_cmd is None:
+            return ""
+        short_name = target_cmd.get("name") or leaf
+        doc_string = (target_cmd.get("doc_string") or "").strip()
+        marker = _approval_marker(subject_workflow_path, target_cmd.get("qualified_name", ""))
+        lines = [f"- {short_name}{marker}"]
+        if doc_string:
+            lines.append(f"  {doc_string}")
+        if template := CommandMetadataAPI._planning_template(
+                subject_workflow_path, target_cmd.get("qualified_name", "")):
+            lines.append("  template:")
+            lines.extend(f"  - {step}" for step in template)
+        return "\n".join(lines)
 
     @staticmethod
     def format_deferred_planner_command(
@@ -836,9 +975,14 @@ class CommandMetadataAPI:
                     navigation_workflow, active_context_name, owning_context_name
                 )
 
-        lines = [f"- {short_name}"]
+        marker = _approval_marker(subject_workflow_path, target_cmd.get("qualified_name", ""))
+        lines = [f"- {short_name}{marker}"]
         if doc_string:
             lines.append(f"  {doc_string}")
+        if template := CommandMetadataAPI._planning_template(
+                subject_workflow_path, target_cmd.get("qualified_name", "")):
+            lines.append("  template:")
+            lines.extend(f"  - {step}" for step in template)
         if steps is None:
             follow = "no declared navigation path"
         elif steps == "":
@@ -910,13 +1054,15 @@ class CommandMetadataAPI:
         for_agents: bool = False,
         omit_command_name: bool = False,
         include_parameters: bool = True,
+        with_template: bool = False,
     ) -> str:
         """
         Return a YAML-like display text for a single command in the given context.
 
         Mirrors get_command_display_text but filters to a specific command only.
         When *include_parameters* is False, only the command name and doc_string
-        are shown (for planner maps of contexts not yet entered).
+        are shown (for planner maps of contexts not yet entered). When *with_template*
+        is True, a planning command's template steps are shown after its parameters.
         """
         meta = CommandMetadataAPI.get_enhanced_command_info(
             subject_workflow_path=subject_workflow_path,
@@ -948,7 +1094,8 @@ class CommandMetadataAPI:
         if "qualified_name" in target_cmd:
             new_cmd["qualified_name"] = target_cmd["qualified_name"]
         if "name" in target_cmd:
-            new_cmd["name"] = target_cmd["name"]
+            new_cmd["name"] = target_cmd["name"] + _approval_marker(
+                subject_workflow_path, target_cmd.get("qualified_name", ""))
         if doc_val := (target_cmd.get("doc_string") or "").strip():
             new_cmd["doc_string"] = doc_val
 
@@ -1018,6 +1165,10 @@ class CommandMetadataAPI:
         if utter := target_cmd.get("plain_utterances", []) or []:
             new_cmd["plain_utterances"] = utter[:2]
 
+        if with_template and (template := CommandMetadataAPI._planning_template(
+                subject_workflow_path, target_cmd.get("qualified_name", ""))):
+            new_cmd["template"] = list(template)
+
         display_obj: Dict[str, Any] = {
             "context": context_info,
             "commands": [new_cmd],
@@ -1034,10 +1185,12 @@ class CommandMetadataAPI:
         Return a mapping of qualified command name -> {inputs: [...], outputs: [...]} where each param is a dict
         with name, type_str, description, examples.
         """
+        from fastworkflow.utils.signatures import is_required_argument  # signatures imports this module
+
         directory = CommandDirectory.load(workflow_path)
 
         params_by_command: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
-        for qualified_name in directory.get_commands():
+        for qualified_name in directory.get_execution_commands():
             try:
                 # Ensure metadata is hydrated and import module by file path
                 directory.ensure_command_hydrated(qualified_name)
@@ -1066,6 +1219,7 @@ class CommandMetadataAPI:
                         ),
                         "examples": list(getattr(field, "examples", []) or []),
                         "default": getattr(field, "default", None),
+                        "required": is_required_argument(field),
                     }
                     for name, field in InputModel.model_fields.items()
                 )
@@ -1102,7 +1256,7 @@ class CommandMetadataAPI:
         directory = CommandDirectory.load(workflow_path)
 
         metadata_list: List[Dict[str, Any]] = []
-        for qualified_name in sorted(directory.get_commands()):
+        for qualified_name in sorted(directory.get_execution_commands()):
             meta = {
                 "command_name": qualified_name.split("/")[-1],
                 "file_path": None,

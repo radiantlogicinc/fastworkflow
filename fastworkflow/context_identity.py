@@ -11,17 +11,22 @@ the cause of the large majority of rows a later reader could not resolve.
 
 This module answers the one question the retrieval record was missing: *which
 context instance*. It is deliberately generic. fastWorkflow has no framework
-notion of a context instance's identity -- the current context is an arbitrary
+notion of a context instance's identity -- the record a command acts on is an arbitrary
 application object whose only framework-visible fact is its class name -- so the
 identity has to be DECLARED by the workflow, on the same context callback class
-that already declares ``get_parent``, ``get_displayname`` and ``enter_command``:
+that already declares ``get_parent`` and ``get_displayname``:
 
-* ``instance_label(command_context_object) -> str`` -- a classmethod (or any
-  callable attribute) returning a short identity for this instance; or
-* ``instance_label_attr = "uid"`` -- the name of an attribute to read off the
-  context object, for a workflow that does not want to write a method.
+* ``instance_label_attr = "sku"`` -- the name of an attribute of the record
+  (a plain attribute or a property on the object). The value read off it is
+  the identity. A workflow whose identity is computed writes a property on its
+  object and names that property here, e.g. ``instance_label_attr =
+  "order_number"``.
 
-A context that declares neither prints its NAME alone. Nothing here derives an
+Any other value of ``instance_label_attr`` is not an identity. A classmethod
+named ``instance_label`` on the callback class is removed: a context that still
+defines one fails the load (``command_context_model.context_class_problems``).
+
+A context that declares nothing prints its NAME alone. Nothing here derives an
 identifier from anything else: ``id()`` is a memory address, ``get_displayname``
 is a display string a workflow may or may not derive from the instance, and a
 guessed identifier that looks concrete is worse than an honest absence.
@@ -33,9 +38,7 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-#: A callable on the context callback class: ``instance_label(context_object)``.
-INSTANCE_LABEL_HOOK = "instance_label"
-#: The name of an attribute to read off the context object instead.
+#: The name of the record attribute (or property) that holds the instance identity.
 INSTANCE_LABEL_ATTR = "instance_label_attr"
 
 
@@ -70,13 +73,6 @@ def declared_instance_label(context_class: Any, context_object: Any) -> str:
     """
     if context_class is None or context_object is None:
         return ""
-    hook = getattr(context_class, INSTANCE_LABEL_HOOK, None)
-    if callable(hook):
-        try:
-            return str(hook(context_object) or "")
-        except Exception:  # noqa: BLE001
-            logger.debug("instance_label hook failed", exc_info=True)
-            return ""
     attribute = getattr(context_class, INSTANCE_LABEL_ATTR, None)
     if isinstance(attribute, str) and attribute:
         try:
@@ -96,12 +92,12 @@ def context_identity(workflow: Any) -> tuple[str, str]:
     try:
         if workflow is None:
             return ("", "")
-        if getattr(workflow, "is_current_command_context_root", True):
+        if getattr(workflow, "_is_current_command_context_root", True):
             return ("", "")
-        name = str(getattr(workflow, "current_command_context_name", "") or "")
+        name = str(getattr(workflow, "_current_command_context_name", "") or "")
         if not name:
             return ("", "")
-        context_object = getattr(workflow, "current_command_context", None)
+        context_object = getattr(workflow, "_current_command_context", None)
         return (name, declared_instance_label(
             context_class_for(workflow, name), context_object))
     except Exception:  # noqa: BLE001
@@ -115,6 +111,28 @@ def context_clause_for(workflow: Any) -> str:
 
     name, label = context_identity(workflow)
     return context_clause(name, label)
+
+
+def identity_of(workflow: Any, context_object: Any) -> tuple[str, str]:
+    """``(context name, instance label)`` for *context_object*, which need not be current.
+
+    Used when a command runs on an enclosing record (the parent walk binds it), so its
+    identity must be read from that object, not from the record a command acts on. ``("", "")`` for
+    the global scope (``None``) and whenever the identity cannot be read. Never raises.
+    """
+    try:
+        import fastworkflow
+
+        if context_object is None:
+            return ("", "")
+        name = str(fastworkflow.Workflow.get_command_context_name(context_object) or "")
+        if not name:
+            return ("", "")
+        return (name, declared_instance_label(
+            context_class_for(workflow, name), context_object))
+    except Exception:  # noqa: BLE001
+        logger.debug("context identity of an enclosing record unavailable", exc_info=True)
+        return ("", "")
 
 
 __all__ = [

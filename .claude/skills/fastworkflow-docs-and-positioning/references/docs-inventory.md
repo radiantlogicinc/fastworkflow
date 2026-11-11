@@ -17,7 +17,7 @@ Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5). Re-verify the file l
 | `fastworkflow-article-1.md` | Tutorial 1: intro, hello_world, hand-built messaging_app_1 | Published tutorial series |
 | `fastworkflow-article-2.md` | Tutorial 2: functions → classes/state (`workflow.root_command_context`, `command_context_for_response_generation`) | " |
 | `fastworkflow-article-3.md` | Tutorial 3: inheritance via `context_inheritance_model.json` (`base` key, `*` = available anywhere) | " |
-| `fastworkflow-article-4.md` | Tutorial 4: parent-child hierarchies via `context_hierarchy_model.json`, `_<ClassName>.py` `Context.get_parent`, `db_lookup`, `startup_action.json` | " — note line 637 link text/href org mismatch |
+| `fastworkflow-article-4.md` | Tutorial 4: parent-child hierarchies via `_<ClassName>.py` `Context.get_parent` (the hierarchy file is retired), `db_lookup`, `startup_action.json` | " — note line 637 link text/href org mismatch |
 
 ## `docs/` git-tracked design docs
 

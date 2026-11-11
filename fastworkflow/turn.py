@@ -16,6 +16,7 @@ the bottom of ``fastworkflow/__init__.py`` via ``TurnResult.model_rebuild``.
 
 from __future__ import annotations
 
+import inspect
 import uuid
 import warnings
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from fastworkflow import CommandOutput, CommandResponse
+from fastworkflow.utils.logging import logger
 
 # Key marking an artifacts-dict envelope whose value was offloaded to a store
 # and replaced in place by a scoped reference. [A10][A47]
@@ -159,6 +161,42 @@ def warn_on_unserializable_artifacts(command_output: "CommandOutput") -> None:
         )
 
 
+_MISSING_DECLARED_OUTPUT_WARNED: set[str] = set()
+
+
+def reset_missing_declared_output_warnings() -> None:
+    """Clear the once-per-process missing-output warning state (for tests)."""
+    _MISSING_DECLARED_OUTPUT_WARNED.clear()
+
+
+def warn_on_missing_declared_output(
+    command_output: "CommandOutput",
+    *,
+    output_model: type,
+) -> None:
+    """Log once per planning command per process when its ``Signature.Output`` was declared but not returned.
+
+    Execution commands never reach this: ``frame_command_result`` makes a declared Output that is not
+    returned a call error. A planning command's ``__result__`` may fail, and its framework fallback
+    then writes text with no output; this logs that case.
+    """
+    if not command_output.success or command_output.is_ask_user:
+        return
+    command_name = command_output.command_name or ""
+    if not command_name or command_output.command_response.output is not None:
+        return
+    if command_name in _MISSING_DECLARED_OUTPUT_WARNED:
+        return
+    if not (inspect.isclass(output_model) and issubclass(output_model, BaseModel)):
+        return
+
+    _MISSING_DECLARED_OUTPUT_WARNED.add(command_name)
+    logger.warning(
+        "%s declares an Output but returned none; phases and from_command_output references cannot read it",
+        command_name,
+    )
+
+
 class TurnOutput(BaseModel):
     """The public result of one logical turn, returned by ``process_turn()``.
 
@@ -274,12 +312,13 @@ class TurnOutput(BaseModel):
 # runs needs that much to know an absent field means "this engine could not emit
 # it" rather than "it did not occur". Bump it when either model gains a field or
 # either vocabulary gains a member.
-TURN_CAPTURE_CONTRACT_VERSION = 1
+TURN_CAPTURE_CONTRACT_VERSION = 2
 
 # Which matching layer decided, named for what ``intent_detection.py`` actually
 # writes to ``nlu_trace["matcher_layer"]`` — ``exact_prefix``,
 # ``fuzzy_prematch``, ``embedding_cache``, ``classifier``,
-# ``clarification_default`` — plus ``direct_action`` for
+# ``clarification_default``, ``jev_tiebreak`` (Jev picked among an ambiguous
+# intent's candidates) — plus ``direct_action`` for
 # ``process_action_turn``, which resolves an ``Action``'s command name with no
 # NLU at all and therefore emits no ``fw.nlu.intent`` span to read a layer off.
 #
@@ -296,6 +335,7 @@ RoutingTier = Literal[
     "embedding_cache",
     "classifier",
     "clarification_default",
+    "jev_tiebreak",
     # An emitter that did not say which layer decided. A real member rather
     # than a default, so "not recorded" never reads as a tier that ran.
     "unknown",

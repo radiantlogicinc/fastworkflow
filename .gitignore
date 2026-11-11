@@ -262,3 +262,12 @@ rejected_examples.json
 .beads/proxieddb/
 # Local backups of env files (e.g. env/.env.bak-groq)
 .env.bak-*
+
+# Local unified-command design. Recorded on the local unified-command-architecture
+# branch; the working copies stay ignored. The skills tutorial and the library
+# example stay tracked. The beads export stays tracked.
+docs/unified_command_architecture.md
+docs/unified_command_architecture/
+
+# Repowise local index and cache.
+.repowise/

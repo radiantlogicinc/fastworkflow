@@ -1,0 +1,1382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Design idioms · fastWorkflow</title>
+<style>
+  :root {
+    --paper: #f3efe6;
+    --paper-2: #e7e0d2;
+    --ink: #1c1814;
+    --muted: #6d655c;
+    --rule: #d9d0c2;
+    --rule-strong: #1c1814;
+    --code: #241f1b;
+    --code-ink: #f6f1e7;
+    --comment: #c4b39a;
+    --execution: #8f3d32;
+    --planning: #1d6b58;
+    --context: #3a4d78;
+    --rail: 17.25rem;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    --sans: "Avenir Next", "Segoe UI", sans-serif;
+    --mono: "ui-monospace", "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    color: var(--ink);
+    background: var(--paper);
+    font-family: var(--serif);
+    font-size: 1.0625rem;
+    line-height: 1.55;
+    display: grid;
+    grid-template-columns: var(--rail) minmax(0, 1fr);
+  }
+  [hidden] { display: none !important; }
+  ::selection { background: #e7d3a1; color: var(--ink); }
+  :focus-visible { outline: 2px solid var(--execution); outline-offset: 3px; }
+
+  .rail {
+    position: sticky;
+    top: 0;
+    align-self: start;
+    height: 100vh;
+    overflow: auto;
+    padding: 1.4rem 1.1rem 2rem 1.25rem;
+    border-right: 1px solid var(--rule);
+    background: #efeae0;
+  }
+  .rail-brand {
+    font-family: var(--sans);
+    font-size: 0.68rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 0.85rem;
+  }
+  .rail .title {
+    font-family: var(--serif);
+    font-size: 1.35rem;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    line-height: 1.15;
+    margin: 0 0 0.9rem;
+  }
+  .rail .title a { color: inherit; text-decoration: none; }
+  #q {
+    width: 100%;
+    font: 0.82rem var(--sans);
+    color: var(--ink);
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    padding: 0.45rem 0.55rem;
+    margin-bottom: 1rem;
+  }
+  #q::placeholder { color: var(--muted); }
+  .index { font-family: var(--sans); font-size: 0.78rem; line-height: 1.35; }
+  .index details { margin: 0 0 0.55rem; }
+  .index summary {
+    cursor: pointer;
+    font-size: 0.68rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    padding: 0.35rem 0;
+    list-style: none;
+  }
+  .index summary::-webkit-details-marker { display: none; }
+  .index summary::before {
+    content: "";
+    display: inline-block;
+    width: 0.45rem;
+    height: 0.45rem;
+    margin-right: 0.4rem;
+    transform: translateY(-1px);
+  }
+  .index details.execution summary { color: var(--execution); }
+  .index details.planning summary { color: var(--planning); }
+  .index details.context summary { color: var(--context); }
+  .index details.execution summary::before { background: var(--execution); }
+  .index details.planning summary::before { background: var(--planning); }
+  .index details.context summary::before { background: var(--context); }
+  .index a {
+    display: block;
+    color: var(--muted);
+    text-decoration: none;
+    padding: 0.22rem 0 0.22rem 0.85rem;
+    border-left: 2px solid transparent;
+  }
+  .index a:hover { color: var(--ink); }
+  .index a.active {
+    color: var(--ink);
+    border-left-color: currentColor;
+  }
+  .index details.execution a.active { border-left-color: var(--execution); }
+  .index details.planning a.active { border-left-color: var(--planning); }
+  .index details.context a.active { border-left-color: var(--context); }
+
+  main { padding: 3.2rem 4.2rem 6rem; max-width: 74rem; }
+  .lede { max-width: 40rem; }
+  .eyebrow {
+    font-family: var(--sans);
+    font-size: 0.72rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 0.8rem;
+  }
+  .lede h1 {
+    font-size: clamp(2.6rem, 5vw, 4.1rem);
+    font-weight: 500;
+    letter-spacing: -0.03em;
+    line-height: 0.98;
+    margin: 0 0 1.1rem;
+  }
+  .lede p { margin: 0 0 0.9rem; }
+  .stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem 1.4rem;
+    margin: 1.5rem 0 0;
+    padding: 0;
+    list-style: none;
+    font-family: var(--sans);
+    font-size: 0.82rem;
+  }
+  .stats li { display: flex; align-items: baseline; gap: 0.45rem; }
+  .stats b { font-family: var(--serif); font-size: 1.35rem; font-weight: 500; }
+  .stats .execution b { color: var(--execution); }
+  .stats .planning b { color: var(--planning); }
+  .stats .context b { color: var(--context); }
+  #shown { color: var(--muted); }
+
+  .section-head {
+    margin: 3.6rem 0 0.4rem;
+    padding-top: 1.6rem;
+    border-top: 1px solid var(--rule-strong);
+    max-width: 40rem;
+  }
+  .section-head .stamp {
+    font-family: var(--sans);
+    font-size: 0.72rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    margin: 0 0 0.35rem;
+  }
+  section.execution .stamp { color: var(--execution); }
+  section.planning .stamp { color: var(--planning); }
+  section.context .stamp { color: var(--context); }
+  .section-head h2 {
+    font-size: 2.15rem;
+    font-weight: 500;
+    letter-spacing: -0.025em;
+    margin: 0 0 0.7rem;
+  }
+  .section-head p { margin: 0; }
+
+  article.idiom {
+    display: grid;
+    grid-template-columns: minmax(16rem, 22.5rem) minmax(0, 1fr);
+    gap: 1.25rem 2.75rem;
+    align-items: start;
+    padding: 1.7rem 0 1.85rem;
+    border-top: 1px solid var(--rule);
+    scroll-margin-top: 1.25rem;
+  }
+  article.idiom h3 {
+    font-size: 1.45rem;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    line-height: 1.15;
+    margin: 0.15rem 0 0.65rem;
+  }
+  .num {
+    font-family: var(--sans);
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    margin: 0;
+  }
+  section.execution .num { color: var(--execution); }
+  section.planning .num { color: var(--planning); }
+  section.context .num { color: var(--context); }
+  .prose p { margin: 0 0 0.75rem; }
+  .prose p:last-child { margin-bottom: 0; }
+  .see {
+    font-family: var(--sans);
+    font-size: 0.78rem;
+    margin-top: 0.85rem !important;
+  }
+  .see a { color: var(--ink); }
+  code, .path {
+    font-family: var(--mono);
+    font-size: 0.86em;
+  }
+  .prose code {
+    background: var(--paper-2);
+    padding: 0.05em 0.28em;
+    border-radius: 2px;
+  }
+  figure { margin: 0; }
+  figcaption {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--muted);
+    margin: 0 0 0.35rem;
+  }
+  pre {
+    margin: 0 0 0.85rem;
+    background: var(--code);
+    color: var(--code-ink);
+    padding: 0.95rem 1.05rem 1.05rem;
+    overflow: auto;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    line-height: 1.55;
+    tab-size: 4;
+    border-radius: 2px;
+  }
+  figure pre:last-child { margin-bottom: 0; }
+  pre .c { color: var(--comment); }
+  .walk {
+    list-style: none;
+    margin: 0.2rem 0 0;
+    padding: 0.2rem 0 0.2rem 0;
+    border-left: 1px solid #c8bfb0;
+  }
+  .walk li {
+    position: relative;
+    padding: 0.55rem 0 0.7rem 1.15rem;
+  }
+  .walk li::before {
+    content: "";
+    position: absolute;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--context);
+    left: -4px;
+    top: 0.85rem;
+  }
+  .walk strong { font-weight: 600; }
+  #empty {
+    font-family: var(--sans);
+    color: var(--muted);
+    padding: 2rem 0;
+  }
+  footer.colophon {
+    margin-top: 3rem;
+    padding-top: 1.2rem;
+    border-top: 1px solid var(--rule);
+    max-width: 40rem;
+    color: var(--muted);
+    font-size: 0.95rem;
+  }
+  footer.colophon a { color: var(--ink); }
+
+  @media (max-width: 980px) {
+    body { display: block; }
+    .rail {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      height: auto;
+      max-height: 40vh;
+      border-right: 0;
+      border-bottom: 1px solid var(--rule);
+    }
+    main { padding: 2rem 1.25rem 4rem; }
+    article.idiom { grid-template-columns: 1fr; gap: 0.9rem; }
+  }
+  @media print {
+    body { display: block; background: white; }
+    .rail, #q { display: none; }
+    main { max-width: none; padding: 0; }
+    pre { white-space: pre-wrap; }
+    article.idiom { break-inside: avoid; }
+  }
+  .index details.shape summary { color: var(--muted); }
+  .index details.reference summary { color: var(--ink); }
+  .index details.shape summary::before { background: var(--muted); }
+  .index details.reference summary::before { background: var(--ink); }
+  .index details.shape a.active { border-left-color: var(--muted); }
+  .stats .shape b { color: var(--muted); }
+  section.shape .stamp, section.shape .num { color: var(--muted); }
+  section.reference .stamp { color: var(--ink); }
+  .explain { max-width: 40rem; margin: 1.2rem 0 0; font-family: var(--serif); }
+  .explain p { margin: 0 0 0.75rem; }
+  .reference-block { max-width: 52rem; margin: 3.6rem 0 0; }
+  .reference-block h3 { font-size: 1.45rem; font-weight: 500; letter-spacing: -0.02em; margin: 2.2rem 0 0.6rem; }
+  table.ref { width: 100%; border-collapse: collapse; font-family: var(--sans); font-size: 0.82rem; line-height: 1.4; margin: 0.6rem 0 0; }
+  table.ref th, table.ref td { text-align: left; vertical-align: top; padding: 0.5rem 0.7rem 0.5rem 0; border-bottom: 1px solid var(--rule); }
+  table.ref th { font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+  table.ref code { font-size: 0.84em; }
+  .prose table.ref code { background: none; padding: 0; }
+  @media (max-width: 980px) { table.ref { display: block; overflow-x: auto; } }
+</style>
+</head>
+<body>
+<aside class="rail">
+  <p class="rail-brand">fastWorkflow</p>
+  <p class="title"><a href="#top">Design idioms</a></p>
+  <input id="q" type="search" placeholder="Filter" aria-label="Filter idioms">
+  <nav class="index" aria-label="Idioms">
+    <details class="execution" open>
+      <summary>Execution · 13</summary>
+      <a href="#e-file">One file, two classes</a>
+      <a href="#e-object">The record it acts on</a>
+      <a href="#e-purpose">The purpose sentence</a>
+      <a href="#e-seeds">Seed utterances</a>
+      <a href="#e-input">An input</a>
+      <a href="#e-words">The user's own words</a>
+      <a href="#e-from">A handle's producer</a>
+      <a href="#e-hook">Correct or refuse</a>
+      <a href="#e-return">What it returns</a>
+      <a href="#e-writes">A command that changes data</a>
+      <a href="#e-approval">Ask before it runs</a>
+      <a href="#e-move">Move onto a record</a>
+      <a href="#e-root">The root object</a>
+    </details>
+    <details class="planning" open>
+      <summary>Planning · 15</summary>
+      <a href="#p-plan">A plan in place of a body</a>
+      <a href="#p-run">A step the code runs</a>
+      <a href="#p-facts">Facts from one command</a>
+      <a href="#p-model">Several commands, one phase</a>
+      <a href="#p-union">Whichever command ran</a>
+      <a href="#p-skip">A phase that does not run</a>
+      <a href="#p-result">The answer, in code</a>
+      <a href="#p-named">The row a listing named</a>
+      <a href="#p-pages">Every page</a>
+      <a href="#p-fan">Once per item</a>
+      <a href="#p-call">Calling a planning command</a>
+      <a href="#p-share">Shared phases</a>
+      <a href="#p-verify">A flag a classifier decides</a>
+      <a href="#p-split">Splitting a request</a>
+      <a href="#p-review">The sub-task review</a>
+    </details>
+    <details class="context" open>
+      <summary>Contexts · 8</summary>
+      <a href="#c-folder">A folder for one kind of object</a>
+      <a href="#c-global">Commands with no object</a>
+      <a href="#c-base">Commands shared through a base</a>
+      <a href="#c-parent">The enclosing record</a>
+      <a href="#c-name">A record's name and identity</a>
+      <a href="#c-state">Remember the object</a>
+      <a href="#c-node">A node inside the snapshot</a>
+      <a href="#c-identifiers">Identifier formats</a>
+    </details>
+    <details class="shape" open>
+      <summary>Plain Python and Pydantic · 7</summary>
+      <a href="#s-class">A class</a>
+      <a href="#s-docstring">A docstring</a>
+      <a href="#s-field">A Field</a>
+      <a href="#s-annotation">A return annotation</a>
+      <a href="#s-union">A union</a>
+      <a href="#s-property">A property</a>
+      <a href="#s-subclass">A subclass</a>
+    </details>
+    <details class="reference" open>
+      <summary>Reference</summary>
+      <a href="#r-helpers">Helper modules</a>
+      <a href="#r-steps">Planning step helpers</a>
+      <a href="#removed">Removed spellings</a>
+    </details>
+  </nav>
+</aside>
+
+<main id="top">
+  <header class="lede">
+    <p class="eyebrow">For people writing a workflow</p>
+    <h1>The shapes a workflow author writes.</h1>
+    <p>A fastWorkflow app is a tree of commands. A command is one of two kinds, and it lives in a context. An <em>execution command</em> runs your code. A <em>planning command</em> writes the steps of a job the agent runs, with code running every step it can. A <em>context</em> is one kind of object the workflow can stand on, and the commands that act on it.</p>
+    <p>Each row below is one shape. The example is the smallest one that shows the whole shape. A real command is several of them in a single file. A planning command keeps the execution <code>Signature</code>, with its purpose, seeds, inputs and their options, the producer edge, the hook, and approval, and adds a <code>PlanGenerator</code>.</p>
+    <ul class="stats">
+      <li class="execution"><b>13</b> execution</li>
+      <li class="planning"><b>15</b> planning</li>
+      <li class="context"><b>8</b> contexts</li>
+      <li class="shape"><b>7</b> plain shapes</li>
+      <li id="shown" hidden></li>
+    </ul>
+  </header>
+  <p id="empty" hidden>Nothing matches that filter.</p>
+
+  <section class="group execution" id="execution">
+    <header class="section-head">
+      <p class="stamp">Execution commands</p>
+      <h2>Code that runs.</h2>
+      <p>One Python file. <code>Signature</code> says what the command is. <code>ResponseGenerator</code> does it. The command runs in agent mode, in assistant mode, and through a direct API or MCP call.</p>
+    </header>
+
+    <article class="idiom" id="e-file">
+      <div class="prose">
+        <p class="num">01</p>
+        <h3>One file, two classes</h3>
+        <p><code>__call__</code> receives the workflow, the command name, and the filled <code>Input</code>. With no <code>Input</code>, that argument is <code>None</code>.</p>
+        <p class="see">See also <a href="#e-return">what it returns</a>.</p>
+      </div>
+      <figure>
+        <figcaption>_commands/Item/show_item.py</figcaption>
+        <pre><code>class Signature:
+    """Show the item the workflow stands on."""
+
+    class Output(BaseModel):
+        label: str
+
+class ResponseGenerator:
+    def __call__(self, workflow, command, input) -&gt; Signature.Output:
+        item = workflow.record
+        return Signature.Output(label=item.label)</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="e-object">
+      <div class="prose">
+        <p class="num">02</p>
+        <h3>The record it acts on</h3>
+        <p><code>workflow.record</code> is the record the command acts on: the one it was invoked on. That can be an enclosing record, reached through <code>get_parent</code>, so a command in the <code>Item</code> folder can run while the workflow stands on a record inside one. Reading it gives the record; assigning it moves the workflow (see <a href="#e-move">move onto a record</a>).</p>
+      </div>
+      <figure>
+        <figcaption>inside ResponseGenerator.__call__</figcaption>
+        <pre><code>item = workflow.record
+return f"{item.label} has {item.copies} copies."</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="e-purpose">
+      <div class="prose">
+        <p class="num">03</p>
+        <h3>The purpose sentence</h3>
+        <p>The <code>Signature</code> docstring is the command, in the words a person would use. The matcher reads it. When intent detection is unsure, the tie-break shows the first sentence of each candidate, so that sentence is the purpose and any condition follows it.</p>
+      </div>
+      <figure>
+        <figcaption>class Signature</figcaption>
+        <pre><code>class Signature:
+    """Open one item by its uid, so the item's own commands act on it."""</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="e-seeds">
+      <div class="prose">
+        <p class="num">04</p>
+        <h3>Seed utterances</h3>
+        <p><code>plain_utterances</code> is the list training expands into the sentences the intent classifier learns. Vary the kind of sentence (an order, a question, a short colloquial line) and aim for about eight. Wording copied from the benchmark teaches the benchmark back to the model, so the seeds stay off <code>intent_benchmark.json</code>.</p>
+      </div>
+      <figure>
+        <figcaption>class Signature</figcaption>
+        <pre><code>plain_utterances = [
+    "open item i1",
+    "go to the item Alpha",
+    "make i3 the current item",
+    "I want to act on Alpha now",
+    "select i2 so I can work on it",
+    "open the item with uid i4",
+    "load Alpha as the open item",
+    "switch to item i2",
+]</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="e-input">
+      <div class="prose">
+        <p class="num">05</p>
+        <h3>An input</h3>
+        <p><code>Signature.Input</code> is a pydantic model. The field's <code>description</code> is what the extractor reads, and <code>examples</code> is a value it can copy. A field with no default is required: a missing value is asked for. A default, or <code>Optional[str] = None</code>, means the request may leave it out.</p>
+        <p>A scope the question can take is an optional field. Its default means the whole set, and the words for "all" map to that default. A scope the user writes is text in the command, so it carries <code>copied_from_command_text</code> (see <a href="#e-words">the user's own words</a>).</p>
+        <p>A bare value takes the text after the command name in agent mode: one <code>str</code> field marked <code>command_text_after_command_name</code>, at most one per Input, on an execution command, so <code>find_item Alpha</code> binds to it without an extractor.</p>
+      </div>
+      <figure>
+        <figcaption>class Signature.Input</figcaption>
+        <pre><code>class Input(BaseModel):
+    query: str = Field(
+        description="words to match against the item's name",
+        examples=["alpha"],
+        json_schema_extra={"command_text_after_command_name": True})
+    note: Optional[str] = Field(
+        default=None,
+        description="a note to store, when the request includes one")
+    branch: str = Field(
+        default="",
+        description="the branch, or empty for every branch",
+        json_schema_extra={"copied_from_command_text": {"ignore": ["branch"]}})</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="e-words">
+      <div class="prose">
+        <p class="num">06</p>
+        <h3>The user's own words</h3>
+        <p>Each option is one key in <code>json_schema_extra</code>. Its value is <code>True</code>, or a dict of that key's own options. Combine keys by adding them; a conflicting pair fails the load.</p>
+        <p><code>copied_from_command_text</code> requires a <code>str</code>, <code>int</code> or <code>list[str]</code> to appear in the command text, so a stored note stays the user's sentence. <code>{"ignore": [...]}</code> drops kind-words from either end of a <code>str</code> before the check, so "the Riverside branch" yields <code>Riverside</code>.</p>
+        <p><code>record_named_in_command_text</code> is for a <code>str</code> that names a record the command text names. It checks names already written in the command text; it does not interpret the description. The description, plus the sentence the framework appends to it, is what <code>LLM_PARAM_EXTRACTION</code> reads. A model re-picks a record name only with <code>classifier_confirms</code> alongside and <code>JEV_API_KEY</code> set.</p>
+        <p><code>converted_from_command_text</code> is for a <code>str</code> or <code>int</code> that the command text is converted into, such as a date. The text check skips it; its placeholder checks still run. Execution commands only.</p>
+        <p>The classifier keys (<code>classifier_confirms</code>, <code>classifier_decides</code>) are under <a href="#p-verify">a flag a classifier decides</a>. A <code>from_command_output</code> key is under <a href="#e-from">a handle's producer</a>.</p>
+      </div>
+      <figure>
+        <figcaption>json_schema_extra on the field</figcaption>
+        <pre><code>note: str = Field(
+    description="what the note says, without the request around it",
+    json_schema_extra={"copied_from_command_text": True})
+
+who: str = Field(
+    description="the person the command text names",
+    json_schema_extra={"record_named_in_command_text": True})</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="e-from">
+      <div class="prose">
+        <p class="num">07</p>
+        <h3>A handle's producer</h3>
+        <p><code>from_command_output</code> on an <code>Input</code> field names the command that produces an id, uid, or code. The value is <code>"cmd.field"</code>, one field of that command's <code>Output</code> (preferred), or a bare <code>"cmd"</code>. A list names several producers, and a <code>Context/cmd</code> form names a command of another context. The planner walks these edges to order the commands, and a missing value tells the caller which command supplies it. Name a producer the caller can reach, and match the type: a <code>str</code> may come from one item of a <code>list[str]</code>.</p>
+        <p class="see">See also <a href="#e-move">move onto a record</a>.</p>
+      </div>
+      <figure>
+        <figcaption>class Signature.Input</figcaption>
+        <pre><code>class Input(BaseModel):
+    item_uid: str = Field(
+        description="the uid of the item to open",
+        examples=["i1"],
+        json_schema_extra={"from_command_output": "find_item.item_uids"})</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="e-hook">
+      <div class="prose">
+        <p class="num">08</p>
+        <h3>Correct or refuse</h3>
+        <p>Cross-field rules have one mechanism: a <code>@model_validator(mode="after")</code> on <code>Input</code>. It reads <code>info.context</code>, which holds <code>command_text</code>, <code>workflow</code> (None while a template or preview renders), and <code>command</code> (the qualified name), for either kind of command. Correct a value by assigning <code>self.&lt;field&gt;</code> and returning <code>self</code>. Refuse by raising <code>fastworkflow.Refused(message, field=...)</code>; a plain <code>ValueError</code> refuses with no field.</p>
+        <p>Order: extraction, the option checks, the model validators in declaration order, then the role checks. A <code>name=value</code> binding whose value fails its type or a field validator is dropped, and the extractor runs instead. A <code>field_validator</code> cleans up one field. Neither can replace <code>required</code> or <code>ignore</code>: a missing required value fails before any validator runs, and <code>ignore</code> strips words before the verbatim match.</p>
+        <p>Known false positive: the library's <code>note_member</code> refuses a note that repeats the member's own name, such as "Mia Chen to call back". That is the request around the note, which is what the validator is for, but a real note with the name in it is refused too.</p>
+      </div>
+      <figure>
+        <figcaption>class Input</figcaption>
+        <pre><code>class Input(BaseModel):
+    name: str = Field(description="the item's name")
+
+    @model_validator(mode="after")
+    def not_a_bulk_word(self, info):
+        if self.name.casefold() in {"all", "everything"}:
+            raise fastworkflow.Refused(
+                f"name is {self.name!r}, which names no one item; "
+                "give that item's name",
+                field="name")
+        self.name = self.name.strip()
+        return self</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="e-return">
+      <div class="prose">
+        <p class="num">09</p>
+        <h3>What it returns</h3>
+        <p><code>__call__</code> returns one of three things, and the framework wraps it. The <code>Output</code> model is the typed result, and its JSON is the response. A <code>str</code> is the response alone. A <code>CommandResponse</code> carries the sentence a person reads together with the <code>Output</code> a caller reads. To decline, raise <code>Refused</code>.</p>
+        <p>A planning command's <code>__result__</code> builds the same <code>Output</code>, so <code>Signature.Output</code> is the command's public result in both kinds. Build one on every path, including the path where nothing was found, so a caller can rely on it.</p>
+      </div>
+      <figure>
+        <figcaption>the returns, execution then planning</figcaption>
+        <pre><code>return Signature.Output(label=item.label)
+
+return f"{item.label} is on the shelf."
+
+return fastworkflow.CommandResponse(
+    response=f"{item.label} is on the shelf.",
+    output=Signature.Output(label=item.label))
+
+# PlanGenerator.__result__, on every path
+def __result__(self, input, item):
+    if item is None:
+        return CommandResponse(
+            response=f"No item named {input.name}.",
+            output=Signature.Output(found=False))
+    return CommandResponse(
+        response=f"{item.label} is in the catalog.",
+        output=Signature.Output(found=True, label=item.label))</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="e-writes">
+      <div class="prose">
+        <p class="num">10</p>
+        <h3>A command that changes data</h3>
+        <p><code>@writes</code> on an execution command's <code>ResponseGenerator</code> marks a command that changes the application's data, including a change that is easy to undo. Inside a planning phase, such a command runs only when a step of that phase names it. A planning command's <code>PlanGenerator</code> takes no mark: it writes when one of its steps runs a command that declares it.</p>
+      </div>
+      <figure>
+        <figcaption>_commands/Item/add_note.py</figcaption>
+        <pre><code>@writes
+class ResponseGenerator:
+    def __call__(self, workflow, command, input) -&gt; Signature.Output:
+        item = workflow.record
+        item.add_note(input.text)
+        return Signature.Output(total=len(item.notes))</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="e-approval">
+      <div class="prose">
+        <p class="num">11</p>
+        <h3>Ask before it runs</h3>
+        <p><code>@user_approval_for_execution</code> sits on <code>ResponseGenerator</code>, or on <code>PlanGenerator</code> for a planning command. <code>UserApproval.REQUIRED_ALWAYS</code> asks before every run. <code>UserApproval.REQUIRED_UNTIL_DELEGATED</code> asks until a standing approval exists for that user, that workflow, and that command. The reply is <code>yes</code>, <code>no</code>, or <code>always</code>, and <code>always</code> records the delegation. Leave the decorator off and the agent decides.</p>
+      </div>
+      <figure>
+        <figcaption>_commands/Item/send_item.py</figcaption>
+        <pre><code>@user_approval_for_execution(UserApproval.REQUIRED_ALWAYS)   <span class="c"># or REQUIRED_UNTIL_DELEGATED</span>
+class ResponseGenerator:
+    def __call__(self, workflow, command, input) -&gt; str:
+        workflow.record.send(input.text)
+        return "Sent."</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="e-move">
+      <div class="prose">
+        <p class="num">12</p>
+        <h3>Move onto a record</h3>
+        <p>Assigning <code>workflow.record</code> is the move: from then on the workflow stands on that record, and its commands act on it. Read the record into a local first, then assign to move. <code>@descends_to("Item")</code> declares the destination, so the framework knows the way into <code>Item</code> before the command runs. <code>when_parameter</code> names the input field that chooses the destination, and it is optional. The way in is declared here, on the command.</p>
+        <p class="see">See also <a href="#c-parent">the enclosing record</a> and <a href="#c-node">a node inside the snapshot</a>.</p>
+      </div>
+      <figure>
+        <figcaption>_commands/Catalog/open_item.py</figcaption>
+        <pre><code>@descends_to("Item", when_parameter="item_uid")
+class ResponseGenerator:
+    def __call__(self, workflow, command, input) -&gt; Signature.Output:
+        catalog = workflow.record
+        item = catalog.items.get(input.item_uid)
+        if item is None:
+            raise fastworkflow.Refused(
+                f"no item has the uid {input.item_uid}; "
+                "find_item lists the uids")
+        workflow.record = item
+        return Signature.Output(item_uid=item.uid, label=item.label)</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="e-root">
+      <div class="prose">
+        <p class="num">13</p>
+        <h3>The root object</h3>
+        <p>The startup command builds the object the workflow stands on at the beginning and stores it as <code>workflow.root</code>. It is set once per workflow; a second assignment fails. Navigation then moves <code>workflow.record</code> onto a record inside it.</p>
+      </div>
+      <figure>
+        <figcaption>_commands/startup.py</figcaption>
+        <pre><code>class ResponseGenerator:
+    def __call__(self, workflow, command, input) -&gt; str:
+        workflow.root = Catalog()
+        return "The catalog is open."</code></pre>
+      </figure>
+    </article>
+  </section>
+
+  <section class="group planning" id="planning">
+    <header class="section-head">
+      <p class="stamp">Planning commands</p>
+      <h2>A job written as steps.</h2>
+      <p>Same folder, same <code>Signature</code>. <code>PlanGenerator</code> replaces <code>ResponseGenerator</code>. A method written with no leading underscore is a phase: it returns the steps of one run, and its return annotation is the facts that run fills. A method with one leading underscore is a helper. Phases run in the order the methods are written. A phase that is not needed returns <code>[]</code>. <code>__phases__</code> is documented only under <a href="#p-share">shared phases</a>.</p>
+      <p>A planning command's <code>Signature</code> docstring is read twice. The matcher reads it with example requests added. The splitter reads it as that command's <code>job_types</code> line, so the docstring shapes how a request is split as well as which command matches (see <a href="#p-split">splitting a request</a>). Write it as a purpose the splitter can judge.</p>
+    </header>
+
+    <article class="idiom" id="p-plan">
+      <div class="prose">
+        <p class="num">01</p>
+        <h3>A plan in place of a body</h3>
+        <p>The file reads top to bottom: a module docstring, the imports, <code>Signature</code>, then <code>PlanGenerator</code>. A planning <code>Input</code> field is a <code>str</code>, <code>bool</code>, <code>int</code>, <code>Literal</code> of text, or <code>Optional[str] = None</code>. A <code>bool</code> defaults to false, so it turns on when the request asks.</p>
+        <p class="see">The <code>Signature</code> itself is the execution set: <a href="#e-purpose">purpose</a>, <a href="#e-seeds">seeds</a>, <a href="#e-input">input</a>, <a href="#e-words">the user's words</a>, <a href="#e-from">the producer edge</a>, <a href="#e-hook">the hook</a>.</p>
+      </div>
+      <figure>
+        <figcaption>_commands/Catalog/count_items.py</figcaption>
+        <pre><code>from .find_item import Signature as FindItem
+from fastworkflow.planning import run
+
+class Signature:
+    """Say how many items match a name."""
+    plain_utterances = ["how many items are called Alpha"]
+
+    class Input(BaseModel):
+        name: str = Field(description="the name to look for")
+
+class PlanGenerator:
+    def find(self, input) -&gt; FindItem.Output:
+        return [run("find_item", query=input.name)]
+
+    def __result__(self, input, find):
+        return f"{find.total} items match {input.name}."</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="p-run">
+      <div class="prose">
+        <p class="num">02</p>
+        <h3>A step the code runs</h3>
+        <p><code>run(command, *, named=None, all_pages=False, **inputs)</code> writes a command step. The <code>inputs</code> are the command's own <code>Input</code> field names. Once every required value is known, code runs the step. A value of <code>None</code> is left out of the step, and a keyword the command's <code>Input</code> lacks fails the load. A plain string is a step for the agent.</p>
+      </div>
+      <figure>
+        <figcaption>a phase method</figcaption>
+        <pre><code>from fastworkflow.planning import run
+
+def find(self, input):
+    return [
+        run("find_item", query=input.name),
+        "say which item was meant",
+    ]</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="p-facts">
+      <div class="prose">
+        <p class="num">03</p>
+        <h3>Facts from one command</h3>
+        <p>A phase's return annotation is the facts it hands on. Annotating with a command's <code>Output</code> fills those facts from that command's run in the phase. Later phases receive them as a parameter of the same name. The import is the other command's <code>Signature</code>.</p>
+      </div>
+      <figure>
+        <figcaption>PlanGenerator</figcaption>
+        <pre><code>from .find_item import Signature as FindItem
+
+def find(self, input) -&gt; FindItem.Output:
+    return [run("find_item", query=input.name)]
+
+def report(self, find):
+    return [f"say that {find.total} items matched"]</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="p-model">
+      <div class="prose">
+        <p class="num">04</p>
+        <h3>Several commands, one phase</h3>
+        <p>When one phase runs two commands, the facts are a model with one field per command, each typed by that command's <code>Output</code>. A value computed from those fields is a property. The model sits just above the method that fills it.</p>
+      </div>
+      <figure>
+        <figcaption>PlanGenerator</figcaption>
+        <pre><code>class Held(BaseModel):
+    opened: OpenItem.Output
+    parts: ListParts.Output
+
+    @property
+    def label(self) -&gt; str:
+        return self.opened.label
+
+def held(self, input) -&gt; Held:
+    return [run("open_item", item_uid=input.item_uid),
+            run("list_parts")]</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="p-union">
+      <div class="prose">
+        <p class="num">05</p>
+        <h3>Whichever command ran</h3>
+        <p>A phase that runs one of two commands annotates a union of their <code>Output</code>s. <code>__result__</code> reads the fields of the one that ran. A <code>Literal</code> input is how the call says which.</p>
+      </div>
+      <figure>
+        <figcaption>PlanGenerator</figcaption>
+        <pre><code>kind: Literal["item", "member"] = Field(
+    default="item",
+    description="whether to look for an item or a member")
+
+def find(self, input) -&gt; FindItem.Output | FindMember.Output:
+    return [run({"item": "find_item", "member": "find_member"}[input.kind],
+                query=input.name)]</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="p-skip">
+      <div class="prose">
+        <p class="num">06</p>
+        <h3>A phase that does not run</h3>
+        <p><code>return []</code> skips the phase. It is decided when the phase is reached, on the facts known then, so a phase gated on a <code>bool</code> input or on a fact is written as an <code>if</code> that returns <code>[]</code>. A later method reads a phase that may have been skipped through a parameter default of <code>None</code>.</p>
+        <p>Use <code>return []</code> rather than leaving the phase out of <code>__phases__</code>. Both run the same, but the previews differ. Measured on a probe copy of a planning command, with <code>fastworkflow command preview</code>: a phase left out of <code>__phases__</code> reads "only when loans = true" in the Phases table, and the plan for <code>loans = false</code> has no step for it at all. A phase that returns <code>[]</code> reads "always", and that plan lists the phase with "No steps." and the note that it is skipped when reached.</p>
+      </div>
+      <figure>
+        <figcaption>PlanGenerator</figcaption>
+        <pre><code>def item(self, input, find) -&gt; OpenItem.Output:
+    if not find.item_uids:
+        return []
+    return [run("open_item", item_uid=find.item_uids[0])]
+
+def loans(self, input, find) -&gt; ListLoans.Output:
+    if not input.loans:
+        return []
+    return [run("list_loans", book_uid=find.book_uids[0], all_pages=True)]
+
+def __result__(self, input, item=None):
+    if item is None:
+        return f"No item named {input.name}."
+    return item.label</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="p-result">
+      <div class="prose">
+        <p class="num">07</p>
+        <h3>The answer, in code</h3>
+        <p><code>__result__</code> runs once, after the last phase, as ordinary code. Its parameters are <code>input</code> and the phases whose facts it reads. It returns the sentence, or a <code>CommandResponse</code> carrying the sentence and the <code>Output</code> (see <a href="#e-return">what it returns</a>). A planning command with no <code>__result__</code> leaves the answer to the agent.</p>
+      </div>
+      <figure>
+        <figcaption>PlanGenerator</figcaption>
+        <pre><code>def __result__(self, input, find, item=None):
+    if item is None:
+        return f"No item named {input.name}."
+    return f"{item.label} is one of {find.total} matches."</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="p-named">
+      <div class="prose">
+        <p class="num">08</p>
+        <h3>The row a listing named</h3>
+        <p><code>run(..., named=...)</code> opens one row of a listing this call read. Code chooses the row whose label holds that name, or the only row. The row-id input is the field marked <code>from_command_output</code>, else the command's single required <code>str</code> field, else the load fails. If the phase already holds the id, pass it too: the step is then the command with that id value.</p>
+      </div>
+      <figure>
+        <figcaption>the phase after find</figcaption>
+        <pre><code>from fastworkflow.planning import run
+
+def item(self, input, find) -&gt; OpenItem.Output:
+    return [run("open_item", named=input.name)]
+    <span class="c"># run("open_item", item_uid=find.item_uids[0], named=input.name)</span></code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="p-pages">
+      <div class="prose">
+        <p class="num">09</p>
+        <h3>Every page</h3>
+        <p>A command whose <code>Input</code> has an integer <code>start</code> is paged, and its <code>Output</code> declares <code>total</code>. The paging parameter is <code>start</code> only. <code>run(..., all_pages=True)</code> reads page after page until the rows reach that total, up to <code>CODE_MAX_PAGES</code> pages (20). Past the cap, the agent reads on. The phase's facts hold every row read. Without <code>all_pages</code>, the same call reads one page.</p>
+      </div>
+      <figure>
+        <figcaption>a phase</figcaption>
+        <pre><code>from fastworkflow.planning import run
+
+def parts(self) -&gt; ListParts.Output:
+    return [run("list_parts", all_pages=True)]</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="p-fan">
+      <div class="prose">
+        <p class="num">10</p>
+        <h3>Once per item</h3>
+        <p><code>@phase(over=...)</code> runs the phase once per item of a list an earlier phase filled. The one parameter that is neither <code>input</code> nor a phase receives the item. In <code>__result__</code>, the phase arrives as the list of those facts, in item order, empty when the list was empty. Each item is opened onto its own record; <code>bind=False</code> is for items that have no record of their own. <code>max_items</code> caps the run, and <code>noun</code> is the word in the note that says so.</p>
+      </div>
+      <figure>
+        <figcaption>PlanGenerator</figcaption>
+        <pre><code>from fastworkflow.planning import phase, run
+
+@phase(over="find.item_uids", max_items=5, noun="items")
+def item(self, uid) -&gt; OpenItem.Output:
+    return [run("open_item", item_uid=uid)]
+
+def __result__(self, input, item):
+    if not item:
+        return f"Nothing by {input.author}."
+    names = "; ".join(one.label for one in item)
+    return f"By {input.author}: {names}."</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="p-call">
+      <div class="prose">
+        <p class="num">11</p>
+        <h3>Calling a planning command</h3>
+        <p>A step that names another planning command runs that command as its own call. The phase hands on the callee's <code>Output</code>, and the workflow is left where the callee left it. The callee's internal steps stay inside the callee. A command that calls itself, even through another command, is reported when the files load. The nested calls of one turn share <code>FW_TURN_MAX_STEPS</code>, 400 unless the workflow sets it.</p>
+      </div>
+      <figure>
+        <figcaption>PlanGenerator</figcaption>
+        <pre><code>from .item_by_name import Signature as ItemByName
+
+def item(self, input) -&gt; ItemByName.Output:
+    return [run("item_by_name", name=input.name)]</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="p-share">
+      <div class="prose">
+        <p class="num">12</p>
+        <h3>Shared phases</h3>
+        <p>Phases two commands share live on a base class in a <code>_</code> module. The command subclasses that class, and its <code>__phases__</code> places the inherited methods where this job needs them, in order. This is the only place <code>__phases__</code> is needed: a phase that is optional for one call returns <code>[]</code> instead (see <a href="#p-skip">a phase that does not run</a>). To reuse a whole command, call it: its <code>PlanGenerator</code> stays its own.</p>
+        <p class="see">See also <a href="#r-helpers">helper modules</a>.</p>
+      </div>
+      <figure>
+        <figcaption>_commands/_item_phases.py and the command</figcaption>
+        <pre><code><span class="c"># _commands/_item_phases.py</span>
+class ItemPhases:
+    def find(self, input) -&gt; FindItem.Output:
+        return [run("find_item", query=input.name)]
+
+<span class="c"># _commands/Catalog/item_report.py</span>
+from .._item_phases import ItemPhases
+
+class PlanGenerator(ItemPhases):
+    def __phases__(self, input):
+        return [self.find, self.report]</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="p-verify">
+      <div class="prose">
+        <p class="num">13</p>
+        <h3>A flag a classifier decides</h3>
+        <p><code>classifier_decides</code> on a <code>bool</code> lets a classifier decide the value from the command text alone. The field keeps its default when the classifier is unsure. <code>classifier_confirms</code> asks a classifier to check the value again from the command text. It applies to a <code>bool</code>, to a <code>Literal</code> (its meanings go in <code>{"meanings": {value: text}}</code>), or to a <code>str</code> with <code>record_named_in_command_text</code> alongside. Both use <code>JEV_API_KEY</code>; with no key they do nothing.</p>
+      </div>
+      <figure>
+        <figcaption>class Signature.Input</figcaption>
+        <pre><code>checks: bool = Field(
+    default=False,
+    description="the request asks about open checks",
+    json_schema_extra={"classifier_decides": True})
+
+kind: Literal["item", "member"] = Field(
+    default="item",
+    description="whether to look for an item or a member",
+    json_schema_extra={"classifier_confirms": {"meanings": {
+        "item": "the request is about an item",
+        "member": "the request is about a member"}}})</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="p-split">
+      <div class="prose">
+        <p class="num">14</p>
+        <h3>Splitting a request</h3>
+        <p>On an agent turn the user's message is split into the separate requests it bundles, before any planning command is matched. The splitter sees the new message only; earlier turns go in as a separate <code>conversation</code> input and never become part of a sub-task. A plain "what can you do?" is answered in code and not split. It uses the planner model (<code>LLM_PLANNER</code>) at temperature 0. A reply cut off at <code>LLM_SPLIT_MAX_TOKENS</code> (default 4,700), or visibly broken (two identical sub-tasks, or one that still points at the rest of the request, such as "each of them"), is retried once at 0.7. A failure, or more than 10 sub-tasks, runs the request whole.</p>
+        <p>The developer's one optional file is <code>_commands/_split.py</code>, at the workflow root only. Every attribute is optional. Its <code>Signature</code> docstring replaces the splitter's instructions wholesale, examples included, with no way to append. Its <code>Signature.Input</code> and <code>Signature.Output</code> may describe only <code>job_types</code>, <code>user_query</code> and <code>subtasks</code>; any other field fails the load, and <code>conversation</code> cannot be changed. <code>identifier_patterns</code> and <code>subject_hints</code> are covered under <a href="#c-identifiers">identifier formats</a>. The file is imported like a command file, so package-relative imports work. It is cached per process, so restart after an edit.</p>
+        <p>A malformed file fails the load and names the problem: a pattern that does not compile, a raw string where <code>re.compile</code> belongs, a single pattern where a list belongs, a non-string <code>subject_hints</code>, or a <code>Signature</code> that is not a class.</p>
+        <p>The merge joins a sub-task with no subject of its own to the one before it. With <code>JEV_API_KEY</code>, Jev decides whether two neighbours are one job, and a sub-task is kept apart only when Jev's "one" probability is under 0.2. Without the key those joins are made with no second opinion. The referent step, which writes the record a sub-task means by "it" or "the customer", needs the key (threshold 0.5); without it the sub-tasks pass through unchanged. When the merge leaves one job, the user's own request runs, not the model's rewrite of it.</p>
+        <p>Levers outside the file: a planning command's docstring (its <code>job_types</code> line), <code>LLM_PLANNER</code>, <code>LLM_SPLIT_MAX_TOKENS</code>, and <code>JEV_API_KEY</code>. The 10-sub-task cap, the 0.2 and 0.5 thresholds and the merge rules are fixed in code.</p>
+        <p class="see">Next: <a href="#p-review">the sub-task review</a>.</p>
+      </div>
+      <figure>
+        <figcaption>_commands/_split.py</figcaption>
+        <pre><code>import re
+
+# Account numbers, as the commands take them: acct_4421
+identifier_patterns = [re.compile(r"\bacct_[0-9]+")]
+
+subject_hints = """Records in this workflow are accounts and their owners."""
+
+class Signature:
+    """Split the request into the separate requests it bundles together.
+    (A complete instruction set: it replaces the built-in splitter's
+    instructions and examples, so write all of them here.)"""</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="p-review">
+      <div class="prose">
+        <p class="num">15</p>
+        <h3>The sub-task review</h3>
+        <p>After the split and merge, and before any sub-task runs, the review gate decides how the sub-tasks run. Three outcomes, in this order:</p>
+      </div>
+      <figure>
+        <figcaption>the gate</figcaption>
+        <ol class="walk">
+          <li><strong>Runs straight away.</strong> One sub-task that is an exact command name, or that intent detection's head matches confidently. No review is shown.</li>
+          <li><strong>Runs unreviewed.</strong> An unattended turn, with no one to answer, or a request from REST or MCP. The draft runs as proposed and is recorded as not reviewed.</li>
+          <li><strong>Opens the review.</strong> Anything else, including a request that was not split. The framework command <code>review_subtasks</code> opens with the draft, and the turn waits until the user answers it.</li>
+        </ol>
+      </figure>
+      <p class="see">The gate's fast path takes a single sub-task only, so a single request that is not an exact name or a confident match is reviewed like a split one. Developers should expect the review to appear for ordinary requests, not only for split ones.</p>
+    </article>
+  </section>
+
+  <section class="group context" id="contexts">
+    <header class="section-head">
+      <p class="stamp">Contexts</p>
+      <h2>Where a command lives, and which object it acts on.</h2>
+      <p>Two declarations decide what a request can reach. <code>base</code>, in <code>context_inheritance_model.json</code>, adds another context's commands to this one. <code>get_parent</code>, on the context class, names the record that encloses this one. The folder holds the commands of the context itself.</p>
+      <div class="explain">
+        <p><strong>Where a request looks.</strong> This is not a separate idiom. It follows from four declarations. An exact command name takes the nearest scope that has it, in this order: the current record's own context, that context's <code>base</code> contexts, then each record on the live chain reached through <code>get_parent</code> with its bases, up to the root, and last the global commands. A command file directly in <code>_commands/</code> is a global command, callable from anywhere by name. The workflow moves into a record only through a command's <code>@descends_to</code>.</p>
+      </div>
+    </header>
+
+    <article class="idiom" id="c-folder">
+      <div class="prose">
+        <p class="num">01</p>
+        <h3>A folder for one kind of object</h3>
+        <p>The folder name is the context. <code>_commands/Item/show_item.py</code> is the command <code>Item/show_item</code>, and it runs when the workflow stands on an item. <code>_commands/Item/_Item.py</code> is that context's callback class, always named <code>Context</code>.</p>
+      </div>
+      <figure>
+        <figcaption>the Item context</figcaption>
+        <pre><code>_commands/Item/show_item.py     <span class="c"># the command Item/show_item</span>
+_commands/Item/open_note.py     <span class="c"># another command of Item</span>
+_commands/Item/_Item.py         <span class="c"># class Context</span></code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="c-global">
+      <div class="prose">
+        <p class="num">02</p>
+        <h3>Commands with no object</h3>
+        <p>A command file in <code>_commands/</code> itself, beside the context folders, is a global command. It is reachable from every context by name.</p>
+      </div>
+      <figure>
+        <figcaption>the global context</figcaption>
+        <pre><code>_commands/hours.py              <span class="c"># reachable from anywhere</span>
+_commands/startup.py            <span class="c"># sets the root object</span></code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="c-base">
+      <div class="prose">
+        <p class="num">03</p>
+        <h3>Commands shared through a base</h3>
+        <p><code>base</code> lists the contexts whose commands this one also has. <code>Item</code> and <code>Member</code> below both gain whatever lives in <code>_commands/Record/</code>. <code>Record</code> can be a base that nothing ever stands on. The file has this one key. A context's own commands come from its folder, so a context is added here to give it a base.</p>
+      </div>
+      <figure>
+        <figcaption>_commands/context_inheritance_model.json</figcaption>
+        <pre><code>{
+    "Item":   { "base": ["Record"] },
+    "Member": { "base": ["Record"] }
+}</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="c-parent">
+      <div class="prose">
+        <p class="num">04</p>
+        <h3>The enclosing record</h3>
+        <p><code>get_parent(cls, record)</code> returns the record that contains this one, read off the live object. An item's parent is the catalog, so the catalog's commands stay reachable while the workflow stands on the item. The walk stops at the root: <code>workflow.get_parent</code> of the root returns the root. The inheritance file holds bases only; the enclosing record comes from here.</p>
+      </div>
+      <figure>
+        <figcaption>_commands/Item/_Item.py</figcaption>
+        <pre><code>class Context:
+    @classmethod
+    def get_parent(cls, record: Item) -&gt; Catalog:
+        return record.catalog</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="c-name">
+      <div class="prose">
+        <p class="num">05</p>
+        <h3>A record's name and identity</h3>
+        <p>Two declarations on the same context class, and they answer different questions. <code>get_displayname</code> is a display string. <code>instance_label_attr</code> names the attribute whose value is the record's identity. Neither derives from the other.</p>
+        <table class="ref">
+          <thead>
+            <tr><th></th><th><code>get_displayname</code></th><th><code>instance_label_attr</code></th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Declared as</td><td>a classmethod, <code>get_displayname(cls, record)</code></td><td>a class attribute, <code>instance_label_attr = "uid"</code></td></tr>
+            <tr><td>Holds</td><td>any free-form display string, such as "Book: Dune (b12)"</td><td>the name of one attribute or property of the record, whose value is its identity ("b12")</td></tr>
+            <tr><td>Read by</td><td><code>workflow.record_displayname</code>, which reads it for <code>workflow.record</code>; the command output's context line; observability</td><td><code>context_identity</code>: the context clause the agent prints, and the approval binding</td></tr>
+            <tr><td>When absent</td><td>the context's own name is shown</td><td>nothing is guessed; no identity is printed</td></tr>
+          </tbody>
+        </table>
+        <p><code>workflow.record_displayname</code> is a reader of <code>get_displayname</code>, not a third declaration. A computed identity is a property on the record, named by <code>instance_label_attr</code>.</p>
+      </div>
+      <figure>
+        <figcaption>_commands/Item/_Item.py</figcaption>
+        <pre><code>class Context:
+    instance_label_attr = "uid"              <span class="c"># the identity: an attribute or property</span>
+
+    @classmethod
+    def get_displayname(cls, record: Item) -&gt; str:  <span class="c"># a display string</span>
+        return f"Item: {record.label} ({record.uid})"</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="c-state">
+      <div class="prose">
+        <p class="num">06</p>
+        <h3>Remember the object</h3>
+        <p><code>get_state(cls, record)</code> returns a JSON-ready dict, and <code>from_state(state, workflow, *, state_version)</code> builds the object back. <code>state_version</code> is the number that pair understands; a snapshot from another version raises <code>UnsupportedStateVersion</code>. Returning <code>fastworkflow.EPHEMERAL</code> says the context is deliberately kept in memory only. With no <code>get_state</code>, a session that holds the live object stays pinned.</p>
+      </div>
+      <figure>
+        <figcaption>_commands/Catalog/_Catalog.py</figcaption>
+        <pre><code>class Context:
+    state_version = 1
+
+    @classmethod
+    def get_state(cls, record: Catalog) -&gt; dict:
+        return record.to_state_dict()
+
+    @classmethod
+    def from_state(cls, state, workflow, *, state_version: int) -&gt; Catalog:
+        if state_version != cls.state_version:
+            raise fastworkflow.UnsupportedStateVersion(state_version)
+        return Catalog.from_state_dict(state)</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="c-node">
+      <div class="prose">
+        <p class="num">07</p>
+        <h3>A node inside the snapshot</h3>
+        <p>The snapshot is of the root. When the workflow stands on a record inside that root, <code>get_locator(cls, record)</code> returns a path to that record, and <code>find_by_locator(anchor, locator)</code> walks the path on the restored root. An id that is unique only among siblings needs its ancestors in the path.</p>
+      </div>
+      <figure>
+        <figcaption>on the root context, for a current Item</figcaption>
+        <pre><code>@classmethod
+def get_locator(cls, record: Item) -&gt; str:
+    return record.uid
+
+@classmethod
+def find_by_locator(cls, anchor: Catalog, locator: str):
+    return anchor.items.get(locator)</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="c-identifiers">
+      <div class="prose">
+        <p class="num">08</p>
+        <h3>Identifier formats</h3>
+        <p><code>identifier_patterns</code> in <code>_commands/_split.py</code> is a list of compiled patterns, one per ID format the workflow uses. It is a workflow-wide declaration with four readers:</p>
+        <ul class="walk">
+          <li><strong>Merge.</strong> Each match is a subject, like a quoted name, when the split is merged.</li>
+          <li><strong>Referent step.</strong> Which records a sub-task leaves unnamed.</li>
+          <li><strong>Planning-command argument checks.</strong> A string argument cut from inside an ID becomes the whole ID: "4421" becomes "acct_4421". Inside several matches, the argument is refused.</li>
+          <li><strong>Policy verifiers.</strong> Their ID patterns, when the policy table gives none.</li>
+        </ul>
+        <p class="see">The file and its load errors are under <a href="#p-split">splitting a request</a>.</p>
+      </div>
+      <figure>
+        <figcaption>_commands/_split.py</figcaption>
+        <pre><code>identifier_patterns = [re.compile(r"\bacct_[0-9]+")]</code></pre>
+      </figure>
+    </article>
+  </section>
+
+  <section class="group shape" id="shapes">
+    <header class="section-head">
+      <p class="stamp">Plain Python and Pydantic</p>
+      <h2>Ordinary shapes, read by the framework.</h2>
+      <p>These are not framework idioms. They are the ordinary Python and Pydantic forms the framework reads. Each row says what it means in a workflow file.</p>
+    </header>
+
+    <article class="idiom" id="s-class">
+      <div class="prose">
+        <p class="num">01</p>
+        <h3>A class</h3>
+        <p>The framework finds <code>Signature</code> (with <code>Input</code> and <code>Output</code> nested in it), and <code>ResponseGenerator</code> or <code>PlanGenerator</code>, by name in each file. Other classes in the file are ordinary Python, such as a <code>BaseModel</code> that a phase annotates with.</p>
+      </div>
+      <figure>
+        <figcaption>a command file</figcaption>
+        <pre><code>class Signature:
+    class Input(BaseModel): ...
+    class Output(BaseModel): ...
+
+class ResponseGenerator: ...</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="s-docstring">
+      <div class="prose">
+        <p class="num">02</p>
+        <h3>A docstring</h3>
+        <p>The <code>Signature</code> docstring is the command's purpose: the matcher reads it, and for a planning command the splitter reads it too (see <a href="#p-split">splitting a request</a>). It is one line of the purpose, in the words a person would use.</p>
+      </div>
+      <figure>
+        <figcaption>class Signature</figcaption>
+        <pre><code>class Signature:
+    """Open one item by its uid, so the item's own commands act on it."""</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="s-field">
+      <div class="prose">
+        <p class="num">03</p>
+        <h3>A Field</h3>
+        <p><code>description</code>, <code>default</code> and <code>examples</code> are what the extractor reads and what the docs show. The framework's options go in <code>json_schema_extra</code>, one key per behaviour (see <a href="#e-input">an input</a> and <a href="#e-words">the user's own words</a>).</p>
+      </div>
+      <figure>
+        <figcaption>class Input</figcaption>
+        <pre><code>query: str = Field(
+    description="the name to find",
+    examples=["Alpha"])</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="s-annotation">
+      <div class="prose">
+        <p class="num">04</p>
+        <h3>A return annotation</h3>
+        <p>In an execution command, the return annotation of <code>__call__</code> is the <code>Output</code> the command returns. In a planning phase, the annotation is the facts that phase hands on (see <a href="#p-facts">facts from one command</a>).</p>
+      </div>
+      <figure>
+        <figcaption>two annotations</figcaption>
+        <pre><code>def __call__(self, workflow, command, input) -&gt; Signature.Output: ...
+def find(self, input) -&gt; FindItem.Output: ...</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="s-union">
+      <div class="prose">
+        <p class="num">05</p>
+        <h3>A union</h3>
+        <p>A phase annotated with a union of two <code>Output</code>s runs one of two commands, and <code>__result__</code> reads the fields of the one that ran (see <a href="#p-union">whichever command ran</a>).</p>
+      </div>
+      <figure>
+        <figcaption>a phase</figcaption>
+        <pre><code>def find(self, input) -&gt; FindItem.Output | FindMember.Output: ...</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="s-property">
+      <div class="prose">
+        <p class="num">06</p>
+        <h3>A property</h3>
+        <p>A value computed from a record, or from a model of facts, is a property. A record's identity is a property too, when it is computed, and <code>instance_label_attr</code> names it (see <a href="#c-name">a record's name and identity</a>).</p>
+      </div>
+      <figure>
+        <figcaption>a facts model</figcaption>
+        <pre><code>@property
+def label(self) -&gt; str:
+    return self.opened.label</code></pre>
+      </figure>
+    </article>
+
+    <article class="idiom" id="s-subclass">
+      <div class="prose">
+        <p class="num">07</p>
+        <h3>A subclass</h3>
+        <p>A planning command that subclasses a base class inherits its phases, placed by its <code>__phases__</code> (see <a href="#p-share">shared phases</a>). Its <code>__result__</code> can extend the shared answer with <code>super()</code>.</p>
+      </div>
+      <figure>
+        <figcaption>PlanGenerator</figcaption>
+        <pre><code>class PlanGenerator(BookPhases):
+    def __result__(self, input, book=None, loans=None):
+        answer = super().__result__(input, book)</code></pre>
+      </figure>
+    </article>
+  </section>
+
+  <section class="reference-block reference" id="reference">
+    <header class="section-head">
+      <p class="stamp">Reference</p>
+      <h2>Helper modules and step helpers.</h2>
+      <p>Not idioms: the modules and helper functions the shapes above use.</p>
+    </header>
+
+    <h3 id="r-helpers">Helper modules</h3>
+    <p>A file whose name starts with an underscore is a module the commands import: shared wording, tables, facts models. It is never matched as a command. The one exception is the context callback, the file named after its folder: <code>_Item.py</code> in <code>Item/</code>.</p>
+    <pre><code><span class="c"># _commands/Item/_wording.py</span>
+from fastworkflow.planning import count
+
+def copies(n: int) -&gt; str:
+    return count(n, "copy", "copies")
+
+<span class="c"># _commands/Item/show_item.py</span>
+from ._wording import copies</code></pre>
+
+    <h3 id="r-steps">Planning step helpers</h3>
+    <p>Imported from <code>fastworkflow.planning</code>.</p>
+    <table class="ref">
+      <thead>
+        <tr><th>Helper</th><th>Use</th><th>Notes</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>run(command, *, named=None, all_pages=False, **inputs)</code></td><td>a command step; <code>named</code> opens a row, <code>all_pages</code> reads every page</td><td><code>inputs</code> are the command's own <code>Input</code> fields; a <code>None</code> value is left out; <code>named</code> and <code>all_pages</code> are reserved names</td></tr>
+        <tr><td><code>@phase(over=, max_items=, noun=, bind=, until=, optional=, output=)</code></td><td>a phase that runs per item, or with the options it takes</td><td>see <a href="#p-fan">once per item</a></td></tr>
+        <tr><td><code>when(condition, step)</code></td><td>a step the agent decides while it runs</td><td>a condition on the input or the facts is an <code>if</code> in the phase, where the real values are known</td></tr>
+        <tr><td><code>do_not_run(command)</code></td><td>a guard: code passes over the command, and the agent is told to leave it alone</td><td>use it where the agent must not run a command</td></tr>
+        <tr><td><code>count(n, noun, plural=None)</code></td><td>a count phrase: <code>1 item</code>, <code>2 items</code></td><td>placeholder-safe, so use it rather than an inline <code>n == 1</code>, which breaks the preview</td></tr>
+        <tr><td><code>count_and_names_read(names, total, noun, same=None, plural=None)</code></td><td>a count with the names of a list read: <code>2 items (Alpha, Beta)</code></td><td><code>none (0 items)</code> for an empty list; <code>5 items (Alpha, Beta; 2 of 5 shown)</code> when fewer rows were read than the total</td></tr>
+        <tr><td>a plain string</td><td>a step for the agent</td><td>the agent judges and does it</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="reference-block reference" id="removed">
+    <header class="section-head">
+      <p class="stamp">Removed spellings</p>
+      <h2>Migration table.</h2>
+      <p>Each spelling below fails the load and names its replacement. This table is the only place the old spellings appear.</p>
+    </header>
+    <table class="ref">
+      <thead>
+        <tr><th>Removed spelling</th><th>Use instead</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>in_request: True</code>, <code>{"ignore": [...]}</code></td><td><code>copied_from_command_text</code></td></tr>
+        <tr><td><code>in_request: "subject"</code>, <code>subject</code>, <code>strip</code></td><td><code>record_named_in_command_text</code></td></tr>
+        <tr><td><code>in_request: False</code></td><td><code>converted_from_command_text</code></td></tr>
+        <tr><td><code>verify: True</code> on a <code>bool</code> or <code>Literal</code></td><td><code>classifier_confirms: True</code></td></tr>
+        <tr><td><code>verify: {value: meaning}</code>, <code>means</code></td><td><code>classifier_confirms: {"meanings": {...}}</code></td></tr>
+        <tr><td><code>verify: "alone"</code></td><td><code>classifier_decides: True</code></td></tr>
+        <tr><td><code>positional: True</code></td><td><code>command_text_after_command_name: True</code></td></tr>
+        <tr><td><code>from</code>, <code>from_("cmd.field")</code> (import of <code>from_</code>)</td><td><code>from_command_output</code> (a key, not a helper)</td></tr>
+        <tr><td><code>validate_extracted_parameters</code> on <code>Signature</code></td><td><code>@model_validator(mode="after")</code> on <code>Input</code></td></tr>
+        <tr><td>validation-context key <code>"request"</code></td><td><code>info.context["command_text"]</code></td></tr>
+        <tr><td><code>approval = "mandatory"</code>, <code>"delegatable"</code></td><td><code>@user_approval_for_execution(UserApproval.REQUIRED_ALWAYS)</code>, <code>REQUIRED_UNTIL_DELEGATED</code></td></tr>
+        <tr><td><code>writes = True</code></td><td><code>@writes</code></td></tr>
+        <tr><td><code>descends_to = "X"</code>, <code>descend_parameter = "p"</code></td><td><code>@descends_to("X", when_parameter="p")</code></td></tr>
+        <tr><td><code>instance_label</code> classmethod</td><td>a property, named by <code>instance_label_attr</code></td></tr>
+        <tr><td><code>command_context_object</code> parameter on context classmethods</td><td><code>record</code></td></tr>
+        <tr><td><code>workflow.command_context_for_response_generation</code></td><td><code>workflow.record</code></td></tr>
+        <tr><td><code>workflow.current_command_context</code> (read and assign)</td><td><code>workflow.record</code> (assign to move)</td></tr>
+        <tr><td><code>workflow.root_command_context</code></td><td><code>workflow.root</code></td></tr>
+        <tr><td><code>is_command_context_for_response_generation_root</code>, <code>is_current_command_context_root</code></td><td><code>workflow.is_record_root</code></td></tr>
+        <tr><td><code>current_command_context_name</code>, <code>current_command_context_displayname</code></td><td><code>workflow.record</code>, and <code>workflow.record_displayname</code></td></tr>
+        <tr><td><code>pick("cmd", named=n, item_uid=u)</code></td><td><code>run("cmd", named=n, &lt;input&gt;=u)</code>, where the input is the command's own field name</td></tr>
+        <tr><td><code>full_list("cmd", ...)</code></td><td><code>run("cmd", ..., all_pages=True)</code></td></tr>
+        <tr><td><code>listed(...)</code></td><td><code>count_and_names_read(...)</code></td></tr>
+        <tr><td><code>num(x)</code></td><td>an inline f-string, <code>f"{x}"</code></td></tr>
+        <tr><td>paging parameters <code>offset</code>, <code>skip</code></td><td><code>start</code> only</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <footer class="colophon">
+    <p>The worked forms of these shapes, on a library of books and members, are the <a href="tutorials/planning_commands/README.md">planning-command tutorial</a>. The one-page file reference is <a href="planning_command_file_layout.md">planning_command_file_layout.md</a>. Command files in general are <a href="../.claude/rules/command-authoring.md">command-authoring.md</a>.</p>
+  </footer>
+</main>
+<script>
+(function () {
+  var input = document.getElementById("q");
+  var articles = Array.prototype.slice.call(document.querySelectorAll("article.idiom"));
+  var sections = Array.prototype.slice.call(document.querySelectorAll("section.group"));
+  var empty = document.getElementById("empty");
+  var shown = document.getElementById("shown");
+  var links = Array.prototype.slice.call(document.querySelectorAll(".index a"));
+  var byId = {};
+  links.forEach(function (link) {
+    byId[link.getAttribute("href").slice(1)] = link;
+  });
+
+  function apply() {
+    var needle = input.value.trim().toLowerCase();
+    var count = 0;
+    articles.forEach(function (article) {
+      var hit = !needle || article.textContent.toLowerCase().indexOf(needle) !== -1;
+      article.hidden = !hit;
+      if (hit) count += 1;
+    });
+    sections.forEach(function (section) {
+      var any = false;
+      section.querySelectorAll("article.idiom").forEach(function (article) {
+        if (!article.hidden) any = true;
+      });
+      section.hidden = !any;
+    });
+    empty.hidden = count !== 0;
+    shown.hidden = !needle;
+    shown.textContent = count + " shown";
+  }
+
+  input.addEventListener("input", apply);
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "/" && document.activeElement !== input) {
+      event.preventDefault();
+      input.focus();
+    }
+  });
+
+  if ("IntersectionObserver" in window) {
+    var current = null;
+    var observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        if (current) current.classList.remove("active");
+        current = byId[entry.target.id] || null;
+        if (current) current.classList.add("active");
+      });
+    }, { rootMargin: "-20% 0px -70% 0px", threshold: 0 });
+    articles.forEach(function (article) { observer.observe(article); });
+  }
+})();
+</script>
+</body>
+</html>

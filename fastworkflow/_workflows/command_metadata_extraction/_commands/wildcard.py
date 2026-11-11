@@ -1,12 +1,48 @@
+from typing import Any, Optional
+
+from pydantic import BaseModel, Field
+
 import fastworkflow
-from fastworkflow import Action, CommandOutput, CommandResponse, NLUPipelineStage
+from fastworkflow import Action, NLUPipelineStage
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.nlu_labels import PARAMETER_VALUE_PLACEHOLDERS
 
+from fastworkflow.utils.logging import logger
+from fastworkflow.utils.signatures import MISSING_INFORMATION_ERRMSG
+
 from ..intent_detection import CommandNamePrediction
-from ..parameter_extraction import ParameterExtraction
+from ..parameter_extraction import (
+    ParameterExtraction,
+    classify_missing_value_reply,
+    missing_value_question,
+    missing_value_reply_enabled,
+    pending_missing_fields,
+)
 
 class Signature:
+    class Output(BaseModel):
+        """The routing result of one message. The executor reads it and builds the turn's CommandOutput.
+
+        handled: a CME or core command already answered the message (or a routing hint did), so the
+            turn ends here with ``response``. A handled answer carries the artifact ``command_handled``.
+        routed: True routes the message on to an application command (run by the executor next);
+            False refuses it, and ``response`` is the answer (success=False).
+        command / command_name / cmd_parameters / ran_on_context_*: the extraction, when the message
+            is routed on to the application command ``command_name`` (run by the executor next).
+        """
+
+        handled: bool = False
+        routed: bool = True
+        response: str = ""
+        command: Optional[str] = None
+        command_name: Optional[str] = None
+        cmd_parameters: Optional[Any] = Field(default=None, exclude=True)
+        ran_on_context_name: Optional[str] = None
+        ran_on_context_clause: Optional[str] = None
+        reply_intent: Optional[str] = None
+        # The nested command's Output, when a CME command answered (the handled path only).
+        output: Optional[Any] = Field(default=None, exclude=True)
+
     # These are the PARAMETER_EXTRACTION stage's bare-value literals. They belong
     # to nlu_labels.PARAMETER_VALUE_LABEL, not to this command's INTENT_DETECTION
     # escalation class; see fastworkflow/nlu_labels.py for the stage split.
@@ -23,35 +59,164 @@ class Signature:
         ]
 
 
+def _global_head_trained(app_workflow) -> bool:
+    """Whether the workflow has a global head to ask: '*' has execution commands, and the trainer
+    wrote its artifacts (``___command_info/global``, the folder ``CommandRouter`` reads for '*').
+    Without one the global-first step is skipped silently, so no model is loaded for it."""
+    import os
+
+    from fastworkflow.model_pipeline_training import GLOBAL_CONTEXT_FOLDER
+
+    try:
+        commands = fastworkflow.RoutingRegistry.get_definition(app_workflow.folderpath).get_command_names("*")
+    except Exception:  # noqa: BLE001 - a workflow whose routing cannot be read has no global head to ask
+        return False
+    if not commands:
+        return False
+    return os.path.isfile(os.path.join(
+        app_workflow.folderpath, "___command_info", GLOBAL_CONTEXT_FOLDER, "threshold.json"))
+
+
+def _confident_global_command(output) -> bool:
+    """A confident answer naming one application command: not a decline, not an ambiguity, not a
+    bare value, and not a framework (CME) command. The reserved labels resolve to no command name."""
+    return (output.command_name is not None
+            and output.error_msg is None
+            and not output.answered_bare_value
+            and not output.is_cme_command)
+
+
+def _run_cme_command(workflow, command: str, command_name: str,
+                     nlu_pipeline_stage: NLUPipelineStage) -> Signature.Output:
+    """Run a framework (CME) command the message routed to, and wrap its result as the routing output."""
+    workflow_context = workflow.context
+    if command_name == 'ErrorCorrection/you_misunderstood':
+        workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
+        workflow_context["command"] = command
+    elif (
+        nlu_pipeline_stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION or
+        command_name == 'ErrorCorrection/abort'
+    ):
+        workflow.end_command_processing()
+    workflow.context = workflow_context
+
+    startup_action = Action(
+        command_name=command_name,
+        command=command,
+    )
+    command_output = CommandExecutor.perform_action(workflow, startup_action)
+    handled = (
+        nlu_pipeline_stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION or
+        command_name == 'ErrorCorrection/abort'
+    )
+    return Signature.Output(
+        handled=handled,
+        routed=command_output.success,
+        response=command_output.command_response.response,
+        output=command_output.command_response.output,
+    )
+
+
+def _missing_value_reply_intent(workflow, app_workflow, command_name: str,
+                                command: str) -> tuple[str, list[str]]:
+    """Jev's reading of a reply to the pending missing-value prompt, with the fields it asked for.
+
+    Returns ("answer", []) whenever the check does not apply or fails: the switch is off, the
+    session is in agent mode, nothing is pending, no Jev LM is configured, or any step raises.
+    """
+    if app_workflow.context.get("run_as_agent") or not missing_value_reply_enabled():
+        return "answer", []
+    stored_params = ParameterExtraction._get_stored_parameters(workflow)
+    if stored_params is None:
+        return "answer", []
+    try:
+        from fastworkflow.workflow_agent import _jev_lm
+
+        if _jev_lm() is None:
+            return "answer", []
+        fields = pending_missing_fields(
+            app_workflow, command_name, stored_params, workflow.context.get("command", command))
+        question = (workflow.context.get("missing_value_question")
+                    or missing_value_question(command_name, fields))
+        intent = classify_missing_value_reply(question, command)
+        return intent, fields
+    except Exception:  # noqa: BLE001 - a failed check is an answer, as before this check existed
+        logger.warning("missing-value reply check failed; treating the reply as an answer", exc_info=True)
+        return "answer", []
+
+
 class ResponseGenerator:
     def __call__(
         self, 
         workflow: fastworkflow.Workflow, 
         command: str,
-    ) -> CommandOutput:  # sourcery skip: hoist-if-from-if
+        input: None,
+    ) -> Signature.Output:  # sourcery skip: hoist-if-from-if
         app_workflow = workflow.context["app_workflow"]   # type: fastworkflow.Workflow
-        cmd_ctxt_obj_name = app_workflow.current_command_context_name
+        cmd_ctxt_obj_name = app_workflow._current_command_context_name
         nlu_pipeline_stage = workflow.context.get(
             "NLU_Pipeline_Stage", 
             NLUPipelineStage.INTENT_DETECTION)
 
-        predictor = CommandNamePrediction(workflow)           
-        cnp_output = predictor.predict(cmd_ctxt_obj_name, command, nlu_pipeline_stage)
+        # The record the command runs on: the current object, unless an exact command name
+        # resolves to an enclosing record or the global scope on the lookup path (3.9).
+        bound_record = app_workflow._current_command_context
+        typed_name = False  # the first token is a command name (exact, or a core command)
+        if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:
+            from fastworkflow.context_navigation import command_on_path
+            from fastworkflow.workflow_agent import core_command_names
+
+            # A leading '/' is the deterministic-mode prefix, not part of the name (as in
+            # workflow_agent._explicit_agent_command and command_executor). It is kept in `token`
+            # so the slice below stays aligned, and stripped for every name comparison.
+            token = command.split(None, 1)[0].split("(", 1)[0] if command.strip() else ""
+            bare = token.lstrip("/")
+            # A framework core command name is answered by the current scope first, always.
+            core_short = {name.split("/")[-1].lower() for name in core_command_names()}
+            typed_name = bool(bare) and bare.lower() in core_short
+            found = (command_on_path(app_workflow, bare)
+                     if bare and not typed_name else None)
+            if found is not None:
+                typed_name = True
+            if found is not None and len(found[1]) == 1:
+                scope, (name,) = found
+                # The scope's own predict matches the short name exactly, as it does here.
+                command = name.split("/")[-1] + command.strip()[len(token):]
+                cmd_ctxt_obj_name = scope.context_name
+                bound_record = scope.record
+
+        predictor = CommandNamePrediction(workflow)
+        cnp_output = None
+        # Confident global first (owner-approved, step 3 bars): for natural language, the global
+        # head '*' is asked before the current context's head. A confident command of '*' is the
+        # answer and runs bound to the root object, as the climb binds it. Anything else is discarded
+        # and today's flow runs unchanged. An exact name never reaches here (the lookup above).
+        if (nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION
+                and not typed_name
+                and app_workflow._current_command_context_name != "*"
+                and app_workflow._current_command_context is not None
+                and app_workflow.root is not None
+                and _global_head_trained(app_workflow)):
+            global_output = predictor.predict("*", command, nlu_pipeline_stage)
+            if _confident_global_command(global_output):
+                cnp_output = global_output
+                cmd_ctxt_obj_name = "*"
+                bound_record = app_workflow.root
+        if cnp_output is None:
+            cnp_output = predictor.predict(cmd_ctxt_obj_name, command, nlu_pipeline_stage)
 
         if cnp_output.error_msg:
             workflow_context = workflow.context
             workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION
             workflow_context["command"] = command
             workflow.context = workflow_context
-            return CommandOutput(
-                command_response=
-                    CommandResponse(
-                        response=(
-                            f"Ambiguous intent error for command '{command}'\n"
-                            f"{cnp_output.error_msg}"
-                        ),
-                        success=False
-                    )
+            return Signature.Output(
+                handled=False,
+                routed=False,
+                response=(
+                    f"Ambiguous intent error for command '{command}'\n"
+                    f"{cnp_output.error_msg}"
+                ),
             )
         else:
             if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION and \
@@ -61,38 +226,14 @@ class ResponseGenerator:
                 workflow.context = workflow_context
         
         if cnp_output.is_cme_command:
-            workflow_context = workflow.context
-            if cnp_output.command_name == 'ErrorCorrection/you_misunderstood':
-                workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
-                workflow_context["command"] = command
-            elif (
-                nlu_pipeline_stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION or
-                cnp_output.command_name == 'ErrorCorrection/abort'
-            ):
-                workflow.end_command_processing()
-            workflow.context = workflow_context
+            return _run_cme_command(workflow, command, cnp_output.command_name, nlu_pipeline_stage)
 
-            startup_action = Action(
-                command_name=cnp_output.command_name,
-                command=command,
-            )
-            command_output = CommandExecutor.perform_action(workflow, startup_action)
-            if (
-                nlu_pipeline_stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION or
-                cnp_output.command_name == 'ErrorCorrection/abort'
-            ):
-                command_output.command_response.artifacts["command_handled"] = True     
-                # Set the additional attributes
-                command_output.command_name = cnp_output.command_name
-            return command_output
-        
         if nlu_pipeline_stage in {
                 NLUPipelineStage.INTENT_DETECTION,
                 NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
                 NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
             }:
-            app_workflow.command_context_for_response_generation = \
-                app_workflow.current_command_context
+            app_workflow._command_context_for_response_generation = bound_record
 
             if cnp_output.command_name is None:
                 # The hint the first declining context composed.
@@ -100,13 +241,16 @@ class ResponseGenerator:
                 # same reason, so the first one is the whole story; it is kept
                 # rather than recomputed because the walk overwrites cnp_output.
                 routing_hint = cnp_output.routing_hint
+                # A head that answered `parameter_value` has said the utterance is a
+                # bare value, so no ancestor is asked (design 2.18, 3.9 step 4).
                 while not cnp_output.command_name and \
-                    app_workflow.command_context_for_response_generation is not None and \
-                        not app_workflow.is_command_context_for_response_generation_root:
-                    app_workflow.command_context_for_response_generation = \
-                        app_workflow.get_parent(app_workflow.command_context_for_response_generation)
+                        not cnp_output.answered_bare_value and \
+                        app_workflow.record is not None and \
+                            not app_workflow.is_record_root:
+                    app_workflow._command_context_for_response_generation = \
+                        app_workflow.get_parent(app_workflow.record)
                     cnp_output = predictor.predict(
-                        fastworkflow.Workflow.get_command_context_name(app_workflow.command_context_for_response_generation), 
+                        fastworkflow.Workflow.get_command_context_name(app_workflow.record), 
                         command, nlu_pipeline_stage)
                     routing_hint = routing_hint or cnp_output.routing_hint
             
@@ -132,13 +276,7 @@ class ResponseGenerator:
                         # hint names usually lives elsewhere. Ending command
                         # processing routes that next message normally.
                         workflow.end_command_processing()
-                        return CommandOutput(
-                            command_response=CommandResponse(
-                                response=routing_hint,
-                                success=False,
-                                artifacts={"command_handled": True},
-                            )
-                        )
+                        return Signature.Output(handled=True, routed=False, response=routing_hint)
 
                     if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:
                         # out of scope commands
@@ -153,16 +291,14 @@ class ResponseGenerator:
                             command=command,
                         )
                         command_output = CommandExecutor.perform_action(workflow, startup_action)
-                        command_output.command_response.artifacts["command_handled"] = True
-                        return command_output
+                        return Signature.Output(
+                            handled=True,
+                            routed=command_output.success,
+                            response=command_output.command_response.response,
+                            output=command_output.command_response.output,
+                        )
 
-                    return CommandOutput(
-                        command_response=
-                            CommandResponse(
-                                response=cnp_output.error_msg,
-                                success=False
-                            )
-                    )
+                    return Signature.Output(handled=False, routed=False, response=cnp_output.error_msg)
 
             # move to the parameter extraction stage
             workflow_context = workflow.context
@@ -189,6 +325,36 @@ class ResponseGenerator:
                 workflow_context["command"] = command
                 workflow.context = workflow_context
             else:
+                # Jev reads the reply first: a hesitation waits, a request to stop, a wrong-command
+                # report or a different request leaves the pending round. Only an answer is merged.
+                intent, missing_fields = _missing_value_reply_intent(
+                    workflow, app_workflow, command_name, command)
+                if intent == "wait":
+                    return Signature.Output(
+                        handled=False,
+                        routed=False,
+                        reply_intent="wait",
+                        response="\n".join(
+                            ["OK, take your time.",
+                             f"{MISSING_INFORMATION_ERRMSG}{', '.join(missing_fields)}"]),
+                    )
+                if intent in ("abort", "misunderstood"):
+                    routed = _run_cme_command(
+                        workflow, command,
+                        "ErrorCorrection/abort" if intent == "abort"
+                        else "ErrorCorrection/you_misunderstood",
+                        nlu_pipeline_stage)
+                    routed.reply_intent = intent
+                    return routed
+                if intent == "different_command":
+                    # The pending command is left: the stored parameters go with it
+                    # (end_command_processing), and the reply runs as a fresh request in INTENT_DETECTION.
+                    workflow.context.pop("missing_value_question", None)
+                    workflow.end_command_processing()
+                    out = self(workflow, command, input)
+                    if out.reply_intent is None:
+                        out.reply_intent = "different_command"
+                    return out
                 # An answer to the pending round: what gets merged is this text,
                 # not the stored command it answers.
                 extraction_text = f'{command_name}: {command}'
@@ -198,28 +364,40 @@ class ResponseGenerator:
             workflow, app_workflow, command_name, extraction_text or preserved_command)
         pe_output = extractor.extract()
         if not pe_output.parameters_are_valid:
-            return CommandOutput(
-                command_name = command_name,
-                command_response=
-                    CommandResponse(
-                        response=(
-                            f"PARAMETER EXTRACTION ERROR FOR COMMAND '{command_name}'\n"
-                            f"{pe_output.error_msg}"
-                        ),
-                        success=False
-                    )
+            return Signature.Output(
+                handled=False,
+                routed=False,
+                reply_intent="answer",
+                response=(
+                    f"PARAMETER EXTRACTION ERROR FOR COMMAND '{command_name}'\n"
+                    f"{pe_output.error_msg}"
+                ),
             )
 
+        workflow.context.pop("missing_value_question", None)
         workflow.end_command_processing()
 
-        return CommandOutput(
-            command_response=
-                CommandResponse(
-                    response="",
-                    artifacts={
-                        "command": preserved_command,
-                        "command_name": command_name,
-                        "cmd_parameters": pe_output.cmd_parameters,
-                    },
-                )
-        ) 
+        # The walk bound an enclosing record: the command runs on that record, so it is
+        # filed under it (design 3.9, "Filing the run"). Absent when it runs here.
+        ran_on_name = ran_on_clause = None
+        ran_on = app_workflow.record
+        if ran_on is not app_workflow._current_command_context:
+            from fastworkflow.context_identity import identity_of
+            from fastworkflow.observation_offloading.labels import context_clause
+
+            ran_on_name, ran_on_label = identity_of(app_workflow, ran_on)
+            ran_on_clause = (
+                context_clause(ran_on_name, ran_on_label) if ran_on is not None else "")
+
+        reply_intent = "answer" if nlu_pipeline_stage == NLUPipelineStage.PARAMETER_EXTRACTION else None
+        return Signature.Output(
+            handled=False,
+            routed=True,
+            reply_intent=reply_intent,
+            response="",
+            command=preserved_command,
+            command_name=command_name,
+            cmd_parameters=pe_output.cmd_parameters,
+            ran_on_context_name=ran_on_name,
+            ran_on_context_clause=ran_on_clause,
+        )

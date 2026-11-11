@@ -14,8 +14,8 @@ def test_reset_context():
     
     # Set a context object
     obj = {"ctx": 1}
-    workflow.current_command_context = obj
-    assert workflow.current_command_context is obj
+    workflow.record = obj
+    assert workflow._current_command_context is obj
 
     # Create a mock workflow that mimics the structure expected by the ResponseGenerator
     mock_workflow = fastworkflow.Workflow.create(
@@ -27,10 +27,11 @@ def test_reset_context():
     resp_gen = ResponseGenerator()
     
     # Call the __call__ method which is the current implementation
-    response = resp_gen(mock_workflow, "reset context")
+    # Short form: the three-argument call returns the response text.
+    response = resp_gen(mock_workflow, "reset context", None)
     
     # Check that the response indicates context was reset
-    assert "context" in response.command_response.response.lower()
+    assert "context" in response.lower()
     
     # Check that the context was actually reset
-    assert workflow.current_command_context is workflow.root_command_context 
+    assert workflow._current_command_context is workflow.root 

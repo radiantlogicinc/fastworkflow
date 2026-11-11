@@ -2,8 +2,573 @@
 
 ## Unreleased
 
+### Upgrading to the design idioms (BREAKING: every old spelling fails the load)
+
+Every BREAKING item below gives the old form and the new one. Each old form fails the load, or the call, with a
+message that names the replacement. Nothing is kept for compatibility. The release is 4.0.0 (see "Version").
+
+1. **BREAKING: field options are keys of `json_schema_extra`, one per behaviour (spec 2).** Plain pydantic
+   `Field(..., json_schema_extra={...})`; there are no helper functions. Optional TypedDicts (`FieldOptions`,
+   `CopiedOptions`, `RecordNamedOptions`, `ConfirmsOptions`) give IDE completion and are exported from `fastworkflow`
+   and `fastworkflow.planning`. The keys are named "command text" where they used to say "request".
+
+   | Old (in `json_schema_extra`) | New | Notes |
+   |---|---|---|
+   | `{"in_request": True}` | `{"copied_from_command_text": True}` | the text must be written in the command text |
+   | `{"in_request": {"ignore": [...]}}` | `{"copied_from_command_text": {"ignore": [...]}}` | `ignore` strips before the verbatim match |
+   | `{"in_request": "subject"}` | `{"record_named_in_command_text": True}` | names a record already written in the command text |
+   | `{"subject": True, "ignore": [...]}` | `{"record_named_in_command_text": {"ignore": [...]}}` | |
+   | `{"verify": True}` on a `bool` or `Literal` | `{"classifier_confirms": True}` | |
+   | `{"verify": {value: meaning}}` on a `Literal` | `{"classifier_confirms": {"meanings": {value: meaning}}}` | keys must be the enum's values |
+   | `{"verify": True}` on a subject `str` | `{"record_named_in_command_text": True, "classifier_confirms": True}` | a model re-picks a record name only with `JEV_API_KEY` |
+   | `{"means": {...}}` | `{"classifier_confirms": {"meanings": {...}}}` | |
+   | `{"verify": "alone"}` | `{"classifier_decides": True}` | |
+   | `{"positional": True}` | `{"command_text_after_command_name": True}` | at most one per `Input`; execution commands only |
+   | `{"from": "cmd.field"}` / `from_("cmd.field", ...)` | `{"from_command_output": "cmd.field"}` (or a list) | `from_` is removed: importing it fails |
+   | `{"strip": [...]}` with a check | `{"copied_from_command_text": {"ignore": [...]}}` | a field with no check: `strip_words(...)` in a `field_validator` |
+   | `{"in_request": False}` on an execution command's `Input` (a value converted from the text, e.g. a date) | `{"converted_from_command_text": True}` | |
+
+   Load rules: an old key fails naming the new key; an unknown key suggests the closest; a value must be `True` or a
+   dict of known options (`False` is rejected); conflicting pairs fail (`copied_from_command_text` with
+   `record_named_in_command_text`, `classifier_confirms` with `classifier_decides`); a wrong type fails naming the
+   accepted types; a hand-written `available_from` fails.
+
+2. **BREAKING: one validation mechanism, `@model_validator(mode="after")` on `Input` (spec 3).**
+   `Signature.validate_extracted_parameters` is removed; a `Signature` that still defines it fails the load, and the
+   message shows the validator form. `db_lookup` (the field key and the `Signature.db_lookup` method) stays retired.
+
+   | Old | New |
+   |---|---|
+   | `@staticmethod def validate_extracted_parameters(workflow, command, input)`, `return None`; corrects by assigning `input.<field>` | `@model_validator(mode="after") def <name>(self, info)`, corrects by assigning `self.<field>` and `return self` |
+   | `raise fastworkflow.Refused(message, field=...)` from the hook | the same raise, from the validator; a plain `ValueError` is a refusal with no field |
+   | `workflow` argument | `info.context["workflow"]` (`None` while a planning command's template renders) |
+   | `command` argument | `info.context["command"]` (the qualified name) |
+   | the raw text (`command_text` parameter) | `info.context["command_text"]` (`""` while a template renders) |
+
+   - **Upgrade step: declare the moved validator first.** The old order was option checks, then the hook (which could
+     correct fields), then the `Input`'s own model validators, then roles. Pydantic runs model validators in declaration
+     order, so a validator moved from the hook must be declared before the `Input`'s existing model validators. Otherwise
+     an existing check sees the uncorrected value. (In one workflow, a kind-fit check refused before the kind resolver ran.)
+   - `field_validator` is for one field's cleanup; `strip_words` stays public. A validator cannot replace "required" or
+     `ignore`: a missing required field fails before the validators, and `ignore` strips before the verbatim match.
+   - Order now: extraction, option checks, model validators (in declaration order), role checks.
+   - Building an `Input` directly (`Signature.Input(...)`) without a context fails with a clear message. In tests use
+     `Signature.Input.model_construct(...)` or `Input.model_validate(values, context={...})`.
+   - Known false positive: the library's `note_member` refuses a note that repeats the member's own name ("Mia Chen to
+     call back"). Document it or reword the note.
+
+3. **BREAKING: command class declarations are decorators (spec 4).**
+
+   | Old (class attribute) | New (decorator, from `fastworkflow`) |
+   |---|---|
+   | `approval = "mandatory"` | `@user_approval_for_execution(UserApproval.REQUIRED_ALWAYS)` |
+   | `approval = "delegatable"` | `@user_approval_for_execution(UserApproval.REQUIRED_UNTIL_DELEGATED)` |
+   | `writes = True` on `ResponseGenerator` | `@writes` on the execution command's `ResponseGenerator` (on a `PlanGenerator` it is a load error) |
+   | `descends_to = "X"` | `@descends_to("X")` |
+   | `descend_parameter = "p"` | `@descends_to("X", when_parameter="p")` |
+
+   The old attributes fail the load naming the decorator. Hand-written private attributes fail too. `always` remains
+   the reply that records the delegation for that user, workflow and command. `command_directory.json` stores
+   `"required_always"` and `"required_until_delegated"` (it stored `"mandatory"` and `"delegatable"`).
+
+4. **BREAKING: the record names (spec 5 and 6).**
+
+   | Old | New |
+   |---|---|
+   | `workflow.command_context_for_response_generation` (read) | `workflow.record` (the record this command acts on) |
+   | `workflow.current_command_context = x` (move) | `workflow.record = x` |
+   | `workflow.root_command_context` | `workflow.root` (set once, in the startup command) |
+   | `workflow.is_command_context_for_response_generation_root` | `workflow.is_record_root` |
+   | `workflow.current_command_context_displayname` | `workflow.record_displayname` |
+   | `command_context_object` parameter of `get_parent`, `get_displayname`, `get_state`, `get_locator` | `record` |
+   | `instance_label` classmethod on a context class | a property on the record, named by `instance_label_attr` (a context that defines `instance_label` fails the load) |
+
+   `find_by_locator(anchor, locator)` and `from_state(state, workflow, *, state_version)` are unchanged. "Context" still
+   names the kind of object (the folder, `base`, `class Context`). `get_displayname` and `instance_label_attr` are kept
+   side by side; see `docs/planning_command_file_layout.md`, "Naming a record".
+
+5. **BREAKING: planning step helpers (spec 7, section 13).**
+
+   | Old | New |
+   |---|---|
+   | `pick("cmd", named=n, item_uid=u)` | `run("cmd", named=n, item_uid=u)` (the command's own input name; `named` and `all_pages` are reserved input names) |
+   | `full_list("cmd", ...)` | `run("cmd", ..., all_pages=True)` (reads pages until the rows reach `Output.total`, up to `CODE_MAX_PAGES` = 20) |
+   | `listed(...)` | `count_and_names_read(...)` (same behaviour) |
+   | `num(...)` | an inline f-string, or `count(n, noun, plural=None)`, which is placeholder-safe (use it rather than an inline `n == 1`) |
+   | `from_(...)` | `json_schema_extra={"from_command_output": ...}` |
+
+   Removed: `pick`, `full_list`, `listed`, `num`, `from_` (importing them fails, the first four naming their replacement).
+   The paging parameter is `start` only. `run` takes `named=` and `all_pages=`, and a `None` value is left out.
+   `when`, `do_not_run`, plain strings and `@phase(...)` are unchanged. Skip a phase with `return []`. `__phases__` is
+   only for shared phases.
+
+6. **BREAKING: "request" is "command text" in every author-visible name.** The validation context key `"request"` is
+   `"command_text"`. The option keys, load errors and documentation say "command text". Text a model reads is unchanged:
+   the sentences the framework appends to field descriptions, refusal messages and step wording. A validator that still
+   reads `info.context["request"]` (or `.get("request")`) fails the call with `raised KeyError` and the message
+   `'request' is removed from the validation context: read info.context['command_text']`.
+
+7. **Diagnostics: SPAN_CONTRACT_VERSION 41.** The `validation_hook` record keeps its keys (`ran`, `is_valid`, `message`,
+   `changed_fields`, `refused_fields`), but its facts come from the `Input`'s model validators: `changed_fields` are the
+   fields a validator wrote back, and `refused_fields` the fields of a `fastworkflow.Refused` a validator raised. The
+   record is always emitted when the validation step runs, with `ran=False` when the `Input` declares no validator.
+   A span recorded before version 41 carries the same keys with the hook's meaning.
+
+8. **Binding and direct construction (`fastworkflow/utils/input_validation.py`).** A `name=value` binding whose value
+   fails its type or a field validator is dropped: the binding is no binding, and the LLM extracts the value instead.
+   A model validator runs later, with the context. Direct construction of an `Input` without context gives a clear
+   error naming the validator, not `'NoneType' object is not subscriptable`.
+
+9. **Retired spellings name their replacement in the load error.** For example:
+   `field 'who': in_request: "subject" is removed: write record_named_in_command_text: True`. Each old spelling in
+   the tables above fails the load in the same way; the planning-command troubleshooting tutorial
+   (`docs/tutorials/planning_commands/15-troubleshooting.md`) shows the load error for each.
+
+**Version.** 4.0.0. The change removes the authoring spellings every workflow uses, so it is breaking for every
+planning command and every command with an `Input` validator. The change-control skill reserves a major for the
+breaking wire/model collapse, and its version rules predate 3.x (it still says 2.22.2). The major is the team's call
+to confirm; the bump follows semver for a breaking public contract.
+
+### Upgrading from copy edges (fact_from, "from" on a facts field) to typed facts (Phase 15)
+
+1. **BREAKING: copy edges are retired (design 2.33, 3.12).** `fact_from` is removed from
+   `fastworkflow.planning` and `fastworkflow.planning_phases`, and a `"from"` key on a facts model's
+   field is no longer read. A facts field typed with anything other than a command's `Output` or
+   `Input` is a load error, and copy fields fail with the message that copies are no longer read.
+   `facts.fact_sources` no longer resolves copies, and `check_phase_sources`, `facts_from_runs`,
+   `facts_from_archive`, `check_fact_sources`, `FactSourceError` and `AmbiguousFactSourceError` are
+   removed. `from_` on a command's `Input` field (a producer edge) is unchanged.
+
+   | Old (copy edges) | New (typed facts) |
+   |---|---|
+   | `class Found(BaseModel): book_uids: list[str] = fact_from("find_book.book_uids")` with `def find(self, input) -> Found` | `def find(self, input) -> FindBook.Output` (`from .find_book import Signature as FindBook`) |
+   | `class Book(BaseModel): name: str = fact_from("show_book.title")` | `class Book(BaseModel): show: ShowBook.Output`, with `@property def name(self) -> str: return self.show.title` |
+   | `total: int = fact_from("list_loans.total", min_length=1)` | the field typed `ListLoans.Output`, its check in a `@model_validator` or the phase method |
+   | a value a copy computed by name (`count: int = Field(json_schema_extra={"from": ...})`) | a property or method of the facts model, over a field typed with the command's `Output` |
+
+   A value a copy renamed, filtered or joined across commands is a property or method of the facts model,
+   over the fields typed with the commands' `Output`s. The previews show each field's origin.
+
+   `over=` may name a property as well as a field: `over="roster.identity_uids"` reads a property of the
+   facts model an earlier phase outputs, and `over="roster.unit.identity_uids"` reads a property of a typed
+   field's model (`unit`). The load checks each name as a field or a property; a property's return
+   annotation types the names after it (a list's items are its element type), and a property without one
+   is read at run time, unchecked past it. A name that is neither a field nor a property still fails the load.
+
+2. **Nested lists and joined pages (Phase 15 follow-ups).** A list a nested Output of a facts model holds is
+   read by the same rule, each nested model its own column scope: a nested list that drops a row fails the
+   check, and a nested complete list passes. A phase's joined pages keep every key an earlier page carries,
+   so a key the last page omits survives; a scalar takes the last page that gives a value.
+
+3. **Plain names in types (Phase 15 follow-up).** Types in previews, load messages and the command-error
+   text are written by plain class name (`Optional[X]` as `X | None`), with no module path or path-derived
+   digest. Two copies of one workflow at two paths give the same previews.
+
+4. **Previews: a fan-out over a property shows its later items.** A `@phase(over="unit.identity_uids")`
+   whose path ends in a property over a typed field now renders the "For each later item" block, as a
+   fan-out over a field does. This changes the preview text only, not the run.
+
+### Upgrading from Phase 11 (check options, one hook, short forms, plain required fields)
+
+Every BREAKING item below gives the old form and the new one. Each old form is a load error or a call
+error that names the new form; there is no legacy support, except where an item says a form still works.
+
+1. **BREAKING: the check options are two (fix-3rsq.two-options).** The Phase 11 options `subject`,
+   `means` and `strip` are retired. Each one that is still declared fails the load, and the message
+   names the new spelling. Migrate each declaration as the table says:
+
+   | Old (Phase 11) | New | Notes |
+   |---|---|---|
+   | `subject: True` on a `str` | `in_request: "subject"` | same check; it implies `in_request` |
+   | `means: {v: text}` on an enum, with `verify: True` | `verify: {v: text}` | the dict is the check; each key must be a value of the enum, else a load error |
+   | `strip: ["group", "unit"]` on a `str`, with a check (`in_request` or `subject`) | `in_request: {"ignore": ["group", "unit"]}` (or `{"subject": True, "ignore": [...]}`) | the same cleanup, before the match, as before |
+   | `strip: [...]` on a `str` with no check | `strip_words(name, ("group", "unit"))` in the field's validator or in `validate_extracted_parameters` | the field had no check, so `in_request` would add one; the cleanup is code |
+   | `verify: True` on a `str` with `subject` | `verify: True` on a `str` with `in_request: "subject"` | unchanged meaning |
+
+   - `in_request: {"ignore": [...]}` runs the cleanup that `strip` ran: before the match, on the
+     extracted value. The outcomes match the old `strip` on the cases checked (required, optional and
+     `subject` fields alike).
+   - The rule sentences the extractor reads are the same. The previews show the new spelling: the
+     column `in_request` holds `yes` or `subject`, followed by `ignore` and the words, and a `verify`
+     dict's meanings are the preview's notes.
+   - Each field a check was declared on needs the option now: a `str` or `int` is checked only when it
+     carries `in_request` or `subject`. A field with neither is taken as the extractor gives it.
+
+2. **BREAKING where it changes a value: Input validators write back.** A value that an `Input` validator
+   returns instead of its input is written back to the arguments, for both kinds of command. Before
+   this release the returned value was checked and then discarded. Inventory: no `Input` validator in
+   the app, the bundled examples, the test workflows or the tests returns a different value, so none
+   changes its behaviour. A validator that refuses still refuses. The Facts models of the app's
+   `_phase_facts.py` are outputs, not inputs.
+   A validator's wording is the hook's: a `fastworkflow.Refused` is `validate_extracted_parameters: <message>`
+   (with its `field`), and an exception is `validate_extracted_parameters raised <Type>: <text>` on the planning
+   path, `Exception in <command>'s validate_extracted_parameters function: <text>` on the execution path.
+   A plain `ValueError` or `AssertionError` is a refusal with no field, worded the same way; any other exception
+   is the call error `validate_extracted_parameters raised <Type>: <text>`.
+
+3. **BREAKING: short forms only.** Each old form is a load or call error that names the new form.
+
+   | Job | Old form | New form |
+   |---|---|---|
+   | Call a command | `def __call__(self, workflow, command)` | `def __call__(self, workflow, command, input)`; `input` is the Input, or `None` for a command with no Input |
+   | Return a result | `return CommandOutput(command_response=CommandResponse(response=X))` | `return X` (a `str`), or the command's `Signature.Output` instance |
+   | Return with artifacts or next actions | `return CommandOutput(command_response=CommandResponse(response=X, artifacts=...))` | `return fastworkflow.CommandResponse(response=X, artifacts=...)` |
+   | Refuse a call | `return CommandOutput(command_response=CommandResponse(response=M, success=False))`, or a `CommandResponse(..., success=False)` return | `raise fastworkflow.Refused(M)` |
+   | Refuse one value | `return (False, M)` from `validate_extracted_parameters`, or a `db_lookup` rejection | `raise fastworkflow.Refused(M, field="name")` (the field is reset and asked for again; `field=` takes a list too) |
+   | Accept | `return (True, "")`, `return True, ""` | `return None` (or fall off the end) |
+   | Generated command file | `_process_command` plus a `CommandOutput` `__call__`, and a `validate_extracted_parameters` stub | one `__call__(self, workflow, command, input) -> Signature.Output` (regenerate) |
+
+   - `CommandOutput` is not a return value. Commands that return one fail with an error naming the
+     command. A handled-but-not-successful router answer is the routing `Signature.Output` (handled and
+     routed flags); the framework builds the turn's `CommandOutput` from it.
+   - A call error names the command and the value it returned, for example "... returned a
+     CommandResponse with success=False ..." or "must return None to accept and raise
+     fastworkflow.Refused(message, field=...) to refuse; it returned tuple".
+   - The bundled simple workflow template raises `Refused` for a failed create. The Phase 10 item
+     "Check command return values" is superseded by this item.
+
+4. **BREAKING: one validation hook; `db_lookup` is retired.** `validate_extracted_parameters` is the
+   one hook for checks that need the workflow, the request text, several parameters together, or
+   suggestions. Its return is `None` (accept). A non-None return is a `TypeError`. An exception other
+   than `fastworkflow.Refused` becomes a call error that names the command, so raise `Refused` for any
+   refusal the user should see. Pydantic `Input` validators are for self-contained per-value rules
+   (format, range) that need no context.
+
+   | Old | New |
+   |---|---|
+   | `json_schema_extra={'db_lookup': True}` on a field, or a `Signature.db_lookup` method | a lookup in `validate_extracted_parameters`: `matched, corrected, suggestions = DatabaseValidator.fuzzy_match(...)`; assign `input.<field> = corrected`, or `raise fastworkflow.Refused("... Did you mean ...?", field="<field>")` |
+   | a `*_uid` field corrected from a display name | map the label back to the uid yourself: `input.user_uid = uid_of[corrected]` |
+
+   - A lookup that matches nothing and offers no suggestion returns `None`: the value is accepted.
+   - The param-extraction span no longer writes `db_lookup`. A value the hook rewrites is recorded as
+     the slot binding `validation_hook`, and a refusal with `field=` is recorded as an invalid field.
+     Span contract v32 (`fw.nlu.param_extraction` v8); the decision signal contract is v2. A span
+     recorded before this carries `db_lookup` and no change list.
+   - Planning commands follow the same hook rule. Their `__result__` forms are unchanged: a `str`, the
+     `Output`, or a `CommandResponse`.
+   - The bundled `messaging_app_4` example's `set_current_user` does its lookup in its hook.
+   - The coding skills (`resolve-parameter-values`, `validate-command-parameters`,
+     `integrate-chat-agent`) teach only these forms. Projects that copied the old forms migrate by the table.
+
+5. **BREAKING: required fields are plain fields (fix-3rsq.plain-required).** A field with no default and
+   no `Optional[...]` is required. Write it plainly:
+
+   | Old | New |
+   |---|---|
+   | `name: str = Field(default="NOT_FOUND", description="...")` | `name: str = Field(description="...")` |
+
+   - The framework supplies `NOT_FOUND` (or the field type's own sentinel) internally while the value is
+     missing, so the Input can be built, then asks the user as before. Both command kinds, and the
+     str, int, float and list fields, work this way.
+   - `default="NOT_FOUND"` still loads but logs one WARNING at load for each field that declares it.
+     Planning commands are exempt from that warning.
+   - A direct call (MCP, REST, `perform_action`) that omits a required field now gets the same ask as the
+     chat path, not a raw pydantic `Field required` error. The MCP tool schema lists plain required fields
+     under `required`.
+   - Editing a command's source changes its fingerprint, so the next `fastworkflow train` retrains that
+     command.
+
+6. **Environment sentinels are constants, not env keys.** `NOT_FOUND`, `INVALID`,
+   `MISSING_INFORMATION_ERRMSG`, `INVALID_INFORMATION_ERRMSG` and `PARAMETER_EXTRACTION_ERROR_MSG` are
+   constants in `fastworkflow.utils.signatures`. The framework does not read them from the environment,
+   so delete any such line from `fastworkflow.env`. Import the constant where a command needs it. The env template
+   lists `FW_TURN_MAX_STEPS` (commented; default 400).
+
+7. **No generated utterance boilerplate.** A generated command file no longer contains
+   `generate_utterances` or `template_utterances`. The framework default generates the synthetic
+   variants from `plain_utterances`, so a file needs only the seed list. Files that already define them
+   keep working; delete them when you next touch the file. The stub's zero-argument
+   `generate_utterances()` that returned `[]` is gone.
+
+8. **Paging recognises only `start`, and a paged command declares `total`.** A paging field is named
+   `start` and is `int` or `Optional[int]`; `offset` and `skip` are no longer paging names. A command with
+   a paging field whose Output has no `total: int` is a load error that names the field. A field that is
+   not a page (for example a `datetime` named `start`) is an ordinary field. Rename a paging field that is
+   not a page.
+
+   | Old | New |
+   |---|---|
+   | `offset: Optional[int]` on Input | `start: Optional[int]` on Input |
+   | Output without a total | `total: int` on the Output |
+
+   - When rows remain, the response text ends with a paging line, for example
+     `Rows 1-20 of 57; next page: start=20.` **Clients that parse the response as JSON must read
+     `structuredContent` instead** (MCP), which carries the Output without that line.
+
+9. **Schemas for clients (additive).** `GET /command_schemas` (operation `get_command_schemas`) lists
+   every listed command with its kind and schemas; framework commands and the internal command-metadata
+   commands are hidden. A per-command MCP tool declares `outputSchema` for a command that has an Output,
+   and returns `structuredContent` (the Output as JSON) beside its text content. The REST turn body keeps
+   `next_actions` and `recommendations` in each `command_response`.
+
+10. **The Input is named `input`.** Docs, the scaffold and the bundled examples name the Input instance
+    `input`. The framework passes it positionally, so a command that names it differently still runs. New
+    code uses `input`.
+
+11. **BREAKING: a declared Output must be returned (fix-3rsq.declared-output-required).** Before this
+    release, a command that declared `Signature.Output` but returned a `str`, or a `CommandResponse`
+    without that output, only logged a warning, and its MCP tool advertised `outputSchema` with no
+    `structuredContent`. Now it is a call error that names the fix. Return the Output, or
+    `CommandResponse(response=<the same text>, output=<Output>)` when the response text must stay as it
+    was. A command that declares no Output is unchanged. Planning commands are not affected: their
+    `__result__` fallback still writes text without an output, and that is still only logged.
+
+12. **BREAKING: a last phase of 'say that' lines is a load error (fix-3rsq.p14.1, Phase 14).** A planning
+    command whose last phase is made of `say that` lines (and guards) no longer loads: its message reads
+    `phase '<name>' writes the answer as 'say that' lines, which code no longer copies; return the text from
+    __result__(self, input, <phase facts...>) instead`. Return the answer from
+    `__result__(self, input, <phase facts...>)` (a phase's name is a parameter, its facts the value). A flat
+    planning command whose answer is `say that` lines is refused the same way, at load where the load check
+    can see its steps and at run time otherwise (fix-3rsq.p14.6). A non-last phase made only of `say that`
+    lines is skipped: no model call, and its text reaches the answer only through `__result__` (fix-3rsq.p14.6).
+    `__result__` returning `None` means no code-written answer on that path (fix-3rsq.p14.6): the answer is
+    written as if the command had no `__result__`, with no warning. A flat call's agent answers. A phased
+    call's last phase runs its steps only, and its answer is one model call with the phases' facts (a span
+    `fw.skill.answer`, span contract v34).
+
+### Upgrading to Phase 11 (check options, one validation step)
+
+1. **Declare the checks a field needs.** The framework no longer checks a `str` or an `int` by its
+   type alone. A `str` or `int` field is checked only when it carries `in_request` (the value must be
+   written in the request) or `subject` (a `str` naming a record the request names). Add those options
+   to each field that needed the check before. A field with neither is taken as the extractor gives it.
+2. **Call one validation step.** `validate_call` is removed. A caller runs
+   `check_arguments` and then the command's `validate_parameters`, which is the only validation step
+   for both kinds of command. Replace each `validate_call` call with those two.
+3. **Fix any check option on the wrong type.** A load error names the command, the field and the
+   option. `in_request` takes a `str`, an `int` or a `list[str]`; `in_request: "subject"` takes a `str`.
+   `verify` takes a `bool`, an enum, or a `str` with `in_request: "subject"`; on an enum it may be
+   a dict of each value's meaning (see Upgrading from Phase 11, item 1).
+4. **Check the defaults of `bool` fields with `verify`.** A `bool` may now default to true. The
+   extractor is then told "False only when the request asks against it."
+5. **Check the previews.** An open-ended type (such as a `float`, a `list[str]` or a `str`) shows one
+   sample value in the preview.
+
+### Upgrading to Phase 10 (matching contract, approvals, return forms)
+
+1. **Retrain every workflow that has planning commands**, with `fastworkflow train`. Their
+   earlier artifacts refuse to load and say to retrain. The first train after the upgrade is a
+   full retrain, and it **generates** training utterances for each planning command, because
+   planning commands are now ordinary classifier labels. That is an LLM cost earlier releases did
+   not incur. Later trains reuse the generated utterances. A workflow without planning commands
+   needs no retrain for this change.
+2. **Declare navigation on the command, not the context.** Delete `enter_command` and
+   `enter_commands` from each context class, and set `descends_to = "<Context>"` on each
+   `ResponseGenerator` or `PlanGenerator` that enters that context. A context class that still
+   declares either one is a load error. It names the file, the command and the fix. A command that
+   moves the workflow into a context it does not declare logs one warning per command and target.
+3. **Review `approval` annotations.** Before this release the attribute was declared and shown but
+   not enforced. Now `approval = "mandatory"` asks before every run, including a run you typed
+   yourself, and `approval = "delegatable"` asks unless a standing approval is recorded. Tell users
+   that the prompt takes `yes`, `no` or `always`. `FW_APPROVAL_BINDING` takes `off`, `shadow` or
+   `enforce` (the default). `off` restores the earlier path, and `shadow` records each decision
+   without asking.
+4. **Check command return values.** A command may return its own `Signature.Output`, a `str`, or a
+   `CommandResponse`. Phase 12 removed `CommandOutput` as a return value (see Upgrading from Phase 11,
+   item 3). Any other type fails that call with an error that names the command. A command with no
+   `Input` receives `None` as its parameters when its `__call__` declares a third argument.
+5. **Assistant mode** runs a planning command only when you name it exactly and it is mechanical.
+   Any other planning command is refused, with the reasons. Direct API and MCP calls still refuse
+   planning commands.
+6. **Known issue:** `fastworkflow command preview --check` looks for the bundled examples' previews
+   in `fastworkflow/examples/docs/planning_command_previews`, a folder that is not committed. It
+   exits 1 for the library example. That exit does not mean the output is stale.
+
+### Upgrading to Phase 9 scoped lookup
+
+1. Retrain every workflow with `fastworkflow train`. Old artifacts refuse to load until you do,
+   and the first train is a full retrain.
+2. Delete `context_hierarchy_model.json` from each workflow, if it is still there.
+3. Review one-word command names of each context. A request that starts with a name that
+   matches a command of an enclosing context now reaches that command.
+
 ### Added
 
+- **`writes = True` declares a command that changes data; a planning command's phases make only the writes
+  their steps name** (fix-fixv). An execution command's `ResponseGenerator` declares `writes = True`; a planning
+  command writes when its steps reach such a command and is read-only otherwise (`command_writes.write_commands`).
+  Inside a planning command's phase, a write command no step of the phase names is left out of the phase's
+  listing and refused unrun by the executor, before the approval gate. `writes` on a `PlanGenerator`, or a value
+  that is not a bool, is a load error. Outside a phase nothing changes. The library example declares it on
+  `Record/add_note` (its one write): `author_books` no longer adds notes to the books it opens.
+
+- **A drift test keeps the planning and execution argument checkers in agreement** (fix-48np.3,
+  `tests/test_argument_checker_drift.py`). One table of argument cases (the typed-call strictness corpus, the
+  execution checks' cases adapted to fields both checkers read, and cases per deliberate difference) runs
+  through `planning_commands.checked_arguments` and `argument_checks.check_extracted_values` on the same
+  `Input`s, and their verdicts (accepted, accepted as another value, refused, not given) must be equal, except
+  on a documented list of deliberate differences (an int the request does not write, an absent int, exemptions,
+  which values are checked, planning-only concepts), each of which a case must show exactly. A new disagreement
+  fails the test; the fix is to align the checkers or to add a list entry by an explicit decision.
+
+- **A planning command's `str` argument with a `One of: a, b` description list must be one of them** (fix-48np.3,
+  the first rule both argument checkers share). The allowed-values rule (`argument_checks.allowed_member`: a
+  case-insensitive match, the declared spelling taken, a value outside the list refused) now runs in
+  `planning_commands.check_arguments` as well as on execution commands; the drift test found the planning path
+  did not check the list. A refused value is refused like any other (an optional argument takes its default, a
+  required one fails the call); the planning checks after it are unchanged. A planning command's choice declared
+  as a `Literal` is checked as before. Execution commands are unchanged.
+
+- **Sub-tasks are reviewed before a multi-part request runs** (fix-3rsq.plan-review.2, round 1). In agent mode,
+  a request split into several sub-tasks, or a sub-task with no confident match, is shown as a proposed plan
+  before anything runs. Each sub-task has its goal, its inputs (values, or `from sub-task N`) and its means: a
+  planning command, a plain command, or build from scratch. The proposal is drawn from the head candidates
+  (execution and planning top-k), the shortlist and, with `JEV_API_KEY`, Jev's planning match. Replies are
+  `accept`, `no` (the turn ends and nothing runs), typed edits (`change N: means=...`, `change N: inputs=...`,
+  `drop N`), or free text: one model call reads the free text into structured edits, which are shown back for
+  confirmation. A review admits 8 replies or 15 minutes.
+- **Fast path.** One sub-task with a confident head match, or an exact command name, runs directly, with no review.
+- **No answerer runs the draft.** An unattended turn, or a host surface (MCP/REST, agent-to-agent), runs the draft
+  plan as proposed and marks it `not_reviewed` (span attribute `subtask_review`). Commands with an approval
+  annotation still need their approval.
+- **Hand-off of the reviewed plan.** Each sub-task runs with its means: a planning command through the phase runner
+  with its checked arguments, a plain command with a listing narrowed to it (its producers and the navigation to its
+  context included), or build from scratch. A `from sub-task N` input takes N's typed Output when N produced one,
+  and N's answer text only when it did not. An accept after a restart resumes the review.
+- **Goals complete only through the finish check.** A successful command does not complete its sub-task's goal.
+
+- **`fastworkflow command run-code`, and `fastworkflow.planning.run_code`** (fix-3rsq.17.1). One call of a command,
+  run with no model: a planning command phase by phase, as the tutorial's runs show it, stopping at the first
+  open step with exit 0; `--start-with` puts the workflow on a record first; a step naming a planning command
+  runs it indented; an execution command runs and prints its `CommandOutput`. A hook that raises exits 1, naming
+  it. The steps are the workflow's real commands on a real session, so the help says to use a development
+  instance. The tutorial test's `dry_run` is now a call to `run_code`, and the pages' traces are unchanged except
+  the open-step line, which now reads `step <n> is open: the agent would run it and the rest`.
+- **Load problems where developers look** (fix-3rsq.17.3). `fastworkflow run` prints the command files that do not
+  load before its first prompt, `fastworkflow train` stops with them before training, and `run_fastapi_mcp` logs
+  them at startup. All three use `command_preview.load_problems`.
+- **Jev chooses among an ambiguous intent's candidates** (fix-jd9o.1). When the intent classifier
+  returns several candidates, Jev picks one before the "command is ambiguous" prompt is shown. The
+  turn routes to Jev's pick when Jev is at least 0.9 sure (`INTENT_TIEBREAK_THRESHOLD`); otherwise the
+  prompt is shown as before. A confident `wildcard` takes the existing not-here path to the parent
+  context. Jev's pick is never written to the utterance cache, and the span records it under
+  `jev_tiebreak` with `matcher_layer` set to `jev_tiebreak`. It runs only with `JEV_API_KEY`; set
+  `FW_JEV_INTENT_TIEBREAK=off` to turn it off.
+- **Jev checks the fields an LLM extraction filled** (fix-jd9o.3). After LLM parameter extraction,
+  Jev decides for each filled field whether the request gives that value. A field Jev is at least 0.9
+  sure is not given (`FIELD_GIVEN_THRESHOLD`) is reset to its not-given value: an optional field takes
+  its default, and a required field is asked for. Values the extractor invented, such as
+  `filter='Jane Doe'` from a bare `show_group_members`, are therefore no longer run. The deterministic
+  forms (tags, `name=value`, positional) are not checked. The reset fields are in the extraction span's
+  diagnostics as `fields_reset_not_given`. It runs only with `JEV_API_KEY`; set `FW_JEV_FIELD_GIVEN=off`
+  to turn it off.
+- **`DatabaseValidator.fuzzy_match_with_request`: Jev picks among close values** (fix-jd9o.5). The helper
+  returns the same three-tuple as `fuzzy_match`, and a unique fuzzy match still stands. When fuzzy
+  matching leaves several candidates, Jev reads the request and each candidate's description. It
+  returns the intended value when Jev is at least 0.9 sure (`VALUE_PICK_THRESHOLD`); otherwise the hook
+  asks as before. The helper takes the request from the hook's `command_text` parameter and a
+  `{value: description}` dict. Descriptions are required, and with none Jev is not called: from bare
+  names, Jev picked wrongly. In the pre-registered test it made 97 confident picks with 1 wrong, and
+  unnecessary questions fell from 89 to 41. It runs only with `JEV_API_KEY`; set
+  `FW_JEV_VALUE_PICK=off` to turn it off.
+- **Assistant mode reads the reply to a missing-value prompt before merging it** (fix-jd9o.6). Jev
+  decides what the reply does. An answer is merged as before. A request to stop runs the existing
+  abort, and a "wrong command" reply runs the existing "you misunderstood". A request for something
+  else leaves the pending command and runs as a new request. A hesitation ("hmm, hold on") gets
+  "OK, take your time." and the missing fields; the pending command and its values stay as they
+  were. A non-answer needs probability 0.5 (`MISSING_VALUE_REPLY_THRESHOLD`). Measured on 280
+  persona replies to real prompts: 0 of 130 answers diverted, 30 of 30 hesitations recognised. A
+  question back is, for now, treated as a request for something else. It runs only with
+  `JEV_API_KEY` and only in assistant mode; set `FW_JEV_MISSING_VALUE_REPLY=off` to turn it off.
+- **Agent mode: a hesitation in reply to `ask_user` keeps the question open** (fix-jd9o.11).
+  `classify_user_reply` has a fourth intent, `wait`. On a hesitation the agent does not replan;
+  it says it will wait and asks the same question again, and `ask_user` stays available. Before
+  this, 23 of 30 hesitations were read as "stop asking", which removed `ask_user` for the rest of
+  the turn. Set `FW_JEV_REPLY_WAIT=off` to keep the three earlier intents.
+- **Check options on any command's `Input`** (fix-3rsq.11). `in_request` and `verify` apply to an
+  execution command's `Input` field as well as a planning command's. Each option is checked by the same
+  rule for both kinds. (Phase 12 cut the five Phase 11 options to these two; see Upgrading from Phase 11.)
+- **Typed inputs `float` and `list[str]`** (fix-3rsq.11). A planning command's `Input` takes a
+  `float` or a `list[str]`. A `list[str]` with `in_request` keeps only the items the request writes.
+  A `bool` may default to true.
+- **Planning commands are ordinary classifier labels** (fix-3rsq.10.12). A planning command is a
+  label of every classifier whose scope holds it, so a request reaches it the way it reaches an
+  execution command. The experiment switch `PLANNING_HEADS_LABELLED` remains for
+  re-measurement. Old artifacts of such a workflow refuse to load (see the upgrade checklist).
+
+- **Approval annotation, enforced** (fix-3rsq.10.13, fix-3rsq.10.14). A command class may declare
+  `approval = "mandatory"` or `approval = "delegatable"`. Absent means the agent decides, with no
+  gate. The annotation is not a read/write gate. Each approval is bound to the exact parameters it
+  was asked for. A reply is single-use and expires after 2 turns or 15 minutes, and a changed
+  parameter invalidates it. A reply of `always` records a standing approval for that user, that
+  workflow and that command. `/approvals` lists standing approvals, `/revoke_approval <command>`
+  revokes one, and `/cancel_pending` cancels the pending approval. A host receives the approval token
+  in the live response only, and it is never stored or logged. Intent confirmations and plan review
+  are not approvals. The listings mark annotated commands: "(needs your approval before it runs)" for
+  `mandatory` and "(may need your approval)" for `delegatable`.
+
+- **Command return forms** (fix-3rsq.12.early). A command returns its own `Signature.Output`, a
+  `str` or a `CommandResponse`. The framework fills the envelope, so the command does not build a
+  `CommandOutput`. (`CommandOutput` was removed as a return value in Phase 12.) `fastworkflow.Refused(message)` gives `success=False` with that
+  message. A command with no `Input` receives `None` as its parameters when its `__call__` declares a
+  third argument.
+
+- **Full run listing by default** (fix-3rsq.10.15). A sub-task's run is shown the full listing of
+  commands. A size-based command shortlist exists for a larger workflow, above
+  `FULL_LISTING_MAX_CHARS` (7000 characters). Round 1 of plan review switched production to the shortlist
+  above that size (see the production listing entry under Changed).
+
+- **The library example has eight seeds per command** (fix-3rsq.10.17). Its
+  `plain_utterances` are the worked example for the seed count. Follow it, and keep each command's
+  seeds distinct from its neighbours' and from its callees'.
+
+- **Scoped lookup: a request finds its command along the live chain** (fix-3rsq.9).
+  A command is found on the path a request walks: the current context and its bases, then
+  each enclosing record on the live object chain and its bases, then the global commands.
+  The first scope that recognises the request wins, and the command runs on that scope's
+  object; a run of an enclosing record's command is filed under that record. The same path
+  serves a command named exactly. A qualified name must name a context on the path.
+  Upgrade checklist below.
+
+- **Not-here seeds are recorded per head** (fix-3rsq.9.8, `docs/tutorials/planning_commands/14`).
+  Each classifier records which seed it used for each command that is not one of its labels.
+  Editing one command's seeds retrains only the classifiers that hold that command (and any
+  that recorded its seed); adding or removing a command retrains every classifier.
+  `fastworkflow train --regenerate-utterances` chooses the seeds again.
+
+- **`fastworkflow command preview` renders a union-typed phase output as variants** (fix-3rsq.phase7-union-preview). A phase whose output is a union of models (`FindBook.Output |
+  FindMember.Output`) is rendered as one variant per member instead of failing.
+
+
+- **A migration guide for app workflows** (fix-3rsq.8,
+  `docs/migrating_skills_to_commands.md`): moving `_skills/` into
+  `_commands/`, keeping an app's own generator from deleting planning
+  commands, import depth, `from_`, `__phases__`, the step helpers, the field
+  options, and the renames below.
+
+- **The build generator protects planning commands** (fix-3rsq.7,
+  `fastworkflow/build/command_file_template.py`). Every file `fastworkflow
+  build` creates starts with `# fastworkflow:generated — regenerate with
+  fastworkflow build; edits may be overwritten`. The build will not write over
+  a file that defines a top-level `PlanGenerator`, even with
+  `overwrite=True`; it logs a warning naming the file instead. The check reads
+  the file with `ast` and falls back to a line check when the file does not
+  parse. The build validator checks only `Signature` on a planning command.
+
+- **Policy verifiers** (`docs/policy_verifiers_design.md`). A workflow can ship a
+  versioned table of deterministic rules in `_policy/table.py`; a workflow that
+  has one has its rules enforced, with nothing to configure. The rules are checked:
+  - before a command the model chose runs, on its real name and validated
+    parameters;
+  - before a question goes to the user;
+  - before the answer is given.
+
+  A rule that fires replaces the step's result with its own text, and the agent
+  carries on. Rules that need to know what the user asked for read it from one
+  model call per user message (`LLM_POLICY_INTENT`, else `LLM_AGENT`). A workflow
+  without a table runs unchanged. `fw.agent.step` v8 (span contract v38) records which rule fired; the
+  debug UI shows it on the step. Worked example:
+  `fastworkflow/examples/retail_workflow/_policy/`.
+- **`fastworkflow policy replay`**: replays a recorded experiment through a policy
+  table and reports every step it would block, with the totals on passing and on
+  failing attempts. This is the audit a table must pass before it is turned on.
+- **`fastworkflow distill --self` and `--pool-students/--pool-teachers`**: distil
+  failing trials against a passing trial of the same model, or against a passing
+  teacher trial when no student trial passed. `--max-pairs-per-task` caps the pairs;
+  `--provenance FILE` writes which pair produced which insights.
+- **Coding skills `distill-policy-verifiers` and `insights-to-failure-modes`**: the
+  end-to-end loop for any workflow, and clustering distilled insights into a
+  failure-mode taxonomy (with a checker).
 - **Sealed experiments can be selected and acted on together** (Tools → Sealed
   experiments). Select all, or pick rows, to seal complete experiments, delete
   sealed ones, or release invalid ones in one confirmation. A released
@@ -19,15 +584,14 @@
   noun=..., optional=...)` for fan-outs and optional phases; `pick` and the filters
   `num`, `count`, `listed` for steps. Skills are unreleased, so the old form is gone.
   A step naming a command or parameter the workflow lacks is a load error.
-- **`fastworkflow.Refused(message)`** (commands, backward compatible): raised from a
-  `ResponseGenerator.__call__` it is a failed `CommandOutput` with that message; from a
-  `validate_extracted_parameters` hook (a command's or a skill's) it is `(False,
-  message)`. A `Signature` without `generate_utterances` gets the standard body as a
+- **`fastworkflow.Refused(message)`** (commands): raised from a `ResponseGenerator.__call__` or from a
+  `validate_extracted_parameters` hook it is a failed answer with that message. `Refused(message,
+  field=...)` also names the refused field. The Phase 10 `(False, message)` return is retired. A `Signature` without `generate_utterances` gets the standard body as a
   default; a defined or inherited one wins.
 - **`fact_from("<command>.<field>")`** (fix-ajir.15, `docs/skill_phases.md`):
   the field of a facts model copied from a command field,
   `Field(json_schema_extra={"from": ...}, **kwargs)`, in place of the `_from`
-  helper each skill file wrote. `fastworkflow skill preview --check` now fails
+  helper each skill file wrote. `fastworkflow command preview --check` now fails
   on a `"from"` naming a command or field the workflow does not have (at load
   it stays a warning, so a command's `Output` can come later).
 
@@ -89,7 +653,7 @@
   `record_issues`.
 - **Skill previews and a skill-file layout convention** (fix-553q,
   `fastworkflow.skill_preview`, `docs/skill_file_layout.md`).
-  `fastworkflow skill preview <workflow_folder> [--out <dir>] [--check]` loads
+  `fastworkflow command preview <workflow_folder> [--out <dir>] [--check]` loads
   every skill with the skill loader and writes `<dir>/<skill>.md` (default
   `<workflow_folder>/../docs/skill_previews`): description, inputs (type,
   default, sample value, `verify` / `subject` flags, description, other
@@ -226,8 +790,8 @@
   logged and skipped, its files not loaded. `class Signature` carries the description (its
   docstring, what the skill matcher and the text planner read), a pydantic
   `Input` (`str`, `bool`, `int`, `Literal[...]` for an enum; `Field(default=...,
-  description=...)`; the skill options `strip`, `subject`, `verify`, `means`,
-  `in_request` in `json_schema_extra`), and optionally
+  description=...)`; the check options `in_request` and `verify` in
+  `json_schema_extra`; the Phase 11 options were cut to these two), and optionally
   `plain_utterances`, a `template` (the text the planner falls back to) and
   `validate_extracted_parameters(workflow, command, cmd_parameters,
   command_text=None)`. A module-level `steps(input) -> list[str]` returns the
@@ -274,7 +838,7 @@
     request alone (one `Choice` call per verified parameter, in parallel with the
     planner's typed call); a verdict at or above `VERIFY_THRESHOLD` (0.65)
     replaces the planner's argument and stands in for a missing or invalid enum.
-    An enum's `means` (a dict) gives Jev each value's meaning (`"group": "a
+    An enum's `verify` dict (a `{value: meaning}` map) gives Jev each value's meaning (`"group": "a
     group, which people are members of"`). A failed check leaves the planner's argument.
     This targets a wrong record kind for a name ("Payroll" planned as a feed) and
     flags set or left unset against what the request asks.
@@ -288,7 +852,7 @@
     `list_logins`, which the agent runs on the record in context instead of
     passing the placeholder on as a value. A step holding a uid-shaped token the
     request does not write is dropped; their descriptions now say so.
-  - `subject: true` on a `str` parameter: the argument must name a record of
+  - `in_request: "subject"` on a `str` parameter: the argument must name a record of
     the request: hold one of its subjects (`split_merge.request_subjects`, with
     the workflow's identifier patterns) whole, or a name-like word, and cut no
     subject. "I" of "Before I approve" or "Payroll" of "Payroll_Approver" is
@@ -308,8 +872,8 @@
 
 - **Skills as parameterized commands** (`fastworkflow/skill_commands.py`): a
   skill may declare typed parameters (its skill file's `Input`: `str`, `bool`,
-  `int` or an enum, with a default, a description and, for a string, `strip`
-  words) that `steps(input)` expands into its steps. The
+  `int` or an enum, with a default, a description and, for a string, the words to
+  ignore in `in_request`) that `steps(input)` expands into its steps. The
   description is still what the skill matcher sees; a skill without parameters
   is read as before. An `@<skill>` include is plain text and cannot name a skill
   with params. A malformed skill fails the load with a `SkillFormatError`
@@ -427,7 +991,75 @@
   the expanded steps. An unknown skill or a cycle raises `ValueError` naming
   the include chain. A skill without `@` lines loads as before.
 
+- **Planning commands can run other planning commands** (fix-3rsq.5,
+  `fastworkflow/workflow_execution_context.py`). A planning command's step may
+  name another one. `run_planning_command` runs it as a nested frame, and the
+  calling step gets the child's whole run back as one run. A command already
+  running is refused: "<name> is already running; call its steps directly."
+  A call cycle is a load error (see below).
+  - Nested calls share one turn-wide step budget, `FW_TURN_MAX_STEPS` (default
+    400), which is now enforced. Once it is spent, a nested call returns "The
+    step budget for nested commands is spent; continue with the remaining steps
+    directly."
+  - `ask_user` inside a nested call suspends the turn with its stack intact.
+    The user's reply resumes it there, also after the session is restored.
+
+- **Planning commands are in the executor's and planner's catalogs**
+  (fix-3rsq.5, `fastworkflow/workflow_agent.py`). They are listed by the same
+  context rule as execution commands, and an agent step that calls one from
+  another context is refused, as it is for an execution command. MCP
+  `list_tools`, the capability answer and training still leave them out.
+
+- **Load errors for call cycles and for `from_` on a callee** (fix-3rsq.5,
+  `fastworkflow/skill_commands.py`). The loader builds a graph of the planning
+  commands each one's steps call. A call cycle is a load error for every
+  command on it. A producer `from_` on a planning command's Input that names
+  one of its own callees is also a load error; the message says to write
+  `Field(description=...)` instead.
+
+- **A refused planning-command call is asked as a question** (fix-3rsq.6,
+  `fastworkflow/workflow_agent.py`). When the planner's typed call of a
+  matched planning command is refused, an attended turn that has not yet asked
+  or run a command puts the refusal to the user, e.g. "I can't run member
+  report yet: your request does not say which member to use. Which member
+  should I use?", and suspends on it; the reply completes the call. An
+  unattended turn plans from the command's template as before. The planner
+  span records `skill_refusal_asked`.
+
+- **`fastworkflow train` writes the workflow's vocabulary** (fix-3rsq.6,
+  `fastworkflow/utils/workflow_vocabulary.py`). `___command_info/
+  workflow_vocabulary.json` is a top-level, unversioned file derived from
+  command metadata (kind words, field names, kind selectors), keyed by a source
+  fingerprint. The runtime reads it while the fingerprint matches and derives
+  it in memory otherwise. Intent detection and the DSPy examples do not read it.
+
 ### Removed
+
+- **`enter_command` and `enter_commands` on a context class** (fix-3rsq.10.4). A context class that
+  declares either one is a load error, which names `descends_to` and the command. Declare the move
+  with `descends_to` on the command that makes it.
+
+- **`context_hierarchy_model.json`** (fix-3rsq.9). The file is no longer read. A workflow
+  that still has one loads, logs one warning that the file is ignored and can be deleted,
+  and routes the same way. Parents come from each context's `get_parent`, read from the live
+  object chain. `fastworkflow build` does not generate the file.
+
+
+- **`fastworkflow.skill`** (fix-3rsq.8): the module planning commands import
+  is `fastworkflow.planning`; there is no alias.
+
+- **`FW_SKILL_PHASE_MAX_STEPS`, `FW_SKILL_FANOUT_MAX_ITEMS`,
+  `FW_SKILL_FACTS_MAX_LIST_ITEMS`** (fix-3rsq.8): no longer read. They are
+  the constants `PHASE_MAX_STEPS` (15), `FANOUT_MAX_ITEMS` (10) and
+  `FACTS_MAX_LIST_ITEMS` (100) in `fastworkflow.planning_phases`. Remove them
+  from env files.
+
+- **`_skills/`** (fix-3rsq.7): a workflow that still has a `_skills/`
+  folder fails to load with "_skills/ is no longer read; move these files into
+  _commands/ (first make sure any script that regenerates _commands/ preserves
+  them; see docs/migrating_skills_to_commands.md)". The checks that existed
+  only while two trees did (a skill named like a command, a skill folder for an
+  unknown context, the nested-folder warning) are gone with it.
 
 - **Skill `repeat()` / `REPEAT_LIMIT` and `@<skill>` include lines**
   (fix-ajir.18): a skill file's `steps()` loops with `range()` (bound the int
@@ -475,6 +1107,189 @@
   A folder under `_skills` is not a skill (see the skill-context note above).
 
 ### Changed
+
+- **The first parameter-extraction attempt now runs at temperature 0 (greedy); retries keep temperature 1.0** (`FirstAttemptGreedy`, `FIRST_ATTEMPT_TEMPERATURE` in `fastworkflow/utils/extraction_attempts.py`; under test). Before, `dspy.BestOfN` ran every attempt, the first included, at temperature 1.0 with a fresh rollout id. Retries (reward 0 or an exception) still use temperature 1.0 and distinct rollout ids.
+- **A DSPy field marker in the splitter's reply is not part of a sub-task** (`workflow_agent._split_items`): a `[[ ## completed ## ]]` the model carried into a sub-task's text is cut before the plan review shows it.
+- **A record name with extra words run on is trimmed to the record** (`planning_commands._subject_without_extra_words`, in the `record_named_in_command_text` check): "snapshot of IT Support" and "X: what it exposes, ..." become the name the request writes. A value the request quotes whole, a subject inside a longer identifier, and a sentence-case title opening with one capitalized word are kept.
+- **A split longer than `MAX_SUBTASKS` is reduced, never run whole** (`split_merge.reduce_to_cap`): exact and contained copies are dropped, then near-copies (Jev, pairs sharing subjects, probability >= 0.9), then the existing merge joins, then adjacent items of the same planning command (or most similar) are joined until the list fits. Jev calls are bounded (`REDUCTION_JEV_CALLS`). The request runs whole only when the splitter listed nothing usable. A joined item keeps its parts (`JoinedSubtask`): the review shows it as one item, and unless the review edits it, each part runs as its own job (`review_proposals.expand_joined_parts`). Splits at or under the cap are unchanged.
+- **Review reader guards** (`review_proposals`, `review_engine`): deterministic checks on the reader's edits. A drop that names a setting of the step clears that setting instead of removing the step; a change is moved to the one step that has the named input; drops the reply did not ask for are not applied (the user is asked); a ruled-out quoted name is not applied; `name=none` clears an input; "yes, but do not apply anything" is an accept.
+- **The finish check reviews up to two finishes per run** (`react.FINISH_REVIEWS_PER_RUN`, `finish_check`): a second note reopens the loop once more, a third finish ends the run; the note's closing line tells the agent to run an unmet step, and to report one not done only when its command ran and failed.
+- **Drafting is on by default, and a bound sub-task runs with the inputs its review showed** (fix-48np.1).
+  `FW_DRAFT_ARGUMENTS` now defaults to on; `FW_DRAFT_ARGUMENTS=off` (or 0, false, no) restores the previous
+  behaviour exactly. `resolve_inputs` no longer skips drafted inputs. Measured before the flip (24 multi-sub-task
+  requests on the library example and the planning tutorial, 2 fresh unattended runs per arm, Bedrock
+  `nvidia.nemotron-nano-3-30b`, blind-judged): task success on 38/48 against off 35/48, about 2.2x faster (median
+  turn 8.5 s against 18.9 s) at about a quarter of the model cost; shown == run for 80 of 83 bound sub-tasks, the
+  rest an id input drafted with a title (fixed below) and one refusal the agent handled.
+  - The library example and the planning tutorial now declare the format of their id inputs (`open_book.book_uid`,
+    `open_member.member_uid`, and the tutorial's `show_book`, `list_loans` and `list_member_loans`: `pattern`
+    `^b[0-9]+$` / `^m[0-9]+$`, the ids their applications mint). A title drafted into a uid now breaks the
+    field's declared rule, so the draft leaves it unbound and the run finds the id as it did before. No framework
+    change was needed: a declared constraint was already enforced on drafted values (`validate_parameters` for an
+    execution command, `check_input` for a planning command). The validate-command-parameters skill says to
+    declare id formats, and why.
+  - A sub-task bound to a planning command runs its phases with the reviewed inputs (drafted, edited by the user, or
+    `from sub-task N`) as its arguments (`review_proposals.reviewed_arguments`), never extracted again but still
+    checked as a typed planning call checks them (`planning_commands.checked_arguments`: `check_arguments`, the
+    `validate_extracted_parameters` hook, the `Input`'s rules).
+  - A sub-task bound to an execution command runs that command with its reviewed inputs: code runs it as the plan's
+    one step (`planning_phases.CodeSteps`, through the agent's command tool and the CME parameter path and its
+    validation), and the agent only answers from its output. A `from sub-task N` input whose field declares its
+    producer field (`from_("find_book.book_uids")`) takes that field of N's typed output, not the whole output.
+  - Reviewed inputs that are refused, or that leave a required field unbound, are handled as before: the agent runs
+    the sub-task, with the refusal in its context. Only a sub-task the draft never drafted for its means
+    (`SubTask.drafted_means`) has its unbound values drafted at run time, by the draft's own function.
+  - Every bound sub-task's shown and run values are recorded on the turn span as `subtask_bindings` (fw.turn v4,
+    `SPAN_CONTRACT_VERSION` 37), with the reason for any deviation (refused or unbound so the agent ran it, drafted
+    at run time, a value other than the one shown).
+  - The review re-drafts a sub-task's inputs when an edit changes its means (`Proposal.revised`), so it never
+    shows inputs drafted for another command. `drafted_means` is bookkeeping: it is not rendered, not listed in
+    the review's field errors and not editable (`review_engine.shown_fields`, `review_hidden`).
+  - The draft runs the same typed fill fallback as `typed_planning_call` for a planning command whose required
+    value the extractor leaves missing or refused (`planning_commands.typed_fallback_arguments`, one planner call).
+  - Measured latency (Bedrock `nvidia.nemotron-nano-3-30b`, `FW_LM_CACHE=0`, library example): drafting adds a
+    median 1.2 s per sub-task (one extractor call in 19 of 22 drafts), 4.3 s median per request; a sub-task that
+    reaches the typed fill fallback costs three calls, 2.6 to 3.8 s.
+- **Library example and planning tutorial workflow: `overdue_summary` takes an optional `branch` and its answer
+  names the branches** (fix-1744). The input (`in_request`, ignoring "the"/"branch"; words for every branch mean
+  the whole library; a name that is no branch is refused with the branches) is passed to `count_overdue`, and the
+  `branches` phase hands `list_branches`'s `Output` on to the answer step. Tutorial page 1 is updated. No
+  `plain_utterances` changed, so no utterance is generated again; the `Signature` docstring (a seed row of the
+  Library planning head) did change, so the next `fastworkflow train` retrains that head selectively. The
+  current heads keep working until then.
+- **Library example: `note_member.text` is `in_request`, and a note that names the member is refused**
+  (fix-46mm). An invented or paraphrased note is refused and extracted once more; a text that holds the request
+  around the note ("Note on Mia Chen's record that ...") is refused by an `Input` validator. Tutorial page 2 is
+  updated. The `author-planning-commands` skill has the lessons of all three fixes.
+
+- **A planning command's arguments come from the shared parameter extractor, not the planner's typed call** (fix-48np,
+  stage 2). `typed_planning_call` now fills a planning command's arguments with `extracted_arguments` (the extractor
+  execution commands use, on `LLM_PARAM_EXTRACTION`, with the copy-verbatim sentence for `str` fields) and runs them
+  through the same `check_arguments`, `validate_extracted_parameters` hook and `Input` rules as before; a refusal is
+  extracted once more with the refusal appended. The planner call now only proposes `steps_before` / `steps_after`
+  for the filled call, and `check_verdicts` is unchanged. When a REQUIRED argument is still missing or refused after
+  that retry, its value is taken from the planner's typed fill (`_typed_fallback`) and checked the same way; the
+  fallback never overrides a value the extractor gave, never adds a value the checks refuse, and records a
+  "typed fill fallback" note in the plan span's `skill_notes`. Measured (pre-registered noise-aware gate, Haiku 5.5
+  on Bedrock, 149 planning requests, two fresh runs per arm, hand-judged references): arguments right 199 and 198 of
+  205 against 192 and 196 for the typed call; right->wrong changes 0 and 2, within the typed call's own run-to-run
+  noise (6), and in a class the typed call produces itself (a value where the request gives none); no bare surname
+  dropped (14 per run); nothing the planning checks refused is accepted (38-case strictness corpus). The fallback
+  fired on 6 of 149 requests per run. Tests that script the planner's typed answer now script the extractor too
+  (`tests/scripted_extractor.py`).
+
+- **The sub-task review's draft shows each sub-task's arguments, from the shared parameter extractor** (fix-48np,
+  stage 1: display only). `draft_round1_proposal` fills each sub-task's inputs with the values the shared extractor
+  gives on the sub-task's text (`parameter_extraction.extract_arguments`: the LLM extractor execution commands use,
+  with their checks, and for a planning command `check_arguments`, its hook and its `Input`'s rules, as
+  `typed_planning_call` checks them; a refused or missing planning value is read once more with the refusal after the
+  text). A field whose declared producer (`from_`) an earlier sub-task runs, as its command or as a step of its
+  planning command, is shown as `from sub-task N` instead of being extracted. A refusal is shown on the line as
+  before. The drafted inputs (`SubTaskInput.drafted`) are shown and not run: `resolve_inputs` skips them, so the
+  sub-tasks run as they did. **Off by default**: `FW_DRAFT_ARGUMENTS=on` turns it on. While `typed_planning_call`
+  still produces the values that run, the two disagree on about 1 argument in 20, so the review could show a value
+  other than the one that runs; stage 2 (the typed call takes the drafted values) is not landed. An extraction that
+  fails leaves the inputs empty and logs a warning. Measured (gate 1b, Haiku 5.5 on Bedrock for both arms, no Jev, 149 planning requests
+  from the tutorial and library test sets, two runs, hand-judged references): the shared extractor agreed with the
+  reference on 403 of 410 scored arguments, `typed_planning_call` on 389 (discordant 19 vs 5; exact McNemar
+  p=0.146 and 0.039 per run). The typed call accepted deictic values ("this book", "the books") that the
+  extractor leaves missing; the extractor missed a bare surname twice and paraphrased a free-text note three times
+  (the typed call tells the model every `str` is copied verbatim; the extractor said so only for `in_request`).
+  The extractor now tells the model that each `str` field of a planning command's `Input` is copied exactly as the
+  request writes it (`signatures.planning_verbatim_sentences`, the `IN_REQUEST_STR_SENTENCE`), as the typed call
+  did; an execution command's fields are unchanged. Re-measured the same way: 405 of 410 against 392 (discordant
+  16 vs 3; per run p=0.109 and 0.039); the paraphrased notes are gone, and the extractor still misses "Austen" in
+  "list every Austen book we own" (answers it not given about one time in three).
+
+- **Production listing is the shortlist above 7000 characters** (fix-3rsq.plan-review.2.10). The agent's listing
+  uses the threshold arm: the full list up to 7000 characters, and the shortlist of the matching commands with their
+  producers and navigation above it. A workflow with no trained heads falls back to the full list at every size.
+
+- **`verify` on a bool that defaults to true asks which value the argument takes** (fix-jd9o.9).
+  Before, the check asked "Does the request ask against this?". Jev read that double negative close
+  to a coin flip: 0.47 on one field, and 0.70 across bools that default to true. The check now asks
+  "Which value should the argument take?", with the options "true: the request does not mention
+  it, or says or implies it" and "false: the request says not to, or says the opposite". On a fresh,
+  blind-labelled set that scored 0.97, and no field got worse. A bool that defaults to false keeps
+  its wording, because neither form won there: each failed a different kind of case.
+- **Navigation warns once when a command moves the workflow into a context it does not declare.** A
+  warning names the command and the target, and says to declare `descends_to`. It is logged once per
+  command and target in each process (fix-3rsq.10.4).
+- **Assistant mode uses the same rule for planning commands** (fix-3rsq.10.8). An exactly named
+  planning command that is mechanical runs. One that needs the agent is refused with the reasons,
+  such as a step the agent carries out in prose, a branch decided at run time, or a `verify` check.
+- **Planning commands in the listings** name their approval marker, and a planning command's
+  template shows the annotated commands it calls.
+
+- **Every trained workflow must be retrained** (fix-3rsq.9). A workflow trained by an
+  earlier release refuses to load and says "retrain with `fastworkflow train`". The first
+  train after upgrading is a full retrain.
+
+- **The reserved "not here" class is one seed per foreign command** (fix-3rsq.9.6). Each
+  context's `wildcard` (not-here) class is built from one hand-written seed of every command
+  that is not one of the context's own or inherited labels, planning commands included.
+  Ancestor sampling and the ratio fill are gone. The internal CME workflow has no not-here
+  class. `--regenerate-utterances` chooses the seeds again.
+
+- **Confident global commands run first for natural language** (fix-3rsq.9). For a request
+  in natural language, the global scope is asked before the current context. If it names one
+  command with confidence, that command runs, bound to the root object. Otherwise the
+  context's own scope is asked and the climb continues as before. Exact command names are
+  unaffected: they take the nearest scope.
+
+- **A bare value ends the lookup** (fix-3rsq.9). When a context answers `parameter_value`, no
+  enclosing scope is asked about the request.
+
+- **The planner and executor listings show enclosing and global commands** (fix-3rsq.9). The
+  planner's list shows the commands of enclosing contexts and the global commands as callable
+  here, each with its scope. A plan never names a command the executor would refuse.
+
+- **Navigation messages name the root context** (fix-3rsq.9). A message about going back
+  up names the root context on the way back, for example when a record was opened under the
+  root.
+
+- **Re-issuing "open this record" from inside that record runs in place** (fix-3rsq.9). A
+  command that opens the record the workflow already stands on runs there, instead of being
+  refused "already in context".
+
+- **Authors: one-word command names reach across the path** (fix-3rsq.9). The first word of
+  a request is matched against command names along the whole path. A one-word command name in
+  an enclosing context can capture a request that starts with that word. Review such names.
+
+
+- **Skills are planning commands, by name** (fix-3rsq.8). Modules:
+  `skill_commands` → `planning_commands`, `skill_phases` → `planning_phases`,
+  `skill_preview` → `command_preview`. Classes: `Skill*` → `PlanningCommand*`
+  (`SkillFormatError` → `PlanningCommandFormatError`, `SkillCommand` →
+  `PlanningCommand`). Functions: `load_skills` → `load_planning_commands`,
+  `warm_skills` → `warm_planning_commands`, `match_skill` →
+  `match_planning_command`, `plan_skill_call` → `typed_planning_call`.
+  Folders: `docs/tutorials/skills/` → `docs/tutorials/planning_commands/`,
+  `docs/skill_*.md` → `docs/planning_command_*.md`, the
+  `author-workflow-skills` coding skill → `author-planning-commands`. Log,
+  error and CLI messages say "planning command". Span names, span attributes
+  and saved session keys keep their `skill` names.
+
+- **`PlanGenerator.__call__` is `__phases__`** (fix-3rsq.8): the method that
+  orders a planning command's phases is `__phases__`, and a `PlanGenerator`
+  that defines `__call__` fails to load with "PlanGenerator defines __call__;
+  rename it to __phases__".
+
+- **Planning commands live in `_commands/`** (fix-3rsq.7,
+  `fastworkflow/workflow_agent.py`, `fastworkflow/command_directory.py`,
+  `fastworkflow/skill_preview.py`). A planning command is a file in
+  `_commands/` (root or one context folder) with a top-level `PlanGenerator`,
+  beside the execution commands; the split settings file is
+  `_commands/_split.py`. To migrate, move each `_skills/` file, with the `_`
+  helpers it imports, to the same place under `_commands/`, make sure any
+  script that regenerates `_commands/` preserves them, and regenerate pinned
+  previews (`fastworkflow command preview <workflow> --out <dir>`), whose
+  source line names the new path.
+
+- **A step may run a planning command at load** (fix-3rsq.7,
+  `fastworkflow/workflow_agent.py`). The load-time step and phase-source checks
+  read the signatures of planning commands as well as execution commands, so a
+  planning command whose step runs another planning command loads.
 
 - **A prompt stored as pieces is no longer also kept as a 16 KB prefix**
   (fix-ajir.37): an `fw.llm.call` that records `prompt_slots_ref` keeps only
@@ -581,7 +1396,93 @@
   integer now logs a warning, and so does an unsealed experiment holding the
   file over the cap.
 
+- **`fastworkflow skill preview` is now `fastworkflow command preview`**
+  (fix-3rsq.5, `fastworkflow/cli.py`). There is no `skill preview` alias. Every
+  app workflow's pinned previews go stale, so regenerate them with
+  `fastworkflow command preview <workflow_folder> --out <dir>`.
+
+- **Planning command previews show calls and depth** (fix-3rsq.5,
+  `fastworkflow/skill_preview.py`). A preview adds a `Calls:` line (the commands
+  its steps call, or `none`) and a `Depth:` line: the longest chain of
+  planning commands from it, a lower bound while open steps name no command.
+  The `Kind:` line is gone.
+
+- **`process_action` refuses while a question waits for the user** (fix-3rsq.5,
+  `fastworkflow/workflow_execution_context.py`). A direct action sent while
+  `ask_user` waits for the reply returns "A question is waiting for the user's
+  answer; reply to it before running an action." The suspended turn is left as
+  it was; the user's reply resumes it.
+
+- **The typed planning call is shown a trimmed list of commands** (fix-3rsq.6,
+  `fastworkflow/workflow_agent.py`). Each command appears with its name, the
+  first sentence of its description and its `parameters:` line, which cut the
+  call's prompt by about 79% with no measured loss. The text planner still
+  sees the full list.
+
+- **Parameter extraction treats placeholder values as not given**
+  (fix-3rsq.6, `fastworkflow/utils/signatures.py`). A value that is the name
+  of a command (the called one's, or another's in identifier form), the string
+  `None`, or a free-text value that is only a pronoun or only a kind word or
+  field name of the workflow counts as missing, so the missing-parameter path
+  asks for it. A field whose description lists its choices ("One of: ...") or
+  whose labeled examples hold kind words is exempt from the word screen.
+  `fw.nlu.param_extraction` records `command_name_values` and
+  `word_screen_values`.
+
+- **A planning command typed by name is matched by name** (fix-3rsq.6,
+  `fastworkflow/_workflows/command_metadata_extraction/intent_detection.py`).
+  Planning command names join the exact-match set and the cross-context
+  inventory, so they no longer fall to the classifier, which has no labels for
+  them.
+
+- **Span contract v30** (fix-3rsq.6, `fastworkflow/tracing.py`):
+  `fw.planner.plan` / `fw.planner.replan` v8, `fw.agent.execute` v3 and
+  `fw.nlu.param_extraction` v7.
+- **`@phase` with both `output=` and a return annotation is a load error** (fix-3rsq epic note, D). The error names the phase: use the return annotation when the facts type is fixed (or a union), and `output=` only when the type depends on the input.
+- **`fastworkflow command preview --check` warns on a `str` input whose description lists kind words** (fix-3rsq epic note, H). A warning, not a failure; if the set of kinds is fixed, type the field as a `Literal`.
+
 ### Fixed
+
+- **FW_LM_CACHE=0 also turns off the Jev classifier's response cache** (`dspy_utils.lm_cache_enabled`, `workflow_agent._jev_lm`). Jev's LM was built with `cache=True` regardless, so repeated experiment attempts replayed earlier Jev answers (937 of 1,233 Jev calls in one three-run benchmark were cache hits) and run-to-run variance was understated.
+
+- **A split whose sub-tasks field has no numbered item is retried once, not taken as the request** (fix-variance, `workflow_agent.split_into_subtasks`): a visibly broken reply gets the existing retry at temperature 0.7; two such replies leave the request whole, and a genuine one-item split is still returned verbatim.
+- **A planning command call whose first phase's lookup finds nothing is planned again once** (fix-variance, `workflow_execution_context._restart_after_empty_first_phase`, `planning_commands.reextracted_arguments` / `replanned_call`, `argument_checks.PHASE_FAILED_EXTRACTION_NOTE`): the arguments are extracted again with the phase's observation after the request, and the call restarts only when they differ; the restarted phases carry `reextracted` (span contract v40).
+- **Verify options with duplicate labels build, so the check runs** (fix-variance, `planning_commands._distinct_labels`, `_check_one`): the first option of each label is kept, and a check that is still skipped (`check_verdicts`) is logged at INFO with its reason.
+- **A backslash escape of punctuation in a key=value value is read as the character** (fix-variance, `parameter_extraction.unescape_punctuation`, `ParameterExtraction._extract_parameters_from_key_values`): `\@` reads as `@` and `\_` as `_`; other backslashes are kept.
+- **Verify classifier calls are traced under the turn, and their verdicts are on the planner span** (fix-verify-finish, `planning_commands.check_verdicts`, `typed_planning_call`): the worker threads run under the submitter's context, so each call leaves an `fw.llm.call` span; `skill_notes` lists each verdict read (span contract v39).
+- **A request split is cleaned before it runs** (fix-5kz5, `workflow_agent.split_into_subtasks`, `split_merge.without_repeated_clauses`): a numbered list written inline after the model's reasoning gives one sub-task per item, a clause the model wrote twice inside a sub-task is written once, a sub-task the model listed twice is one job, and a request that comes back as one job is returned as the user wrote it.
+- **The agent's command tool refuses a blank command, or one that names the tool itself, unrun** (fix-wfxt, `workflow_agent.execute_workflow_query`, `command_executor.invoke_command`, `run_listing.head_answers`). Blank text reached intent detection, whose predict raises `Input text cannot be empty` and ended the turn, and `execute_workflow_query` as a command was classified as an utterance; both now return a failed step that tells the agent to name a workflow command.
+
+- **A facts field typed with a command's `Input` fills from the run's input** (fix-3rsq.15.5, `typed_phase_facts._role_for_model`). The run-time fill passes no command signatures, so such a field was filled from the command's Output and failed validation, breaking the phase. A command's `Signature.Input` is now known by its class name.
+
+- **A planner that takes only one temperature now splits requests** (fix-z62t, `dspy_utils.call_dropping_rejected_params`, `workflow_agent.split_into_subtasks`). The splitter calls the planner at temperature 0.0 and retries at 0.7. Bedrock Claude Haiku 5.5 takes only `temperature=1`, so litellm refused both calls before sending them. The error was caught, every request ran whole, and each turn logged the same warning. Nothing set `litellm.drop_params` outside `ChatSession.start_workflow`, so the FastAPI server and other direct `WorkflowExecutionContext` users always hit this. Now a call that litellm refuses for a parameter (`UnsupportedParamsError`) is sent once more with `drop_params=True`, and later calls on that model in the process are sent with it from the start. A model that takes the temperature is called exactly as before, with no `drop_params` added (adding it to every LM would move native `openai/` and `anthropic/` models onto LiteLLM). When the temperature is left out, the splitter's retry skips the response cache so it is a fresh answer. The observation search (`search_memory`, temperature 0) uses the same fallback. A split that fails is logged at WARNING once per process for each planner model and root cause, and later at DEBUG. Live: 5 two-job library requests with Haiku 5.5 as planner, 0/5 split before and 5/5 after, for $0.0016.
+
+- **A plain `str` field that declares a default takes it when the extractor leaves it unstated**, instead of being reported missing and asked for. `default_unfilled_optional_strs` gave defaults only to `Optional[str]` fields, and the missing check counts only `Optional[...]` fields as optional, so `reason: str = "ordered by mistake"` (retail `cancel_pending_order`) or `branch: str = ''` (library `overdue_summary`, `count_overdue`, `library_hours`) asked the user when the model answered NOT_FOUND. A field whose default is the NOT_FOUND marker itself (the old required idiom) is still reported missing. Planning commands already gave a missing argument its default.
+
+- **Two independent jobs in one request are no longer joined back into one sub-task** (fix-bydz, `split_merge.merge_subtasks` `same_job`, `workflow_agent._same_request_check`). The split model returned "Who wrote Dune?" and "Who has Dune out?" for "Who wrote Dune and who has it out?", and the merge's rule 3 (a part naming no subject, or the same subjects as the part before it, is no new job) joined them, so only one job ran. With `JEV_API_KEY` set, rule 3 now asks Jev whether the two parts are separate requests or steps of one, and joins them only when Jev says one request with probability at least `SAME_REQUEST_THRESHOLD` (0.2); "find X, then open it" is still joined. Without the key, or when the Jev call fails, rule 3 joins as before. A limit sentence ("Apply none of them.") is joined without asking. `split_merge` itself still makes no model call: the decision is passed in as a callable.
+
+- **The conversation summary is no longer part of the request the splitter splits and the merge returns** (fix-bydz, `split_into_subtasks(..., conversation=)`, `merge_subtasks(..., context=)`). The earlier turns' summaries were prepended to the request ("conversation summary: ... new_user_query: ..."), so when the merge joined everything back it returned that whole text as the one sub-task, and the summary's names changed how a request merged. The splitter now gets the user's new message as the request and the earlier turns as a separate `conversation` input (present only when there are earlier turns, so a first turn's prompt is unchanged), which it uses to resolve words such as "its loans" after a turn about Dune. The merge treats only the new message as the request; it reads the conversation only so that a name a sub-task takes from it is not dropped as an invented record. An unsplit request still runs with the summary, as before.
+
+- **Parked pending state of a deleted or archived conversation is dropped** (fix-ayez, `WorkflowExecutionContext.drop_parked_pending`, `run_fastapi_mcp/utils.py` `prune_parked_pending`). The state is pruned against the observability store when it is saved, before a conversation id is minted, and when a saved blob is restored, so a reused id cannot pick up a deleted conversation's state. The archive and delete routes live in the separate chatbot server, so the prune runs at save time rather than at the delete.
+
+- **A new conversation no longer answers a previous conversation's paused question or approval** (fix-newconv-pending). Questions and reviews are parked with their conversation and come back when it is active again; approvals are cancelled.
+
+- **An execution command's extracted values are checked against the request, as a planning command's arguments are** (fix-qjf4, `fastworkflow/utils/argument_checks.py`). When the LLM extractor fills an execution command's parameters, each value it gives is checked against the command text it read (the user's message in assistant mode, the agent's command in agent mode; earlier user messages are not counted, since the extractor never sees them): a `str` must be written there, ignoring case and Unicode dashes, and takes the request's spelling; punctuation alone, a template token (`{name}`, `NAME_1`, "unspecified"), an invented example value ("John Doe" the request does not write) or a copied description example is refused; a `str` whose allowed values live in `json_schema_extra={"enum": [...]}` or in a `One of: a, b` description must be one of them (the declared spelling is taken, and a `json_schema_extra` enum is now listed to the model as its valid values: fix-1pfu.enum-in-extra); an `int` must be a number the request writes, when it writes any. A refused value sends the extraction back once with the refusal appended (as `typed_planning_call` does with `REFUSED_CALL_NOTE`); a value still refused is treated as not given, so a required field is asked for and an optional one takes its default. A value that is not given (including an absent `Optional[int] = None`, which the planning rule refused when the request wrote two numbers) or equal to its default is not checked, and an `int` is refused, never replaced by the one number the request writes. Exempt from the request check: types other than `str` and `int` (dates, floats, lists), a field with a `pattern`, and a field marked `json_schema_extra={"in_request": False}` for a value converted on purpose (a date from "next Monday"). Planning commands keep `check_arguments`; `FW_EXTRACTION_ARGUMENT_CHECKS=off` turns the checks off. Span contract v36: `fw.nlu.param_extraction` v10 records `argument_check_refusals`, `argument_check_retry`, `argument_check_refusals_final` and `argument_check_respelled`. Measured offline on the app's extraction replay: 0 of 1,189 values refused in passing Haiku runs (0 of 974 calls would retry); on 468 Nemotron cases, 32 of 107 wrong values caught with 0 correct values refused; retries on 101 of 738 Nemotron calls.
+
+- **An HTML-escaped `&lt;UNKNOWN&gt;` from the extractor is the not-given marker too** (fix-3koe). Claude on Bedrock sometimes writes the fix-1pfu marker with its brackets escaped; the value is now HTML-decoded (repeatedly, at most three rounds, so `&amp;lt;UNKNOWN&amp;gt;` counts) before it is matched as the marker or as a bracketed placeholder, for a string and for list items. A value with entities but no bracket shape (`AT&amp;T`) keeps its text.
+
+- **Two workflows in one process no longer share command classes or modules** (fix-3rsq.phase10-routing-class-cache). The command-class cache is keyed by workflow folder and command, and each folder's command modules load under a namespace from its resolved path, so two same-named folders no longer share modules or relative imports. Persisted parameter-example cache keys are unchanged.
+
+- **Parameter extraction maps `<UNKNOWN>` to "not given", so unstated arguments are asked for** (fix-1pfu). A `<UNKNOWN>` (or bracketed unknown variant) from the model now becomes "not given" (`NOT_FOUND`, or `[]` for a list), instead of running as the value `UNKNOWN`. The JSON schema is kept for its type checks. Measured on Bedrock: retail 96.6% exact cases vs 71-76% before; airline 96-97%.
+
+- **Held-out planning requests no longer repeat training rows** (fix-3rsq.10.17). The test-set
+  builder for planning-command matching dropped held-out requests that matched rows the trained
+  version was built from. Its measurements were optimistic before this fix.
+
+- **Live distillation's student pass no longer starts from the teacher's end
+  state.** The workflow snapshot shared the live context dict, so restoring it
+  restored nothing. The student's commands are also kept off the command-trace
+  queue, so a host reading it sees one trajectory, not two interleaved.
 
 - **A clarification reply fills the field it was asked for** (fix-mbkw).
   When parameter extraction asks for a missing or invalid field, the reply is
@@ -614,7 +1515,7 @@
   file whose declaration is malformed (or whose name is not an identifier) is
   logged as an error and skipped, as one that does not import already was; the
   workflow's other skills load, and the result is kept for the process instead
-  of every skill being imported again on each turn. `fastworkflow skill preview`
+  of every skill being imported again on each turn. `fastworkflow command preview`
   (with or without `--check`) fails naming each skipped file and its error.
 
 - **Command modules that import other command modules load safely from
@@ -637,6 +1538,13 @@
   The bytes it holds while the DB stays over the cap are reported as
   `in_flight_bytes` in the `prune_over_cap_bound_bytes` diagnostic. No schema
   change.
+
+- **A question back or a hesitation no longer reads as stop_asking** (fix-jd9o.12, `workflow_agent.classify_user_reply`, `ClassifyReply`). `stop_asking` now needs Jev's reading and an explicit request to stop being asked ("stop asking", "just do it", "don't ask me again", "never mind"), so `ask_user` stays available for the turn after a question or a hesitation.
+- **A near tie between two values is no longer auto-applied** (fix-jd9o.10, `DatabaseValidator.fuzzy_match`, `near_tie_margin`). A unique match is applied only when no other candidate scores within 0.08 of it (edits / length); otherwise the result is a suggestion list with every candidate within the margin, so the hook asks the user to choose. A clear winner still applies.
+- **`--startup_action` is a JSON file path, or an inline JSON object** (fix-3rsq epic note, F). The help and the server comment said "JSON string"; `fastworkflow.load_startup_action` reads a path, or an object when the value starts with `{`, for `run` and `run_fastapi_mcp`.
+- **Planning number reading matches the execution side** (fix-3rsq epic note, numbers). `"1,000"` was refused for 1000 and `"-5"` was read as 5; the planning check now uses `argument_checks.written_numbers`.
+- **The turn-frame path refuses one value given to two required str inputs of a planning command** (fix-3rsq.check-roles-one-step). `validate_parameters` runs the role check the typed call already runs, with the same rule: every required `str` input.
+- **Dependencies** (Dependabot): black 26.5.1 → 26.10.1 and setuptools 83.0.0 → 84.2.1 in `poetry.lock`; the resolver also moved urllib3 2.8.0, httpcore2/httpx2 2.13.1, litellm 1.95.1 and typesafe-sdk 0.7.4.
 
 ## 3.6.0 — DSPy 3.4, request splitting, workflow facts on classes
 

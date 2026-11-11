@@ -1,0 +1,38 @@
+"""book_loans: the book the request names and who has it on loan.
+
+Reuses the phases book_by_title shares (_book_phases.BookPhases): __phases__ places them and the
+new loans phase in order, and __result__ extends the shared answer with super().
+"""
+from pydantic import BaseModel, Field
+
+from fastworkflow.planning import count_and_names_read, run
+
+from ._book_phases import BookPhases
+from .list_loans import Signature as ListLoans
+
+
+class Signature:
+    """Show the book whose title the request names and who has it on loan."""
+
+    plain_utterances = ["who has borrowed Dune", "is anyone reading Emma right now"]
+
+    class Input(BaseModel):
+        title: str = Field(description="the book's title",
+                           json_schema_extra={"copied_from_command_text": True})
+
+
+class PlanGenerator(BookPhases):
+    def __phases__(self, input):
+        return [self.find, self.book, self.loans]
+
+    def loans(self, book=None) -> ListLoans.Output:
+        if book is None:
+            return []
+        return [run("list_loans", book_uid=book.uid, all_pages=True)]
+
+    def __result__(self, input, book=None, loans=None):
+        answer = super().__result__(input, book)
+        if loans is None:
+            return answer
+        return (f"{answer}\nIt is on loan to "
+                f"{count_and_names_read(loans.borrowers, loans.total, 'borrower')}.")

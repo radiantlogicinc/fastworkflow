@@ -26,6 +26,7 @@ spans close and is attributed to neither pass.
 """
 
 import contextlib
+import copy
 import json
 import re
 from dataclasses import dataclass
@@ -210,23 +211,72 @@ class InsightExtractionSignature(dspy.Signature):
 class DistillationSession:
     """Orchestrates a single distillation comparison for one user message."""
 
-    def __init__(self, wec: "fastworkflow.WorkflowExecutionContext"):
+    def __init__(
+        self,
+        wec: "fastworkflow.WorkflowExecutionContext" = None,
+        *,
+        workflow_folderpath: str = None,
+    ):
         # `wec` is the WorkflowExecutionContext (session engine). Distillation is
         # CLI/Topology-A only and drives its own agent passes over the WEC's state.
+        #
+        # `workflow_folderpath` is the detached alternative: comparing two runs
+        # that were already recorded needs only the comparison and insight
+        # methods, and those want the workflow path and nothing else off the WEC.
+        # Supplying it lets them run with no live session.
+        if wec is None and not workflow_folderpath:
+            raise ValueError(
+                "DistillationSession needs either a WorkflowExecutionContext or "
+                "a workflow_folderpath"
+            )
         self.chat_session = wec
+        self._workflow_folderpath_override = workflow_folderpath
         self.planning_insights_extracted: int = 0
         self.execution_insights_extracted: int = 0
+        # The judges' chain-of-thought from the latest extract_insights /
+        # extract_planning_insights call: why each difference was judged a
+        # mistake or context-justified. Kept for annotations; the return values
+        # (the rules) are unchanged. Empty when the call failed or gave none.
+        self.last_execution_reasoning: str = ""
+        self.last_planning_reasoning: str = ""
+
+    def _workflow_folderpath(self) -> str:
+        """Where this session's Insights files live.
+
+        The override is what makes the insight methods usable without a session;
+        with a session the behaviour is exactly as before.
+        """
+        if self._workflow_folderpath_override:
+            return self._workflow_folderpath_override
+        return self.chat_session.get_active_workflow().folderpath
 
     # ------------------------------------------------------------------
     # State snapshot / restore
     # ------------------------------------------------------------------
 
     def snapshot_workflow_state(self) -> dict:
-        """Capture current workflow + CME state for later restoration."""
+        """Capture current workflow + CME state for later restoration.
+
+        The APP workflow's context is DEEP-COPIED. ``Workflow._to_dict`` returns
+        the live context dict itself, so a snapshot taken without copying is the
+        same object the teacher pass then mutates, and restoring it is a no-op.
+        In a host that keeps application state in the context, the student then
+        starts from the teacher's end state (records already changed) and
+        diverges for reasons that have nothing to do with the model.
+
+        The CME context is deliberately NOT copied: it holds the NLU pipeline
+        stage and a reference to the app workflow, whose context-change
+        listeners are ``WeakMethod``s that do not survive ``deepcopy``. It holds
+        no application state either pass can corrupt.
+        """
         workflow = self.chat_session.get_active_workflow()
         cme = self.chat_session.cme_workflow
+        workflow_dict = workflow._to_dict()
         return {
-            "workflow_dict": workflow._to_dict(),
+            "workflow_dict": {
+                **workflow_dict,
+                "workflow_context": copy.deepcopy(workflow_dict["workflow_context"]),
+            },
             "cme_dict": cme._to_dict(),
             "conversation_history_len": len(
                 self.chat_session.conversation_history.messages
@@ -234,10 +284,16 @@ class DistillationSession:
         }
 
     def restore_workflow_state(self, snapshot: dict):
-        """Restore workflow + CME state from a prior snapshot."""
+        """Restore workflow + CME state from a prior snapshot.
+
+        The app context is copied on the way out as well as in: one snapshot is
+        restored more than once (the initial state before the student, the
+        teacher's final state after it), and handing the live workflow the
+        snapshot's own dict would let the next pass mutate the snapshot.
+        """
         workflow = self.chat_session.get_active_workflow()
         wd = snapshot["workflow_dict"]
-        workflow._context = wd["workflow_context"]
+        workflow._context = copy.deepcopy(wd["workflow_context"])
         workflow._is_complete = wd["is_complete"]
         workflow._save()
         workflow._dirty = False
@@ -552,6 +608,23 @@ class DistillationSession:
     # Agent run helper
     # ------------------------------------------------------------------
 
+    @contextlib.contextmanager
+    def trace_queue_detached(self) -> Iterator[None]:
+        """Suppress command-trace events (``CommandTraceEvent``) for one pass.
+
+        Every emission site guards on the queue being non-None, so clearing the
+        attribute is enough. The output queue is left attached: a blocking
+        ``ask_user`` waits for an answer that only arrives if its question was
+        delivered.
+        """
+        wec = self.chat_session
+        original = getattr(wec, "_command_trace_queue", None)
+        wec._command_trace_queue = None
+        try:
+            yield
+        finally:
+            wec._command_trace_queue = original
+
     def _run_agent_pass(
         self,
         message: str,
@@ -617,6 +690,16 @@ class DistillationSession:
         # Temporarily install this agent
         original_agent = self.chat_session._workflow_tool_agent
         self.chat_session._workflow_tool_agent = agent
+
+        # The pass's policy verifier (when enabled) starts from what the
+        # session's own agent knows of the conversation, and sees this message
+        # as its turn, as a live turn would (fastworkflow.policy_runtime).
+        from fastworkflow.policy_runtime import policy_of
+
+        if (policy := policy_of(agent)) is not None:
+            if (earlier := policy_of(original_agent)) is not None:
+                policy.import_state(earlier.export_state())
+            policy.observe_turn(message)
 
         try:
             refined_message = self.chat_session._refine_user_query(
@@ -771,13 +854,17 @@ class DistillationSession:
         genuine mistakes or context-justified.
 
         Returns a list of insight strings, or empty list if no genuine mistakes.
+        The judge's reasoning is left on ``self.last_execution_reasoning``.
         """
+        # Cleared first, so a call that raises cannot leave an earlier task's
+        # reasoning behind.
+        self.last_execution_reasoning = ""
+
         # Load existing insights for dedup
         from fastworkflow.utils.insights_loader import load_workflow_insights
 
-        workflow = self.chat_session.get_active_workflow()
         existing_insights = (
-            load_workflow_insights(workflow.folderpath, "execution_agent") or ""
+            load_workflow_insights(self._workflow_folderpath(), "execution_agent") or ""
         )
 
         # Format trajectories for the LLM
@@ -796,6 +883,7 @@ class DistillationSession:
                 existing_insights=existing_insights,
             )
 
+        self.last_execution_reasoning = (getattr(result, "reasoning", None) or "").strip()
         raw_insights = (getattr(result, "insights", None) or "").strip()
 
         # Treat "EMPTY" or empty string as no insights
@@ -820,9 +908,9 @@ class DistillationSession:
 
     def _insights_dir(self) -> Path:
         """Return (creating if needed) the workflow's Insights directory."""
-        workflow = self.chat_session.get_active_workflow()
-        workflow_name = Path(workflow.folderpath).name
-        insights_dir = Path(workflow.folderpath) / "Insights" / workflow_name
+        folderpath = self._workflow_folderpath()
+        workflow_name = Path(folderpath).name
+        insights_dir = Path(folderpath) / "Insights" / workflow_name
         insights_dir.mkdir(parents=True, exist_ok=True)
         return insights_dir
 
@@ -892,14 +980,18 @@ class DistillationSession:
         """Extract prescriptive planning rules using LLM_DISTILLATION.
 
         Uses both planning traces and executed actions to give the insight
-        extraction LLM full context for judging plan quality.
+        extraction LLM full context for judging plan quality. The judge's
+        reasoning is left on ``self.last_planning_reasoning``.
         """
+        # Cleared first, so a call that raises cannot leave an earlier task's
+        # reasoning behind.
+        self.last_planning_reasoning = ""
+
         # Load existing planning insights for dedup
         from fastworkflow.utils.insights_loader import load_workflow_insights
 
-        workflow = self.chat_session.get_active_workflow()
         existing_insights = (
-            load_workflow_insights(workflow.folderpath, "planning_agent") or ""
+            load_workflow_insights(self._workflow_folderpath(), "planning_agent") or ""
         )
 
         # Format planning traces
@@ -928,6 +1020,7 @@ class DistillationSession:
                 existing_insights=existing_insights,
             )
 
+        self.last_planning_reasoning = (getattr(result, "reasoning", None) or "").strip()
         raw_insights = (getattr(result, "insights", None) or "").strip()
         if not raw_insights or raw_insights.upper() == "EMPTY":
             return []
@@ -1016,17 +1109,22 @@ def distill_message(
     # 4. Restore initial state for student run
     ds.restore_workflow_state(initial_snapshot)
 
-    # 5. Run student
+    # 5. Run student. Its commands are kept off the transport trace queue: the
+    # turn belongs to the teacher (whose output is returned and whose state is
+    # restored on divergence), so a host reading that queue as "what the agent
+    # did" must see one trajectory, not two interleaved. The student's commands
+    # are still recorded in its pass's spans, which is what comparison reads.
     _announce("STUDENT pass", student_model, style="bold cyan")
     try:
-        student_output, student_traj, student_actions, student_plans = ds._run_agent_pass(
-            message,
-            agent_lm_role="LLM_STUDENT_AGENT",
-            agent_api_key_role="LITELLM_API_KEY_STUDENT_AGENT",
-            planner_lm_role="LLM_STUDENT_PLANNER",
-            planner_api_key_role="LITELLM_API_KEY_STUDENT_PLANNER",
-            pass_id=tracing.PASS_STUDENT,
-        )
+        with ds.trace_queue_detached():
+            student_output, student_traj, student_actions, student_plans = ds._run_agent_pass(
+                message,
+                agent_lm_role="LLM_STUDENT_AGENT",
+                agent_api_key_role="LITELLM_API_KEY_STUDENT_AGENT",
+                planner_lm_role="LLM_STUDENT_PLANNER",
+                planner_api_key_role="LITELLM_API_KEY_STUDENT_PLANNER",
+                pass_id=tracing.PASS_STUDENT,
+            )
     except Exception as e:
         logger.warning(f"Distillation: student agent failed: {e}")
         ds.restore_workflow_state(teacher_final_state)

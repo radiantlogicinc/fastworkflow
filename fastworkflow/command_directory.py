@@ -1,16 +1,22 @@
+import ast
 import contextlib
 import functools
 import hashlib
 import os
+import re
 from typing import Optional
 from pathlib import Path
 from functools import lru_cache
 
-from pydantic import BaseModel, field_validator, model_validator, ConfigDict, Field, ValidationInfo
+from pydantic import BaseModel, field_validator, model_serializer, model_validator, ConfigDict, Field, ValidationInfo
 
 from fastworkflow.utils import python_utils
+from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_inheritance_model import WorkflowInheritanceModel
 
+
+#: The framework-provided planning commands (global scope, lowest precedence).
+FRAMEWORK_PLANNING_COMMANDS_DIR = Path(__file__).resolve().parent / "_framework_commands"
 
 class CommandMetadata(BaseModel):
     """Command metadata"""
@@ -22,6 +28,22 @@ class CommandMetadata(BaseModel):
     # response generation
     response_generation_module_path: str
     response_generation_class_name: str
+    is_planning: bool = False
+    # A framework-provided command (fastworkflow/_framework_commands, fix-3rsq.plan-review.1): system machinery.
+    # Loaded and callable by name through the executor and loader, but never listed to the planner, the agent or
+    # the user, never a head label, and never counted by the artifact construction check.
+    framework: bool = False
+    # The command's ``@user_approval_for_execution`` value ("required_always" | "required_until_delegated"),
+    # set from its class when the routing definition loads (approval_annotations). None is agent discretion
+    # and is not serialised.
+    approval: Optional[str] = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_approval(self, handler):
+        data = handler(self)
+        if isinstance(data, dict) and data.get("approval") is None:
+            data.pop("approval", None)
+        return data
 
     @model_validator(mode="after")
     def validate_parameter_extraction_fields(self) -> "CommandMetadata":
@@ -57,7 +79,7 @@ def default_generate_utterances(signature, workflow, command_name: str) -> list[
 class UtteranceMetadata(BaseModel):
     workflow_folderpath: Optional[str] = None
     plain_utterances: list[str]
-    template_utterances: list[str]
+    template_utterances: list[str] = []
     generated_utterances_module_filepath: str
     generated_utterances_func_name: str
 
@@ -133,6 +155,12 @@ class ContextMetadata(BaseModel):
         return v
 
 
+def is_visible_planning(metadata: "CommandMetadata") -> bool:
+    """A planning command the planner, the agent, the listings, the labels and the artifact check see:
+    a planning command that is not framework machinery."""
+    return bool(metadata.is_planning) and not metadata.framework
+
+
 class CommandDirectory(BaseModel):
     """
     Centralized directory for all command implementations.
@@ -157,6 +185,14 @@ class CommandDirectory(BaseModel):
     def get_commands(self) -> list[str]:
         """Retrieve all command keys registered in the command directory."""
         return list(self.map_command_2_metadata.keys())
+
+    def get_execution_commands(self) -> list[str]:
+        """Command names that are not planning commands (routing, training, catalogs)."""
+        return [
+            name
+            for name, metadata in self.map_command_2_metadata.items()
+            if not metadata.is_planning and not metadata.framework
+        ]
 
     def get_command_metadata(self, command_name: str) -> CommandMetadata:
         if command_name not in self.map_command_2_metadata:
@@ -199,7 +235,13 @@ class CommandDirectory(BaseModel):
             f.write(self.model_dump_json(indent=4))
 
     @classmethod
-    def load(cls, workflow_folderpath: str) -> "CommandDirectory":
+    def load(
+        cls,
+        workflow_folderpath: str,
+        *,
+        hydrate_utterances: bool = True,
+        best_effort_inheritance: bool = False,
+    ) -> "CommandDirectory":
         """
         Loads the command directory by scanning _commands folders from base workflows 
         and the current workflow, implementing workflow inheritance.
@@ -219,25 +261,68 @@ class CommandDirectory(BaseModel):
             inheritance_model = WorkflowInheritanceModel.load(workflow_folderpath)
             base_paths = inheritance_model.resolve_base_paths(workflow_folderpath)
         except Exception as e:
-            raise RuntimeError(f"Error processing workflow inheritance: {e}") from e
+            if best_effort_inheritance:
+                base_paths = []
+            else:
+                raise RuntimeError(f"Error processing workflow inheritance: {e}") from e
+
+        # A retired _skills/ folder (here or in a base) is a load error: its planning commands are not read
+        for path in (*base_paths, workflow_folderpath):
+            check_no_planning_commands_folder(path)
         
-        # Step 2: Process base workflows first (in order of precedence)
+        # Step 2: framework-provided planning commands, at the LOWEST precedence (fix-3rsq.plan-review.1):
+        # loaded first, so a base or app command of the same global name replaces them.
+        cls._load_framework_planning_commands(command_directory)
+
+        # Step 3: Process base workflows (in order of precedence)
         for base_path in base_paths:
             cls._load_commands_from_path(command_directory, base_path)
         
-        # Step 3: Process current workflow commands (highest precedence for user commands)
+        # Step 4: Process current workflow commands (highest precedence for user commands)
         cls._load_commands_from_path(command_directory, workflow_folderpath)
-        
-        # Step 4: Populate utterance metadata when available
-        for command_key in command_directory.map_command_2_metadata:
-            if utterance_metadata := command_directory.get_utterance_metadata(command_key):
-                command_directory.register_utterance_metadata(command_key, utterance_metadata)
 
-        # Step 5: Register core commands (processed last, lowest precedence)
+        # Step 5: Populate utterance metadata when available (optional; defers imports)
+        if hydrate_utterances:
+            for command_key in command_directory.map_command_2_metadata:
+                if utterance_metadata := command_directory.get_utterance_metadata(command_key):
+                    command_directory.register_utterance_metadata(command_key, utterance_metadata)
+
+        # Step 6: Register core commands (processed last, lowest precedence)
         cls._register_core_commands(command_directory)
-        
+
         return command_directory
+
+    @classmethod
+    def scan(cls, workflow_folderpath: str) -> "CommandDirectory":
+        """Load command metadata without hydrating utterances (no imports, no ``___command_info``)."""
+        return cls.load(
+            workflow_folderpath,
+            hydrate_utterances=False,
+            best_effort_inheritance=True,
+        )
     
+    @classmethod
+    def _load_framework_planning_commands(cls, command_directory: "CommandDirectory") -> None:
+        """Register the framework's global planning commands: the ``.py`` files directly in
+        ``fastworkflow/_framework_commands`` (no context folder, so the global ``*`` scope). They are
+        ordinary planning commands in every other respect (the same loader as an app's).
+        """
+        root = FRAMEWORK_PLANNING_COMMANDS_DIR
+        if not root.is_dir():
+            return
+        # The framework's own internal workflows (the command metadata extraction workflow, which holds the
+        # core commands) do not take the global planning commands: their trained artifacts predate them.
+        import fastworkflow  # inline: the module is imported before the package is ready
+        if os.path.abspath(command_directory.workflow_folderpath) in {
+                os.path.abspath(fastworkflow.get_internal_workflow_path("command_metadata_extraction")),
+                os.path.abspath(fastworkflow.get_internal_workflow_path("consultation")),
+        }:
+            return
+        for item_path in sorted(root.glob("*.py")):
+            if item_path.is_file() and not item_path.name.startswith("_"):
+                cls._register_command(command_directory, item_path.stem, item_path, str(root))
+                command_directory.map_command_2_metadata[item_path.stem].framework = True
+
     @classmethod
     def _load_commands_from_path(cls, command_directory: "CommandDirectory", path: str):
         """
@@ -270,6 +355,7 @@ class CommandDirectory(BaseModel):
                 context_name = context_dir.name
                 
                 # Check if this context directory contains any command files
+                # (execution or planning — a planning-only context is not empty)
                 has_commands = False
                 
                 for command_file in context_dir.glob("*.py"):
@@ -292,9 +378,33 @@ class CommandDirectory(BaseModel):
                 if has_commands:  # Only register context classes if there are actual commands
                     cls._register_context_class(command_directory, context_name, context_dir, path)
     
+    @staticmethod
+    def check_planning_command_path(name: str, path: str) -> None:
+        """Validate a planning command's file name before load: its stem is a Python identifier.
+
+        Raises :class:`fastworkflow.planning_commands.PlanningCommandFormatError` when it is not.
+        """
+        # planning_commands imports command_directory at load (via command_context_model); import here to break the cycle
+        from fastworkflow.planning_commands import PlanningCommandFormatError
+
+        _context, _, stem = name.rpartition("/")
+        if not stem.isidentifier():
+            raise PlanningCommandFormatError(
+                f"{path}: a planning command's name is its file name, a Python identifier "
+                f"(snake_case): rename it to {re.sub(r'[^0-9A-Za-z_]', '_', stem)}.py"
+            )
+
     @classmethod
-    def _register_command(cls, command_directory: "CommandDirectory", command_name: str, 
-                         command_file_path: Path, workflow_folderpath: str):
+    def _register_command(
+        cls,
+        command_directory: "CommandDirectory",
+        command_name: str,
+        command_file_path: Path,
+        workflow_folderpath: str,
+        *,
+        response_generation_class_name: str | None = None,
+        is_planning: bool | None = None,
+    ):
         """Helper method to register a command and its metadata"""
         command_filepath_str = str(command_file_path)
 
@@ -305,6 +415,13 @@ class CommandDirectory(BaseModel):
         # time it is requested (see `ensure_command_hydrated`).
         # ------------------------------------------------------------
 
+        if response_generation_class_name is None or is_planning is None:
+            rg_name, detected_planning = _command_kind_from_ast(command_file_path)
+            if response_generation_class_name is None:
+                response_generation_class_name = rg_name
+            if is_planning is None:
+                is_planning = detected_planning
+
         metadata = CommandMetadata(
             workflow_folderpath=workflow_folderpath,
             # Defer Signature import – fill these lazily
@@ -313,7 +430,8 @@ class CommandDirectory(BaseModel):
             command_parameters_class=None,
             # Response generation path is still required immediately
             response_generation_module_path=command_filepath_str,
-            response_generation_class_name="ResponseGenerator",
+            response_generation_class_name=response_generation_class_name,
+            is_planning=is_planning,
         )
         command_directory.register_command_metadata(command_name, metadata)
 
@@ -401,6 +519,13 @@ class CommandDirectory(BaseModel):
         1.  Core commands come from *all* python modules inside the internal
             ``command_metadata_extraction/_commands`` tree (recursively).
         """
+        import fastworkflow  # inline: matches other internal-workflow guards in this module
+
+        if os.path.abspath(command_directory.workflow_folderpath) == os.path.abspath(
+                fastworkflow.get_internal_workflow_path("consultation")):
+            command_directory.core_command_names.clear()
+            return
+
         # Clear any previously populated list first
         command_directory.core_command_names.clear()
 
@@ -576,11 +701,16 @@ class CommandDirectory(BaseModel):
                 generated_utterances_func_name = 'dummy'               
             )
 
-        # If already hydrated we are done.
+        # If already hydrated in this process we are done. (When a directory is
+        # deserialized from `command_directory.json` in a fresh process, the
+        # string fields on `command_metadata` are already populated from the
+        # snapshot, so we still ensure the command's in-memory `from_` edges
+        # have been resolved once for its `Signature` class before returning.)
         if command_metadata.response_generation_class_name is not None and (
             command_metadata.input_for_param_extraction_class is not None and \
             utterance_metadata.plain_utterances
         ):
+            _ensure_workflow_field_sources_resolved(command_metadata, self, command_name)
             return
 
         _lazy_hydrate_metadata(
@@ -595,6 +725,128 @@ class CommandDirectory(BaseModel):
 # Module-level helper with its own cache so that repeated
 # hydration calls across directories are cheap.
 # ------------------------------------------------------
+
+# Guard against re-entrant `resolve_field_sources` calls when `resolve_field_sources`
+# loads `CommandContextModel`, which builds `CommandDirectory` and hydrates commands.
+_RESOLVING_FIELD_SOURCES_WORKFLOWS: set[str] = set()
+# Cache of `(workflow_abs_path, command_name) -> Signature class` already resolved
+# and logged in this process. Keying on the `Signature` class object ensures that
+# resolution and error logging happen at most once per `(workflow, command, Signature)`
+# while a reloaded module (producing a new `Signature` class object) is resolved again.
+_RESOLVED_COMMAND_SIGNATURES: dict[tuple[str, str], type] = {}
+# ``(workflow_abs_path, command_name)`` already logged via :func:`_handle_command_field_source_errors`.
+_LOGGED_FIELD_SOURCE_COMMAND_ERRORS: set[tuple[str, str]] = set()
+_INTERNAL_CME_WORKFLOW_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "_workflows", "command_metadata_extraction")
+)
+
+
+def clear_resolved_command_signatures_cache() -> None:
+    """Clear the per-command ``(workflow, command) -> Signature`` resolution cache."""
+    _RESOLVED_COMMAND_SIGNATURES.clear()
+    _LOGGED_FIELD_SOURCE_COMMAND_ERRORS.clear()
+
+
+def _is_subject_workflow_command(
+    command_name: str, metadata: CommandMetadata, directory: CommandDirectory
+) -> bool:
+    """True when *command_name* belongs to a subject workflow rather than the internal CME workflow."""
+    if command_name in directory.core_command_names:
+        return False
+    if os.path.abspath(metadata.workflow_folderpath or "") == _INTERNAL_CME_WORKFLOW_PATH:
+        return False
+    if os.path.abspath(directory.workflow_folderpath or "") == _INTERNAL_CME_WORKFLOW_PATH:
+        return False
+    return True
+
+
+def _handle_command_field_source_errors(
+    command_name: str,
+    errs: list[str],
+    *,
+    workflow_folderpath: str | None = None,
+) -> bool:
+    """Policy for a command whose ``Signature`` has ``from_`` / ``available_from`` errors.
+
+    Applies to execution and planning commands alike: log each problem once per process
+    (keyed by workflow folder and command name), leave the offending field's
+    ``available_from`` edge unwritten, and keep the command loadable (routable for
+    execution commands; matchable for planning commands). Preview ``--check`` still
+    fails on the reported errors.
+
+    Returns ``True`` to keep hydrating or loading the command, or ``False`` to skip it.
+    Kept in one place so the policy can be switched cleanly.
+    """
+    if errs:
+        wf_abs = os.path.abspath(workflow_folderpath) if workflow_folderpath else ""
+        log_key = (wf_abs, command_name)
+        if log_key not in _LOGGED_FIELD_SOURCE_COMMAND_ERRORS:
+            _LOGGED_FIELD_SOURCE_COMMAND_ERRORS.add(log_key)
+            logger.error(f"command {command_name!r}: " + "; ".join(errs))
+    return True
+
+
+def _ensure_workflow_field_sources_resolved(
+    metadata: CommandMetadata,
+    directory: CommandDirectory,
+    command_name: str,
+    signature_cls: Optional[type] = None,
+) -> bool:
+    """Ensure ``resolve_field_sources`` has run for the workflow and the command's
+    ``Signature`` has its ``available_from`` populated (including when ``CommandDirectory``
+    was loaded from a persisted JSON snapshot in a new process).
+
+    Cached per ``(workflow_folder, command_name, Signature class identity)`` so each
+    command's resolution and error logging runs at most once per ``Signature`` class.
+    Returns ``True`` when hydration should proceed, ``False`` if the command should be skipped.
+    """
+    if not _is_subject_workflow_command(command_name, metadata, directory):
+        return True
+    wf_folder = directory.workflow_folderpath or metadata.workflow_folderpath
+    if not wf_folder:
+        return True
+    wf_abs = os.path.abspath(wf_folder)
+    if wf_abs in _RESOLVING_FIELD_SOURCES_WORKFLOWS:
+        return True
+
+    module_path = metadata.response_generation_module_path
+    if signature_cls is None:
+        module = python_utils.get_module(module_path, metadata.workflow_folderpath or wf_folder)
+        signature_cls = getattr(module, "Signature", None) if module else None
+    if signature_cls is None:
+        return True
+
+    cache_key = (wf_abs, command_name)
+    if _RESOLVED_COMMAND_SIGNATURES.get(cache_key) is signature_cls:
+        return True
+
+    from fastworkflow import planning_commands  # circular import: planning_commands -> command_context_model -> command_directory
+
+    _RESOLVING_FIELD_SOURCES_WORKFLOWS.add(wf_abs)
+    try:
+        resolution = planning_commands.resolve_field_sources(wf_abs)
+    finally:
+        _RESOLVING_FIELD_SOURCES_WORKFLOWS.discard(wf_abs)
+
+    cmd_problems = planning_commands.resolve_signature_field_sources(
+        command_name, signature_cls, module_path, resolution
+    )
+    _RESOLVED_COMMAND_SIGNATURES[cache_key] = signature_cls
+
+    errs = resolution.errors_for(command_name) or [
+        p.format() for p in cmd_problems if p.severity == "error"
+    ]
+    # ``skipped_commands`` lists commands with a field-source error, not unloadable ones.
+    if errs or command_name in resolution.skipped_commands:
+        if not _handle_command_field_source_errors(
+            command_name, errs, workflow_folderpath=wf_abs
+        ):
+            metadata.parameter_extraction_signature_module_path = None
+            metadata.input_for_param_extraction_class = None
+            metadata.command_parameters_class = None
+            return False
+    return True
+
 
 # We purposely do *not* cache by arguments because `metadata`/`directory` are
 # unhashable Pydantic objects.  The helper itself safeguards against running
@@ -615,6 +867,11 @@ def _lazy_hydrate_metadata(module_path: str, metadata: CommandMetadata, director
     if not signature_cls:
         return
 
+    if not _ensure_workflow_field_sources_resolved(
+        metadata, directory, command_name, signature_cls=signature_cls
+    ):
+        return
+
     metadata.parameter_extraction_signature_module_path = module_path
     metadata.input_for_param_extraction_class = "Signature"
     if hasattr(signature_cls, "Input"):
@@ -633,6 +890,49 @@ def _lazy_hydrate_metadata(module_path: str, metadata: CommandMetadata, director
 # Files (beyond *.py) that the command/routing snapshots derive from. Changes
 # to these must also invalidate the persisted caches.
 _CONTEXT_MODEL_BASENAMES = ("context_inheritance_model.json",)
+
+
+#: The load error for a workflow that still has a ``_skills/`` folder (see ``check_no_planning_commands_folder``).
+PLANNING_COMMANDS_FOLDER_RETIRED = (
+    "_skills/ is no longer read; move these files into _commands/ (first make sure any script "
+    "that regenerates _commands/ preserves them; see docs/migrating_skills_to_commands.md)"
+)
+
+
+def check_no_planning_commands_folder(workflow_folderpath: str) -> None:
+    """Raise ValueError when the workflow folder still has a retired ``_skills/`` folder.
+
+    Planning commands are read from ``_commands/`` (as are execution commands), so a workflow
+    that keeps its planning commands in ``_skills/`` must move them before it loads.
+    """
+    if os.path.isdir(os.path.join(workflow_folderpath, "_skills")):
+        raise ValueError(PLANNING_COMMANDS_FOLDER_RETIRED)
+
+
+def _command_kind_from_ast(command_file_path: Path) -> tuple[str, bool]:
+    """Return ``(response_generation_class_name, is_planning)`` without importing the module."""
+    try:
+        source = command_file_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(command_file_path))
+    except SyntaxError:
+        raise
+    except OSError as exc:
+        raise ValueError(f"{command_file_path}: could not read command source ({exc})") from exc
+    has_response_generator = False
+    has_plan_generator = False
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            if node.name == "ResponseGenerator":
+                has_response_generator = True
+            elif node.name == "PlanGenerator":
+                has_plan_generator = True
+    if has_response_generator and has_plan_generator:
+        raise ValueError(
+            f"{command_file_path}: defines both ResponseGenerator and PlanGenerator"
+        )
+    if has_plan_generator:
+        return "PlanGenerator", True
+    return "ResponseGenerator", False
 
 
 def _command_source_roots(workflow_folderpath: str) -> list[Path]:
@@ -679,11 +979,8 @@ def compute_commands_source_fingerprint(workflow_folderpath: str) -> str:
                 st = p.stat()
                 entries.append((str(p), st.st_size, st.st_mtime_ns))
 
-    # Routing also depends on the hierarchy model at the workflow root.
-    hierarchy = Path(workflow_folderpath) / "context_hierarchy_model.json"
-    if hierarchy.is_file():
-        st = hierarchy.stat()
-        entries.append((str(hierarchy), st.st_size, st.st_mtime_ns))
+    # No hierarchy file is fingerprinted: parents come from the live chain, and a leftover
+    # context_hierarchy_model.json is ignored (see CommandContextModel.load).
 
     return hashlib.sha256(repr(sorted(entries)).encode("utf-8")).hexdigest()
 
@@ -725,6 +1022,8 @@ def get_cached_command_directory(workflow_folderpath: str) -> CommandDirectory:
     """
 
     workflow_folderpath = str(Path(workflow_folderpath).resolve())
+    # Checked before the fast path: a snapshot written before a _skills/ folder appeared still matches the fingerprint
+    check_no_planning_commands_folder(workflow_folderpath)
 
     cache_folder = Path(CommandDirectory.get_commandinfo_folderpath(workflow_folderpath))
     cache_file = cache_folder / "command_directory.json"

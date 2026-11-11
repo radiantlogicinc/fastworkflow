@@ -3,7 +3,7 @@ import re
 
 import pytest
 
-from fastworkflow.split_merge import merge_subtasks, request_subjects, subjects_in
+from fastworkflow.split_merge import merge_subtasks, request_subjects, subjects_in, without_repeated_clauses
 
 
 # ------------------------------------------------------------------ subjects
@@ -177,6 +177,21 @@ def test_per_person_jobs_without_a_comparison_stay_split():
 
 
 # ------------------------------------------------------------------ edges
+def test_a_clause_written_twice_is_cut_at_its_later_copy_and_other_text_is_untouched():
+    copied = ("Ada Ng has asked for the reading room pass: triage the request: what the pass exposes, and what "
+              "Ada Ng has asked for the reading room pass: triage the request: what the pass exposes, and what "
+              "Ada Ng can reach today.")
+    assert without_repeated_clauses(copied) == (
+        "Ada Ng has asked for the reading room pass: triage the request: what the pass exposes, and what "
+        "Ada Ng can reach today.")
+    # nothing repeats: the text comes back as it was, spacing and all
+    plain = "Show  Ada Ng's   loans, and her fines."
+    assert without_repeated_clauses(plain) is plain
+    # a short name or phrase written twice is the request's own words
+    assert without_repeated_clauses("Compare Ada Ng with Ada Ng's peer, Ben Ito.") == (
+        "Compare Ada Ng with Ada Ng's peer, Ben Ito.")
+
+
 def test_fewer_than_two_subtasks_are_returned_unchanged():
     assert merge_subtasks("q", []) == []
     assert merge_subtasks("q", ["only one"]) == ["only one"]
@@ -532,3 +547,67 @@ def test_a_long_name_dense_request_merges_in_well_under_a_second_per_thousand_wo
     start = time.perf_counter()
     merge_subtasks(q, split)
     assert time.perf_counter() - start < 2.5
+
+
+# ------------------------------------------------------------------ rule 3's join decision from the caller (fix-bydz)
+def test_same_job_false_keeps_two_questions_about_the_same_record_apart():
+    q = "Who wrote Dune and who has it out?"
+    split = ["Who wrote Dune?", "Who has Dune out?"]
+    asked: list[tuple[str, str]] = []
+
+    def same_job(earlier, later):
+        asked.append((earlier, later))
+        return False
+
+    assert merge_subtasks(q, split) == [q]                      # the lexical rule joins them
+    assert merge_subtasks(q, split, same_job=same_job) == split
+    assert asked == [("Who wrote Dune?", "Who has Dune out?")]
+
+
+def test_same_job_decides_a_subject_less_part_after_or_before_another():
+    q = "Who wrote Persuasion, and how many loans are overdue?"
+    split = ["Who wrote Persuasion?", "How many loans are overdue?"]
+    assert merge_subtasks(q, split, same_job=lambda e, l: False) == split
+    assert merge_subtasks(q, split, same_job=lambda e, l: True) == [q]
+    q = "How many loans are overdue, and who wrote Persuasion?"
+    split = ["How many loans are overdue?", "Who wrote Persuasion?"]
+    assert merge_subtasks(q, split, same_job=lambda e, l: False) == split
+    assert merge_subtasks(q, split) == [q]
+
+
+def test_same_job_none_keeps_the_lexical_join():
+    q = "Find the member Ann Lee and then open her record."
+    split = ["Find the member Ann Lee.", "Open the record for Ann Lee."]
+    assert merge_subtasks(q, split, same_job=lambda e, l: None) == merge_subtasks(q, split) == [q]
+
+
+def test_same_job_is_not_asked_about_different_subjects_or_a_limit():
+    asked: list = []
+
+    def same_job(earlier, later):
+        asked.append((earlier, later))
+        return False
+
+    q = "How many copies of Dune Messiah are there, and are there any notes on Raj Patel's record?"
+    split = ["How many copies of Dune Messiah are there?", "Are there any notes on Raj Patel's record?"]
+    assert merge_subtasks(q, split, same_job=same_job) == split
+    q = ("Work the control 'Cases without owner' through. Then put Nora Banks through an "
+         "offboarding sweep. Apply none of them.")
+    assert merge_subtasks(q, ["Work the control 'Cases without owner' through.",
+                              "Put Nora Banks through an offboarding sweep.",
+                              "Apply none of them."], same_job=same_job) == [
+        "Work the control 'Cases without owner' through.",
+        "Put Nora Banks through an offboarding sweep. Apply none of them."]
+    assert asked == []
+
+
+def test_a_name_taken_from_the_earlier_turns_is_not_an_invention_and_the_request_stays_the_request():
+    q = "Add a note to her record that she was reminded, and who wrote that book?"
+    split = ["Add a note to Mia Chen's record that she was reminded.", "Who wrote the book Persuasion?"]
+    context = "conversation summary: The user asked for Mia Chen's loans: she has Persuasion, due 2026-10-18."
+    # Without the earlier turns, "Mia Chen" is a record the request never writes: that sub-task is dropped.
+    assert merge_subtasks(q, split) == [q]
+    assert merge_subtasks(q, split, context=context) == split
+    # When everything joins, the request (never the earlier turns) is the one job.
+    assert merge_subtasks(q, ["Add a note to Mia Chen's record that she was reminded.",
+                              "Show the notes on Mia Chen's record."], context=context) == [q]

@@ -74,13 +74,12 @@ class Signature(BaseSig):
 ResponseGenerator = BaseRG  # simple alias
 ```
 
-> **How many to add.** Seed count is the largest measured input to intent-detection
-> accuracy — bigger than the persona/utterance generation dials. On one 160-command
-> workflow, held-out routing accuracy climbed steeply from ~3 seeds per command to ~8 and
-> then flattened; treat that as one workflow's observation rather than a constant, and aim
-> for roughly eight varied phrasings (imperative, question, colloquial, terse,
-> synonym-heavy, value-bearing) instead of paraphrases of one sentence. Full guidance in
-> `.claude/rules/command-authoring.md`.
+> **How many to add.** Seed count is the largest input to intent-detection accuracy, bigger
+> than the persona and utterance generation settings. Aim for roughly eight varied phrasings
+> per command (imperative, question, colloquial, terse, synonym-heavy, value-bearing) rather
+> than paraphrases of one sentence. A command's seeds also teach every other context that a
+> request is not theirs, so a command's seeds are read by the "not here" class of each head.
+> Full guidance in `.claude/rules/command-authoring.md`.
 
 ### 4.2  Example – override only the input schema
 
@@ -106,14 +105,12 @@ from fastworkflow.templates.template_workflow._commands.get_task_summary import 
 
 class Signature(BaseSig):
     @staticmethod
-    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> tuple[bool, str]:
-        # call default checks first
-        success, error_msg = super(Signature, Signature).validate_extracted_parameters(workflow, command, cmd_parameters)
-        if not success:
-            return (False, error_msg)
+    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> None:
+        # call default checks first; a refusal raises fastworkflow.Refused and stops here
+        super(Signature, Signature).validate_extracted_parameters(workflow, command, cmd_parameters)
 
         if len(cmd_parameters.task_id) > 10:
-            return (False, "Task id too long for this org policy")
+            raise fastworkflow.Refused("Task id too long for this org policy", field="task_id")
 ```
 
 No other attributes or methods need to be copied.
@@ -130,7 +127,7 @@ No other attributes or methods need to be copied.
 
 ## 6. Packaging & distribution of templates
 
-Template workflows are ordinary Python packages that ship an `_commands/` folder plus any helper files (`context_inheritance_model.json`, `workflow_inheritance_model.json`, `context_hierarchy_model.json`, etc.). They can be:
+Template workflows are ordinary Python packages that ship an `_commands/` folder plus any helper files (`context_inheritance_model.json`, `workflow_inheritance_model.json`, etc.). Enclosing records come from each context's `get_parent`, not from a hierarchy file. They can be:
 
 * **Built-in** – published inside `fastworkflow.examples.*`.
 * **Third-party** – installed via `pip install mycompany-wf-templates`.

@@ -94,6 +94,13 @@ def _workflow_is_trained(path: str) -> bool:
         threshold_path = os.path.join(command_info_root, folder, "threshold.json")
         if not os.path.isfile(threshold_path):
             return False
+    # Phase 9 step 4: artifacts without the not-here construction record are refused at load
+    # (ChatSession.start_workflow), so they are not offered as trained here either.
+    from fastworkflow.train.artifact_versioning import construction_record_problem
+    import fastworkflow
+    cme_path = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
+    if construction_record_problem(path) or construction_record_problem(cme_path):
+        return False
     return True
 
 

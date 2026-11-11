@@ -22,18 +22,12 @@ from fastworkflow.model_pipeline_training import (
     CommandRouter,
     GLOBAL_CONTEXT_FOLDER,
 )
-# `entry_declarations` owns the entry-command declaration contract: one
-# canonical source for "which command enters this context", read here by the
-# foreign-context hint. Nothing in the routing definition or the context model
-# records the fact, and inferring it from a command's NAME would bake one
-# workflow's spelling conventions into the framework.
-# `CONTEXT_ENTER_COMMAND_ATTRS` is re-exported because this module is where the
-# foreign-context callers already look for it.
-from fastworkflow.entry_declarations import (
-    CONTEXT_ENTER_COMMAND_ATTRS,
-    declared_entry_commands,
+# The commands that enter a context are read from the descend edges (`@descends_to`
+# on each command, design 3.15), the one navigation declaration.
+from fastworkflow.context_navigation import entering_commands
+from fastworkflow.nlu_labels import (
+    PARAMETER_VALUE_LABEL, is_escalation, is_non_routable, label_of,
 )
-from fastworkflow.nlu_labels import is_escalation, is_non_routable
 from fastworkflow.train.artifact_versioning import VERSIONS_DIRNAME
 
 from fastworkflow.utils.fuzzy_match import find_best_matches
@@ -123,8 +117,8 @@ def foreign_context_hint(
     the workflow's state on the strength of a guess about what was meant.
 
     Generic by construction. The owning contexts come from the routing
-    definition, and the entering command only from a context's own
-    `enter_command` declaration -- never from the shape of a command's name.
+    definition, and the entering command only from a command's own
+    `@descends_to` declaration -- never from the shape of a command's name.
 
     *enter_commands* is keyed by owning context. With one owner the entering
     commands are simply listed; with several, each is named beside the context
@@ -179,6 +173,35 @@ def escalation_outcome_of(predictions: list[str]) -> str:
     if len(predictions) == 1:
         return ESCALATION_OUTCOME_HONORED
     return ESCALATION_OUTCOME_SUPPRESSED_BY_AMBIGUITY
+
+
+def _jev_intent_tiebreak(utterance: str, predictions: list[str], folderpath: str,
+                         context: str, nlu_trace: dict) -> Optional[str]:
+    """The label Jev chooses among the classifier's ambiguous *predictions*, or None.
+
+    Records the question and its answer in ``nlu_trace["jev_tiebreak"]`` whenever Jev was asked.
+    The import is lazy: ``workflow_agent`` imports this stack, so a top-level import would be circular.
+    """
+    from fastworkflow.workflow_agent import (
+        INTENT_TIEBREAK_THRESHOLD, choose_ambiguous_command, intent_tiebreak_descriptions)
+    candidates = [str(p) for p in predictions]
+    descriptions = intent_tiebreak_descriptions(folderpath, context, candidates)
+    label, probability = choose_ambiguous_command(utterance, candidates, descriptions)
+    if label is not None:
+        nlu_trace["jev_tiebreak"] = {
+            "choice": label,
+            "probability": probability,
+            "threshold": INTENT_TIEBREAK_THRESHOLD,
+            "candidates": candidates,
+        }
+        return label
+    if probability is not None:
+        nlu_trace["jev_tiebreak"] = {
+            "choice": None,
+            "probability": probability,
+            "threshold": INTENT_TIEBREAK_THRESHOLD,
+        }
+    return None
 
 
 def _classifier_signal_version(model_artifact_path: str, model_tier: str) -> str:
@@ -292,6 +315,11 @@ def command_identity_uncertainty(nlu_trace: dict) -> DecisionUncertainty:
         # "not-instrumented" is the honest report of a decision whose measurement
         # the contract cannot represent yet.
         signals_absent_reason = "not-instrumented"
+    elif matcher_layer == "jev_tiebreak":
+        # Jev chose among the classifier's candidates. Its probability is on the span as
+        # `jev_tiebreak`, but §6.6.1 has no signal kind for an LLM's probability, so the
+        # record says so. The candidate count is kept: the ambiguity was real.
+        signals_absent_reason = "not-instrumented"
     elif matcher_layer == "classifier":
         signal_version = nlu_trace["classifier_signal_version"]
         signals.append(
@@ -377,6 +405,11 @@ class CommandNamePrediction:
         # prediction leaves them None and nothing reads them.
         known_name_owner_contexts: Optional[list[str]] = None
         routing_hint: Optional[str] = None
+        # True when this context's head answered `parameter_value`: the utterance is
+        # a bare value, not a command here or anywhere else. Such an answer ends the
+        # parent-context walk where it is given (design 2.18, 3.9 step 4). A null
+        # command_name alone cannot tell it from a decline, which is why this exists.
+        answered_bare_value: bool = False
 
     def __init__(self, cme_workflow: fastworkflow.Workflow):
         self.cme_workflow = cme_workflow
@@ -384,7 +417,10 @@ class CommandNamePrediction:
         self.app_workflow_folderpath = self.app_workflow.folderpath
         self.app_workflow_id = self.app_workflow.id
 
-        self.convo_path = os.path.join(self.app_workflow_folderpath, "___convo_info")
+        self.convo_path = (
+            cme_workflow.context.get("convo_path")
+            or os.path.join(self.app_workflow_folderpath, "___convo_info")
+        )
         self.cache_path = self._get_cache_path(self.app_workflow_id, self.convo_path)
         self.path = self._get_cache_path_cache(self.convo_path, self.app_workflow_id)
         # Built once per predictor and reused across the parent-chain walk,
@@ -462,7 +498,9 @@ class CommandNamePrediction:
         Read from the same `RoutingDefinition` the per-context candidate set is
         built from (`RoutingRegistry` caches it per workflow folder), so there
         is no second source of truth to drift: this is that definition read
-        across every context instead of one.
+        across every context instead of one. Planning commands are read from
+        `get_planning_command_names`, the same accessor the per-context set uses,
+        so a planning name owned by another context is guarded like a routed one.
         """
         if self._command_inventory is None:
             app_crd = fastworkflow.RoutingRegistry.get_definition(
@@ -470,6 +508,12 @@ class CommandNamePrediction:
             owners: dict[str, set[str]] = {}
             for context_name, qualified_names in app_crd.contexts.items():
                 for qualified_name in qualified_names:
+                    simple_name = qualified_name.split('/')[-1]
+                    if is_non_routable(simple_name):
+                        continue
+                    owners.setdefault(simple_name.lower(), set()).add(context_name)
+            for context_name in app_crd.contexts:
+                for qualified_name in app_crd.get_planning_command_names(context_name):
                     simple_name = qualified_name.split('/')[-1]
                     if is_non_routable(simple_name):
                         continue
@@ -482,16 +526,14 @@ class CommandNamePrediction:
     def enter_commands_for(self, context_name: str) -> list[str]:
         """The command(s) a workflow declares as entering *context_name*.
 
-        Read through `entry_declarations.declared_entry_commands`, which owns the
-        declaration contract; the context's own callback class is the only
-        place the fact is recorded. Empty when the workflow declares nothing,
-        when the context has no callback class, or when loading it fails -- a
-        hint that names the context alone is worth more than a failed turn, so
-        nothing here is allowed to raise.
+        Read from the descend edges (`context_navigation.entering_commands`): each
+        command whose `@descends_to` names the context, with the values it needs.
+        Empty when no command declares it. Nothing here is allowed to raise: a hint
+        that names the context alone is worth more than a failed turn.
         """
         if context_name in self._enter_commands:
             return self._enter_commands[context_name]
-        declared = declared_entry_commands(self.app_workflow_folderpath, context_name)
+        declared = entering_commands(self.app_workflow_folderpath, context_name)
         self._enter_commands[context_name] = declared
         return declared
 
@@ -547,13 +589,21 @@ class CommandNamePrediction:
         nlu_trace["escalation_outcome"] = ESCALATION_OUTCOME_NOT_EVALUATED
 
         model_artifact_path = f"{self.app_workflow_folderpath}/___command_info/{command_context_name}"
-        command_router = CommandRouter(model_artifact_path)
+        # The router is built only where a classifier or the embedding cache is consulted (below),
+        # never for an exact command name: an exact name needs no model, and a context with no
+        # trained model (the global scope of a workflow with no global model) must still take one (3.9).
+        command_router = None
+        modelpipeline = None
 
-        # Re-use the already-built ModelPipeline attached to the router
-        # instead of instantiating a fresh one.  This avoids reloading HF
-        # checkpoints and transferring tensors each time we see a new
-        # message for the same context.
-        modelpipeline = command_router.modelpipeline
+        def ensure_router():
+            # Re-use the already-built ModelPipeline attached to the router instead of
+            # instantiating a fresh one. This avoids reloading HF checkpoints and transferring
+            # tensors each time we see a new message for the same context.
+            nonlocal command_router, modelpipeline
+            if command_router is None:
+                command_router = CommandRouter(model_artifact_path)
+                modelpipeline = command_router.modelpipeline
+            return command_router
 
         crd = fastworkflow.RoutingRegistry.get_definition(
             self.cme_workflow.folderpath)
@@ -566,9 +616,13 @@ class CommandNamePrediction:
                 NLUPipelineStage.INTENT_DETECTION, NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION):
             app_crd = fastworkflow.RoutingRegistry.get_definition(
                 self.app_workflow_folderpath)
+            # A planning command is typed by name like a routed one: its name must be in
+            # this exact-match set, or its words fall to the classifier, which has no
+            # planning labels (training excludes them). Never added to the classifier path.
             valid_command_names = (
-                set(cme_command_names) | 
-                set(app_crd.get_command_names(command_context_name))
+                set(cme_command_names) |
+                set(app_crd.get_command_names(command_context_name)) |
+                set(app_crd.get_planning_command_names(command_context_name))
             )
 
         command_name_dict = {
@@ -719,6 +773,7 @@ class CommandNamePrediction:
                 # but the number it was compared against is no longer discarded
                 # (FW-REQ-021 clause 1). A hit is a 2-tuple, a miss is still None,
                 # so the walrus test behaves exactly as it did.
+                ensure_router()
                 if cache_result := cache_match(
                     self.path, command, modelpipeline, 0.85, return_details=True
                 ):
@@ -751,6 +806,14 @@ class CommandNamePrediction:
 
                     if len(predictions)==1:
                         command_name = predictions[0].split('/')[-1]
+                    elif jev_label := _jev_intent_tiebreak(
+                            command, predictions, self.app_workflow_folderpath,
+                            command_context_name, nlu_trace):
+                        # Jev chose among the candidates, confidently: route to it as if the
+                        # classifier had. The ambiguity prompt is not shown. The choice is not
+                        # written to the utterance cache: only the clarification stages do that.
+                        command_name = jev_label.split('/')[-1]
+                        nlu_trace["matcher_layer"] = "jev_tiebreak"
                     else:
                         # If confidence is low, treat as ambiguous command (type 1)
                         if escalation_signals := self.escalation_signals_in(predictions):
@@ -790,6 +853,9 @@ class CommandNamePrediction:
             # default that replaces it is one command, chosen by the code.
             nlu_trace["candidate_count"] = 1
 
+        answered_bare_value = (
+            command_name is not None and label_of(command_name) == PARAMETER_VALUE_LABEL
+        )
         fully_qualified_command_name = self.resolve_fully_qualified_command_name(
             command_name, command_name_dict)
         if fully_qualified_command_name is None:
@@ -814,11 +880,13 @@ class CommandNamePrediction:
             and not fully_qualified_command_name.endswith('you_misunderstood')
         ):
             command = self.cme_workflow.context["command"]
+            ensure_router()
             store_utterance_cache(self.path, command, command_name, modelpipeline)
 
         return CommandNamePrediction.Output(
             command_name=fully_qualified_command_name,
-            is_cme_command=is_cme_command
+            is_cme_command=is_cme_command,
+            answered_bare_value=answered_bare_value,
         )
 
     @staticmethod

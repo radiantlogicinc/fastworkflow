@@ -87,8 +87,9 @@ the spec (none of them is consumed in code today; the artifact validator is unco
 - Anything you add to `CommandResponse.artifacts` must be `None/str/int/float/bool` or
   dict/list/tuple compositions — v3.0 REJECTS other types at record filing; v2.21+ already
   warns (`turn.py:147-165`).
-- New code should construct `CommandOutput(command_response=...)` (singular) — the shim
-  maps it; this is the forward-compatible spelling.
+- Command code never constructs `CommandOutput`: it returns the Output, a `str` or a
+  `CommandResponse`, and the framework builds the envelope. Framework code that builds one uses the
+  singular `CommandOutput(command_response=...)` spelling; the shim maps it.
 - New endpoint work should return `TurnOutput`-shaped bodies (see `render_turn_response`,
   `turns.py:386-424`) rather than raw `CommandOutput` — that is the fix-qtq direction.
 - Do not build ad-hoc turn persistence; if you need durable turns, that IS the v3.0

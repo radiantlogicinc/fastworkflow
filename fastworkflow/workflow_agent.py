@@ -3,6 +3,8 @@ Agent integration module for fastWorkflow.
 Provides workflow tool agent functionality for intelligent tool selection.
 """
 
+import contextlib
+import contextvars
 import dataclasses
 import functools
 import json
@@ -11,7 +13,9 @@ import re
 import threading
 import time
 import traceback
+from typing import Any, Mapping, Optional
 from datetime import datetime, timezone
+from pathlib import Path
 
 import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
@@ -20,17 +24,26 @@ from dspy.experimental import Choice, TypeSafe
 
 import fastworkflow
 from fastworkflow import tracing
-from fastworkflow import skill_commands
-from fastworkflow.skill_commands import SkillCommand, SkillFormatError, plan_skill_call
+from fastworkflow import approval_binding
+from fastworkflow import planning_commands
+from fastworkflow.planning_commands import (
+    PlanningCommandCommand, PlanningCommandFormatError, PlanningCommandInputError, typed_planning_call, refusal_question,
+    refusal_names_an_input)
 from fastworkflow.split_merge import (
-    definite_descriptions, merge_subtasks, request_subjects, subjects_in, unnamed_subjects, with_referent)
+    JoinedSubtask, Reduction, definite_descriptions, merge_subtasks, reduce_to_cap, request_subjects, subjects_in,
+    unnamed_subjects, with_referent, without_repeated_clauses)
 from fastworkflow.utils.logging import logger
+from fastworkflow.policy_runtime import policy_of
 from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
+from fastworkflow.command_directory import (
+    CommandDirectory, _command_kind_from_ast, _handle_command_field_source_errors, check_no_planning_commands_folder,
+)
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_executor import AlreadyInContextError, CommandNotFoundError
 from fastworkflow.context_navigation import (
-    enters_current_context, render_already_in_context, unavailable_command_message)
+    command_on_path, enters_current_context, lookup_scopes, render_already_in_context,
+    scope_command_names, unavailable_command_message)
 from fastworkflow.context_navigation import home_contexts as context_homes
 from fastworkflow.utils.react import AskUserSuspend
 from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
@@ -93,21 +106,45 @@ def _append_action_record(chat_session_obj, record: dict) -> None:
         core.append_action_log(record)
 
 
+def _held_context(chat_session_obj, command_output, ran_in_clause, ran_in_name):
+    """The (clause, name) a command's held run is recorded under.
+
+    A planning command's child leaves the workflow where its last step ended,
+    so its run names the context the workflow is in once the call returns;
+    any other command ran, and is held, in the context it was called from.
+    Never raises: a label hook must not stop the command.
+    """
+    # A run the parent walk executed on an enclosing record is filed under that record.
+    ran_on_clause = getattr(command_output, "ran_in_context_clause", None)
+    if ran_on_clause is not None:
+        return ran_on_clause, getattr(command_output, "ran_in_context_name", None) or ""
+    active = chat_session_obj.get_active_workflow()
+    try:
+        if active is None or planning_commands.planning_command(
+                active.folderpath, command_output.command_name) is None:
+            return ran_in_clause, ran_in_name
+        return context_clause_for(active), context_identity(active)[0]
+    except Exception:  # noqa: BLE001 - a label hook must not stop the command
+        return ran_in_clause, ran_in_name
+
+
 def _hold_command_run(chat_session_obj, command_output, context_clause,
-                      context_name=None) -> None:
+                      context_name=None, alias=None) -> None:
     """Hold this command's run for the in-flight execute step's archive row.
 
     Its name, success, context, parameters and ``Signature.Output``
     (``CommandResponse.output``) are stored beside the step's text when the
     step is archived; the observation the agent reads is not touched. Outside
     an agent execute step there is no row to store it in, and nothing is held.
+    *alias* names the step the run is held under; None reads the in-flight step.
     Never raises: this record must not be able to fail a command.
     """
     try:
         name = command_output.command_name
         if not name:
             return
-        alias = current_execute_alias(getattr(chat_session_obj, "workflow_tool_agent", None))
+        if alias is None:
+            alias = current_execute_alias(getattr(chat_session_obj, "workflow_tool_agent", None))
         if alias is None:
             return
         note_command_run(scope_for_host(chat_session_obj), alias, command_run_record(
@@ -120,6 +157,60 @@ def _hold_command_run(chat_session_obj, command_output, context_clause,
         ))
     except Exception:  # noqa: BLE001
         logger.debug("could not hold the command run for its archive row", exc_info=True)
+
+
+def command_run_response(command_output) -> str:
+    """The response text a command run gives the agent: its response, or a line saying it produced none.
+
+    Shared by the step that ran the command (_execute_workflow_query) and the step a
+    nested run finishes for after a suspension (WorkflowExecutionContext).
+    """
+    if command_output.command_response.response:
+        return command_output.command_response.response
+    return "Command executed successfully but produced no output."
+
+
+def _parameters_dict(params) -> dict | None:
+    """A command's parameters as a dict: a typed Input is dumped, a dict is kept."""
+    if params is None:
+        return None
+    if hasattr(params, "model_dump"):
+        return params.model_dump()
+    if isinstance(params, dict):
+        return params
+    return None
+
+
+def action_record(command: str, command_output, response_text: str) -> dict:
+    """The action-log record of one command run: the text the agent sent, the command it
+    ran as, its parameters and the response it gave.
+
+    Written by the step that ran the command, and by the step a nested run completes after
+    a suspension, so the two records read alike.
+    """
+    return {
+        "command": command,
+        "command_name": command_output.command_name,
+        "parameters": _parameters_dict(command_output.command_parameters),
+        "response": response_text,
+    }
+
+
+def run_observation(alias: str | None, ran_in_clause: str, response: str, *,
+                    folded_note: str = "", context_changed: bool,
+                    now_clause: str | None) -> str:
+    """The observation a command run gives the agent: its response, the note on arguments
+    folded into its command, and the handle line naming the step it ran in (with where it
+    left the agent, when the run moved it).
+
+    Shared by the step that ran the command and by the step a nested run completes after a
+    suspension, so both observations read alike.
+    """
+    text = response + folded_note
+    if alias is None:
+        return text
+    return annotated_observation(alias, ran_in_clause, text, context_changed=context_changed,
+                                 now_in=now_clause if context_changed else None)
 
 
 def _append_turn_output(chat_session_obj, command_output) -> None:
@@ -168,8 +259,21 @@ def _complete_ask_user_entry(chat_session_obj, answer: str) -> None:
 def _what_can_i_do(chat_session_obj: fastworkflow.ChatSession) -> str:
     """
     Returns a list of available commands, including their names and parameters.
+
+    Inside a planning command's phase, the commands that write and that no step of the phase names are
+    left out (fix-fixv, ``command_writes.unplanned_write_commands``).
     """
-    return _executor_commands_text(chat_session_obj.get_active_workflow())
+    workflow = chat_session_obj.get_active_workflow()
+    return _executor_commands_text(workflow, _unplanned_writes(chat_session_obj, workflow))
+
+
+def _unplanned_writes(host, workflow) -> frozenset[str]:
+    """The write commands the running phase's steps do not name (none outside a phase)."""
+    from fastworkflow import command_writes
+
+    if workflow is None:
+        return frozenset()
+    return command_writes.unplanned_write_commands(host, workflow.folderpath)
 
 
 def _executor_commands_text(current_workflow, exclude: frozenset[str] = frozenset()) -> str:
@@ -177,12 +281,12 @@ def _executor_commands_text(current_workflow, exclude: frozenset[str] = frozense
     commands = CommandMetadataAPI.get_command_display_text(
         subject_workflow_path=current_workflow.folderpath,
         cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
-        active_context_name=current_workflow.current_command_context_name,
+        active_context_name=current_workflow._current_command_context_name,
         exclude=exclude,
     )
     other_contexts = CommandMetadataAPI.get_other_contexts_text(
         subject_workflow_path=current_workflow.folderpath,
-        active_context_name=current_workflow.current_command_context_name,
+        active_context_name=current_workflow._current_command_context_name,
         navigation_workflow=current_workflow,
         exclude=exclude,
     )
@@ -219,7 +323,8 @@ def _refresh_agent_available_commands(host, exclude: frozenset[str] = frozenset(
     if current_workflow is None:
         return
 
-    inputs["available_commands"] = _executor_commands_text(current_workflow, exclude)
+    inputs["available_commands"] = _executor_commands_text(
+        current_workflow, exclude | _unplanned_writes(host, current_workflow))
 
 
 _REPEAT_REASON = "it just returned the same result again"
@@ -292,6 +397,45 @@ def core_command_names() -> frozenset[str]:
                      for name in cme.get_command_names(context))
 
 
+#: Set while the framework itself runs a planning command (WorkflowExecutionContext.run_framework_planning_command):
+#: the framework's plan steps may then name a framework execution command (review_proposal) by exact name. The
+#: agent's own calls never run in this scope, so they are still refused.
+_framework_call_var: contextvars.ContextVar[bool] = contextvars.ContextVar("fw_framework_call", default=False)
+
+
+@contextlib.contextmanager
+def framework_call_scope():
+    token = _framework_call_var.set(True)
+    try:
+        yield
+    finally:
+        _framework_call_var.reset(token)
+
+
+def _framework_execution_names(app) -> list[str]:
+    return [name for name, meta in app.command_directory.map_command_2_metadata.items()
+            if meta.framework and not meta.is_planning]
+
+
+def _framework_call_name(command: str, workflow) -> str | None:
+    """The framework execution command *command* names, when the framework itself is calling it; else None."""
+    if not _framework_call_var.get() or workflow is None:
+        return None
+    token = command.strip().split(maxsplit=1)[0] if command.strip() else ""
+    app = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
+    hits = [name for name in _framework_execution_names(app) if name == token or name.split("/")[-1] == token]
+    return hits[0] if len(hits) == 1 else None
+
+
+_FRAMEWORK_PARAMETER = re.compile(r'(\w+)=(?:"([^"]*)"|(\S+))')
+
+
+def _framework_action_parameters(command: str) -> dict:
+    """``name=value`` (value quoted or not) pairs of a framework step's command text."""
+    return {match.group(1): match.group(2) if match.group(2) is not None else match.group(3)
+            for match in _FRAMEWORK_PARAMETER.finditer(command)}
+
+
 def _explicit_agent_command(command: str, workflow) -> str:
     """Resolve the agent tool's command token against its current command surface.
 
@@ -305,9 +449,38 @@ def _explicit_agent_command(command: str, workflow) -> str:
     parts = command.strip().split(maxsplit=1)
     token = parts[0].lstrip("/") if parts else ""
     app = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
-    current_context = workflow.current_command_context_name
-    available = set(app.get_command_names(current_context)) | core_command_names()
+    current_context = workflow._current_command_context_name
+    # A planning command is available where it is runnable, by the same rule as an
+    # execution command: a name outside this set is refused with the same message.
+    available = (set(app.get_command_names(current_context))
+                 | set(app.get_planning_command_names(current_context))
+                 | core_command_names())
+    if _framework_call_var.get():
+        framework_hits = [name for name in _framework_execution_names(app)
+                          if _command_name_matches(token, name)]
+        if len(framework_hits) == 1:
+            return framework_hits[0] + (" " + parts[1] if len(parts) > 1 else "")
     matches = [name for name in available if _command_name_matches(token, name)]
+    if not matches and (on_path := command_on_path(workflow, token)) is not None:
+        # 3.9, "Calls by exact name": a command of an enclosing record or of the global
+        # scope runs here, bound to that record (the CME walk binds it). Nearest scope wins.
+        scope, hits = on_path
+        if len(hits) != 1:
+            raise CommandNotFoundError(
+                f"Command {token!r} is ambiguous in context "
+                f"{_display_context_name(scope.context_name)!r}; it matches "
+                f"{', '.join(repr(m) for m in sorted(hits))}. Use the qualified name.")
+        name = hits[0]
+        short = name.split("/")[-1]
+        # The same collapse rule as the current scope, within the scope the name was found in.
+        scope_names = scope_command_names(workflow.folderpath, scope.context_name)
+        if sum(other.split("/")[-1].lower() == short.lower() for other in scope_names) != 1:
+            raise CommandNotFoundError(f"Ambiguous command name {short!r} in context "
+                                       f"{_display_context_name(scope.context_name)!r}")
+        # A qualified token is kept qualified: a nearer scope may hold a command with the
+        # same short name, and the CME walk must find the one the token names.
+        named = name if "/" in token else short
+        return named + (" " + parts[1] if len(parts) > 1 else "")
     if not matches:
         home_contexts = context_homes(workflow, token)
         if not home_contexts:
@@ -345,6 +518,7 @@ def _commands_in(command: str, names: set[str]) -> list[str]:
 _NESTED_ARG_KEYS = ("args", "arguments", "params", "parameters", "kwargs")
 _COMMAND_NAME_KEYS = ("command_name", "cmd", "action", "function", "tool")
 _COMMAND_NAME_TOKEN = re.compile(r"[A-Za-z_][\w./-]*")
+_COMMAND_TOOL_NAME = "execute_workflow_query"
 _XML_TAG = re.compile(r"</?[A-Za-z_][\w.-]*>")
 
 
@@ -437,7 +611,9 @@ def _parameter_fields(command: str, workflow) -> frozenset[str] | None:
         return None
     try:
         app = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
-        names = [name for name in app.get_command_names(workflow.current_command_context_name)
+        context = workflow._current_command_context_name
+        names = [name for name in (*app.get_command_names(context),
+                                   *app.get_planning_command_names(context))
                  if _command_name_matches(token, name)]
         if len(names) != 1:
             return None
@@ -481,7 +657,7 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     if guard is not None and guard.blocked_command and " ".join(command.split()) == guard.blocked_command[2]:
         return (f"{guard.blocked_command[0]} with these arguments is unavailable for this step: "
                 f"{guard.blocked_command[1]}. Use what it returned, or do something else.")
-    ran_in = active.current_command_context_name if active is not None else None
+    ran_in = active._current_command_context_name if active is not None else None
     try:
         ran_in_clause = context_clause_for(active) if active is not None else ""
         ran_in_name = context_identity(active)[0]
@@ -533,7 +709,16 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     started = datetime.now(timezone.utc)
     try:
         resolved_command = _explicit_agent_command(command, chat_session_obj.get_active_workflow())
-        command_output = CommandExecutor.invoke_command(chat_session_obj, resolved_command)
+        framework_name = _framework_call_name(resolved_command, chat_session_obj.get_active_workflow())
+        if framework_name is not None:
+            # A framework execution command (review_proposal) is not routed, so the intent path cannot name it:
+            # the framework's own step calls it by exact name, through the executor.
+            command_output = CommandExecutor.perform_action(
+                chat_session_obj.get_active_workflow(),
+                fastworkflow.Action(command_name=framework_name, command=resolved_command,
+                                    parameters=_framework_action_parameters(resolved_command)))
+        else:
+            command_output = CommandExecutor.invoke_command(chat_session_obj, resolved_command)
     except BaseException as e:
         # BaseException, not CommandCancelledError. This arm used to name only
         # that one exception, and the comment beside it even observed that
@@ -635,21 +820,10 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
 
     # Live path: typed Pydantic instance. After cold-rehydrate of turn outputs,
     # command_parameters is the dumped dict [A10]. Accept both.
-    if params is None:
-        params_dict = None
-    elif hasattr(params, "model_dump"):
-        params_dict = params.model_dump()
-    elif isinstance(params, dict):
-        params_dict = params
-    else:
-        params_dict = None
+    params_dict = _parameters_dict(params)
 
     # Extract response text
-    response_text = ""
-    if command_output.command_response.response:
-        response_text = command_output.command_response.response
-    else:
-        response_text = "Command executed successfully but produced no output."
+    response_text = command_run_response(command_output)
 
     # Same command text, same context, same response as this run's previous call: block it next step.
     if guard is not None:
@@ -688,14 +862,27 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     # Append executed action to the session action log for external consumers
     # (agent mode only): distillation compares teacher/student passes off it and
     # final-answer synthesis summarizes it.
-    record = {
-        "command": command,
-        "command_name": name,
-        "parameters": params_dict,
-        "response": response_text
-    }
-    _append_action_record(chat_session_obj, record)
-    _hold_command_run(chat_session_obj, command_output, ran_in_clause, ran_in_name)
+    # A command the policy blocked, or a write refused inside a read-only planning command's phase
+    # (command_writes), never ran, so it is not an executed action; what ran is also what the policy
+    # remembers (fastworkflow.policy_runtime).
+    artifacts = getattr(command_output.command_response, "artifacts", None) or {}
+    if not (artifacts.get("policy_blocked") or artifacts.get("write_refused")):
+        _append_action_record(chat_session_obj, action_record(command, command_output, response_text))
+        if not internal and (policy := policy_of(chat_session_obj.workflow_tool_agent)):
+            policy.record_command(
+                name or (command.split() or [""])[0],
+                params_dict,
+                response_text,
+                bool(command_output.success),
+            )
+    held_clause, held_name = _held_context(chat_session_obj, command_output, ran_in_clause, ran_in_name)
+    _hold_command_run(chat_session_obj, command_output, held_clause, held_name)
+    if command_output.ran_in_context_clause is not None:
+        # The observation the agent reads names the record the command ran on (read back
+        # by execute_workflow_query, which holds the step's run state).
+        run_state = getattr(getattr(chat_session_obj, "workflow_tool_agent", None), "run_state", None)
+        if isinstance(run_state, dict):
+            run_state["ran_on_clause"] = command_output.ran_in_context_clause
 
     # Check workflow context to determine if we're in an error state that needs specialized handling
     cme_workflow = chat_session_obj.cme_workflow
@@ -736,11 +923,60 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
 
 
 def _apply_reply_intent(agent, intent: str) -> None:
-    """Take ask_user away after a reply that stops the asking; leave only finish after an abort."""
+    """Take ask_user away after a reply that stops the asking; leave only finish after an abort.
+
+    "wait" and "answer" change nothing: a hesitation keeps ask_user for the question asked again.
+    """
     if intent == "stop_asking":
         agent.disabled_tools = agent.disabled_tools | {"ask_user"}
     elif intent == "abort":
         agent.disabled_tools = set(agent.tools) - {"finish"}
+
+
+def _refusal_may_ask_attended(chat_session_obj) -> bool:
+    """Whether a refusal may be put to the user as a question that suspends the turn (Topology B):
+    ask_user is available to the turn (attended, no queue-based blocking ask), and the turn has
+    not already been put a refusal question (the reply gets one re-run, no second question).
+
+    The callers add their own check that nothing ran yet in the turn (a re-run would repeat its
+    side effects): a planning command call's refusal checks the whole turn, a fast-path call its own outputs.
+    """
+    return (
+        getattr(chat_session_obj, "_turn_unattended", True) is False
+        and getattr(chat_session_obj, "user_message_queue", True) is None
+        and not getattr(chat_session_obj, "_planning_command_refusal_answered", True)
+    )
+
+
+def _planning_command_refusal_may_ask(chat_session_obj) -> bool:
+    """Whether a refused planning command call may be put to the user, suspending the turn (Topology B).
+
+    Only when ask_user is available to the turn (attended, no queue-based blocking ask), no
+    run has happened yet in the turn (a re-run would repeat its side effects), and the turn has
+    not already been put a refusal question (the reply gets one re-run, no second question).
+    Every other case keeps the text planner's fallback.
+    """
+    return (
+        _refusal_may_ask_attended(chat_session_obj)
+        and not getattr(chat_session_obj, "_turn_outputs", True)
+    )
+
+
+def planning_command_refusal_to_ask(chat_session_obj, command: PlanningCommandCommand,
+                                    refusal: PlanningCommandInputError) -> str | None:
+    """The question a refused planning command call puts to the user, or None when the text planner
+    plans the request instead.
+
+    Asked only when the turn may ask (``_planning_command_refusal_may_ask``) and the refusal names one
+    of the command's inputs (``refusal_names_an_input``): a missing or guessed value is the user's to
+    give. A refusal that names no input says the command does not fit the request, which the user
+    cannot fix by answering, so it is not put to them.
+    """
+    if not _planning_command_refusal_may_ask(chat_session_obj):
+        return None
+    if not refusal_names_an_input(command, refusal):
+        return None
+    return refusal_question(command, refusal)
 
 
 def _post_ask_user_response(
@@ -752,6 +988,8 @@ def _post_ask_user_response(
     Steps 2-4 after the user answers an ask_user clarification (Topology-A parity).
 
     Appends the dialog to the session action log, sets raw_user_message, and replans.
+    On a "wait" reply (the user is checking, not answering) it does not replan: it returns
+    an instruction to ask the same question again, which the ReAct loop reads as the observation.
     Returns the observation string for the ReAct loop.
     """
     _append_action_record(
@@ -764,16 +1002,21 @@ def _post_ask_user_response(
     # Complete the pending unanswered ask_user entry with the user's answer.
     # Both topologies route resumes through here.
     _complete_ask_user_entry(chat_session_obj, user_response)
+    if policy := policy_of(chat_session_obj.workflow_tool_agent):
+        policy.observe_reply(clarification_request, user_response)
 
     workflow = chat_session_obj.get_active_workflow()
     if workflow:
         workflow.context["raw_user_message"] = user_response
 
-    _apply_reply_intent(
-        chat_session_obj.workflow_tool_agent,
-        classify_user_reply(user_response, clarification_request),
-    )
-
+    intent = classify_user_reply(user_response, clarification_request)
+    _apply_reply_intent(chat_session_obj.workflow_tool_agent, intent)
+    if intent == "wait":
+        # A hesitation is not an answer: no replan, and the ReAct loop asks the same question again.
+        return (
+            "The user asked for a moment and has not answered yet. Reply briefly that you will wait, "
+            f"and ask the same question again with ask_user: {clarification_request}"
+        )
     planner_lm = getattr(chat_session_obj, '_current_planner_lm', None)
     return build_query_with_next_steps(
         user_response,
@@ -854,30 +1097,47 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         return _what_can_i_do(chat_session_obj=chat_session_obj)
 
     def run_execute_workflow_query(command: str) -> str:
+        # The agent's own call (and the planning-command steps it runs): agent-originated for the
+        # approval gate (ADR-EXP-025 section 5). Suspendable, so an ask suspends this tool call.
+        with approval_binding.origin_scope(approval_binding.Origin.AGENT):
+            return _run_execute_workflow_query_unscoped(command)
+
+    def _run_execute_workflow_query_unscoped(command: str) -> str:
         # Check if this command originated from user input (iteration_counter == 0)
-        # Set flag in workflow context so validate_extracted_parameters can access it
+        # Set flag in workflow context so the Input's model validators can access it
         is_user_command = chat_session_obj.workflow_tool_agent.iteration_counter <= 0 
+        run_state = getattr(chat_session_obj.workflow_tool_agent, "run_state", None)
+        by_code = isinstance(run_state, dict) and bool(run_state.get("by_code"))
         workflow = chat_session_obj.get_active_workflow()
         if workflow:
             workflow.context["is_user_command"] = is_user_command
-        
-        # Retry logic for workflow execution
-        max_retries = 2
-        for attempt in range(max_retries):
-            try:
-                return _execute_workflow_query(command, chat_session_obj=chat_session_obj)
-            except AlreadyInContextError as e:
-                return reenter_from_parent(command, e)
-            except CommandNotFoundError as e:
-                # Deterministic and recoverable: the message says where to go.
-                return str(e)
-            except Exception as e:
-                if attempt == max_retries - 1:  # Last attempt
-                    message = f"Terminate immediately! Exception processing {command}: {str(e)}"
-                    logger.critical(message)                    
-                    return message
-                # Continue to next attempt
-                logger.warning(f"Attempt {attempt + 1} failed for command '{command}': {str(e)}")
+            workflow.context["by_code"] = by_code
+
+        try:
+            # Retry logic for workflow execution
+            max_retries = 2
+            for attempt in range(max_retries):
+                try:
+                    return _execute_workflow_query(command, chat_session_obj=chat_session_obj)
+                except AlreadyInContextError as e:
+                    return reenter_from_parent(command, e)
+                except CommandNotFoundError as e:
+                    # Deterministic and recoverable: the message says where to go.
+                    return str(e)
+                except Exception as e:
+                    if attempt == max_retries - 1:  # Last attempt
+                        message = f"Terminate immediately! Exception processing {command}: {str(e)}"
+                        logger.critical(message)                    
+                        return message
+                    # Continue to next attempt
+                    logger.warning(f"Attempt {attempt + 1} failed for command '{command}': {str(e)}")
+        finally:
+            active = chat_session_obj.get_active_workflow()
+            for wf in (workflow, active):
+                if wf is not None and "by_code" in wf.context:
+                    del wf.context["by_code"]
+            if isinstance(run_state, dict):
+                run_state.pop("by_code", None)
 
     def reenter_from_parent(command: str, refusal: AlreadyInContextError) -> str:
         """Open another instance of the context the agent is in: go_up, then the command.
@@ -933,28 +1193,52 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
                 note_folded_command(scope_for_host(chat_session_obj), folded_alias, command)
             folded_note =(f"\n(Ran as: {command} -- parameters go inside the command string."
                            + (f" Not used: {'; '.join(empty)}." if empty else "") + ")")
+        # A call that names no workflow command is refused before dispatch (fix-wfxt). Blank text
+        # has no command for intent detection to route, and the tool's own name is not a command.
+        named = (command.split() or [""])[0].lstrip("/")
+        if not named:
+            return ("No command was given, so nothing ran. Name a workflow command first, then its "
+                    "parameters after it, e.g. <command_name> <param>value</param>.")
+        if named.lower() == _COMMAND_TOOL_NAME:
+            return (f"{_COMMAND_TOOL_NAME} is this tool, not a workflow command, so nothing ran. "
+                    "Name a workflow command first, then its parameters after it.")
         # The context this command RUNS IN, taken before dispatch: a command that
         # moves the context is evidence about the context it ran in.
         alias = current_execute_alias(chat_session_obj.workflow_tool_agent)
         workflow = chat_session_obj.get_active_workflow()
         clause = context_clause_for(workflow)
-        context_before = getattr(workflow, "current_command_context", None)
-        response = run_execute_workflow_query(command) + folded_note
-        if alias is None:
-            return response
+        context_before = getattr(workflow, "_current_command_context", None)
+        # What a nested run this command starts needs to finish this step after a suspension:
+        # the command as the action log holds it, and the note on its folded arguments.
+        run_state = getattr(chat_session_obj.workflow_tool_agent, "run_state", None)
+        if isinstance(run_state, dict):
+            run_state["execute_call"] = {"command": command, "folded_note": folded_note}
+            run_state.pop("ran_on_clause", None)
+        try:
+            response = run_execute_workflow_query(command)
+        finally:
+            if isinstance(run_state, dict):
+                run_state.pop("execute_call", None)
+        if isinstance(run_state, dict):
+            ran_on_clause = run_state.pop("ran_on_clause", None)
+            if ran_on_clause is not None:
+                clause = ran_on_clause
         workflow_after = chat_session_obj.get_active_workflow()
-        context_changed = getattr(workflow_after, "current_command_context", None) is not context_before
+        context_changed = getattr(workflow_after, "_current_command_context", None) is not context_before
         # Name where the command left the agent: a weak model otherwise reads
         # the context the command ran in as the one it is now in.
-        now_in = context_clause_for(workflow_after) if context_changed else None
-        return annotated_observation(alias, clause, response,
-                                     context_changed=context_changed, now_in=now_in)
+        return run_observation(
+            alias, clause, response, folded_note=folded_note, context_changed=context_changed,
+            now_clause=context_clause_for(workflow_after) if context_changed else None)
 
     def ask_user(clarification_request: str) -> str:
         """
         Only as the last resort, request clarification for missing information from the human user. Ask at most once about the same thing.
         The clarification_request must be plain text without any formatting.
-        Note that using the wrong command name can produce missing information errors. Double-check with the what_can_i_do tool to verify that the correct command name is being used 
+        Questions to the user must use domain words only; never include command names, context names, or record uids.
+        When asking for a name that may contain 'and' or several words, ask the user to wrap the full name in single
+        or double quotes.
+        Note that using the wrong command name can produce missing information errors. Double-check with the what_can_i_do tool to verify that the correct command name is being used
         """
         _clear_blocked_command(chat_session_obj)
         # reset iteration counter, everytime we ask the user
@@ -996,6 +1280,10 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         on_step_complete=on_step_complete,
     )
     agent.on_step_end = lambda: _end_repeat_step(chat_session_obj)
+    # The policy verifier (the workflow's _policy/table.py); nothing without one.
+    from fastworkflow.policy_loader import attach_policy
+
+    attach_policy(agent, chat_session_obj)
     return agent
 
 
@@ -1033,14 +1321,82 @@ def split_max_tokens() -> int:
     return int(fastworkflow.get_env_var("LLM_SPLIT_MAX_TOKENS", int, default=SPLIT_MAX_TOKENS))
 
 
-def _split_lm(planner_lm, temperature: float):
-    """The planner LM as the splitter uses it: ``temperature``, output capped at ``split_max_tokens()``."""
+def _split_lm(planner_lm, temperature: float, retry: bool = False):
+    """The planner LM as the splitter uses it: ``temperature``, output capped at ``split_max_tokens()``.
+
+    The retry's other temperature is what makes it a new answer. On a planner whose temperature is
+    left out (a model that takes only its default, ``dspy_utils.drops_rejected_params``) it would
+    change nothing, so the retry skips the response cache instead (fix-z62t).
+    """
+    if retry and dspy_utils.drops_rejected_params(planner_lm):
+        return planner_lm.copy(temperature=temperature, max_tokens=split_max_tokens(), cache=False)
     return planner_lm.copy(temperature=temperature, max_tokens=split_max_tokens())
 
 
+#: Causes of a failed split already logged at WARNING, as ``(planner model, root error type)``: a misconfigured
+#: planner fails every turn the same way, and is logged once per process rather than once per turn.
+_SPLIT_FAILURES_WARNED: set[tuple[str, str]] = set()
+
+
+def _log_split_failure(planner_lm, error: Exception) -> None:
+    """Log a split that failed, with its cause: at WARNING the first time this cause is seen, else at DEBUG.
+
+    The cause is the error at the root of the chain: DSPy wraps every provider error in its own type.
+    """
+    root, seen = error, {id(error)}
+    while (inner := root.__cause__ or root.__context__) is not None and id(inner) not in seen:
+        root = inner
+        seen.add(id(root))
+    model = str(getattr(planner_lm, "model", "") or "")
+    cause = (model, f"{type(root).__module__}.{type(root).__qualname__}")
+    message = f"could not split the request with {model or 'the planner'}; running it whole"
+    if cause in _SPLIT_FAILURES_WARNED:
+        logger.debug(f"{message} ({type(root).__name__}: {root})")
+        return
+    _SPLIT_FAILURES_WARNED.add(cause)
+    logger.warning(f"{message}. Every split that fails this way runs whole; later ones are logged at DEBUG "
+                   f"({type(root).__name__}: {root})", exc_info=error)
+
+
 _NUMBERED_LINE = re.compile(r"^\s*\d+[.)]\s+(.*\S)\s*$")
+#: A numbered-list marker anywhere in a line ("2. ", "3) "), not part of a number such as "3.5".
+_INLINE_MARKER = re.compile(r"(?<!\S)(\d{1,2})[.)]\s+")
 #: Typographic hyphens a model writes into names it was asked to copy exactly.
 _HYPHENS = str.maketrans({"\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-"})
+#: A DSPy field marker ("[[ ## completed ## ]]") a splitter reply carried into a sub-task's text
+#: (the same pattern planning_phases.clean_answer removes from answers). No request holds one.
+_FIELD_MARKER = re.compile(r"[ \t]*\[\[\s*##\s*[A-Za-z0-9_ ]*?\s*##\s*\]\]")
+
+
+def _split_items(reply: str) -> list[str]:
+    """The sub-tasks a splitter reply lists: one per numbered line, and one per item of a numbered list
+    written inline on a line ("1. A 2. B 3. C", possibly after reasoning a model wrote in the same field).
+
+    An inline list is the last run that starts at "1." and counts up without a gap; text before it is not a
+    sub-task. A stray opening brace or bracket left by the reply's JSON is cut from the end of each item,
+    and a DSPy field marker (``[[ ## completed ## ]]``) from anywhere in the reply.
+    """
+    items: list[str] = []
+    reply = _FIELD_MARKER.sub("", reply)
+    for line in reply.splitlines():
+        markers = list(_INLINE_MARKER.finditer(line))
+        parts: list[str] = []
+        for index in range(len(markers) - 1, -1, -1):
+            if markers[index].group(1) != "1":
+                continue
+            run = [markers[index]]
+            for marker in markers[index + 1:]:
+                if int(marker.group(1)) != len(run) + 1:
+                    break
+                run.append(marker)
+            if len(run) > 1:
+                ends = [marker.start() for marker in run[1:]] + [len(line)]
+                parts = [line[marker.end():end] for marker, end in zip(run, ends)]
+                break
+        if not parts and (match := _NUMBERED_LINE.match(line)):
+            parts = [match.group(1)]
+        items.extend(re.sub(r"\s*[{\[]+\s*$", "", part.strip()).strip() for part in parts)
+    return [item for item in items if item]
 
 
 class SplitIntoSubtasks(dspy.Signature):
@@ -1084,190 +1440,235 @@ class SplitIntoSubtasks(dspy.Signature):
     subtasks: str = dspy.OutputField(desc="the sub-tasks as a numbered list, one per line")
 
 
-def _read_skill_file(name: str, path: str, workflow_folderpath: str):
-    """The ``SkillFile`` of ``_skills/<name>.py``.
+def _read_planning_command_file(name: str, path: str, workflow_folderpath: str):
+    """The ``PlanningCommandFile`` of ``_commands/<name>.py`` (or ``_commands/<Context>/<name>.py``, where
+    *name* is ``"<Context>/<stem>"``).
 
     The file is imported as a command file is (``python_utils.get_module`` under the
     workflow's package, so package-relative imports work: ``from ._helpers import ...`` reads
-    ``_skills/_helpers.py``). Raises SkillFormatError for a file name that is not a Python
-    identifier or a malformed declaration, and the import's own error for a file that does
-    not import.
+    ``_commands/_helpers.py``). Raises PlanningCommandFormatError when the file stem is not a Python
+    identifier or the declaration is malformed, and the import's own error for a file that
+    does not import.
     """
     from fastworkflow.utils import python_utils
 
-    if not name.isidentifier():
-        raise SkillFormatError(f"{path}: a skill's name is its file name, a Python identifier "
-                               f"(snake_case): rename it to {re.sub(r'[^0-9A-Za-z_]', '_', name)}.py")
+    CommandDirectory.check_planning_command_path(name, path)
     module = python_utils.get_module(path, workflow_folderpath)
-    return skill_commands.command_from_module(name, module, path)
+    return planning_commands.command_from_module(name, module, path)
 
 
-def _load_skill_file(name: str, path: str, workflow_folderpath: str):
-    """The ``SkillFile`` of ``_skills/<name>.py`` (``_read_skill_file``), or None when it
-    cannot be read: a broken skill file costs that skill, not the workflow. The error is
-    logged, and ``fastworkflow skill preview`` reports the skill as not loaded.
+def _load_planning_command_file(name: str, path: str, workflow_folderpath: str):
+    """The ``PlanningCommandFile`` of ``_commands/<name>.py`` (``_read_planning_command_file``), or None when it
+    cannot be read: a broken planning command file costs that planning command, not the workflow. The error is
+    logged, and ``fastworkflow command preview`` reports the planning command as not loaded.
     """
     try:
-        return _read_skill_file(name, path, workflow_folderpath)
-    except SkillFormatError as error:
-        logger.error(f"skipping skill {name!r}: {error}")
+        return _read_planning_command_file(name, path, workflow_folderpath)
+    except PlanningCommandFormatError as error:
+        logger.error(f"skipping planning command {name!r}: {error}")
     except Exception:  # noqa: BLE001 - workflow code
-        logger.error(f"skipping skill {name!r}: could not import {path}", exc_info=True)
+        logger.error(f"skipping planning command {name!r}: could not import {path}", exc_info=True)
     return None
 
 
-def _skill_files(root: str) -> list[tuple[str, str]]:
-    """``(name, path)`` of each skill file of a workflow's ``_skills`` folder, by name.
+def _is_planning_file(path: str) -> bool:
+    """Whether the command file at *path* defines a top-level ``PlanGenerator``: read from the
+    source (``command_directory._command_kind_from_ast``), never imported."""
+    try:
+        return _command_kind_from_ast(Path(path))[1]
+    except (ValueError, SyntaxError):
+        return False
 
-    As for command files at the root of ``_commands``: a skill is a file ``_skills/<name>.py``
-    and its name is the file stem, a Python identifier (snake_case; ``_read_skill_file``
-    refuses another). A ``.py`` file whose name starts with ``_`` is a helper
-    the skill files may import, not a skill; ``_split.py`` is the workflow's split settings
-    (``split_settings``). Other files are not read. A subfolder is reserved for a skill context (as a
-    ``_commands/<Context>/`` folder is): its files are not loaded yet, and it is logged and
-    skipped (one starting with ``_`` or ``.``, such as ``__pycache__``, silently).
+
+def _planning_command_files(root: str) -> list[tuple[str, str]]:
+    """``(name, path)`` of each planning command file of a workflow's ``_commands`` folder, by name.
+
+    A planning command is a command file with a top-level ``PlanGenerator`` (as ``CommandDirectory``
+    classifies it): a root one is ``_commands/<name>.py``, named by its file stem, and a context
+    one is ``_commands/<Context>/<name>.py``, named ``"<Context>/<stem>"`` (the file stem is a
+    Python identifier, snake_case; ``_read_planning_command_file`` refuses another). A ``.py`` file or subfolder
+    whose name starts with ``_`` or ``.`` (such as ``__pycache__`` or a ``_helpers.py`` module the
+    planning command files import) is skipped silently at both levels; ``_split.py`` is the workflow's split
+    settings (``split_settings``). Execution commands and other files are not returned.
     """
     out = []
     for entry in sorted(os.listdir(root)) if os.path.isdir(root) else ():
+        if entry.startswith(("_", ".")):
+            continue
         path = os.path.join(root, entry)
         if os.path.isdir(path):
-            if not entry.startswith(("_", ".")):
-                logger.warning(f"{path}: skill contexts (subfolders of _skills) are not loaded yet; skipped")
+            for sub in sorted(os.listdir(path)):
+                if sub.startswith(("_", ".")):
+                    continue
+                sub_path = os.path.join(path, sub)
+                stem, ext = os.path.splitext(sub)
+                if ext == ".py" and _is_planning_file(sub_path):
+                    out.append((f"{entry}/{stem}", sub_path))
             continue
         stem, ext = os.path.splitext(entry)
-        if ext != ".py" or stem.startswith("_"):
-            continue
-        out.append((stem, path))
+        if ext == ".py" and _is_planning_file(path):
+            out.append((stem, path))
     return out
 
 
-#: Held while a workflow's skills are read, so threads that start together build them once.
-_parsed_skills_lock = threading.RLock()
+#: Held while a workflow's planning commands are read, so threads that start together build them once.
+_parsed_planning_commands_lock = threading.RLock()
 
 
-def _parsed_skills(workflow_folderpath: str) -> tuple[
-        tuple[str, str, tuple[str, ...], "SkillCommand | None", tuple[str, ...]], ...]:
-    """``(name, description, template steps, command or None, plain_utterances)`` per skill;
-    see ``load_skills``. Built once per process (``_build_parsed_skills``): a skill file that
-    cannot be read is skipped (``_load_skill_file``), so it is not read again each turn."""
-    with _parsed_skills_lock:
-        return _build_parsed_skills(workflow_folderpath)
+def _parsed_planning_commands(workflow_folderpath: str) -> tuple[
+        tuple[str, str, tuple[str, ...], "PlanningCommandCommand", tuple[str, ...]], ...]:
+    """``(name, description, template steps, command, plain_utterances)`` per planning command;
+    see ``load_planning_commands``. Built once per process (``_build_parsed_planning_commands``): a planning command file that
+    cannot be read is skipped (``_load_planning_command_file``), so it is not read again each turn."""
+    with _parsed_planning_commands_lock:
+        return _build_parsed_planning_commands(workflow_folderpath)
 
 
 @functools.lru_cache(maxsize=None)
-def _build_parsed_skills(workflow_folderpath: str) -> tuple[
-        tuple[str, str, tuple[str, ...], "SkillCommand | None", tuple[str, ...]], ...]:
-    root = os.path.join(workflow_folderpath, "_skills")
+def _build_parsed_planning_commands(workflow_folderpath: str) -> tuple[
+        tuple[str, str, tuple[str, ...], "PlanningCommandCommand", tuple[str, ...]], ...]:
+    check_no_planning_commands_folder(workflow_folderpath)
+    root = os.path.join(workflow_folderpath, "_commands")
     identifiers = identifier_patterns(workflow_folderpath)
-    files = []   # (name, SkillFile)
-    for name, path in _skill_files(root):
-        loaded = _load_skill_file(name, path, workflow_folderpath)
+    field_resolution = planning_commands.resolve_field_sources(workflow_folderpath)
+    try:   # read once for every planning command's step and phase-source checks (None: each check reads it again)
+        signatures = command_signatures(workflow_folderpath)
+    except Exception as error:  # noqa: BLE001 - the checks warn and skip, as they did before
+        logger.warning(f"could not read the workflow's command signatures to check its planning commands: "
+                       f"{type(error).__name__}: {error}")
+        signatures = None
+    logged_field_source_commands: set[str] = set()
+    files = []   # (name, PlanningCommandFile)
+    for name, path in _planning_command_files(root):
+        loaded = _load_planning_command_file(name, path, workflow_folderpath)
         if loaded is not None:
             files.append((name, loaded))
+    planning_command_names = {name for name, _ in files}
+    for problem in field_resolution.errors:
+        if not problem.command:
+            logger.error(problem.format())
+        elif (
+            problem.command not in planning_command_names
+            and problem.command not in logged_field_source_commands
+        ):
+            logged_field_source_commands.add(problem.command)
+            _handle_command_field_source_errors(
+                problem.command,
+                field_resolution.errors_for(problem.command),
+                workflow_folderpath=workflow_folderpath,
+            )
     out = []
     for name, loaded in files:
-        if loaded.command is None:
-            out.append((name, loaded.description, loaded.steps, None, loaded.plain_utterances))
-            continue
         command = dataclasses.replace(loaded.command, identifiers=identifiers)
-        problems = step_command_problems(command, workflow_folderpath)
-        if problems:
-            logger.error(f"skipping skill {name!r}: " + "; ".join(problems))
+        if planning_commands.fixed_steps(command):
+            # Its steps are text the planner reads and code runs as they are: not checked
+            # against the workflow's commands (a step that names no command is run by the agent).
+            out.append((name, loaded.description, loaded.steps, command, loaded.plain_utterances))
             continue
-        if command.phase_outputs:
-            _warn_phase_sources(command, workflow_folderpath)
+        step_problems = step_command_problems(command, workflow_folderpath, signatures)
+        field_source_errs = field_resolution.errors_for(name)
+        if field_source_errs and name not in logged_field_source_commands:
+            logged_field_source_commands.add(name)
+            _handle_command_field_source_errors(
+                name, field_source_errs, workflow_folderpath=workflow_folderpath
+            )
+        if step_problems:
+            logger.error(f"skipping planning command {name!r}: " + "; ".join(step_problems))
+            continue
         out.append((name, loaded.description, command.template, command, loaded.plain_utterances))
     return tuple(out)
 
 
-def _warn_phase_sources(command: SkillCommand, workflow_folderpath: str) -> None:
-    """Log a warning for each phase output field whose ``"from"`` names no command field.
-
-    Not a load failure: the workflow may add the command's ``Output`` later
-    (``skill_commands.check_phase_sources``). A phase whose field is still missing
-    when it runs fails then, naming the field; ``fastworkflow skill preview --check``
-    fails on it (``phase_source_problems``).
-    """
-    for warning in phase_source_problems(command, workflow_folderpath):
-        logger.warning(f"skill {command.name!r}: phase output source not found (loaded anyway): {warning}")
-
-
-def step_command_problems(command: SkillCommand, workflow_folderpath: str) -> list[str]:
-    """``skill_commands.check_step_commands`` of *command* against the workflow's command
-    signatures: a step naming a command the workflow lacks, or a parameter its
-    ``Signature.Input`` lacks. A load error (the skill is skipped); empty, with a logged
-    warning, when the signatures cannot be read (``fastworkflow skill preview --check``
-    still checks)."""
+def command_signatures(workflow_folderpath: str) -> dict[str, Any]:
+    """The ``Signature`` of each command a planning command's steps and phase sources may name: the routed
+    execution commands (``workflow_signatures``) and the planning commands. A planning command is
+    not in routing; its ``Signature`` comes from ``planning_commands.resolve_field_sources``, the same
+    source ``planning_phases.parameter_classes`` reads a planning command's ``Input`` from (Phase 5)."""
     from fastworkflow.observation_offloading.facts import workflow_signatures
 
-    try:
-        signatures = workflow_signatures(workflow_folderpath)
-    except Exception as error:  # noqa: BLE001 - checked again by the preview's --check
-        logger.warning(f"skill {command.name!r}: could not read the workflow's command signatures "
-                       f"to check its steps: {type(error).__name__}: {error}")
-        return []
-    return skill_commands.check_step_commands(command, signatures)
+    signatures = dict(workflow_signatures(workflow_folderpath))
+    resolution = planning_commands.resolve_field_sources(workflow_folderpath)
+    for name in resolution.planning_commands:
+        if name in resolution.signatures:
+            signatures[name] = resolution.signatures[name]
+    return signatures
 
 
-def phase_source_problems(command: SkillCommand, workflow_folderpath: str) -> list[str]:
-    """``skill_commands.check_phase_sources`` of *command* against the workflow's command
-    signatures; empty, with a logged warning, when they cannot be read."""
-    from fastworkflow.observation_offloading.facts import workflow_signatures
+def step_command_problems(command: PlanningCommandCommand, workflow_folderpath: str,
+                          signatures: Optional[dict] = None) -> list[str]:
+    """``planning_commands.check_step_commands`` of *command* against the workflow's command
+    signatures (``command_signatures``, or *signatures* when the caller read them once): a step
+    naming a command the workflow lacks, or a parameter its ``Signature.Input`` lacks. A load
+    error (the planning command is skipped); empty, with a logged warning, when the signatures cannot be read
+    (``fastworkflow command preview --check`` still checks)."""
+    if signatures is None:
+        try:
+            signatures = command_signatures(workflow_folderpath)
+        except Exception as error:  # noqa: BLE001 - checked again by the preview's --check
+            logger.warning(f"planning command {command.name!r}: could not read the workflow's command signatures "
+                           f"to check its steps: {type(error).__name__}: {error}")
+            return []
+    return planning_commands.check_step_commands(command, signatures)
 
-    try:
-        signatures = workflow_signatures(workflow_folderpath)
-    except Exception as error:  # noqa: BLE001 - the check is advice; the skill still loads
-        logger.warning(f"skill {command.name!r}: could not read the workflow's command signatures "
-                       f"to check its phase outputs: {type(error).__name__}: {error}")
-        return []
-    return skill_commands.check_phase_sources(command, signatures)
 
+def load_planning_commands(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+    """``(name, description, steps)`` for each planning command of the workflow (``_commands/<name>.py``
+    and ``_commands/<Context>/<name>.py``).
 
-def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
-    """``(name, description, steps)`` for each skill of the workflow (``_skills/<name>.py``).
-
-    A skill is defined by the file ``_skills/<name>.py`` (format: ``fastworkflow.skill_commands``;
-    which files are skills: ``_skill_files``); the file stem is the skill's name and the
-    ``Signature`` docstring its description. A
-    skill without parameters or phases gives its fixed ``steps()``; a skill with parameters
-    or phases gives its template text, and ``load_skill_commands`` holds its parsed form. A skill
-    file that cannot be imported or is malformed is logged as an error and skipped (the
-    other skills still load; ``fastworkflow skill preview`` fails on it); a malformed split
-    settings file raises SkillFormatError. ``_skills`` also holds the workflow's
+    A planning command is defined by the file ``_commands/<name>.py`` at the root or
+    ``_commands/<Context>/<name>.py`` in a context subfolder (format:
+    ``fastworkflow.planning_commands``; which files are planning commands: ``_planning_command_files``); its name is
+    the file stem (or ``"<Context>/<stem>"`` in a context) and the ``Signature`` docstring
+    its description. A
+    planning command's template text is its steps (its ``steps()`` on placeholder inputs; for a planning command
+    without parameters or phases, its fixed ``steps()``), and ``load_planning_command_map`` holds its
+    parsed form. A planning command file that cannot be imported or is malformed is logged as an error and skipped (the
+    other planning commands still load; ``fastworkflow command preview`` fails on it); a malformed split
+    settings file raises PlanningCommandFormatError. ``_commands`` also holds the workflow's
     split settings, ``_split.py`` (``split_settings``), and helper modules named ``_<name>.py``.
     """
-    return tuple((name, description, steps) for name, description, steps, *_ in _parsed_skills(workflow_folderpath))
+    return tuple((name, description, steps) for name, description, steps, *_ in _parsed_planning_commands(workflow_folderpath))
 
 
-def load_skill_commands(workflow_folderpath: str) -> dict[str, SkillCommand]:
-    """The workflow's skills called with typed arguments (those with params or phases), by
-    name."""
-    return {name: command for name, _, _, command, _ in _parsed_skills(workflow_folderpath) if command is not None}
+def load_planning_command_map(workflow_folderpath: str) -> dict[str, PlanningCommandCommand]:
+    """The workflow's planning commands as commands, by name: each planning command's parsed form, which a call of it
+    runs (a planning command with fixed steps has one with no parameters, ``planning_commands.fixed_steps``)."""
+    return {name: command for name, _, _, command, _ in _parsed_planning_commands(workflow_folderpath)}
 
 
-def skill_utterances(workflow_folderpath: str) -> dict[str, tuple[str, ...]]:
-    """Each skill's ``Signature.plain_utterances`` (empty when it declares none), by name."""
-    return {name: utterances for name, _, _, _, utterances in _parsed_skills(workflow_folderpath)}
+def planning_command_utterances(workflow_folderpath: str) -> dict[str, tuple[str, ...]]:
+    """Each planning command's ``Signature.plain_utterances`` (empty when it declares none), by name."""
+    return {name: utterances for name, _, _, _, utterances in _parsed_planning_commands(workflow_folderpath)}
 
 
-def warm_skills(workflow_folderpath: str) -> None:
-    """Read the workflow's skills and its commands' utterances once, at startup, so the first
-    request does not pay for them (``load_skills``; ``skill_commands.command_utterances``,
-    which ``plan_skill_call`` reaches through ``command_texts``). The skill cache is keyed by
+def warm_planning_commands(workflow_folderpath: str) -> None:
+    """Read the workflow's planning commands and its commands' utterances once, at startup, so the first
+    request does not pay for them (``load_planning_commands``; ``planning_commands.command_utterances``,
+    which ``typed_planning_call`` reaches through ``command_texts``). The planning command cache is keyed by
     the path string: pass the one the turn path uses, the app workflow's ``folderpath``.
-    A workflow without a ``_skills`` folder has nothing to warm. Never raises: a failure is
+    A workflow without planning commands has nothing to warm. Never raises: a failure is
     logged and the turn path meets it again."""
-    if not os.path.isdir(os.path.join(workflow_folderpath, "_skills")):
+    if not _planning_command_files(os.path.join(workflow_folderpath, "_commands")):
+        if _jev_lm() is None:   # the classifier checks of execution commands' fields need the key too (2.46)
+            try:
+                _warn_missing_jev_key(workflow_folderpath)
+            except Exception as error:  # noqa: BLE001 - warm-up must not stop startup
+                logger.debug(f"planning command warm-up: no classifier check listing for {workflow_folderpath}: {error}")
         return
-    for step in (load_skills, skill_commands.command_utterances):
+    loaded = ()
+    for step in (load_planning_commands, planning_commands.command_utterances):
         try:
-            step(workflow_folderpath)
+            result = step(workflow_folderpath)
+            if step is load_planning_commands:
+                loaded = result
         except Exception as error:  # noqa: BLE001 - warm-up must not stop startup
-            logger.warning(f"skill warm-up: {step.__name__} failed for {workflow_folderpath}: "
+            logger.warning(f"planning command warm-up: {step.__name__} failed for {workflow_folderpath}: "
                            f"{type(error).__name__}: {error}")
+    if loaded and _jev_lm() is None:
+        _warn_missing_jev_key(workflow_folderpath)
 
 
-#: The workflow's split settings file, ``_skills/_split.py`` (see ``split_settings``).
+#: The workflow's split settings file, ``_commands/_split.py`` (see ``split_settings``).
 SPLIT_FILE = "_split.py"
 #: The fields of ``SplitIntoSubtasks`` a split settings file may describe, as ``Signature.Input``
 #: and ``Signature.Output``.
@@ -1276,7 +1677,7 @@ _SPLIT_INPUTS, _SPLIT_OUTPUTS = frozenset({"job_types", "user_query"}), frozense
 
 @dataclasses.dataclass(frozen=True)
 class SplitSettings:
-    """What a workflow's ``_skills/_split.py`` sets for the split stage; the defaults when absent."""
+    """What a workflow's ``_commands/_split.py`` sets for the split stage; the defaults when absent."""
 
     #: Replaces ``SplitIntoSubtasks``'s instructions (``Signature``'s docstring), or None.
     instructions: str | None = None
@@ -1300,10 +1701,10 @@ def _split_field_descs(signature, path: str) -> tuple[tuple[str, str], ...]:
         if model is None:
             continue
         if not (inspect.isclass(model) and issubclass(model, BaseModel)):
-            raise SkillFormatError(f"{path}: Signature.{block} must be a pydantic BaseModel")
+            raise PlanningCommandFormatError(f"{path}: Signature.{block} must be a pydantic BaseModel")
         for name, info in model.model_fields.items():
             if name not in allowed:
-                raise SkillFormatError(f"{path}: Signature.{block}.{name} is not a splitter "
+                raise PlanningCommandFormatError(f"{path}: Signature.{block}.{name} is not a splitter "
                                        f"{block.lower()} (one of {', '.join(sorted(allowed))})")
             if info.description is not None:
                 out.append((name, info.description))
@@ -1313,7 +1714,7 @@ def _split_field_descs(signature, path: str) -> tuple[tuple[str, str], ...]:
 def split_settings_from_module(module, path: str) -> SplitSettings:
     """The ``SplitSettings`` a split settings file (already imported) declares.
 
-    Every attribute is optional. Raises SkillFormatError for a malformed one (see ``split_settings``).
+    Every attribute is optional. Raises PlanningCommandFormatError for a malformed one (see ``split_settings``).
     """
     import inspect
 
@@ -1321,28 +1722,28 @@ def split_settings_from_module(module, path: str) -> SplitSettings:
     signature = getattr(module, "Signature", None)
     if signature is not None:
         if not inspect.isclass(signature):
-            raise SkillFormatError(f"{path}: Signature must be a class")
+            raise PlanningCommandFormatError(f"{path}: Signature must be a class")
         instructions = inspect.cleandoc(signature.__doc__ or "") or None
         field_descs = _split_field_descs(signature, path)
     patterns = getattr(module, "identifier_patterns", ())
     if isinstance(patterns, (str, re.Pattern)) or not isinstance(patterns, (list, tuple)):
-        raise SkillFormatError(f"{path}: identifier_patterns must be a list of compiled patterns (re.compile)")
+        raise PlanningCommandFormatError(f"{path}: identifier_patterns must be a list of compiled patterns (re.compile)")
     for pattern in patterns:
         if not isinstance(pattern, re.Pattern):
-            raise SkillFormatError(f"{path}: identifier_patterns holds {pattern!r}; write re.compile({pattern!r})")
+            raise PlanningCommandFormatError(f"{path}: identifier_patterns holds {pattern!r}; write re.compile({pattern!r})")
     hints = getattr(module, "subject_hints", None)
     if hints is not None and not isinstance(hints, str):
-        raise SkillFormatError(f"{path}: subject_hints must be a str")
+        raise PlanningCommandFormatError(f"{path}: subject_hints must be a str")
     return SplitSettings(instructions=instructions, field_descs=field_descs,
                          identifier_patterns=tuple(patterns), subject_hints=hints)
 
 
 @functools.lru_cache(maxsize=None)
 def split_settings(workflow_folderpath: str) -> SplitSettings:
-    """The workflow's split settings, from its optional ``_skills/_split.py``; the defaults without one.
+    """The workflow's split settings, from its optional ``_commands/_split.py``; the defaults without one.
 
     The file configures the split stage (the splitter, the split merge and the referent step); it
-    is not a skill (its leading ``_`` keeps ``_skill_files`` from loading it as one). It is
+    is not a planning command (its leading ``_`` keeps ``_planning_command_files`` from loading it as one). It is
     written as a command file is, and every attribute is optional:
 
     - ``class Signature``: its docstring replaces ``SplitIntoSubtasks``'s instructions (as
@@ -1355,27 +1756,27 @@ def split_settings(workflow_folderpath: str) -> SplitSettings:
     - ``subject_hints``: a str telling the referent step what the workflow counts as a record
       (``resolve_referents``).
 
-    The file is imported as a skill file is (``python_utils.get_module`` under the workflow's
+    The file is imported as a planning command file is (``python_utils.get_module`` under the workflow's
     package, so package-relative imports work). It is the whole split configuration, so a file
     that cannot be imported (an invalid pattern raises in ``re.compile``) is not skipped, as a
-    skill file would be, but fails the load as a malformed skill file does: the error is logged
-    and SkillFormatError raised naming the file.
+    planning command file would be, but fails the load as a malformed planning command file does: the error is logged
+    and PlanningCommandFormatError raised naming the file.
     """
     from fastworkflow.utils import python_utils
 
-    path = os.path.join(workflow_folderpath, "_skills", SPLIT_FILE)
+    path = os.path.join(workflow_folderpath, "_commands", SPLIT_FILE)
     if not os.path.isfile(path):
         return SplitSettings()
     try:
         module = python_utils.get_module(path, workflow_folderpath)
     except Exception as exc:  # noqa: BLE001 - reported as the file's error
         logger.error(f"could not import the split settings {path}", exc_info=True)
-        raise SkillFormatError(f"{path}: could not import the split settings: {exc}") from exc
+        raise PlanningCommandFormatError(f"{path}: could not import the split settings: {exc}") from exc
     return split_settings_from_module(module, path)
 
 
 def identifier_patterns(workflow_folderpath: str) -> tuple[re.Pattern, ...]:
-    """The workflow's identifier patterns (``identifier_patterns`` of its optional ``_skills/_split.py``).
+    """The workflow's identifier patterns (``identifier_patterns`` of its optional ``_commands/_split.py``).
 
     Each match in a request is a subject for the split merge (``split_merge.merge_subtasks``),
     like a quoted name: the framework knows no workflow's identifier formats.
@@ -1386,7 +1787,7 @@ def identifier_patterns(workflow_folderpath: str) -> tuple[re.Pattern, ...]:
 @functools.lru_cache(maxsize=None)
 def _split_signature(workflow_folderpath: str) -> type[dspy.Signature]:
     """``SplitIntoSubtasks``, with the instructions and field descriptions of the workflow's
-    ``_skills/_split.py`` when it sets them."""
+    ``_commands/_split.py`` when it sets them."""
     settings = split_settings(workflow_folderpath)
     signature = SplitIntoSubtasks
     if settings.instructions is not None:
@@ -1397,24 +1798,69 @@ def _split_signature(workflow_folderpath: str) -> type[dspy.Signature]:
 
 
 def _job_types_for(workflow_folderpath: str | None) -> str:
-    """One ``- name: description`` line per skill of the workflow; "(none)" without skills."""
-    skills = load_skills(workflow_folderpath) if workflow_folderpath else ()
-    if not skills:
+    """One ``- name: description`` line per planning command of the workflow; "(none)" without planning commands."""
+    planning_commands = load_planning_commands(workflow_folderpath) if workflow_folderpath else ()
+    if not planning_commands:
         return "(none)"
-    return "\n".join(f"- {name}: {description}" for name, description, _ in skills)
+    return "\n".join(f"- {name}: {description}" for name, description, _ in planning_commands)
 
 
-#: The skill matcher shows at most this many of a skill's ``plain_utterances`` (its first
+def _planning_scope(name: str) -> str:
+    """The context name of planning command ``name`` (``"Library"`` for ``"Library/dune_search"``),
+    or ``""`` for a root planning command."""
+    return name.rpartition("/")[0]
+
+
+def planning_scopes(workflow) -> tuple[str, ...]:
+    """The planning command scopes on ``workflow``'s lookup path, ending with ``""`` for the root.
+
+    Planning commands are matched scope by scope along the lookup path:
+    1. The active context.
+    2. Its bases, in ``CommandContextModel`` order, transitively.
+    3. Each live ancestor's context (``workflow.get_parent`` on the live chain, up to the
+       root context object) and that ancestor's bases.
+    4. The root planning commands (``""``).
+
+    A scope already on the path is skipped. Does not depend on intent-classifier code.
+    """
+    if workflow is None:
+        return ("",)
+    folder = getattr(workflow, "folderpath", None)
+    names = [getattr(workflow, "_current_command_context_name", "*")]
+    obj = getattr(workflow, "_current_command_context", None)
+    root = getattr(workflow, "root", None)
+    visited_objs: set[int] = {id(obj)} if obj is not None else set()
+    while obj is not None and obj is not root:
+        try:
+            parent = workflow.get_parent(obj)
+        except Exception:  # noqa: BLE001 - never fail scope lookup on parent walk
+            logger.debug(f"planning_scopes parent walk stopped at {obj!r}", exc_info=True)
+            break
+        if parent is None or id(parent) in visited_objs:
+            break
+        visited_objs.add(id(parent))
+        names.append(fastworkflow.Workflow.get_command_context_name(parent))
+        if parent is root:
+            break
+        obj = parent
+    return lookup_scopes(folder, names)
+
+
+#: The planning command matcher shows at most this many of a planning command's ``plain_utterances`` (its first
 #: ones) after its description, to bound the prompt.
 MATCHER_EXAMPLES = 9
 
 
-def _matcher_job_types(workflow_folderpath: str, examples: int = MATCHER_EXAMPLES) -> str:
-    """The skill matcher's job types: one ``- name: description`` line per skill, followed by
-    ``e.g. "...", "..."`` when the skill declares ``plain_utterances`` (at most ``examples``)."""
-    utterances = skill_utterances(workflow_folderpath)
+def _matcher_job_types(workflow_folderpath: str, examples: int = MATCHER_EXAMPLES,
+                       scope: str | None = None) -> str:
+    """The planning command matcher's job types: one ``- name: description`` line per planning command, followed by
+    ``e.g. "...", "..."`` when the planning command declares ``plain_utterances`` (at most ``examples``).
+    With ``scope`` given (``""`` for root, or a context name), only that scope's planning commands are listed."""
+    utterances = planning_command_utterances(workflow_folderpath)
     lines = []
-    for name, description, _ in load_skills(workflow_folderpath):
+    for name, description, _ in load_planning_commands(workflow_folderpath):
+        if scope is not None and _planning_scope(name) != scope:
+            continue
         shown = [" ".join(u.split()) for u in utterances.get(name, ())[:max(0, examples)]]
         shown = [u for u in shown if u]
         lines.append(f"- {name}: {description}" + (
@@ -1422,16 +1868,165 @@ def _matcher_job_types(workflow_folderpath: str, examples: int = MATCHER_EXAMPLE
     return "\n".join(lines)
 
 
-#: A matched skill's steps are offered to the planner only at or above this Jev
+#: A matched planning command's steps are offered to the planner only at or above this Jev
 #: probability (measured offline: at 0.5, 96.6% of sub-tasks get a template, 1.1% a wrong one).
-SKILL_MATCH_THRESHOLD = 0.5
+PLANNING_COMMAND_MATCH_THRESHOLD = 0.5
+
+#: The planner's instructions (the planner signatures use them as their docstring unchanged).
+PLANNER_INSTRUCTIONS = """
+    Carefully review the user_query and generate a next steps sequence based only on available commands.
+    Walk the graph of commands based on the 'available_from' hints to build the most appropriate command sequence.
+    Use names and values exactly as written in the user_query; never abbreviate or reword them.
+
+    IMPORTANT: 9 times out of 10 information can be found via available commands. However, when generating the plan:
+    - If required information is missing and cannot be found via commands, explicitly specify in the plan that the user needs to be consulted
+    - If confirmation is needed before proceeding, explicitly specify in the plan that user confirmation is required
+    """
+
+
+def planner_commands_text(current_workflow) -> str:
+    """The planner's listing: every context's commands, each planning command with its template."""
+    return CommandMetadataAPI.get_all_contexts_command_display_text(
+        subject_workflow_path=current_workflow.folderpath,
+        cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
+        active_context_name=current_workflow._current_command_context_name,
+        navigation_workflow=current_workflow,
+    )
+
+
+def planner_listing_text(current_workflow, sub_task: str,
+                         planning_probabilities: Mapping[str, float] | None = None) -> str:
+    """The planner's listing for *sub_task* (run_listing.run_listing_text). Production (no experiment arm, the default
+    FULL): ``planner_commands_text``, byte for byte. The experiment selector ``THRESHOLD`` gives it while it is at most
+    ``run_listing.FULL_LISTING_MAX_CHARS``, else the trained-head shortlist; ``COMMAND_SHORTLIST`` gives the shortlist.
+    *planning_probabilities*: the turn's planning-command match distribution (None without JEV_API_KEY)."""
+    from fastworkflow import run_listing
+
+    arm = run_listing.effective_listing_arm(current_workflow)
+    if arm == run_listing.FULL:
+        return planner_commands_text(current_workflow)
+    return run_listing.run_listing_text(current_workflow, sub_task, arm=arm,
+                                        planning_probabilities=planning_probabilities)
+
+
+def sub_task_commands_text(chat_session_obj, sub_task: str,
+                           planning_probabilities: Mapping[str, float] | None = None) -> str:
+    """The ``available_commands`` of a sub-task's run (run_listing.run_listing_text). Production (no experiment arm,
+    the default FULL): ``_what_can_i_do``, byte for byte. The experiment selector ``THRESHOLD`` gives it while it is at
+    most ``run_listing.FULL_LISTING_MAX_CHARS``, else the trained-head shortlist; ``COMMAND_SHORTLIST`` gives the
+    shortlist. *planning_probabilities*: the turn's planning-command match distribution (None without JEV_API_KEY)."""
+    from fastworkflow import run_listing
+
+    arm = run_listing.effective_listing_arm(chat_session_obj.get_active_workflow())
+    full = _what_can_i_do(chat_session_obj)
+    if arm == run_listing.FULL:
+        return full
+    return run_listing.run_listing_text(chat_session_obj.get_active_workflow(), sub_task, arm=arm,
+                                        planning_probabilities=planning_probabilities, full=full)
+
+
+#: A section header of the planner's listing: the active context's, the one a command enters, or the
+#: scope of a command callable here by its name (3.9, Catalogs: an enclosing context, or the global scope).
+_LISTING_SECTION = re.compile(
+    r"^Commands available (?:in the current context\b"
+    r"|after entering the (?P<context>\S+) context\b"
+    r"|here from (?:the (?P<here>\S+) context|(?P<scope>the global scope))\b)")
+#: A command's own line in the planner's listing (its block starts here).
+_LISTING_COMMAND = re.compile(r"^- ([A-Za-z_][A-Za-z0-9_]*)\s*$")
+
+
+def typed_planner_commands_text(current_workflow) -> str:
+    """The typed planning call's listing (design 3.4): the planner's listing with each command's
+    block cut to its name, the first sentence of its description and its parameter names.
+
+    The section headers and the order of the commands are the planner listing's (so every command
+    it names is named here, once per section), and each block's description and parameters are
+    those of the context the section is for: a command listed in several contexts keeps what it
+    does in each. A planning command's parameters are its own typed fields.
+    """
+    full = planner_commands_text(current_workflow)
+    folderpath = current_workflow.folderpath
+    active = current_workflow._current_command_context_name
+    cme_path = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
+    crd = fastworkflow.RoutingRegistry.get_definition(folderpath)
+    # (context, name) -> (description, parameter names), from every context's metadata; and the
+    # first entry of each name, for a block whose section is not one of the contexts.
+    by_context: dict[tuple[str, str], tuple[str, list[str]]] = {}
+    by_name: dict[str, tuple[str, list[str]]] = {}
+    for context in crd.contexts:
+        info = CommandMetadataAPI.get_enhanced_command_info(
+            subject_workflow_path=folderpath, cme_workflow_path=cme_path, active_context_name=context)
+        for cmd in info.get("commands", []):
+            name = cmd.get("name")
+            if not name:
+                continue
+            doc = " ".join(str(cmd.get("doc_string") or "").split())
+            params = [str(i.get("name")) for i in cmd.get("inputs", []) or [] if i.get("name")]
+            by_context.setdefault((context, name), (doc, params))
+            by_name.setdefault(name, (doc, params))
+    for planning_command_name, planning_command in load_planning_command_map(folderpath).items():
+        name = planning_command_name.rpartition("/")[2]
+        params = [p.name for p in planning_command.params]
+        for key, (doc, _) in list(by_context.items()):
+            if key[1] == name:
+                by_context[key] = (doc or planning_command.description, params)
+        if name in by_name:
+            doc, _ = by_name[name]
+            by_name[name] = (doc or planning_command.description, params)
+        else:
+            by_name[name] = (planning_command.description, params)
+    out: list[str] = []
+    context = active
+    for line in full.split("\n"):
+        section = _LISTING_SECTION.match(line)
+        if section:
+            if section["scope"]:
+                context = "*"
+            else:
+                context = section["context"] or section["here"] or active
+            out.append(line)
+            continue
+        command = _LISTING_COMMAND.match(line)
+        if command is None:
+            continue
+        name = command.group(1)
+        doc, params = by_context.get((context, name)) or by_name.get(name, ("", []))
+        out.append(f"- {name}")
+        sentence = re.split(r"(?<=[.!?])\s", doc, maxsplit=1)[0] if doc else ""
+        if sentence:
+            out.append(f"  {sentence}")
+        if params:
+            out.append(f"  parameters: {', '.join(params)}")
+    return "\n".join(out)
 
 
 @functools.lru_cache(maxsize=None)
 def _jev_lm():
     """The Jev (dspy.experimental TypeSafe) LM, or None without a JEV_API_KEY."""
-    key = fastworkflow.get_env_var("JEV_API_KEY", default=None)
-    return TypeSafe(api_key=key, cache=True) if key else None
+    # default="" (not None): get_env_var warns about a variable that is missing and has no default,
+    # and the missing key is the INFO line of 3.9, not a warning.
+    key = fastworkflow.get_env_var("JEV_API_KEY", default="")
+    return TypeSafe(api_key=key, cache=dspy_utils.lm_cache_enabled()) if key else None
+
+
+@functools.lru_cache(maxsize=None)
+def _warn_missing_jev_key(workflow_folderpath: str) -> None:
+    """The INFO line of design 3.9, once per workflow folder per process, when a workflow has
+    planning commands (``_commands``) and ``JEV_API_KEY`` is not set. Planning commands are ordinary
+    intent labels, so intent detection still matches them; without the key, Jev's planning-match
+    candidates are off, and so are the classifier checks (``classifier_confirms``) of the fields that name planning commands.
+    """
+    fields = planning_commands.verify_field_names(workflow_folderpath)
+    if not _planning_command_files(os.path.join(workflow_folderpath, "_commands")):
+        if fields:
+            logger.info(f"{workflow_folderpath}: JEV_API_KEY is not set: the classifier checks of "
+                        f"{', '.join(fields)} are inactive.")
+        return
+    checks_clause = f" and the classifier checks of {', '.join(fields)}" if fields else ""
+    logger.info(
+        f"{workflow_folderpath}: planning commands are matched by intent detection; without "
+        f"JEV_API_KEY, Jev's planning-match candidates{checks_clause} are off."
+    )
 
 
 def _choice_value_and_probability(choice) -> tuple[str, float]:
@@ -1440,51 +2035,87 @@ def _choice_value_and_probability(choice) -> tuple[str, float]:
 
 
 @functools.lru_cache(maxsize=None)
-def _skill_matcher(workflow_folderpath: str):
-    """``(predictor, jev_lm)`` choosing a sub-task's skill, or None without skills or a Jev key."""
-    skills = load_skills(workflow_folderpath)
-    jev_lm = _jev_lm()
-    if not skills or jev_lm is None:
+def _planning_command_matcher(workflow_folderpath: str):
+    """``{scope: (predictor, jev_lm)}`` choosing a sub-task's planning command per scope (``""`` for root),
+    or None without planning commands or a JEV_API_KEY."""
+    planning_commands = load_planning_commands(workflow_folderpath)
+    if not planning_commands:
         return None
-    options = tuple((name, description) for name, description, _ in skills) + (
-        ("none", "None of the job types fits this sub-task."),)
-    listing = "the available job types, one per line as '- name: description'"
-    if any(skill_utterances(workflow_folderpath).values()):
-        listing += ", some followed by example requests for that job (e.g. ...)"
+    jev_lm = _jev_lm()
+    if jev_lm is None:
+        _warn_missing_jev_key(workflow_folderpath)
+        return None
+    utterances = planning_command_utterances(workflow_folderpath)
+    by_scope: dict[str, list[tuple[str, str]]] = {}
+    for name, description, _ in planning_commands:
+        by_scope.setdefault(_planning_scope(name), []).append((name, description))
+    matchers: dict[str, tuple] = {}
+    for scope, scope_planning_commands in by_scope.items():
+        options = tuple(scope_planning_commands) + (("none", "None of the job types fits this sub-task."),)
+        listing = "the available job types, one per line as '- name: description'"
+        if any(utterances.get(name) for name, _ in scope_planning_commands):
+            listing += ", some followed by example requests for that job (e.g. ...)"
 
-    class MatchSkill(dspy.Signature):
-        """Decide which job type a sub-task asks for."""
+        class MatchPlanningCommand(dspy.Signature):
+            """Decide which job type a sub-task asks for."""
 
-        subtask: str = dspy.InputField(desc="one sub-task from a user request")
-        job_types: str = dspy.InputField(desc=listing)
-        job: Choice[options] = dspy.OutputField(
-            desc="Which job type does this sub-task ask for? 'none' if none of them fits.")
+            subtask: str = dspy.InputField(desc="one sub-task from a user request")
+            job_types: str = dspy.InputField(desc=listing)
+            job: Choice[options] = dspy.OutputField(
+                desc="Which job type does this sub-task ask for? 'none' if none of them fits.")
 
-    return dspy.Predict(MatchSkill), jev_lm
+        matchers[scope] = (dspy.Predict(MatchPlanningCommand), jev_lm)
+    return matchers
 
 
-def match_skill(text: str, workflow_folderpath: str) -> tuple[str, tuple[str, ...]] | None:
-    """``(name, steps)`` of the skill ``text`` asks for, when Jev is confident; None otherwise.
+def match_planning_command(text: str, workflow_folderpath: str,
+                scopes: tuple[str, ...] = ("",), *, distribution: dict[str, float] | None = None
+                ) -> tuple[str, tuple[str, ...]] | None:
+    """``(name, steps)`` of the planning command ``text`` asks for along ``scopes`` (``""`` for root),
+    when Jev is confident; None otherwise.
 
-    Never raises: a failed match only means the planner gets no template.
+    Runs once for each scope on ``scopes`` that has planning commands, offering only that
+    scope's planning commands plus ``"none"``; the first confident match (>= ``PLANNING_COMMAND_MATCH_THRESHOLD``)
+    wins and later scopes are not asked. Never raises: a failed match only means the
+    planner gets no template.
+
+    ``distribution`` (optional, filled in place): the options' probabilities of each scope asked, the max per option,
+    so the listing can take the unsure candidates (run_listing.planning_candidates). No extra model call: it is the
+    same choice the match already made. Left empty when no match runs (no JEV_API_KEY, no planning commands).
     """
     try:
-        matcher = _skill_matcher(workflow_folderpath)
+        matcher = _planning_command_matcher(workflow_folderpath)
         if matcher is None:
             return None
-        predictor, jev_lm = matcher
-        skills = load_skills(workflow_folderpath)
-        job_types = _matcher_job_types(workflow_folderpath)
-        with dspy.context(lm=jev_lm):
-            choice = predictor(subtask=text, job_types=job_types).job
-        value, probability = _choice_value_and_probability(choice)
-        logger.info(f"skill match for {text!r}: {value} (confidence {probability:.2f})")
-        steps = {name: steps for name, _, steps in skills}
-        if value in steps and probability >= SKILL_MATCH_THRESHOLD:
-            return value, steps[value]
+        planning_commands = load_planning_commands(workflow_folderpath)
+        by_scope: dict[str, dict[str, tuple[str, ...]]] = {}
+        for name, _, steps in planning_commands:
+            by_scope.setdefault(_planning_scope(name), {})[name] = steps
+        seen: set[str] = set()
+        for scope in scopes:
+            if scope in seen:
+                continue
+            seen.add(scope)
+            scope_steps = by_scope.get(scope)
+            scope_matcher = matcher.get(scope) if scope_steps else None
+            if not scope_steps or scope_matcher is None:
+                continue
+            predictor, jev_lm = scope_matcher
+            job_types = _matcher_job_types(workflow_folderpath, scope=scope)
+            with dspy.context(lm=jev_lm):
+                choice = predictor(subtask=text, job_types=job_types).job
+            value, probability = _choice_value_and_probability(choice)
+            if distribution is not None:
+                for option, option_probability in (choice.probabilities or {value: probability}).items():
+                    key = str(option)
+                    distribution[key] = max(distribution.get(key, 0.0), float(option_probability))
+            scope_label = scope or "root"
+            logger.info(f"planning command match in scope {scope_label!r} for {text!r}: {value} (confidence {probability:.2f})")
+            if value in scope_steps and probability >= PLANNING_COMMAND_MATCH_THRESHOLD:
+                return value, scope_steps[value]
         return None
     except Exception:  # noqa: BLE001 - a template is an optimisation; never fail the turn
-        logger.warning("could not match the sub-task to a skill", exc_info=True)
+        logger.warning("could not match the sub-task to a planning command", exc_info=True)
         return None
 
 
@@ -1494,61 +2125,228 @@ def _template_text(steps: tuple[str, ...]) -> str:
             "Adapt this to the request: drop steps it does not need and add steps it asks for.")
 
 
-def planner_skill_for(text: str, workflow_folderpath: str) -> tuple[str, SkillCommand | None]:
-    """``(template, command)`` for the skill ``text`` asks for: one Jev match.
+def planner_planning_command_for(text: str, workflow_folderpath: str,
+                      scopes: tuple[str, ...] = ("",), *, distribution: dict[str, float] | None = None
+                      ) -> tuple[str, PlanningCommandCommand | None]:
+    """``(template, command)`` for the planning command ``text`` asks for along ``scopes`` (``""`` for root).
 
-    ``template`` is ``plan_template_for``'s text ("" when no skill matches); ``command`` is
-    the matched skill's parsed form when it has params or phases, else None.
+    ``template`` is ``plan_template_for``'s text ("" when no planning command matches); ``command`` is
+    the matched planning command's parsed form (None when no planning command matches). A matched planning command's call runs
+    through the phase runner, whatever its shape.
     """
-    matched = match_skill(text, workflow_folderpath)
+    matched = match_planning_command(text, workflow_folderpath, scopes=scopes, distribution=distribution)
     if matched is None:
         return "", None
     name, steps = matched
-    return _template_text(steps), load_skill_commands(workflow_folderpath).get(name)
+    return _template_text(steps), load_planning_command_map(workflow_folderpath).get(name)
 
 
-def plan_template_for(text: str, workflow_folderpath: str) -> str:
-    """The matched skill's steps as a planner template for ``text``; "" when no skill matches."""
-    return planner_skill_for(text, workflow_folderpath)[0]
+def plan_template_for(text: str, workflow_folderpath: str,
+                      scopes: tuple[str, ...] = ("",)) -> str:
+    """The matched planning command's steps as a planner template for ``text``; "" when no planning command matches."""
+    return planner_planning_command_for(text, workflow_folderpath, scopes=scopes)[0]
 
 
 #: A reply's non-answer intent applies only at or above this Jev probability.
 REPLY_INTENT_THRESHOLD = 0.5
 REPLY_INTENTS = (
-    ("answer", "The reply answers the question or gives direction for the work to go on."),
-    ("stop_asking", "The reply declines to answer or says not to ask again, but does not ask to stop the work."),
+    ("answer", "The reply gives a value or direction for the work to go on, or asks a question back about the "
+               "request (which one, what are the options): the agent answers it and asks again."),
+    ("stop_asking", "The reply explicitly asks the agent to stop asking questions: 'stop asking', 'just do it', "
+                    "'don't ask me again', 'never mind'. A question back or a hesitation is never this."),
     ("abort", "The reply asks to stop, cancel or abort the work."),
+    ("wait", "The reply asks for a moment or says the user is checking, or hesitates ('hmm, not sure', 'let me "
+             "think'); it gives no value and asks nothing."),
+)
+
+#: The explicit requests to stop being asked. stop_asking needs one of these in the reply as well as Jev's
+#: choice (see classify_user_reply): a question back or a hesitation never stops the asking. The patterns are
+#: general families (a verb of stopping + asking/questions/pestering; "no more questions"; "don't ask me
+#: (about) that/this/it (again)"; "did not ask me about that again"), not the wording of any one test set.
+_STOP_ASKING_REQUEST = re.compile(
+    r"\b(?:stop\s+(?:(?:with\s+)?the\s+)?(?:asking|questions?)"
+    r"|(?:quit|stop)\s+(?:with\s+the\s+)?(?:asking|questions?|pestering|bugging|hassling|badgering|nagging)"
+    r"|no\s+(?:more|further)\s+questions?"
+    r"|(?:don'?t|do\s+not|never)\s+ask(?:\s+me)?(?:\s+(?:about\s+)?(?:that|this|it))?"
+    r"(?:\s+(?:again|anymore|any\s+more))?"
+    r"|(?:did\s+not|didn'?t|would\s+not|wouldn'?t|won'?t)\s+ask\s+me(?:\s+about\s+(?:that|this|it))?"
+    r"(?:\s+(?:again|anymore|any\s+more))?"
+    r"|just\s+do\s+it|no\s+need\s+to\s+ask|never\s*mind)\b",
+    re.IGNORECASE,
 )
 
 
 class ClassifyReply(dspy.Signature):
-    """Decide what a user's reply to the agent's clarification request does."""
+    """Decide what a user's reply to the agent's clarification request does.
+
+    Three readings are easy to confuse. A question back ("which one do you mean?", "what are the
+    options?") is "answer": the agent answers it and asks again, so it is not a request to stop asking.
+    A hesitation ("hmm, not sure", "let me think") is "wait". Only an explicit request to stop being
+    asked ("stop asking", "just do it", "don't ask me again", "never mind") is "stop_asking".
+    """
 
     question: str = dspy.InputField(desc="the clarification request the agent asked the user")
     reply: str = dspy.InputField(desc="the user's reply")
-    intent: Choice[REPLY_INTENTS] = dspy.OutputField(desc="What does the reply do?")
+    intent: Choice[REPLY_INTENTS] = dspy.OutputField(
+        desc="What does the reply do? A question back is answer; a hesitation is wait; "
+             "stop_asking only for an explicit request to stop being asked.")
+
+
+def _reply_wait_enabled() -> bool:
+    """False when FW_JEV_REPLY_WAIT is set to off, 0 or false (case-insensitive)."""
+    value = str(fastworkflow.get_env_var("FW_JEV_REPLY_WAIT", default="on"))
+    return value.strip().lower() not in {"off", "0", "false"}
+
+
+def _classify_reply_predictor():
+    """The predictor for ClassifyReply; with FW_JEV_REPLY_WAIT off, "wait" is not an offered option."""
+    if _reply_wait_enabled():
+        return dspy.Predict(ClassifyReply)
+    options = tuple(option for option in REPLY_INTENTS if option[0] != "wait")
+    return dspy.Predict(ClassifyReply.with_updated_fields("intent", type_=Choice[options]))
 
 
 def classify_user_reply(reply: str, question: str) -> str:
-    """The reply's intent: "abort", "stop_asking", or "answer" (the default).
+    """The reply's intent: "abort", "stop_asking", "wait", or "answer" (the default).
 
-    Any other intent needs Jev to be confident. Never raises: without a Jev key,
-    or on a failure, the reply is taken as an answer.
+    "wait" is a hesitation ("hold on", "one sec"): the user has not answered yet. Any non-answer
+    intent needs Jev to be confident at REPLY_INTENT_THRESHOLD. With FW_JEV_REPLY_WAIT off, "wait"
+    is not offered to Jev at all, so the result is one of the other three.
+
+    "stop_asking" is also vetoed by a deterministic guard: it stands only when the reply holds an
+    explicit request to stop being asked (_STOP_ASKING_REQUEST). A question back or a hesitation that
+    Jev reads as stop_asking becomes "answer", so ask_user stays available for the turn. A stop phrase
+    that also carries an answer value still stands as stop_asking: the value check that would have
+    caught it was dropped (fix-jd9o.12, owner decision). Measured on a fresh set, that check vetoed 5
+    of 10 real stops, while without it about 1 in 130 value replies that also say "stop asking" is
+    taken as a stop. A stop only ends asking for that turn, so the trade favours the real stops.
+
+    Never raises: without a Jev key, or on a failure, the reply is taken as an answer. That is the
+    same rule on both paths: stop_asking needs Jev's reading and an explicit request, and without a
+    key there is no reading, so the reply is an answer.
     """
     jev_lm = _jev_lm()
     if jev_lm is None:
         return "answer"
     try:
+        predictor = _classify_reply_predictor()
         with dspy.context(lm=jev_lm):
-            choice = dspy.Predict(ClassifyReply)(question=question, reply=reply).intent
+            choice = predictor(question=question, reply=reply).intent
         value, probability = _choice_value_and_probability(choice)
         logger.info(f"reply intent for {reply!r}: {value} (confidence {probability:.2f})")
+        if value == "stop_asking" and not _STOP_ASKING_REQUEST.search(reply):
+            logger.info(f"reply intent {value!r} vetoed: the reply holds no explicit request to stop asking")
+            return "answer"
         if value != "answer" and probability >= REPLY_INTENT_THRESHOLD:
             return value
         return "answer"
     except Exception:  # noqa: BLE001 - the reply is then taken as an answer; never fail the turn
         logger.warning("could not classify the reply intent", exc_info=True)
         return "answer"
+
+
+#: Jev's probability an ambiguous intent choice needs before it routes; below it the ambiguity prompt is shown.
+INTENT_TIEBREAK_THRESHOLD = 0.9
+_INTENT_TIEBREAK_OFF = frozenset({"off", "0", "false"})
+_INTENT_TIEBREAK_WILDCARD = "wildcard"
+_INTENT_TIEBREAK_PARAMETER_VALUE = "parameter_value"
+_INTENT_TIEBREAK_RESERVED = {
+    _INTENT_TIEBREAK_WILDCARD:
+        "None of these commands: the message is not a command of the current context.",
+    _INTENT_TIEBREAK_PARAMETER_VALUE:
+        "The message is a bare value answering an earlier question, not a command.",
+}
+
+
+def _intent_tiebreak_enabled() -> bool:
+    """False when FW_JEV_INTENT_TIEBREAK is set to off, 0 or false (case-insensitive)."""
+    value = str(fastworkflow.get_env_var("FW_JEV_INTENT_TIEBREAK", default="on"))
+    return value.strip().lower() not in _INTENT_TIEBREAK_OFF
+
+
+@functools.lru_cache(maxsize=None)
+def _command_first_sentences(workflow_folderpath: str, context: str) -> dict[str, str]:
+    """``{leaf command name: first sentence of its docstring}`` for the commands *context* offers."""
+    info = CommandMetadataAPI.get_enhanced_command_info(
+        subject_workflow_path=workflow_folderpath,
+        cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
+        active_context_name=context,
+    )
+    sentences: dict[str, str] = {}
+    for cmd in info.get("commands", []) or []:
+        name = str(cmd.get("name") or "").rpartition("/")[2]
+        doc = " ".join(str(cmd.get("doc_string") or "").split())
+        if name and doc:
+            sentences[name] = re.split(r"(?<=[.!?])\s", doc, maxsplit=1)[0]
+        elif name:
+            # No docstring: the command's example utterances describe it instead. fix-jd9o.1 measured
+            # descriptions against bare names: 148/148 routes right with them, 148/151 without.
+            examples = [" ".join(str(u).split()) for u in (cmd.get("plain_utterances") or [])[:3]
+                        if str(u).strip()]
+            if examples:
+                sentences[name] = "e.g. " + "; ".join(examples)
+    return sentences
+
+
+def intent_tiebreak_descriptions(workflow_folderpath: str, context: str,
+                                 candidates: list[str]) -> dict[str, str]:
+    """``{candidate: description}`` for the candidates of an ambiguous intent: the first sentence of
+    each command's docstring in *context*, matched by leaf name. Never raises: {} on a failure."""
+    try:
+        sentences = _command_first_sentences(workflow_folderpath, context)
+        return {str(c): sentences[str(c).rpartition("/")[2]]
+                for c in candidates if sentences.get(str(c).rpartition("/")[2])}
+    except Exception:  # noqa: BLE001 - descriptions only sharpen Jev's choice; never fail the turn
+        logger.warning("could not read the command docstrings for the intent tie-break", exc_info=True)
+        return {}
+
+
+def choose_ambiguous_command(utterance: str, candidates: list[str],
+                             descriptions: dict[str, str]) -> tuple[str | None, float | None]:
+    """``(label, probability)`` of the candidate Jev chooses for an ambiguous *utterance*, when it is
+    confident (>= ``INTENT_TIEBREAK_THRESHOLD``); ``(None, probability)`` otherwise.
+
+    ``(None, None)`` without calling anything when there is no Jev key, the tie-break is switched off,
+    or there are fewer than two distinct candidates. Never raises.
+    """
+    try:
+        jev_lm = _jev_lm()
+        if jev_lm is None or not _intent_tiebreak_enabled():
+            return None, None
+        labels = list(dict.fromkeys(str(c) for c in candidates))
+        if len(labels) < 2:
+            return None, None
+        options = []
+        for label in labels:
+            leaf = label.rpartition("/")[2]   # a reserved label may come context-qualified
+            if leaf in _INTENT_TIEBREAK_RESERVED:
+                description = _INTENT_TIEBREAK_RESERVED[leaf]
+            else:
+                description = (descriptions.get(label)
+                               or label.rpartition("/")[2].replace("_", " "))
+            options.append((label, description))
+        options.append(("none", "None of these commands fits the message."))
+        options = tuple(options)
+
+        class IntentTiebreak(dspy.Signature):
+            """Decide which command a message to a workflow asks for."""
+
+            # The wording measured in fix-jd9o.1 (agent mode sends the agent's message, not the user's).
+            message: str = dspy.InputField(desc="the message sent to the workflow")
+            command: Choice[options] = dspy.OutputField(
+                desc="Which command does the message ask for? 'none' if none fits.")
+
+        with dspy.context(lm=jev_lm):
+            choice = dspy.Predict(IntentTiebreak)(message=utterance).command
+        value, probability = _choice_value_and_probability(choice)
+        logger.info(f"intent tie-break for {utterance!r} among {labels}: {value} "
+                    f"(confidence {probability:.2f})")
+        if value != "none" and probability >= INTENT_TIEBREAK_THRESHOLD:
+            return value, probability
+        return None, probability
+    except Exception:  # noqa: BLE001 - the ambiguity prompt is then shown as today; never fail the turn
+        logger.warning("could not choose among the ambiguous commands", exc_info=True)
+        return None, None
 
 
 #: Phrases that point at other parts of the request instead of naming them; a sub-task with one is broken.
@@ -1581,18 +2379,32 @@ def _breakage(user_query: str, subtasks: list[str], workflow_folderpath: str | N
     return len(named) - len(set(named)), references
 
 
+#: The splitter's ``conversation`` input (added only when the turn has earlier turns, so a first turn's prompt is
+#: unchanged): the earlier turns' summaries, for words of the new request that point back to them.
+SPLIT_CONVERSATION_DESC = ("earlier turns of the conversation, for resolving words of user_query that point back to "
+                           "them ('its loans' after a turn about Dune). Background only: nothing in it is a "
+                           "sub-task, and a sub-task takes from it only the name such a word refers to")
+
+
 def split_into_subtasks(user_query: str, planner_lm=None,
-                        workflow_folderpath: str | None = None) -> list[str]:
+                        workflow_folderpath: str | None = None, conversation: str = "") -> list[str]:
     """The request as independent sub-tasks, in order; ``[user_query]`` when it is not split.
 
+    ``user_query`` is the user's new request only: it is what the merge treats as the request (its ground truth,
+    and the text it returns when everything merges back into one job). ``conversation`` (optional) is the
+    earlier turns' summaries, given to the splitter as a separate input (``SPLIT_CONVERSATION_DESC``) so it can
+    resolve references to them; the merge reads it only so that a name taken from it is not an invention, and
+    never returns it (fix-bydz).
+
     One call on the planner LM, with no command catalog: the split is about the
-    request, not about how to carry it out. It is shown the workflow's skills
-    (``_skills``), as the kinds of job it may contain.
+    request, not about how to carry it out. It is shown the workflow's planning commands
+    (``_commands``), as the kinds of job it may contain.
     Any failure, an empty answer, or more than MAX_SUBTASKS sub-tasks leaves the
     request whole. A reply cut off at ``split_max_tokens()`` is not an answer, even
     when it parses (a field header written mid-reasoning, e.g. the output template
     echoed back, parses as "{subtasks}"): it gets the one retry, and a second
-    cut-off reply leaves the request whole. When both replies are visibly broken, the
+    cut-off reply leaves the request whole. A non-empty sub-tasks field with no numbered item (``it``) is
+    visibly broken too and gets the same one retry. When both replies are visibly broken, the
     one that names fewer of the request's records in two sub-tasks is used (``_breakage``).
     The model's split then goes through ``split_merge.merge_subtasks`` (code only), which joins parts that are not independent jobs and returns the
     request whole when one job is left.
@@ -1606,48 +2418,173 @@ def split_into_subtasks(user_query: str, planner_lm=None,
     # A split whose only flaw is a leftover reference ("each of them") is still
     # better than none, so it is kept when the retry does not fix it; when both
     # attempts are like that, the less broken one (``_breakage``; the first on a tie).
+    # A model that refuses a temperature (Bedrock Claude Haiku 5.5 takes only 1) is called again
+    # without it (``dspy_utils.call_dropping_rejected_params``); its retry skips the cache (``_split_lm``).
     usable: list[list[str]] = []
-    for temperature in (0.0, 0.7):
+    for attempt, temperature in enumerate((0.0, 0.7)):
         replies: list = []
-        try:
-            with dspy.context(lm=_split_lm(planner_lm, temperature),
-                              adapter=CommandsSystemPreludeAdapter()), watch_cut_off_replies() as replies:
+
+        def split(lm) -> str:
+            with dspy.context(lm=lm, adapter=CommandsSystemPreludeAdapter()):
                 signature = _split_signature(workflow_folderpath) if workflow_folderpath else SplitIntoSubtasks
-                text = dspy.ChainOfThought(signature)(
-                    job_types=job_types, user_query=user_query).subtasks or ""
-        except Exception:  # noqa: BLE001 - splitting is an optimisation; never fail the turn
+                inputs = {"job_types": job_types, "user_query": user_query}
+                if conversation:
+                    signature = signature.insert(
+                        1, "conversation", dspy.InputField(desc=SPLIT_CONVERSATION_DESC), type_=str)
+                    inputs["conversation"] = conversation
+                return dspy.ChainOfThought(signature)(**inputs).subtasks or ""
+
+        try:
+            with watch_cut_off_replies() as replies:
+                text = dspy_utils.call_dropping_rejected_params(
+                    _split_lm(planner_lm, temperature, retry=attempt > 0), split)
+        except Exception as error:  # noqa: BLE001 - splitting is an optimisation; never fail the turn
             if any(replies):
                 logger.warning(f"the split was cut off at {split_max_tokens()} tokens and did not parse")
                 continue
-            logger.warning("could not split the request; running it whole", exc_info=True)
+            _log_split_failure(planner_lm, error)
             return [user_query]
         if replies and replies[-1]:
             # The parsed reply stopped at the cap: whatever parsed is not the model's answer.
             logger.warning(f"the split was cut off at {split_max_tokens()} tokens; not using it")
             continue
-        subtasks = [match.group(1).translate(_HYPHENS) for line in text.splitlines()
-                    if (match := _NUMBERED_LINE.match(line))]
-        if not subtasks or len(subtasks) > MAX_SUBTASKS:
+        subtasks = [without_repeated_clauses(item.translate(_HYPHENS)) for item in _split_items(text)]
+        # Disabled after benchmark pass 4 (fix-kdag never fired in 840 runs):
+        # if not subtasks and text.strip():
+        #     # A non-empty sub-tasks field with no numbered item ("it") is a visibly broken reply: retried once.
+        #     logger.warning("the split listed no numbered sub-task; retrying once")
+        #     continue
+        if len(subtasks) > MAX_SUBTASKS:
+            # The number of items is never a reason to run the request whole: the list is brought down to the cap
+            # (copies dropped, then parts joined). Only a split that listed nothing, or a reduction that failed, is whole.
+            reduction = _reduced_to_cap(user_query, subtasks, workflow_folderpath, conversation)
+            if reduction is None:
+                return [user_query]
+            if reduction.merged:
+                return _with_referents(user_query, reduction.items, workflow_folderpath)
+            subtasks = reduction.items
+        if not subtasks:
             return [user_query]
         if not _visibly_broken(subtasks):
-            return _merged(user_query, subtasks, workflow_folderpath)
-        if len(set(subtasks)) == len(subtasks):
-            usable.append(subtasks)
+            return _merged(user_query, subtasks, workflow_folderpath, conversation)
+        # A sub-task the model listed twice is one job: the list without its copies is a candidate too.
+        unique = list(dict.fromkeys(subtasks))
+        if len(unique) >= 2:
+            usable.append(unique)
     if not usable:
         return [user_query]
     best = min(usable, key=lambda subtasks: _breakage(user_query, subtasks, workflow_folderpath))
-    return _merged(user_query, best, workflow_folderpath)
+    return _merged(user_query, best, workflow_folderpath, conversation)
 
 
-def _merged(user_query: str, subtasks: list[str], workflow_folderpath: str | None = None) -> list[str]:
-    """``split_merge.merge_subtasks`` on the model's split; the split unchanged if the merge fails."""
+def _with_referents(user_query: str, items: list[str], workflow_folderpath: str | None) -> list[str]:
+    """``resolve_referents`` on the sub-tasks that are not joined. A joined one (``JoinedSubtask``) keeps its text and parts."""
+    if len(items) < 2:
+        return items
+    plain = [item for item in items if not isinstance(item, JoinedSubtask)]
+    resolved = iter(resolve_referents(user_query, plain, workflow_folderpath))
+    return [item if isinstance(item, JoinedSubtask) else next(resolved) for item in items]
+
+
+def _reduced_to_cap(user_query: str, subtasks: list[str], workflow_folderpath: str | None,
+                    conversation: str) -> Reduction | None:
+    """``split_merge.reduce_to_cap`` on a split of more than MAX_SUBTASKS items, with Jev's checks when there is
+    a key (near copies, same request, the item's planning command); None if it fails.
+
+    Jev calls: at most ``REDUCTION_JEV_CALLS`` here, plus at most two per remaining sub-task in ``resolve_referents``.
+    """
     try:
         identifiers = identifier_patterns(workflow_folderpath) if workflow_folderpath else ()
-        merged = merge_subtasks(user_query, subtasks, identifiers)
+
+        def label(text: str) -> str | None:
+            matched = match_planning_command(text, workflow_folderpath) if workflow_folderpath else None
+            return matched[0] if matched else None
+
+        reduction = reduce_to_cap(
+            user_query, subtasks, MAX_SUBTASKS, identifiers, context=conversation,
+            same_job=_same_request_check(user_query),
+            near_copy=_same_request_check(user_query, NEAR_COPY_THRESHOLD),
+            label=label if _jev_lm() is not None else None)
+        logger.info(f"the split listed {len(subtasks)} sub-tasks, over {MAX_SUBTASKS}: reduced to "
+                    f"{len(reduction.items)} ({reduction.jev_calls} Jev calls)")
+        return reduction
+    except Exception:  # noqa: BLE001 - never fail the turn
+        logger.warning("could not reduce a split over the cap", exc_info=True)
+        return None
+
+
+def _merged(user_query: str, subtasks: list[str], workflow_folderpath: str | None = None,
+            conversation: str = "") -> list[str]:
+    """``split_merge.merge_subtasks`` on the model's split; the split unchanged if the merge fails.
+
+    With a Jev key, rule 3's joins (a sub-task naming no subject, or the same subjects as the one before it)
+    are Jev's call (``_same_request_check``); without one, the lexical rule joins them as before.
+    One sub-task is one job, returned as the request the user wrote: the model's rewrite of a single job can
+    drop the words that qualify it (a leading record phrase), and nothing else restores them.
+    """
+    if sum(1 for item in subtasks if item and item.strip()) < 2:
+        return [user_query]
+    try:
+        identifiers = identifier_patterns(workflow_folderpath) if workflow_folderpath else ()
+        merged = merge_subtasks(user_query, subtasks, identifiers, same_job=_same_request_check(user_query),
+                                context=conversation)
     except Exception:  # noqa: BLE001 - the merge is a clean-up; never fail the turn
         logger.warning("could not merge the split; keeping it as the model gave it", exc_info=True)
         return subtasks
     return resolve_referents(user_query, merged, workflow_folderpath) if len(merged) > 1 else merged
+
+
+#: Rule 3 of the merge joins two adjacent sub-tasks (no subject, or the same subjects) only when Jev says they are
+#: one request at or above this probability; below it they stay two jobs. Calibrated on the fix-bydz diagnosis
+#: requests (library example and planning tutorial, Nemotron splits): Jev gave independent jobs 0.00-0.01 and steps
+#: of one job 0.27-0.99, so the bar is low and only a confident "separate" keeps two parts apart.
+SAME_REQUEST_THRESHOLD = 0.2
+
+#: A near copy (over the cap) is dropped only when Jev says it is one request with at least this probability.
+NEAR_COPY_THRESHOLD = 0.9
+
+_SAME_REQUEST_OPTIONS = (
+    ("separate", "Two separate requests: each part asks for something of its own and gets its own answer, "
+                 "and either could be asked alone."),
+    ("one", "One request: the later part is a step of the earlier one; it continues it, or acts on or "
+            "narrows what the earlier part finds (find a record, then open it)."),
+)
+
+
+class SameRequest(dspy.Signature):
+    """Decide whether two parts cut from a user's request are separate requests or steps of one request."""
+
+    request: str = dspy.InputField(desc="the user's whole request")
+    earlier: str = dspy.InputField(desc="a part cut from the request")
+    later: str = dspy.InputField(desc="the part cut from the request right after it")
+    relation: Choice[_SAME_REQUEST_OPTIONS] = dspy.OutputField(
+        desc="Are the two parts separate requests, each needing its own answer, or one request whose "
+             "later part is a step of the earlier one?")
+
+
+def _same_request_check(user_query: str, threshold: float = SAME_REQUEST_THRESHOLD):
+    """The merge's rule 3 decision (``split_merge.SameJob``) on Jev, or None without a Jev key.
+
+    ``(earlier, later) -> True`` when Jev says the two parts are one request with probability at least
+    ``SAME_REQUEST_THRESHOLD``, False when it says otherwise, None (the lexical rule) when the call fails.
+    """
+    jev_lm = _jev_lm()
+    if jev_lm is None:
+        return None
+
+    def same_job(earlier: str, later: str) -> bool | None:
+        try:
+            with dspy.context(lm=jev_lm):
+                choice = dspy.Predict(SameRequest)(request=user_query, earlier=earlier, later=later).relation
+            value, probability = _choice_value_and_probability(choice)
+            one = probability if value == "one" else float((choice.probabilities or {}).get("one", 1 - probability))
+        except Exception:  # noqa: BLE001 - the lexical rule decides; never fail the turn
+            logger.warning("could not ask whether two sub-tasks are one request", exc_info=True)
+            return None
+        logger.info(f"same request? {earlier!r} / {later!r}: {value} (one: {one:.2f})")
+        return one >= threshold
+
+    return same_job
 
 
 #: A sub-task's referent is written in only at or above this Jev probability.
@@ -1661,7 +2598,7 @@ def resolve_referents(user_query: str, subtasks: list[str], workflow_folderpath:
     leaves", "Confirm whether Raj Patel is among its holders". For a sub-task that leaves some of
     the request's subjects unnamed, Jev chooses which of them, if any, it is about
     (``split_merge.unnamed_subjects``), told what the workflow counts as a record by its optional
-    ``subject_hints`` in ``_skills/_split.py``; ``split_merge.with_referent`` writes the choice in. Without a Jev
+    ``subject_hints`` in ``_commands/_split.py``; ``split_merge.with_referent`` writes the choice in. Without a Jev
     key, or on any failure, the sub-tasks are returned unchanged.
 
     When a record is chosen and the sub-task holds definite descriptions ("the customer", see
@@ -1745,7 +2682,8 @@ def build_query_with_next_steps(user_query: str,
     planner_user_query: str | None = None,
     plan_template: str | None = None,
     done_only: bool = False,
-    skill_command: SkillCommand | None = None) -> str:
+    planning_command: PlanningCommandCommand | None = None,
+    planning_probabilities: Mapping[str, float] | None = None) -> str:
     """
     Generate a todo list.
     Return a string that combine the user query and todo list
@@ -1762,27 +2700,23 @@ def build_query_with_next_steps(user_query: str,
             turns are supplied via ``previous_turn_summaries``, pass the raw user
             message here so ``user_query`` (often a refined string that already
             embeds recent summaries) is not duplicated in the planner prompt.
-        plan_template: Optional skill steps for the planner only, appended to the
+        plan_template: Optional planning command steps for the planner only, appended to the
             request in the planner prompt (not in the returned string). Used on
             the turn's initial plan, not on a replan.
         done_only: With a trajectory, return only the "what's done" summary.
-        skill_command: The matched skill's parsed form when it has params or phases. On the
-            turn's initial plan the planner then fills the skill's typed parameters
-            and code expands its steps (``skill_commands.plan_skill_call``; span
-            ``plan_source`` "skill_call"); Jev, when configured, checks the skill's
-            ``verify`` parameters against the request. Any failure falls back to the
-            text planner with ``plan_template``. Ignored on a replan.
+        planning_command: The matched planning command's parsed form. On the turn's initial plan the
+            planner then fills the planning command's typed parameters and code expands its steps
+            (``planning_commands.typed_planning_call``; span ``plan_source`` "skill_call"; a planning command
+            without parameters makes no planner call); Jev, when configured, checks the
+            planning command's classifier-checked parameters against the request. The call's phases are then
+            run by the execution context (``_phased_planning_command_call``). Any failure falls back to
+            the text planner with ``plan_template``, except a refusal of the arguments
+            (PlanningCommandInputError) on a turn that may ask (``_planning_command_refusal_may_ask``): its question
+            is left on ``chat_session_obj._planning_command_refusal``, no plan is made, and the execution
+            context suspends the turn on it. Ignored on a replan.
     """
     current_workflow = chat_session_obj.get_active_workflow()
-    base_docstring = """
-    Carefully review the user_query and generate a next steps sequence based only on available commands.
-    Walk the graph of commands based on the 'available_from' hints to build the most appropriate command sequence.
-    Use names and values exactly as written in the user_query; never abbreviate or reword them.
-
-    IMPORTANT: 9 times out of 10 information can be found via available commands. However, when generating the plan:
-    - If required information is missing and cannot be found via commands, explicitly specify in the plan that the user needs to be consulted
-    - If confirmation is needed before proceeding, explicitly specify in the plan that user confirmation is required
-    """
+    base_docstring = PLANNER_INSTRUCTIONS
     # The plain-text planner.
     class TaskPlannerTextSignature(dspy.Signature):
         __doc__ = base_docstring
@@ -1805,12 +2739,8 @@ def build_query_with_next_steps(user_query: str,
         )
         next_steps: str = dspy.OutputField(desc="task descriptions as a numbered list of short sentences separated by line breaks")
 
-    available_commands = CommandMetadataAPI.get_all_contexts_command_display_text(
-        subject_workflow_path=current_workflow.folderpath,
-        cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
-        active_context_name=current_workflow.current_command_context_name,
-        navigation_workflow=current_workflow,
-    )
+    available_commands = planner_listing_text(current_workflow, user_query,
+                                              planning_probabilities=planning_probabilities)
 
     # Use provided planner_lm if available (distillation mode), else build from env
     if planner_lm is None:
@@ -1864,45 +2794,64 @@ def build_query_with_next_steps(user_query: str,
 
     plan_text = ""
     plan_source = None
-    skill_args = None
-    skill_notes = None
-    skill_fallback = None
+    planning_command_args = None
+    planning_command_notes = None
+    planning_command_fallback = None
+    prediction = None
+    # The question to put to the user when the planning command call is refused and the turn may ask (see
+    # _planning_command_refusal_may_ask); None when the text planner takes over as before.
+    refusal_ask = None
     if initial_plan:
-        # A phased skill call (skill_phases): the runner reads it after this plan.
-        chat_session_obj._phased_skill_call = None
+        # A phased planning command call (planning_phases): the runner reads it after this plan.
+        chat_session_obj._phased_planning_command_call = None
+        # A refused planning command call the turn asks the user about (set below; read by the execution context).
+        chat_session_obj._planning_command_refusal = None
     try:
         with dspy.context(lm=planner_lm, adapter=agent_adapter):
-            if skill_command is not None and initial_plan:
+            if planning_command is not None and initial_plan:
                 try:
-                    call = plan_skill_call(skill_command, request_text, available_commands, check_lm=_jev_lm(),
-                                           workflow=current_workflow)
-                    prediction, plan_text, skill_args = call.prediction, call.plan, call.args
-                    skill_notes = list(call.notes) or None
+                    # The typed planning call gets the trimmed listing (design 3.4); the text planner keeps the full one.
+                    call = typed_planning_call(planning_command, request_text, typed_planner_commands_text(current_workflow),
+                                           check_lm=_jev_lm(), workflow=current_workflow)
+                    prediction, plan_text, planning_command_args = call.prediction, call.plan, call.args
+                    planning_command_notes = list(call.notes) or None
                     plan_source = "skill_call"
-                    if call.phases is not None:
-                        chat_session_obj._phased_skill_call = (skill_command, call)
-                    logger.info(f"skill call {skill_command.name}{call.args}"
+                    chat_session_obj._phased_planning_command_call = (planning_command, call)
+                    logger.info(f"planning command call {planning_command.name}{call.args}"
                                 + (f" ({'; '.join(call.notes)})" if call.notes else ""))
+                except PlanningCommandInputError as exc:  # asked of the user, or the text planner takes over
+                    planning_command_fallback = f"{type(exc).__name__}: {exc}"[:500]
+                    refusal_ask = planning_command_refusal_to_ask(chat_session_obj, planning_command, exc)
+                    if refusal_ask is not None:
+                        logger.info(f"planning command call {planning_command.name} refused, asking the user: {refusal_ask!r}")
+                    else:
+                        logger.info(f"planning command call {planning_command.name} failed, planning from its template: {planning_command_fallback}")
                 except Exception as exc:  # noqa: BLE001 - the text planner with the template takes over
-                    skill_fallback = f"{type(exc).__name__}: {exc}"[:500]
-                    logger.info(f"skill call {skill_command.name} failed, planning from its template: {skill_fallback}")
-            if plan_source is None:
+                    planning_command_fallback = f"{type(exc).__name__}: {exc}"[:500]
+                    logger.info(f"planning command call {planning_command.name} failed, planning from its template: {planning_command_fallback}")
+            if plan_source is None and refusal_ask is None:
                 prediction = plan_with()
                 plan_text = prediction.next_steps or ""
                 plan_source = "text" if plan_text else "none"
     except BaseException:
         tracing.end_span(chat_session_obj, span, status=tracing.STATUS_ERROR)
         raise
+    if refusal_ask is not None:
+        # No plan for the refused call: the turn waits on the user, and the execution context
+        # reads the question and suspends (_call_agent_for_query).
+        chat_session_obj._planning_command_refusal = refusal_ask
+        plan_source = "none"
     tracing.end_span(
         chat_session_obj,
         span,
         attributes={
             "plan": plan_text,
             "plan_source": plan_source,
-            "skill": skill_command.name if skill_command is not None and initial_plan else None,
-            "skill_args": skill_args,
-            "skill_notes": skill_notes,
-            "skill_fallback": skill_fallback,
+            "skill": planning_command.name if planning_command is not None and initial_plan else None,
+            "skill_args": planning_command_args,
+            "skill_notes": planning_command_notes,
+            "skill_fallback": planning_command_fallback,
+            "skill_refusal_asked": True if refusal_ask is not None else None,
         },
     )
 

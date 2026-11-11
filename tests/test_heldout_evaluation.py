@@ -700,7 +700,6 @@ _LABEL_SPACE = {
         "AccessReviewWorkspace/list_items",
     },
 }
-_ANCESTOR_MAP = {"ReviewTicket": ["AccessReviewWorkspace"], "AccessReviewWorkspace": []}
 
 
 def test_validate_escalation_cases_accepts_a_structurally_valid_case():
@@ -712,7 +711,7 @@ def test_validate_escalation_cases_accepts_a_structurally_valid_case():
             expected_ancestor_command="AccessReviewWorkspace/bulk_decide",
         )
     ]
-    assert validate_escalation_cases(cases, _LABEL_SPACE, _ANCESTOR_MAP) == []
+    assert validate_escalation_cases(cases, _LABEL_SPACE) == []
 
 
 def test_validate_escalation_cases_rejects_a_command_present_in_the_tested_context():
@@ -724,12 +723,12 @@ def test_validate_escalation_cases_rejects_a_command_present_in_the_tested_conte
             expected_ancestor_command="ReviewTicket/certify_approve",
         )
     ]
-    problems = validate_escalation_cases(cases, _LABEL_SPACE, _ANCESTOR_MAP)
+    problems = validate_escalation_cases(cases, _LABEL_SPACE)
     assert len(problems) == 1
     assert "IS in the tested context's label space" in problems[0]
 
 
-def test_validate_escalation_cases_rejects_a_command_absent_from_every_ancestor():
+def test_validate_escalation_cases_rejects_a_command_absent_from_every_other_context():
     cases = [
         BenchmarkCase(
             context="ReviewTicket",
@@ -738,12 +737,14 @@ def test_validate_escalation_cases_rejects_a_command_absent_from_every_ancestor(
             expected_ancestor_command="SomewhereElse/do_thing",
         )
     ]
-    problems = validate_escalation_cases(cases, _LABEL_SPACE, _ANCESTOR_MAP)
+    problems = validate_escalation_cases(cases, _LABEL_SPACE)
     assert len(problems) == 1
-    assert "not present in any ancestor" in problems[0]
+    assert "not present in any other context" in problems[0]
 
 
-def test_validate_escalation_cases_rejects_a_context_with_no_ancestors():
+def test_validate_escalation_cases_finds_the_command_in_a_context_that_is_not_an_ancestor():
+    """Phase 9 step 5: the sparse class samples every foreign command, so the expected command
+    may live in any other context. A parent link is not required (the file is retired)."""
     cases = [
         BenchmarkCase(
             context="AccessReviewWorkspace",
@@ -752,9 +753,22 @@ def test_validate_escalation_cases_rejects_a_context_with_no_ancestors():
             expected_ancestor_command="ReviewTicket/certify_approve",
         )
     ]
-    problems = validate_escalation_cases(cases, _LABEL_SPACE, _ANCESTOR_MAP)
+    assert validate_escalation_cases(cases, _LABEL_SPACE) == []
+
+
+def test_validate_escalation_cases_rejects_a_workflow_with_no_other_context_to_escalate_to():
+    lonely = {"ReviewTicket": {"ReviewTicket/certify_approve"}}
+    cases = [
+        BenchmarkCase(
+            context="ReviewTicket",
+            utterance="nothing above this",
+            kind="escalation",
+            expected_ancestor_command="SomewhereElse/do_thing",
+        )
+    ]
+    problems = validate_escalation_cases(cases, lonely)
     assert len(problems) == 1
-    assert "no ancestors" in problems[0]
+    assert "not present in any other context" in problems[0]
 
 
 def test_validate_escalation_cases_ignores_routing_cases():
@@ -765,7 +779,7 @@ def test_validate_escalation_cases_ignores_routing_cases():
             expected_label="ReviewTicket/certify_approve",
         )
     ]
-    assert validate_escalation_cases(cases, _LABEL_SPACE, _ANCESTOR_MAP) == []
+    assert validate_escalation_cases(cases, _LABEL_SPACE) == []
 
 
 def test_validate_routing_cases_rejects_a_label_outside_the_context():

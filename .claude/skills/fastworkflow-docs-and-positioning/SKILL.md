@@ -69,7 +69,7 @@ one is public, one is team-private.
 | | Root tutorial series | docs/ failure series |
 |---|---|---|
 | Files | `fastworkflow-article-1.md` … `-4.md` (repo root, git-tracked) | `docs/Article 1 - The Setup.pdf`, `Article 2 - The Failure Taxonomy.pdf`, `Article 3 - Mitigations and a Path Forward.pdf` (UNTRACKED) |
-| What | 4-part published tutorial: hello_world → stateful classes → inheritance (`context_inheritance_model.json`) → parent-child hierarchies (`context_hierarchy_model.json`) | 3-part study of an RLM memory layer on τ²-bench retail: 15 hand-picked hard tasks, 2/15 → 5/15 after mitigations, failure taxonomy |
+| What | 4-part published tutorial: hello_world → stateful classes → inheritance (`context_inheritance_model.json`) → parent-child hierarchies (`get_parent` in `_<Context>.py`) | 3-part study of an RLM memory layer on τ²-bench retail: 15 hand-picked hard tasks, 2/15 → 5/15 after mitigations, failure taxonomy |
 | Authors | Dhar Rawal / core team | Rakshit Pandhi (principal), Sanchit Satija, Sharvil Oza; mentored by Dhar; funded by Radiant Logic |
 | Visibility | PUBLIC | TEAM-PRIVATE until Dhar decides (dated Jul 7 2026) |
 | Citation hygiene | article-4 link text says `github.com/fastworkflow/fastworkflow` but href is `radiantlogicinc/fastworkflow` (line 637) — org migration status unknown | DOI + arXiv citation errors, see §4 |

@@ -1,8 +1,8 @@
 from typing import Optional
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
+from fastworkflow.utils.signatures import NOT_FOUND
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from ...application.workitem import WorkItem
 
@@ -25,6 +25,12 @@ class Signature:
             default=None
         )
 
+        @model_validator(mode="after")
+        def clear_placeholder_workitem_type(self, info):
+            if self.workitem_type == NOT_FOUND:
+                self.workitem_type = None
+            return self
+
     class Output(BaseModel):
         error_msg: Optional[str] = Field(
             description="Error msg if the removal failed",
@@ -44,20 +50,13 @@ class Signature:
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
-    @staticmethod
-    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> tuple[bool, str]:
-        if cmd_parameters.workitem_type == fastworkflow.get_env_var('NOT_FOUND'):
-            cmd_parameters.workitem_type = None
-        return (True, '')
-
-
 class ResponseGenerator:
     """Handle command execution and craft the textual response."""
 
     def _process_command(self, 
                          workflow: fastworkflow.Workflow, 
                          input: Signature.Input) -> Signature.Output:
-        parent_workitem: WorkItem = workflow.command_context_for_response_generation
+        parent_workitem: WorkItem = workflow.record
 
         try:
             # Get the child work item at the specified index and type
@@ -77,17 +76,12 @@ class ResponseGenerator:
         except (ValueError, IndexError) as e:
             return Signature.Output(str(e))
 
-    def __call__(self, workflow: fastworkflow.Workflow, command: str, 
-                 command_parameters: Signature.Input) -> CommandOutput:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str,
+                 command_parameters: Signature.Input) -> str:
         output = self._process_command(workflow, command_parameters)
-        
+
         if output.error_msg:
-            response = output.error_msg
-        else:
-            workitem: WorkItem = workflow.command_context_for_response_generation
-            response = f"Removed child work item under '{workitem.get_absolute_path()}'."
-        
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=response)
-        )
+            return fastworkflow.CommandResponse(response=output.error_msg, output=output)
+        workitem: WorkItem = workflow.record
+        return fastworkflow.CommandResponse(
+            response=f"Removed child work item under '{workitem.get_absolute_path()}'.", output=output)

@@ -767,7 +767,7 @@ judgement that the task was accomplished".
 
 **What is NOT enforced**, stated because a draft of this section promised it and
 something weaker shipped: nothing refuses to score a workflow whose commands
-never set `success=False`. That check needs a per-workflow notion of "reports
+never refuse with `fastworkflow.Refused`. That check needs a per-workflow notion of "reports
 failure honestly" which this container does not have. The warning is visible;
 the refusal is not implemented. See §12 item 4.
 

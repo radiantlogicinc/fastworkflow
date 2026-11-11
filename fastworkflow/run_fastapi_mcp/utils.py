@@ -16,6 +16,7 @@ from jwt.exceptions import PyJWTError as JWTError
 from pydantic import BaseModel, Field, field_validator
 
 import fastworkflow
+from fastworkflow import approval_binding
 from fastworkflow.session_state_store import (
     IncompatibleSessionState,
     PendingReapOutcome,
@@ -229,6 +230,8 @@ class InvokeRequest(BaseModel):
     # This turn runs with nobody to answer: the agent gets no ask_user tool.
     # Per turn, never sticky; omitted means attended.
     unattended: bool = False
+    # The token of a pending approval (ADR-EXP-025), carried back on the reply that answers it.
+    approval_token: Optional[str] = None
 
 
 _dspy_cache_enabled: Optional[bool] = None
@@ -888,6 +891,10 @@ async def _create_user_runtime(
 ) -> None:
     """Build and register a fresh Topology-B runtime (caller holds creation lock)."""
     context = _merge_workflow_context(context, http_bearer_token)
+    # Phase 9 step 4: refuse an app whose artifacts predate the not-here construction, before the
+    # experiment claim below reserves anything. The CME is checked by WorkflowExecutionContext.
+    from fastworkflow.train.artifact_versioning import require_construction_record
+    require_construction_record(workflow_path)
     logger.info(f"Creating new Topology-B session for channel_id: {channel_id}")
 
     claim: Optional[dict[str, Any]] = None
@@ -968,6 +975,15 @@ async def _create_user_runtime(
         )
 
     if pending := session_manager.session_state_store.load(channel_id):
+        # fix-ayez: a restored blob drops parked state of conversations the store no longer has, so a deleted or
+        # reused id cannot resurrect it. The blob's own conversation is kept.
+        if _prune_parked_blob(
+            pending, channel_id,
+            trace_sink.store if trace_sink is not None else None,
+            keep=pending.get("conversation_id"),
+        ):
+            session_manager.session_state_store.save(channel_id, pending)
+            logger.info(f"Pruned parked pending state of deleted conversations for channel_id {channel_id}")
         pending_claim = (
             {
                 "experiment_id": pending.get("experiment_id"),
@@ -1091,7 +1107,12 @@ def persist_pending_after_turn(
     # has_open_command(): a mid-parameter-extraction session is not
     # awaiting_user but still holds partially extracted parameters (see the
     # twin in turns.persist_pending_after_turn).
-    if ctx.awaiting_user or _is_awaiting_user_output(output) or ctx.has_open_command():
+    # A pending approval (ADR-EXP-025) is durable suspended state too: it survives eviction and restart.
+    pending_approval = approval_binding.active_record(ctx.app_workflow) is not None
+    # fix-ayez: parked state of a conversation the store no longer has is dropped before the save decides what to keep.
+    prune_parked_pending(runtime)
+    # Parked state (fix-newconv-pending) is saved too: it is kept for its conversation until that one is active again.
+    if ctx.awaiting_user or _is_awaiting_user_output(output) or ctx.has_open_command() or pending_approval or ctx.has_parked_pending():
         try:
             state = ctx.serialize_state(channel_id=runtime.channel_id)
         except StateEncodingError as exc:
@@ -1103,6 +1124,89 @@ def persist_pending_after_turn(
         session_manager.session_state_store.save(runtime.channel_id, state)
     else:
         session_manager.session_state_store.clear(runtime.channel_id)
+
+
+def _existing_conversation_ids(store, channel_id: str, conversation_ids: list[int]) -> Optional[set[int]]:
+    """The ids that still name a live conversation, or None when the store cannot say (then nothing is pruned)."""
+    try:
+        return store.existing_conversation_ids(channel_id, conversation_ids)
+    except Exception as exc:  # noqa: BLE001 - an unreadable store must not fail a save; it prunes nothing
+        logger.warning(
+            f"Parked pending state of channel_id {channel_id} not pruned: the conversation store could not be read "
+            f"({type(exc).__name__}: {exc})"
+        )
+        return None
+
+
+def prune_parked_pending(runtime: "ChannelRuntime") -> int:
+    """Drop parked pending state whose conversation the observability store no longer has (fix-ayez).
+
+    Archiving and deleting conversations happen in the run_chatbot server, which cannot reach this process's parked
+    state, so the parked state is checked against the store whenever it is about to be saved, and again before a
+    conversation id is minted (a reused id must not inherit a deleted conversation's state). The bound conversation
+    keeps its state, and the "none" and unowned keys are not conversation ids. No store, or an unreadable one, prunes
+    nothing. Returns the number of parked snapshots dropped.
+    """
+    ctx = runtime.execution_context
+    if not ctx.has_parked_pending():
+        return 0
+    store = getattr(runtime, "observability_store", None)
+    if store is None:
+        return 0
+    bound = ctx.bound_conversation_id()
+    ids = [cid for cid in ctx.parked_conversation_ids() if cid != bound]
+    if not ids:
+        return 0
+    live = _existing_conversation_ids(store, runtime.channel_id, ids)
+    if live is None:
+        return 0
+    return sum(ctx.drop_parked_pending(cid) for cid in ids if cid not in live)
+
+
+def _prune_parked_blob(state: dict, channel_id: str, store, keep) -> int:
+    """The same prune on a saved blob, before it is restored (fix-ayez). Edits *state* in place; returns the count."""
+    parked = dict(state.get("parked_pending") or {})
+    ids = [int(key) for key in parked if key.isdigit() and int(key) != keep]
+    if not ids or store is None:
+        return 0
+    live = _existing_conversation_ids(store, channel_id, ids)
+    if live is None:
+        return 0
+    dropped = 0
+    for cid in ids:
+        if cid not in live:
+            dropped += len(parked.pop(str(cid), None) or [])
+    if dropped:
+        state["parked_pending"] = parked
+    return dropped
+
+
+def drop_parked_pending_for_conversation(
+    session_manager: "ChannelSessionManager",
+    channel_id: str,
+    conversation_id: int,
+    runtime: "Optional[ChannelRuntime]" = None,
+) -> int:
+    """Drop the pending state parked for a deleted or archived conversation (fix-ayez).
+
+    A loaded runtime is changed in memory and saved through persist_pending_after_turn, the helper every other path
+    uses. With no loaded runtime the saved blob is edited directly: nothing live can re-save the entry. Returns the
+    number of parked snapshots dropped.
+    """
+    if runtime is not None:
+        dropped = runtime.execution_context.drop_parked_pending(conversation_id)
+        persist_pending_after_turn(session_manager, runtime, None)
+        return dropped
+    state = session_manager.session_state_store.load(channel_id)
+    if not state:
+        return 0
+    parked = dict(state.get("parked_pending") or {})
+    dropped = parked.pop(str(conversation_id), None) or []
+    if not dropped:
+        return 0
+    state["parked_pending"] = parked
+    session_manager.session_state_store.save(channel_id, state)
+    return len(dropped)
 
 
 async def run_process_turn(
@@ -1745,6 +1849,9 @@ class ChannelSessionManager:
                 )
                 continue
 
+            # Eviction is not session end: pending approvals live in the session's stored state and
+            # survive it (ADR-EXP-025 answer 4, section 6.4 token hash only), so they are not cleared here.
+
             try:
                 generation = checkpoint.publish(
                     self.checkpoint_store, runtime, eligibility, self._launch_context
@@ -1813,9 +1920,18 @@ class ChannelSessionManager:
             await self._evict_oldest_if_needed()
             return runtime
 
+    def _clear_pending_approvals(self, channel_id: str, runtime: "ChannelRuntime") -> bool:
+        """Cancel the session's pending approvals and drop their stored state. True when any were cancelled."""
+        cancelled = runtime.execution_context.cancel_pending_approvals()
+        if cancelled:
+            self.session_state_store.clear(channel_id)
+        return bool(cancelled)
+
     async def remove_session(self, channel_id: str) -> None:
         async with self._lock:
             if runtime := self._sessions.pop(channel_id, None):
+                # Session end: pending approvals end with the session (owner 2026-11-01).
+                self._clear_pending_approvals(channel_id, runtime)
                 runtime.execution_context.close()
 
     async def evict_live_session(self, channel_id: str) -> None:
@@ -1864,11 +1980,12 @@ def reserve_conversation_id(runtime: "ChannelRuntime") -> int:
     """
     ctx = runtime.execution_context
     sink = getattr(ctx, "trace_sink", None)
-    conv_id = (
-        _mint_conversation_id(sink, runtime.channel_id)
-        if isinstance(sink, SQLiteTraceSink)
-        else None
-    )
+    conv_id = None
+    if isinstance(sink, SQLiteTraceSink):
+        # fix-ayez: prune before the mint, so an id the store reuses after a deletion never restores the deleted
+        # conversation's parked state (the bound conversation's own state is kept).
+        prune_parked_pending(runtime)
+        conv_id = _mint_conversation_id(sink, runtime.channel_id)
     conv_id = int(conv_id or 0)
     if conv_id:
         ctx.bind_observability_identity(conversation_id=conv_id)

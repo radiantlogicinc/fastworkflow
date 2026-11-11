@@ -3,7 +3,6 @@ from typing import List
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.workflow import Workflow
-from fastworkflow import CommandOutput, CommandResponse
 
 from ..retail_data import load_data
 from ..tools.transfer_to_human_agents import TransferToHumanAgents
@@ -13,7 +12,6 @@ class Signature:
     """Transfer to a human agent ONLY if the user demands it explicitly."""
     class Input(BaseModel):
         summary: str = Field(
-            default="NOT_FOUND",
             description="A summary of the user's issue",
             examples=["Customer needs help with complex return process"],
         )
@@ -46,14 +44,9 @@ class Signature:
 
 
 class ResponseGenerator:
-    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandOutput:
+    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> Signature.Output:
         output = self._process_command(workflow, command_parameters)
-        response = (
-            f'Response: transfer status: {output.status}'
-        )
-        return CommandOutput(
-            command_response=CommandResponse(response=response),
-        )
+        return output
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()

@@ -65,11 +65,11 @@ Four rules make the difference between a real harness and a loop over command ca
    an earlier turn produced, not from internal state. The rendered response is all an agent ever
    sees, so if a listing does not expose its handles legibly, that is a defect this suite should
    catch.
-3. **Run the validation hook.** `Signature.validate_extracted_parameters` is part of the runtime
+3. **Run the Input's model validators.** The `@model_validator`s on `Signature.Input` are part of the runtime
    path, and normalising rules write back onto the parameter object the command body then reads.
-   Skipping it tests a call the runtime never makes. Return a validation failure as a soft outcome,
-   not an exception — the runtime hands the message back for correction, so a bad call is still a
-   conversation.
+   Skipping it tests a call the runtime never makes. A refusal (`raise fastworkflow.Refused(...)`) is a
+   soft outcome, not an exception — the runtime hands the message back for correction, so a bad call is
+   still a conversation.
 4. **Writes are opt-in and paired.** Every write turn gets a restore turn, so a default run is
    net-neutral. Anything genuinely destructive is *validated* (its input object is constructed) and
    never sent.

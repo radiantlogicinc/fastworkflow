@@ -66,8 +66,8 @@ class ContextProjection:
 
     ``anchor`` is the one object actually serialized; the other slots are stored
     as locators into it. Two independent snapshots of the same node would restore
-    as two objects, and ``workflow.current_command_context`` would no longer be a
-    node inside ``workflow.root_command_context``.
+    as two objects, and ``workflow._current_command_context`` would no longer be a
+    node inside ``workflow.root``.
     """
 
     outcome: ProjectionOutcome
@@ -138,9 +138,9 @@ def project_command_contexts(workflow: "fastworkflow.Workflow") -> ContextProjec
     current context, because a workflow may set only the current one — and stores
     the other slots as locators relative to it.
     """
-    root = workflow.root_command_context
-    current = workflow.current_command_context
-    response = workflow.command_context_for_response_generation
+    root = workflow.root
+    current = workflow._current_command_context
+    response = workflow.record
 
     anchor = root if root is not None else current
     if anchor is None:
@@ -233,14 +233,14 @@ def restore_command_contexts(
         )
 
     if record.get("anchor_is_root"):
-        workflow.root_command_context = anchor
+        workflow.root = anchor
     else:
-        workflow.current_command_context = anchor
+        workflow.record = anchor
 
-    workflow.current_command_context = _resolve(
+    workflow.record = _resolve(
         hooks, anchor, record.get("current_locator")
     )
-    workflow.command_context_for_response_generation = _resolve(
+    workflow._command_context_for_response_generation = _resolve(
         hooks, anchor, record.get("response_locator")
     )
     return True

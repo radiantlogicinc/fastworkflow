@@ -35,8 +35,9 @@ For each context to train (workflow contexts − internal CME contexts, + `'*'` 
 `global`):
 
 1. **Labels** = context's commands + core commands (`cmd_dir.core_command_names`).
-2. **Utterances per command** = output of the command's `generate_utterances`
-   staticmethod, i.e. humanized command name + `generate_diverse_utterances(seeds, name)`
+2. **Utterances per command** = output of the command's `generate_utterances` (its own, or the
+   framework default `default_generate_utterances`), i.e. humanized command name +
+   `generate_diverse_utterances(seeds, name)`
    (which itself prepends the raw command name and seeds). Commands lacking
    `Signature.Input` return `[]` and are skipped (:741-766).
 3. **Negative class**: label `wildcard` gets (ancestor-context utterances − this

@@ -61,7 +61,7 @@ Inside wildcard's ResponseGenerator
 | Predict command name | `:39-40` | `CommandNamePrediction.predict(context_name, command, nlu_stage)` |
 | Ambiguity | `:42-57` | set stage `INTENT_AMBIGUITY_CLARIFICATION`, store `command`, return `success=False` |
 | Core/CME command | `:65-89` | `perform_action` on the CME workflow itself; mark `command_handled` for INTENT_DETECTION-stage hits and `abort` |
-| Context-parent walk | `:99-107` | if no command found, retry prediction while walking `app_workflow.get_parent(...)` up the hierarchy (this is where `context_hierarchy_model.json` / `_<Context>.py` earn their keep) |
+| Context-parent walk | `:99-107` | if no command found, retry prediction while walking `app_workflow.get_parent(...)` up the live chain (this is where `_<Context>.py` `get_parent` earns its keep; there is no hierarchy file) |
 | Out-of-scope | `:109-124` | force `ErrorCorrection/you_misunderstood` |
 | Param extraction | `:140-164` | `ParameterExtraction(...).extract()`; invalid → `PARAMETER EXTRACTION ERROR ...`, `success=False`, stage stays `PARAMETER_EXTRACTION` |
 | Success | `:166-179` | `workflow.end_command_processing()` (resets stage to INTENT_DETECTION, clears `command`/`stored_parameters` — `workflow.py:291-303`), return artifacts `{command, command_name, cmd_parameters}` |

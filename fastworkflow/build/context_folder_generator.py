@@ -124,8 +124,8 @@ from ...application.{context.lower()} import {context}
 
 class Context:
     @classmethod
-    def get_parent(cls, command_context_object: {context}) -> Optional[{parent_type}]:
-        return getattr(command_context_object, 'parent', None)
+    def get_parent(cls, record: {context}) -> Optional[{parent_type}]:
+        return getattr(record, 'parent', None)
 """
 
                 # Write the file

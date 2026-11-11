@@ -57,12 +57,9 @@ class ResponseGenerator:
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         return Signature.Output(result=True)
     
-    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandOutput:
+    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandResponse:
         output = self._process_command(workflow, command_parameters)
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=output.model_dump_json())
-        )
+        return CommandResponse(response=output.model_dump_json())
 """)
     
     def tearDown(self):

@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import BaseModel, Field
 
+import fastworkflow
 from fastworkflow import NLUPipelineStage
 from fastworkflow._workflows.command_metadata_extraction import parameter_extraction as pe_module
 from fastworkflow._workflows.command_metadata_extraction._commands import wildcard
@@ -36,7 +37,7 @@ class _FindParams(BaseModel):
 
 
 class _MarkedFindParams(BaseModel):
-    query: Optional[str] = Field(default=None, json_schema_extra={"positional": True})
+    query: Optional[str] = Field(default=None, json_schema_extra={"command_text_after_command_name": True})
     start: Optional[int] = Field(default=None)
 
 
@@ -50,7 +51,7 @@ class _TwoStrings(BaseModel):
 
 
 class _MarkedTwoStrings(BaseModel):
-    book_uid: Optional[str] = Field(default=None, json_schema_extra={"positional": True})
+    book_uid: Optional[str] = Field(default=None, json_schema_extra={"command_text_after_command_name": True})
     filter: Optional[str] = Field(default=None)
 
 
@@ -142,7 +143,9 @@ def test_xml_records_no_deterministic_form(harness):
     assert "deterministic_form" not in diagnostics
 
 
-def test_assistant_mode_does_not_parse_in_code(harness):
+def test_assistant_mode_does_not_parse_in_code(harness, monkeypatch):
+    # Which path runs, not the argument checks (fix-qjf4, which would refuse the made-up answer).
+    monkeypatch.setitem(fastworkflow._env_vars, "FW_EXTRACTION_ARGUMENT_CHECKS", "off")
     output, diagnostics, _ = harness(
         _FindParams, f"{FIND}: find_book query=Ann", agent=False,
         llm_result=lambda cls: cls(query="from llm"))
@@ -250,8 +253,8 @@ def test_positional_needs_this_command_as_lead_and_a_plain_text():
 
 def test_positional_declines_two_marks():
     class _TwoMarks(BaseModel):
-        a: Optional[str] = Field(default=None, json_schema_extra={"positional": True})
-        b: Optional[str] = Field(default=None, json_schema_extra={"positional": True})
+        a: Optional[str] = Field(default=None, json_schema_extra={"command_text_after_command_name": True})
+        b: Optional[str] = Field(default=None, json_schema_extra={"command_text_after_command_name": True})
 
     assert _pos("find_book x", _TwoMarks) is None
 
@@ -271,7 +274,7 @@ LIST = "Shelf/list_books"
 def _pending_round(stored, command=LIST):
     workflow = MagicMock()
     app_workflow = MagicMock()
-    app_workflow.current_command_context_name = "Shelf"
+    app_workflow._current_command_context_name = "Shelf"
     workflow.context = {
         "app_workflow": app_workflow,
         "NLU_Pipeline_Stage": NLUPipelineStage.PARAMETER_EXTRACTION,
@@ -312,7 +315,7 @@ def test_new_full_command_in_a_pending_round_is_a_fresh_extraction(recorded):
     stale = _ListParams.model_construct(scope="other", scope_uid=NOT_FOUND)
     workflow, _ = _pending_round(stale)
     new = "list_books scope=shelf scope_uid=3c85"
-    wildcard.ResponseGenerator()(workflow, new)
+    wildcard.ResponseGenerator()(workflow, new, None)
 
     assert recorded == [{"text": f"{LIST}: {new}", "stored": None}]
     assert workflow.context["command"] == new
@@ -322,7 +325,7 @@ def test_new_full_command_in_a_pending_round_is_a_fresh_extraction(recorded):
 def test_answer_in_a_pending_round_merges_the_new_text(recorded):
     stale = _ListParams.model_construct(scope="shelf", scope_uid=NOT_FOUND)
     workflow, _ = _pending_round(stale)
-    wildcard.ResponseGenerator()(workflow, "3c85")
+    wildcard.ResponseGenerator()(workflow, "3c85", None)
 
     assert recorded == [{"text": f"{LIST}: 3c85", "stored": stale}]
     assert workflow.context["command"] == LIST  # the pending command is kept
@@ -336,11 +339,11 @@ def test_assistant_mode_retry_round_binds_the_answer(no_prediction, harness):
     stored = _ListParams.model_construct(scope="shelf", scope_uid=NOT_FOUND)
     workflow, app_workflow = _pending_round(stored)
     app_workflow.context = {}
-    output = wildcard.ResponseGenerator()(workflow, "3c85")
+    route = wildcard.ResponseGenerator()(workflow, "3c85", None)
 
-    params = output.command_response.artifacts["cmd_parameters"]
+    params = route.cmd_parameters
     assert (params.scope, params.scope_uid) == ("shelf", "3c85")
-    assert output.command_response.artifacts["command"] == f"{LIST}: {LIST}"
+    assert route.command == f"{LIST}: {LIST}"
 
 
 # ---------------------------------------------------------------------------
@@ -356,7 +359,10 @@ def test_a_bare_command_binds_its_defaults_without_the_llm(harness, text):
     assert diagnostics["deterministic_form"] == "bare"
 
 
-def test_a_bare_command_with_a_required_field_takes_the_existing_path(harness):
+def test_a_bare_command_with_a_required_field_takes_the_existing_path(harness, monkeypatch):
+    # Which path runs, not the argument checks (fix-qjf4 refuses the made-up answer:
+    # tests/test_extraction_argument_checks.py).
+    monkeypatch.setitem(fastworkflow._env_vars, "FW_EXTRACTION_ARGUMENT_CHECKS", "off")
     output, diagnostics, _ = harness(
         _OpenParams, f"{OPEN}: open_book", command_name=OPEN,
         llm_result=lambda cls: cls.model_construct(book_uid="from llm"))

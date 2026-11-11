@@ -28,7 +28,7 @@ class ResponseGenerator:
     """Call the User.send_message instance method."""
 
     def _process_command(self, workflow: fastworkflow.Workflow) -> Signature.Output:
-        chatroom: ChatRoom = workflow.command_context_for_response_generation
+        chatroom: ChatRoom = workflow.record
         if chatroom.current_user:
             return Signature.Output(user_name=chatroom.current_user.name)
         else:
@@ -36,15 +36,9 @@ class ResponseGenerator:
 
     def __call__(self, workflow: 
                  fastworkflow.Workflow, 
-                 command: str) -> fastworkflow.CommandOutput:
+                 command: str, input: None) -> Signature.Output:
         """The framework will call this function to process the command"""
         output = self._process_command(workflow)
         
-        response = (
-            f'Response: {output.model_dump_json()}'
-        )
 
-        return fastworkflow.CommandOutput(
-            command_response=
-                fastworkflow.CommandResponse(response=response)
-        )
+        return output

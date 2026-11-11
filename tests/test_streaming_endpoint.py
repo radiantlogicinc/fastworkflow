@@ -5,10 +5,15 @@ Tests SSE streaming functionality with FastWorkflow
 """
 
 import json
-import requests
 import time
+from pathlib import Path
+
+import requests
 
 BASE_URL = "http://localhost:8000"
+# Repo root derived from this file's location, so the test runs from any clone.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+EXAMPLES_DIR = REPO_ROOT / "fastworkflow" / "examples"
 
 def parse_sse_events(response_text):
     """Parse SSE event stream into structured events"""
@@ -41,9 +46,9 @@ def test_streaming_endpoint():
     print(f"1. Initializing session for {user_id}...")
     init_payload = {
         "user_id": user_id,
-        "workflow_path": "/home/drawal/rl/fastworkflow/fastworkflow/examples/todo_list",
-        "env_file_path": "/home/drawal/rl/fastworkflow/fastworkflow/examples/fastworkflow.env",
-        "passwords_file_path": "/home/drawal/rl/fastworkflow/fastworkflow/examples/fastworkflow.passwords.env",
+        "workflow_path": str(EXAMPLES_DIR / "todo_list"),
+        "env_file_path": str(EXAMPLES_DIR / "fastworkflow.env"),
+        "passwords_file_path": str(EXAMPLES_DIR / "fastworkflow.passwords.env"),
         "show_agent_traces": True
     }
     

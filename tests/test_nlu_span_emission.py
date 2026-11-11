@@ -4,12 +4,12 @@ Real components throughout (testing_rules.mdc): the trained
 fastworkflow/examples/hello_world workflow drives the REAL intent-detection
 matching layers (exact prefix, fuzzy pre-match, TinyBERT/DistilBERT
 classifier) and the real XML-regex parameter extraction; messaging_app_4's
-``set_current_user`` drives the real ``db_lookup`` fuzzy matcher. The only
+``set_current_user`` drives the real validation hook's fuzzy matcher. The only
 test-authored piece is RecordingTraceSink — a real implementation of the
 TraceSink protocol (the pluggable seam the design defines).
 
 No LLM is called anywhere here: the classifier path is local models, the
-extraction path is the agent-mode XML regex, and db_lookup/validation run at
+extraction path is the agent-mode XML regex, and the validation hook runs at
 the validate_parameters level.
 """
 
@@ -149,7 +149,10 @@ class TestParamExtractionSpan:
         assert span.attributes["extraction_method"] == "xml_regex"
         assert span.attributes["retry_round"] is False
         assert span.attributes["parameters_valid"] is True
-        assert span.attributes["validation_hook"]["ran"] is True
+        # add_two_numbers declares no Input validator, so the validation step did not run
+        # (ran=False is the honest fact). The facts are still emitted; a command with a
+        # validator reports ran=True (test_validation_hook_outcomes_are_structured).
+        assert span.attributes["validation_hook"]["ran"] is False
         assert span.attributes["validation_hook"]["is_valid"] is True
 
     def test_key_value_extraction_valid(self, hello_ctx):
@@ -192,7 +195,10 @@ class TestStructuredValidationDiagnostics:
         assert diagnostics["missing_fields"] == ["second_num"]
         assert diagnostics["invalid_fields"] == []
 
-    def test_db_lookup_events_are_structured(self):
+    def test_validation_hook_outcomes_are_structured(self):
+        # The fuzzy user lookup is the workflow's validate_extracted_parameters hook (fix-3rsq.one-hook), so its
+        # outcome is the validation_hook diagnostic: ran, is_valid, changed_fields (the value it rewrote in place)
+        # and refused_fields (the fields it refused, with suggestions in the message). No db_lookup events.
         from fastworkflow.command_routing import RoutingRegistry
 
         wf = fastworkflow.Workflow.create(
@@ -203,14 +209,14 @@ class TestStructuredValidationDiagnostics:
         set_root = routing.get_command_class(
             "set_root_context", fastworkflow.ModuleType.RESPONSE_GENERATION_INFERENCE
         )()
-        set_root(wf, "set root context")
+        set_root(wf, "set root context", None)
         add_user = routing.get_command_class(
             "ChatRoom/add_user", fastworkflow.ModuleType.RESPONSE_GENERATION_INFERENCE
         )()
         add_params = routing.get_command_class(
             "ChatRoom/add_user", fastworkflow.ModuleType.COMMAND_PARAMETERS_CLASS
         )
-        wf.command_context_for_response_generation = wf.root_command_context
+        wf._command_context_for_response_generation = wf.root
         add_user(wf, "add Alice", add_params(user_name="Alice", is_premium_user=False))
         add_user(wf, "add Bob", add_params(user_name="Bob Smith", is_premium_user=True))
 
@@ -219,36 +225,40 @@ class TestStructuredValidationDiagnostics:
         )
         validator = self._validator_for(wf, "ChatRoom/set_current_user")
 
-        # One-edit typo on a long-enough name: the real fuzzy matcher
-        # auto-applies the correction, and the event records the rewrite.
+        # One-edit typo on a long-enough name: the real fuzzy matcher in the hook
+        # applies the correction, the value is written back, and the diagnostic records it.
         diagnostics: dict = {}
         params = params_class.model_construct(user_name="Bob Smyth")
         is_valid, _m, _s, _f = validator.validate_parameters(
             wf, "ChatRoom/set_current_user", params, diagnostics=diagnostics
         )
         assert is_valid is True
-        (event,) = diagnostics["db_lookup"]
-        assert event["field"] == "user_name"
-        assert event["input_value"] == "Bob Smyth"
-        assert event["outcome"] == "applied"
-        assert event["corrected_value"] == "Bob Smith"
-        assert event["corrected"] is True
+        hook = diagnostics["validation_hook"]
+        assert hook["ran"] is True
+        assert hook["is_valid"] is True
+        assert hook["changed_fields"] == ["user_name"]
+        assert hook["refused_fields"] == []
+        assert params.user_name == "Bob Smith"
+        assert "db_lookup" not in diagnostics
 
-        # A far-off value: rejected with structured suggestions.
+        # A far-off value: refused with suggestions, naming the field.
         diagnostics = {}
         params = params_class.model_construct(user_name="Alicia")
         is_valid, _m, _s, _f = validator.validate_parameters(
             wf, "ChatRoom/set_current_user", params, diagnostics=diagnostics
         )
-        (event,) = diagnostics["db_lookup"]
-        if event["outcome"] == "rejected":
+        hook = diagnostics["validation_hook"]
+        assert hook["ran"] is True
+        if hook["is_valid"] is False:
             assert is_valid is False
-            assert event["suggestions"]
+            assert hook["refused_fields"] == ["user_name"]
+            assert hook["message"]
             assert diagnostics["invalid_fields"] == ["user_name"]
         else:
             # The matcher considered it close enough to apply — still a
             # structured, truthful record.
-            assert event["outcome"] == "applied"
+            assert hook["changed_fields"] == ["user_name"]
+        assert "db_lookup" not in diagnostics
 
     def test_diagnostics_none_changes_nothing(self):
         from fastworkflow.command_routing import RoutingRegistry

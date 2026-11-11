@@ -136,6 +136,22 @@ re-inserted from the previous report and tagged `carried_forward` with the versi
 Those numbers still describe the models this version ships, but a diff across two runs will show
 them as unchanged because nothing re-measured them, not because nothing moved.
 
+## When the classifier is unsure: the tie-break reads the first docstring sentence
+
+A turn the classifier does not route alone (several candidates, the "routed without asking" gap
+in the report) is offered to Jev with `JEV_API_KEY` set (`choose_ambiguous_command`). Jev
+routes only when it is at least 0.9 sure; otherwise the turn asks as before. For each candidate it
+sees one thing: the first sentence of the command's `Signature` docstring, or the command's
+first three `plain_utterances` when there is no docstring.
+
+So write that first sentence as the command's plain purpose, in the words a user would use, and
+put conditions and usage notes in the sentences after it. Measured on a workflow's open commands:
+"Open an account of this identity by uid, once its listing has it." was never chosen, because a
+request that gives no uid does not seem to fit it (Jev at 0.36-0.82). "Open one of this identity's
+accounts (logins) to work on it." was chosen correctly in 5 of 6 such turns at 0.92-0.99, with no
+change on the neighbouring commands. Set `FW_JEV_INTENT_TIEBREAK=off` to compare routing without
+the tie-break.
+
 ## Deciding whether a change helped
 
 The noise floor depends entirely on whether generation was cached:

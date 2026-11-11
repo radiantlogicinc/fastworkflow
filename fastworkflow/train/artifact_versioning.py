@@ -14,6 +14,7 @@ Layout
         command_directory.json          <- workflow-scoped, NOT versioned
         routing_definition.json         <- workflow-scoped, NOT versioned
         <command>_param_labeled.json    <- workflow-scoped, NOT versioned
+        workflow_vocabulary.json        <- workflow-scoped, NOT versioned (utils/workflow_vocabulary)
         current.json                    <- authoritative pointer (this module)
         versions/
             README.md                   <- "these cost hours to rebuild" warning
@@ -85,7 +86,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Mapping, Optional
+from typing import Iterable, Mapping, Optional, Sequence
 
 from pydantic import BaseModel
 
@@ -191,6 +192,30 @@ A previous incident destroyed a complete trained set because nothing said so.
 
 The previous version is an internal recovery point, not a user-managed history.
 """
+
+
+class StaleArtifactError(RuntimeError):
+    """Raised at load when trained artifacts carry no not-here construction record.
+
+    Such artifacts were built before the sparse "not here" class became the shipped
+    construction (Phase 9 step 4). Loading them would run a class the current trainer
+    does not build, so the runtime refuses and the owner retrains. Training itself never
+    raises this: the planner reads the baseline and falls back to a full retrain.
+    """
+
+
+#: Manifest key holding the not-here construction record of a version
+#: (``model_pipeline_training.not_here_construction``). Its absence marks an artifact
+#: trained before the record existed.
+NOT_HERE_RECORD_KEY: str = "not_here"
+
+#: Field of the not-here record that says the heads carry the planning commands as labels
+#: (Phase 10 step 1: production). Written only by a workflow WITH planning commands; a version
+#: of such a workflow without ``"planning_heads": "labelled"`` is refused at load.
+#: ``model_pipeline_training.PLANNING_HEADS_LABELLED`` is the same string (this module does not
+#: import the trainer).
+PLANNING_HEADS_RECORD_KEY: str = "planning_heads"
+PLANNING_HEADS_PRODUCTION: str = "labelled"
 
 
 class LegacyArtifactsPresentError(RuntimeError):
@@ -636,6 +661,77 @@ def manifest_is_damaged(workflow_folderpath: str, version_id: str) -> bool:
     return not isinstance(data, dict)
 
 
+def construction_record_problem(workflow_folderpath: str) -> Optional[str]:
+    """Why the trained artifacts of *workflow_folderpath* cannot be loaded, or None.
+
+    Runtime-only check (the trainer never calls it, so `fastworkflow train` can still retrain
+    over an old artifact). It returns None when the workflow has no trained artifacts at all,
+    since "not trained" is reported by the caller's own check. Otherwise it requires the
+    current version's manifest to carry a not-here construction record
+    (``NOT_HERE_RECORD_KEY``). A legacy unversioned layout has no manifest and so no record.
+    A workflow WITH planning commands also needs the record to say its heads carry them as
+    labels (``PLANNING_HEADS_RECORD_KEY``); a workflow without planning commands is not asked.
+    Reads only JSON, so it is cheap enough for the chatbot's workflow listing.
+    """
+    name = os.path.basename(os.path.normpath(workflow_folderpath))
+    version = resolve_current_version(workflow_folderpath)
+    if version is None:
+        if legacy_layout_in_use(workflow_folderpath):
+            return (
+                f"Workflow '{name}' ({workflow_folderpath}) has unversioned trained artifacts "
+                f"that predate the sparse 'not here' class and carry no construction record, "
+                f"so they cannot be loaded: retrain with `fastworkflow train` "
+                f"{workflow_folderpath} <env_file> <passwords_file>."
+            )
+        return None
+    record = read_manifest(workflow_folderpath, version).get(NOT_HERE_RECORD_KEY)
+    if not (isinstance(record, dict) and isinstance(record.get("construction"), str)):
+        return (
+            f"Workflow '{name}' ({workflow_folderpath}) has trained artifacts (version {version}) "
+            f"with no 'not here' construction record, built before the sparse 'not here' class "
+            f"(Phase 9 step 4), so they cannot be loaded: retrain with `fastworkflow train` "
+            f"{workflow_folderpath} <env_file> <passwords_file>."
+        )
+    if workflow_has_planning_commands(workflow_folderpath) and (
+            record.get(PLANNING_HEADS_RECORD_KEY) != PLANNING_HEADS_PRODUCTION):
+        return (
+            f"Workflow '{name}' ({workflow_folderpath}) has planning commands, and its trained "
+            f"artifacts (version {version}) do not carry them as head labels (the 'not here' "
+            f"record has no '{PLANNING_HEADS_RECORD_KEY}': '{PLANNING_HEADS_PRODUCTION}'), built "
+            f"before planning commands became ordinary head labels (Phase 10 step 1), so they "
+            f"cannot be loaded: retrain with `fastworkflow train` "
+            f"{workflow_folderpath} <env_file> <passwords_file>."
+        )
+    return None
+
+
+def workflow_has_planning_commands(workflow_folderpath: str) -> bool:
+    """True when the workflow's command directory snapshot holds a planning command.
+
+    Read from ``___command_info/command_directory.json`` (the snapshot the routing registry
+    writes), so it needs no routing registry and no torch. A missing or unreadable snapshot
+    counts as no planning commands: the artifacts' own record is then the only check left.
+    """
+    path = os.path.join(workflow_folderpath, "___command_info", "command_directory.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    metadata = data.get("map_command_2_metadata") if isinstance(data, dict) else None
+    if not isinstance(metadata, dict):
+        return False
+    return any(isinstance(entry, dict) and entry.get("is_planning") and not entry.get("framework")
+               for entry in metadata.values())
+
+
+def require_construction_record(workflow_folderpath: str) -> None:
+    """Raise `StaleArtifactError` when `construction_record_problem` reports one."""
+    problem = construction_record_problem(workflow_folderpath)
+    if problem is not None:
+        raise StaleArtifactError(problem)
+
+
 # ---------------------------------------------------------------------
 # Promotion-time consistency (spec AR3)
 # ---------------------------------------------------------------------
@@ -657,6 +753,12 @@ COMMAND_UTTERANCE_FINGERPRINTS_KEY: str = "command_utterance_fingerprints"
 CARRY_FORWARD_FROM_KEY: str = "carry_forward_from"
 
 CONTRIBUTION_FORMAT_KEY: str = "contribution_format_version"
+
+#: Per-context key holding a sparse head's not-here samples, ``{foreign command: [seed text]}``
+#: (design 2.50). When present, the head's ``ancestor_utterances_sha256`` is the digest of these
+#: samples (``not_here_samples_fingerprint``) rather than of every foreign command's fingerprint.
+#: A version without the key is checked the old way.
+NOT_HERE_SAMPLES_KEY: str = "not_here_samples"
 
 #: Bump when the shape of the two keys above changes. A version recorded under an
 #: unrecognised value is reported as unverifiable rather than checked against rules
@@ -714,6 +816,22 @@ def utterance_set_fingerprint(
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 
 
+def not_here_samples_fingerprint(samples: Mapping[str, Sequence[str]]) -> str:
+    """Digest a head's not-here samples, order-independently across commands and seeds."""
+    canonical = {name: sorted(texts) for name, texts in sorted(samples.items())}
+    payload = json.dumps(canonical, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _well_formed_samples(value: object) -> bool:
+    return isinstance(value, dict) and all(
+        isinstance(name, str)
+        and isinstance(texts, list)
+        and all(isinstance(text, str) for text in texts)
+        for name, texts in value.items()
+    )
+
+
 def _contribution_block(manifest: dict) -> tuple[dict, dict]:
     """Return (`context_contributions`, `command_utterance_fingerprints`) as dicts."""
     contributions = manifest.get(CONTEXT_CONTRIBUTIONS_KEY)
@@ -765,6 +883,61 @@ def _describe_fingerprint_drift(
         f"{len(changed)} command(s) feeding its wildcard class changed since the "
         f"version it was carried from: {shown}"
     )
+
+
+def _verify_head_layouts(
+    version_id: str,
+    contributions: dict,
+    carried: set[str],
+    source_contributions: dict,
+    result: "VersionConsistency",
+) -> None:
+    """EXPERIMENT (Phase 9 step 3): the head layout must be one thing per version.
+
+    A version whose contexts are a mix of the flattened and scoped layouts, a scoped context
+    whose not-here class is not the sparse construction, or a context carried forward from a
+    different layout, is refused: its artifacts were trained on different label spaces and
+    holdouts and cannot be served together. A record with no ``head_scope`` is today's layout.
+    """
+    # Lazy: model_pipeline_training imports torch, and this module must not.
+    from fastworkflow.model_pipeline_training import FLATTENED, HEAD_SCOPES, SCOPED
+
+    def layout_of(record: dict) -> str:
+        return record.get("head_scope") or FLATTENED
+
+    by_layout: dict[str, list[str]] = {}
+    for context_name, record in contributions.items():
+        if not isinstance(record, dict):
+            continue  # reported as malformed by the caller
+        layout = layout_of(record)
+        if layout not in HEAD_SCOPES:
+            result.problems.append(
+                f"context {context_name!r} in version {version_id} records an unknown head "
+                f"layout {layout!r}"
+            )
+            continue
+        by_layout.setdefault(layout, []).append(context_name)
+        if layout == SCOPED and record.get("reserved_class_construction") != "not_here":
+            result.problems.append(
+                f"context {context_name!r} in version {version_id} is scoped but its "
+                f"not-here class is not the sparse construction"
+            )
+    if len(by_layout) > 1:
+        described = "; ".join(
+            f"{layout}: {', '.join(sorted(names))}" for layout, names in sorted(by_layout.items())
+        )
+        result.problems.append(
+            f"version {version_id} mixes head layouts ({described}); its artifacts were "
+            f"trained on different label spaces and holdouts"
+        )
+    for context_name in sorted(carried):
+        record = contributions.get(context_name)
+        source = source_contributions.get(context_name)
+        if isinstance(record, dict) and isinstance(source, dict) and layout_of(record) != layout_of(source):
+            result.problems.append(
+                f"context {context_name!r} is carried forward from a {layout_of(source)} layout "
+                f"into version {version_id}, which records {layout_of(record)}"
+            )
 
 
 def verify_version_consistency(
@@ -856,6 +1029,9 @@ def verify_version_consistency(
     }
     source_contributions, source_fingerprints = _resolve_carry_forward_records(
         workflow_folderpath, manifest, carried, result
+    )
+    _verify_head_layouts(
+        version_id, contributions, carried, source_contributions, result
     )
 
     for context_name in sorted(contributions):
@@ -989,6 +1165,19 @@ def _verify_one_context(
             if command.split("/")[-1] != WILDCARD_LABEL
         }
 
+    if record.get("reserved_class_construction") == "not_here":
+        # Sparse arm: the wildcard class samples every command outside the head, so its
+        # sources are the whole workflow's label spaces (plus the planning commands the
+        # record names) minus this head's own labels. The ancestor union does not apply.
+        universe: set[str] = set(record.get("not_here_planning_sources", []))
+        for other in contributions.values():
+            if _malformed_contribution_record(other) is None:
+                universe |= set(other["label_space"])
+        expected_sources = {
+            command for command in universe
+            if command.split("/")[-1] != WILDCARD_LABEL
+        } - set(label_space)
+
     if expected_sources != set(wildcard_sources):
         absent = sorted(expected_sources - set(wildcard_sources))
         extra = sorted(set(wildcard_sources) - expected_sources)
@@ -1016,16 +1205,37 @@ def _verify_one_context(
             f"{', '.join(orphans[:5])}{' ...' if len(orphans) > 5 else ''}"
         )
 
-    for field, commands in (
-        ("own_utterances_sha256", label_space),
-        ("ancestor_utterances_sha256", wildcard_sources),
-    ):
-        recomputed = utterance_set_fingerprint(fingerprints, commands)
-        if record[field] != recomputed:
+    recomputed_own = utterance_set_fingerprint(fingerprints, label_space)
+    if record["own_utterances_sha256"] != recomputed_own:
+        result.problems.append(
+            f"the recorded own_utterances_sha256 of context {context_name!r} disagrees with "
+            f"the command fingerprints present in version {version_id}"
+        )
+
+    if NOT_HERE_SAMPLES_KEY in record:
+        samples = record[NOT_HERE_SAMPLES_KEY]
+        if not _well_formed_samples(samples):
             result.problems.append(
-                f"the recorded {field} of context {context_name!r} disagrees with the "
-                f"command fingerprints present in version {version_id}"
+                f"the recorded {NOT_HERE_SAMPLES_KEY} of context {context_name!r} is not a "
+                f"map of command names to lists of seed texts"
             )
+            return
+        if stray := sorted(set(samples) - set(wildcard_sources)):
+            result.problems.append(
+                f"context {context_name!r} records not-here samples for {', '.join(stray)}, "
+                f"which are not among its wildcard-class sources"
+            )
+        recomputed_ancestor = not_here_samples_fingerprint(samples)
+    else:
+        recomputed_ancestor = utterance_set_fingerprint(fingerprints, wildcard_sources)
+    if record["ancestor_utterances_sha256"] != recomputed_ancestor:
+        result.problems.append(
+            f"the recorded ancestor_utterances_sha256 of context {context_name!r} disagrees "
+            f"with the command fingerprints present in version {version_id}"
+            if NOT_HERE_SAMPLES_KEY not in record else
+            f"the recorded ancestor_utterances_sha256 of context {context_name!r} disagrees "
+            f"with the not-here samples recorded in version {version_id}"
+        )
 
     if not record.get("carried_forward"):
         return
@@ -1067,14 +1277,28 @@ def _verify_one_context(
     if source_record["ancestor_utterances_sha256"] != record[
         "ancestor_utterances_sha256"
     ]:
-        result.problems.append(
-            _describe_fingerprint_drift(
-                context_name,
-                set(wildcard_sources) | set(source_record["wildcard_sources"]),
-                fingerprints,
-                source_fingerprints,
+        source_samples = source_record.get(NOT_HERE_SAMPLES_KEY)
+        if NOT_HERE_SAMPLES_KEY in record and _well_formed_samples(source_samples):
+            current_samples = record[NOT_HERE_SAMPLES_KEY]
+            moved = sorted(
+                name
+                for name in set(current_samples) | set(source_samples)
+                if current_samples.get(name) != source_samples.get(name)
             )
-        )
+            result.problems.append(
+                f"context {context_name!r} was carried forward, but its not-here samples for "
+                f"{', '.join(moved) or 'some foreign command'} differ from the version it was "
+                f"carried from, so its models were trained on a different seed of those commands"
+            )
+        else:
+            result.problems.append(
+                _describe_fingerprint_drift(
+                    context_name,
+                    set(wildcard_sources) | set(source_record["wildcard_sources"]),
+                    fingerprints,
+                    source_fingerprints,
+                )
+            )
     if source_record["own_utterances_sha256"] != record["own_utterances_sha256"]:
         result.problems.append(
             f"context {context_name!r} was carried forward, but its own label space's "

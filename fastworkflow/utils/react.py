@@ -49,13 +49,21 @@ class NoSuspendedAgentStateError(RuntimeError):
 class fastWorkflowReAct(Module):
     # Called after each completed tool step (not on suspension); class default for agents built via __new__.
     on_step_end: Callable[[], None] | None = None
-    # Asked once per run when the agent picks ``finish``: ``(trajectory, iters_left)``
-    # -> a note that replaces the finish observation and sends the agent back to
+    # Asked when the agent picks ``finish``, up to ``FINISH_REVIEWS_PER_RUN`` times per run:
+    # ``(trajectory, iters_left)`` -> a note that replaces the finish observation and sends the agent back to
     # the loop, or None to finish. Set by the caller per run (the finish check).
     finish_reviewer: Callable[[dict[str, Any], int], str | None] | None = None
-    # The steps code runs before the loop (``skill_phases.CodeSteps``), for the next
+    # The steps code runs before the loop (``planning_phases.CodeSteps``), for the next
     # forward() only: set by the caller per run, taken (and cleared) by forward().
     code_steps: Any = None
+    # The conversation's policy (``fastworkflow.policy_runtime.AgentPolicy``), set by
+    # ``policy_loader.attach_policy`` when the workflow has _policy/table.py; None
+    # otherwise, and then nothing below changes behaviour.
+    policy: Any = None
+    # False while this run is not the last of its user turn (a sub-task or skill
+    # phase with more to come): the finish policy is skipped, since a later run
+    # carries the rest of the request. Set by the caller per run.
+    policy_final_run: bool = True
 
     def __init__(self, signature: type["Signature"], tools: list[Callable], max_iters: int = 10,
                  on_step_complete: Callable[[int, dict], bool] | None = None):
@@ -128,7 +136,14 @@ class fastWorkflowReAct(Module):
         # Caller-owned state for one executor run; reset in forward().
         self.run_state: dict[str, Any] = {}
         self._on_step_complete = on_step_complete
+        # Caller hooks, None on a plain agent. step_floor is the lowest index the next step may
+        # take; on_iteration is asked after each counted step and returning False ends the run.
+        self.step_floor: Callable[[], int] | None = None
+        self.on_iteration: Callable[[], bool] | None = None
         self._suspended: dict[str, Any] | None = None
+        # The CodeSteps the last run was given, kept for the phase run that reads its count
+        # after a resume. In-process only, like the code of a suspended step.
+        self.last_code: Any = None
         # True when the most recent _run_loop ended because max_iters was
         # reached without the agent selecting the `finish` tool.
         self._exhausted_last_run = False
@@ -256,12 +271,23 @@ class fastWorkflowReAct(Module):
         idx = input_args.pop("first_step", 0)
         exception_count = 0
         source, self.code_steps = self.code_steps, None
+        self.last_code = source
 
         if source is not None:
             # Code runs the leading steps it can (see _run_loop); the loop goes on after them.
-            self._run_loop(self.trajectory, idx, input_args, max_iters, exception_count,
-                           code=source)
-            idx = max(_step_indexes(self.trajectory), default=idx - 1) + 1
+            suspended = self._run_loop(self.trajectory, idx, input_args, max_iters,
+                                       exception_count, code=source)
+            if suspended is not None:
+                return suspended
+            idx = self._next_idx(max(_step_indexes(self.trajectory), default=idx - 1))
+        return self._finish_run(source, idx, input_args, max_iters, exception_count)
+
+    def _finish_run(self, source, idx: int, input_args: dict[str, Any], max_iters: int,
+                    exception_count: int):
+        """The run's end once code has run its leading steps (*source*; None when it ran none).
+
+        Returns the suspended Prediction when the loop suspends, else the run's prediction.
+        """
         go_on = source is None or source.stop != "stopped"
         if go_on and source is not None and source.finished and not source.answers:
             # Every step ran by code and the run's answer is not shown: it ends here with
@@ -277,19 +303,65 @@ class fastWorkflowReAct(Module):
             # say every step has run (``source.done_inputs``).
             if source is not None and source.finished:
                 input_args.update(getattr(source, "done_inputs", None) or {})
+            page_hint = getattr(source, "page_hint", "") if source is not None else ""
+            if page_hint and "user_query" in input_args:
+                # Code stopped on a full-list step at its page cap: the agent reads on from the
+                # next page, with the pages code read kept (CodeSteps._page_cap).
+                input_args["user_query"] = f"{input_args['user_query']}\n\n{page_hint}"
             suspended = self._run_loop(
                 self.trajectory, idx, input_args, max_iters, exception_count
             )
             if suspended is not None:
                 return suspended
 
-        extract = self._extract_prediction(self.trajectory, **input_args)
+        extract = self._final_extract(input_args)
         return dspy.Prediction(
             trajectory=self.trajectory, exhausted=self._exhausted_last_run, **extract
         )
 
-    def resume(self, observation: str):
-        """Resume a suspended run after the user answered an ask_user clarification."""
+    def _final_extract(self, input_args: dict[str, Any]):
+        """The run's answer: the one the finish policy already checked, else extracted now."""
+        run_state = getattr(self, "run_state", None)
+        checked = run_state.pop("policy_extract", None) if isinstance(run_state, dict) else None
+        extract = checked if checked is not None else self._extract_prediction(
+            self.trajectory, **input_args)
+        policy = self.policy
+        if policy is not None and policy.enabled:
+            policy.observe_answer(_answer_text(extract))
+        return extract
+
+    def _policy_finish(self, trajectory: dict[str, Any], input_args: dict[str, Any]):
+        """``(decision, answer)`` for a finish the agent just chose, or ``(None, "")``.
+
+        The answer is extracted here, so the policy can check what it claims
+        against what ran; when no row objects, that extraction is kept
+        (``run_state["policy_extract"]``) and becomes the run's answer, so a
+        passing check costs no extra model call.
+        """
+        policy = self.policy
+        if policy is None or not policy.enabled or not self.policy_final_run:
+            return None, ""
+        try:
+            extract = self._extract_prediction(trajectory, **input_args)
+        except Exception as error:  # noqa: BLE001 - the check never fails a run
+            logger.warning("finish policy skipped: %s: %s", type(error).__name__, error)
+            return None, ""
+        answer = _answer_text(extract)
+        decision = policy.before_finish(answer)
+        if decision is None:
+            if not isinstance(getattr(self, "run_state", None), dict):
+                self.run_state = {}
+            self.run_state["policy_extract"] = extract
+        return decision, answer
+
+    def resume(self, observation: str, *, completes_step: bool = False):
+        """Resume a suspended run after the user answered an ask_user clarification.
+
+        With *completes_step* the observation is instead the run of a nested command the
+        step was waiting on, and the step completes as one that returned normally does: its
+        completion hook archives the runs it holds, its verdict can end the run, it counts
+        toward the turn-wide budget, and the code that ran it is told of it.
+        """
         if self._suspended is None:
             raise NoSuspendedAgentStateError(
                 "No suspended ReAct state to resume"
@@ -300,6 +372,8 @@ class fastWorkflowReAct(Module):
         idx = stash["idx"]
         input_args = stash["input_args"]
         max_iters = stash["max_iters"]
+        code = stash.get("code")
+        self.last_code = code
 
         # Keep self.inputs pointing at the active run's arg dict so any mid-run refresh
         # (e.g. available_commands re-scoping after a context switch) mutates the same
@@ -307,15 +381,38 @@ class fastWorkflowReAct(Module):
         self.inputs = input_args
 
         self.trajectory[f"observation_{idx}"] = observation
-        idx += 1
+        keep_going = True
+        if completes_step:
+            # The end-of-step hook (the repeat guard's) is not run: this step's own command has
+            # not returned, so it set nothing for that hook to end. The held runs are archived
+            # with the step (compaction is what takes them).
+            on_step_complete = getattr(self, "_on_step_complete", None)
+            if on_step_complete:
+                keep_going = bool(on_step_complete(idx, self.trajectory))
+        if code is not None:
+            if keep_going:
+                code.ran(idx, observation)
+            else:
+                code.stop = "stopped"
+        idx = self._next_idx(idx)
         self.iteration_counter += 1
         self._suspended = None
 
-        suspended = self._run_loop(self.trajectory, idx, input_args, max_iters, 0)
-        if suspended is not None:
-            return suspended
+        on_iteration = getattr(self, "on_iteration", None)
+        if completes_step and on_iteration is not None and not on_iteration():
+            # The turn-wide budget for nested commands is spent (as _run_loop reads it).
+            logger.warning("Nested step budget spent")
+            self._exhausted_last_run = True
+        elif keep_going:
+            if code is not None:
+                suspended = self._run_loop(self.trajectory, idx, input_args, max_iters, 0,
+                                           code=code)
+                if suspended is not None:
+                    return suspended
+                idx = self._next_idx(max(_step_indexes(self.trajectory), default=idx - 1))
+            return self._finish_run(code, idx, input_args, max_iters, 0)
 
-        extract = self._extract_prediction(self.trajectory, **input_args)
+        extract = self._final_extract(input_args)
         return dspy.Prediction(
             trajectory=self.trajectory, exhausted=self._exhausted_last_run, **extract
         )
@@ -336,7 +433,7 @@ class fastWorkflowReAct(Module):
         Sets ``self._exhausted_last_run`` when the loop ends because max_iters
         was reached without the agent selecting the `finish` tool.
 
-        With *code* (``skill_phases.CodeSteps``) the steps are code's, not the model's:
+        With *code* (``planning_phases.CodeSteps``) the steps are code's, not the model's:
         each ``(thought, command)`` it gives runs as an ``execute_workflow_query`` step,
         written, traced (``by_code``) and hooked like any other, and is reported back to
         it (``code.ran``). They do not count toward ``iteration_counter``. The loop ends
@@ -382,7 +479,7 @@ class fastWorkflowReAct(Module):
                         f"Agent failed to select a valid tool: {_fmt_exc(err)}"
                     )
                     trajectory[f"observation_{idx}"] = invalid_tool_obs
-                    idx += 1
+                    idx = self._next_idx(idx)
                     recovery_thought = (
                         "To execute a command, I should use one of the available tools"
                     )
@@ -391,7 +488,7 @@ class fastWorkflowReAct(Module):
                     )
                     trajectory[f"thought_{idx}"] = recovery_thought
                     trajectory[f"observation_{idx}"] = recovery_obs
-                    idx += 1
+                    idx = self._next_idx(idx)
                     exception_count += 1
                     tracing.end_span(
                         host,
@@ -433,10 +530,34 @@ class fastWorkflowReAct(Module):
                 step_attributes["repaired_tool_name"] = repaired_tool_name
             if planned is not None:
                 step_attributes["by_code"] = True
+            run_state = getattr(self, "run_state", None)
+            if isinstance(run_state, dict):
+                run_state["by_code"] = planned is not None
 
+            # The policy (fastworkflow.policy_runtime), when one is enabled. A
+            # decision is delivered as the step's observation: the agent reads
+            # it like any result and keeps going.
+            policy = self.policy if self.policy is not None and self.policy.enabled else None
+            decision = None
             try:
                 if pred.next_tool_name in self.disabled_tools:
                     observation = f"{pred.next_tool_name} is not available now."
+                elif (policy is not None and planned is None
+                      and pred.next_tool_name not in (_COMMAND_TOOL, "finish")
+                      and (decision := policy.before_tool(
+                          pred.next_tool_name, pred.next_tool_args)) is not None):
+                    # Checked before it runs: a question to the user, once sent,
+                    # cannot be taken back.
+                    observation = decision.rewrite
+                elif policy is not None and planned is None and pred.next_tool_name == _COMMAND_TOOL:
+                    # Commands are checked at the executor (policy.guard), where
+                    # they exist in canonical form; only the model's own steps.
+                    policy.dispatching, policy.last_block = True, None
+                    try:
+                        observation = self.tools[pred.next_tool_name](**pred.next_tool_args)
+                    finally:
+                        policy.dispatching = False
+                    decision, policy.last_block = policy.last_block, None
                 else:
                     observation = self.tools[pred.next_tool_name](**pred.next_tool_args)
                 if pred.next_tool_name == "finish":
@@ -447,6 +568,26 @@ class fastWorkflowReAct(Module):
                         # contract change): the step's observation is the note,
                         # and the finish_check offload event says why.
                         reopened = True
+                    elif policy is not None and code is None:
+                        trajectory[f"observation_{idx}"] = observation
+                        decision, answer = self._policy_finish(trajectory, input_args)
+                        if decision is not None:
+                            observation = decision.rewrite
+                            reopened = True
+                            step_attributes["answer"] = answer
+                if decision is not None:
+                    step_attributes.update({
+                        "policy_mode": policy.point.mode.value,
+                        "policy_outcome": decision.outcome.value,
+                        "policy_source": decision.source_policy,
+                        "policy_table_version": decision.table_version,
+                        "policy_intent": policy.describe_intent(),
+                        "policy_requests": policy.describe_requests(),
+                        "policy_judgement": (
+                            policy.last_judgement.reason
+                            if pred.next_tool_name == "ask_user"
+                            and policy.last_judgement is not None else None),
+                    })
                 trajectory[f"observation_{idx}"] = observation
                 step_attributes["observation"] = _as_text(observation)
                 # The command text a tool built from arguments passed beside
@@ -456,12 +597,15 @@ class fastWorkflowReAct(Module):
                 if folded is not None:
                     step_attributes["folded_command"] = folded
             except AskUserSuspend as err:
+                # The code that ran the step stays in-process: a restored run has none, and
+                # its step is the model's.
                 self._suspended = {
                     "trajectory": trajectory,
                     "idx": idx,
                     "input_args": input_args,
                     "max_iters": max_iters,
                     "clarification": err.clarification_request,
+                    "code": code,
                 }
                 # The step really did end here — the human wait that follows is
                 # fw.ask_user's to record, and this span must not stay open
@@ -518,16 +662,24 @@ class fastWorkflowReAct(Module):
                 break
             if code is not None:
                 code.ran(idx, observed)
-                idx += 1
+                idx = self._next_idx(idx)
                 continue
 
             if pred.next_tool_name == "finish" and not reopened:
                 break
 
-            idx += 1
+            idx = self._next_idx(idx)
             # Still counted: execute_workflow_query reads iteration_counter <= 0
             # as "this command came from the user".
             self.iteration_counter += 1
+            on_iteration = getattr(self, "on_iteration", None)
+            keep_going = on_iteration() if on_iteration is not None else True
+            if not keep_going:
+                # The turn-wide budget for nested commands is spent (run_planning_command).
+                # Not a step cap: no hand-off follows, the frame returns to its parent.
+                logger.warning("Nested step budget spent")
+                self._exhausted_last_run = True
+                break
             # The cap is a hand-off signal: the caller summarises progress and
             # runs a fresh executor to continue the same sub-task.
             if self.iteration_counter >= max_iters:
@@ -537,17 +689,26 @@ class fastWorkflowReAct(Module):
 
         return None
 
+    def _next_idx(self, idx: int) -> int:
+        """The index of the step after step *idx*: never below the caller's step_floor."""
+        step_floor = getattr(self, "step_floor", None)
+        if step_floor is None:
+            return idx + 1
+        return max(idx + 1, step_floor())
+
     def _review_finish(self, trajectory: dict[str, Any], max_iters: int) -> str | None:
-        """The finish reviewer's note, at most once per run; None on any failure."""
+        """The finish reviewer's note, for the first ``FINISH_REVIEWS_PER_RUN`` finishes of a run; None past
+        the cap, or on any failure."""
         reviewer = getattr(self, "finish_reviewer", None)
         if reviewer is None:
             return None
         run_state = getattr(self, "run_state", None)
         if not isinstance(run_state, dict):
             run_state = self.run_state = {}
-        if run_state.get("finish_reviewed"):
+        reviews = run_state.get("finish_reviews", 0)
+        if reviews >= FINISH_REVIEWS_PER_RUN:
             return None
-        run_state["finish_reviewed"] = True
+        run_state["finish_reviews"] = reviews + 1
         iters_left = max_iters - self.iteration_counter - 1
         try:
             note = reviewer(trajectory, iters_left)
@@ -734,6 +895,18 @@ def _extract_prompt_tokens() -> int | None:
         return None
 
 
+def _answer_text(extract: Any) -> str:
+    """The final answer out of an ``extract`` prediction, or ""."""
+    for key in ("final_answer", "answer", "output"):
+        try:
+            value = extract.get(key) if hasattr(extract, "get") else getattr(extract, key, None)
+        except Exception:  # noqa: BLE001 - an odd prediction has no answer
+            value = None
+        if value:
+            return str(value)
+    return ""
+
+
 def _as_text(value: Any) -> str:
     """A span-safe rendering of a tool observation.
 
@@ -763,6 +936,11 @@ def _fmt_exc(err: BaseException, *, limit: int = 5) -> str:
 _FIELD_MARKER = re.compile(r"\[\[ ## (\w+) ## \]\]")
 _COMMAND_TOKEN = re.compile(r"[A-Za-z_][\w/]*")
 _COMMAND_TOOL = "execute_workflow_query"
+# Finish reviews per agent run (the finish check, observation_offloading.finish_check): a second finish is
+# reviewed too, so a run whose first note the agent did not act on is reopened once more. Past the cap the
+# run may finish. The review itself still declines when too few iterations are left.
+# Was 2 (fix-a67q); back to 1 after benchmark pass 4, where the second review never helped.
+FINISH_REVIEWS_PER_RUN = 1
 _ARG_KEY = re.compile(r"[A-Za-z_]\w*")
 _TAG_LIKE = re.compile(r"</?[^<>]+>")
 

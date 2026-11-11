@@ -5,6 +5,7 @@ if "dspy" in _sys.modules and "openai" in _sys.modules:
     _sys.modules["openai"].__version__
 import contextlib
 from dataclasses import dataclass
+import json
 from datetime import datetime
 from enum import Enum
 import os
@@ -27,6 +28,27 @@ class Action(BaseModel):
     command: str = ""   # only use is to display autocomplete item in the UI
     parameters: dict[str, Optional[Union[str, bool, int, float, BaseModel]]] = {}
     workflow_id: Optional[int] = None    # when creating a new action, this is set by the workflow
+
+def load_startup_action(value: str) -> "Action":
+    """Build the Action for a ``--startup_action`` value.
+
+    The value is a path to a JSON file holding the action object. An inline JSON
+    object is also accepted when the value starts with "{". A missing file raises
+    ValueError naming the path, so the CLI and the server report the same error.
+    """
+    text = value.strip()
+    if text.startswith("{"):
+        data = json.loads(text)
+    else:
+        try:
+            with open(value, "r") as file:
+                data = json.load(file)
+        except FileNotFoundError:
+            raise ValueError(
+                f"--startup_action file not found: {value!r}. Pass a path to a JSON file, "
+                "or an inline JSON object starting with '{'."
+            ) from None
+    return Action(**data)
 
 class Recommendation(BaseModel):
     summary: str
@@ -62,6 +84,8 @@ class MCPToolResult(BaseModel):
     """MCP-compliant tool result format"""
     content: list[MCPContent]
     isError: bool = False
+    # The command's Output as JSON (MCP ``structuredContent``); absent when the command returned none.
+    structuredContent: Optional[dict[str, Any]] = None
 
 class CommandTraceEventDirection(str, Enum):
     AGENT_TO_WORKFLOW = "agent_to_workflow"
@@ -81,15 +105,29 @@ class CommandTraceEvent:
     turn_key: str | None = None
 
 class Refused(ValueError):
-    """The one way a command or skill hook declines: ``raise fastworkflow.Refused(message)``.
+    """The one way a command, or a planning command, declines: ``raise fastworkflow.Refused(message, field=None)``.
 
-    A decision, not a crash. Raised from a command's ``ResponseGenerator.__call__``, the
-    command answers ``CommandOutput(CommandResponse(response=message, success=False))``, as
-    if it had returned that. Raised from a ``validate_extracted_parameters`` hook (a
-    command's or a skill's), it is the hook's ``(False, message)``. Returning those forms
-    still works exactly as before. A ``ValueError``, so code that caught ``ValueError``
-    around a command's helpers keeps catching it.
+    A decision, not a crash. ``message`` is what the user is told. Without ``field``, the
+    call answers ``CommandOutput(CommandResponse(response=message, success=False))``. With
+    ``field`` (a field name, or a list of names), the framework resets those fields to
+    missing, keeps the others, and asks the user for those fields again, with the message
+    (the targeted re-ask a ``db_lookup`` rejection gave before it was retired). Raised from
+    a model validator of the command's ``Input`` (``@model_validator``), it is a refusal of the arguments; raised from
+    a ``ResponseGenerator.__call__``, it is the call's answer. A ``ValueError``, so code
+    that caught ``ValueError`` around a command's helpers keeps catching it.
     """
+
+    def __init__(self, message: str = "", field=None):
+        super().__init__(message)
+        if field is None:
+            names: tuple[str, ...] = ()
+        elif isinstance(field, str):
+            names = (field,)
+        else:
+            names = tuple(field)
+            if not all(isinstance(name, str) and name for name in names):
+                raise TypeError("Refused(field=...) takes a field name or a list of field names")
+        self.fields: tuple[str, ...] = names
 
     def as_output(self) -> "CommandOutput":
         return CommandOutput(command_response=CommandResponse(response=str(self), success=False))
@@ -134,6 +172,12 @@ class CommandOutput(BaseModel):
     # validating. None means "written before this field existed" and defers to
     # the name comparison in `is_ask_user`; True and False are authoritative.
     ask_user_entry: Optional[bool] = None
+    # The record a command ran on, when a parent-context walk ran it on an enclosing
+    # record rather than the current one (design 3.9, "Filing the run"). Both None when the
+    # command ran on the current record. ``ran_in_context_name`` is "" for the global
+    # scope and ``ran_in_context_clause`` is "" for a root with no printable identity.
+    ran_in_context_name: Optional[str] = None
+    ran_in_context_clause: Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -198,12 +242,25 @@ class CommandOutput(BaseModel):
         )
 
     def to_mcp_result(self) -> MCPToolResult:
-        """Convert CommandOutput to MCP-compliant format"""
+        """Convert CommandOutput to MCP-compliant format.
+
+        The text content is the response text. When the command returned its ``Signature.Output``
+        (or a dict of one, after a record is read back), ``structuredContent`` carries that Output
+        as JSON, the data its tool's ``outputSchema`` describes (MCP spec field names).
+        """
+        output = self.command_response.output
+        if isinstance(output, BaseModel):
+            structured = output.model_dump(mode="json")
+        elif isinstance(output, dict):
+            structured = output
+        else:
+            structured = None
         return MCPToolResult(
             content=[
                 MCPContent(type="text", text=self.command_response.response)
             ],
             isError=not self.success,
+            structuredContent=structured,
         )
 
 class _Ephemeral:
@@ -418,6 +475,15 @@ from fastworkflow.metrics import (
 # instead of publishing the descriptor, which is not the public object.
 del chat_session
 
+# Command class declarations (fastworkflow.command_declarations): the decorators a
+# ResponseGenerator or PlanGenerator carries. Stdlib-only, so imported eagerly.
+from fastworkflow.command_declarations import (
+    UserApproval,
+    descends_to,
+    user_approval_for_execution,
+    writes,
+)
+
 # First-use re-exports. Workflow pulls numpy via kvstore; ChatSession and
 # WorkflowExecutionContext pull dspy, litellm, fastapi, and starlette.
 _LAZY_ATTRS = {
@@ -431,6 +497,10 @@ _LAZY_ATTRS = {
         "fastworkflow.workflow_execution_context",
         "CommandCancelledError",
     ),
+    "FieldOptions": ("fastworkflow.field_options", "FieldOptions"),
+    "CopiedOptions": ("fastworkflow.field_options", "CopiedOptions"),
+    "RecordNamedOptions": ("fastworkflow.field_options", "RecordNamedOptions"),
+    "ConfirmsOptions": ("fastworkflow.field_options", "ConfirmsOptions"),
 }
 
 __all__ = (
@@ -469,7 +539,11 @@ __all__ = (
     "TurnStatus",
     "Union",
     "UnsupportedStateVersion",
+    "UserApproval",
     "Workflow",
+    "descends_to",
+    "user_approval_for_execution",
+    "writes",
     "WorkflowExecutionContext",
     "active_workflow",
     "chat_session",
@@ -478,6 +552,10 @@ __all__ = (
     "contextlib",
     "dataclass",
     "datetime",
+    "FieldOptions",
+    "CopiedOptions",
+    "RecordNamedOptions",
+    "ConfirmsOptions",
     "get_active_workflow",
     "get_env_var",
     "get_fastworkflow_package_path",

@@ -2,7 +2,6 @@ from pydantic import BaseModel, Field
 import datetime
 
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse
 from fastworkflow.examples.simple_workflow_template._commands.WorkItem.get_status import (
     Signature as BaseSig,
     ResponseGenerator as BaseRG
@@ -36,7 +35,7 @@ class ResponseGenerator:
         base_output = base_generator._process_command(workflow)
         
         # Add enhanced analytics
-        workitem: WorkItem = workflow.command_context_for_response_generation
+        workitem: WorkItem = workflow.record
         analytics = self._generate_analytics(workitem)
         
         return Signature.Output(
@@ -84,7 +83,7 @@ class ResponseGenerator:
             current = current.parent
         return depth
     
-    def __call__(self, workflow: fastworkflow.Workflow, command: str) -> CommandOutput:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, input: None) -> Signature.Output:
         output = self._process_command(workflow)
         
         # Format the enhanced status information
@@ -95,9 +94,5 @@ class ResponseGenerator:
             "message": "Enhanced status report with analytics"
         }
         
-        response = f'Enhanced Response: {response_data}'
         
-        return CommandOutput(
-            command_response=
-                CommandResponse(response=response)
-        )
+        return output

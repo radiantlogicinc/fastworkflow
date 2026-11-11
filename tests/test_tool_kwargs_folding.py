@@ -191,7 +191,7 @@ def test_the_tool_looks_up_the_command_fields(session, agent, responses, tmp_pat
     from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
     workflow = session.get_active_workflow()
-    workflow.root_command_context = TodoListManager(str(tmp_path / "todo.json"))
+    workflow.root = TodoListManager(str(tmp_path / "todo.json"))
     assert workflow_agent._parameter_fields("get_todo_list", workflow) == frozenset({"id"})
     assert workflow_agent._parameter_fields("no_such_command", workflow) is None
     agent.tools[TOOL](command="get_todo_list", list_id="3")
